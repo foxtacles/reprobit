@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/reprobit-mark.svg" width="168" alt="ReproBit: a dotted geometric R built from exact bits">
+  <img src="docs/assets/reprobit-mark.svg" width="168" alt="ReproBit: a dot-matrix R assembled from individual bits">
 </p>
 
 <h1 align="center">ReproBit</h1>
