@@ -85,6 +85,28 @@ class _ProcessDeviceMapSet(ctypes.Structure):
     _fields_ = [("DirectoryHandle", ctypes.c_void_p)]
 
 
+class _ProcessDeviceMapQuery(ctypes.Structure):
+    _fields_ = [
+        ("DriveMap", ctypes.c_uint32),
+        ("DriveType", ctypes.c_uint8 * 32),
+    ]
+
+
+class _ProcessDeviceMapInformation(ctypes.Union):
+    """Exact non-EX ``PROCESS_DEVICEMAP_INFORMATION`` input buffer.
+
+    Windows validates the size of the complete union for ``ProcessDeviceMap``
+    even when ``NtSetInformationProcess`` consumes only the set arm.  The
+    36-byte query arm therefore makes this a 40-byte, pointer-aligned union on
+    the supported 64-bit controller.
+    """
+
+    _fields_ = [
+        ("Set", _ProcessDeviceMapSet),
+        ("Query", _ProcessDeviceMapQuery),
+    ]
+
+
 def _handle(value: int) -> ctypes.c_void_p:
     return ctypes.c_void_p(value)
 
@@ -140,7 +162,7 @@ class _NativeApi:
             raise NativeDeviceMapError(
                 "native process device maps require a 64-bit Python controller"
             )
-        if ctypes.sizeof(_ProcessDeviceMapSet) != ctypes.sizeof(ctypes.c_void_p):
+        if ctypes.sizeof(_ProcessDeviceMapInformation) != 40:
             raise NativeDeviceMapError(
                 "native process device-map binding has an unexpected layout"
             )
@@ -327,7 +349,8 @@ class _NativeApi:
         return ctypes.wstring_at(buffer, result.Length // 2)
 
     def set_process_map(self, process: int, directory: int) -> None:
-        information = _ProcessDeviceMapSet(_handle(directory))
+        information = _ProcessDeviceMapInformation()
+        information.Set.DirectoryHandle = _handle(directory)
         status = int(
             self.NtSetInformationProcess(
                 _handle(process),

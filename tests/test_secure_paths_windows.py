@@ -57,9 +57,9 @@ def test_windows_file_rename_info_uses_native_boolean_layout() -> None:
     assert information.name.offset == 20
 
 
-def test_windows_file_rename_buffer_includes_the_native_struct_tail() -> None:
+def test_windows_file_rename_buffer_ends_at_the_declared_name() -> None:
     api = _WindowsHandles()
-    calls: list[tuple[int, int]] = []
+    calls: list[tuple[int, int, int, int, bytes]] = []
 
     def set_information(
         _handle: object,
@@ -67,14 +67,34 @@ def test_windows_file_rename_buffer_includes_the_native_struct_tail() -> None:
         _information: object,
         size: int,
     ) -> int:
-        calls.append((information_class, size))
+        rename = ctypes.cast(
+            _information,
+            ctypes.POINTER(api.FileRenameInfo),
+        ).contents
+        name_offset = api.FileRenameInfo.name.offset
+        calls.append(
+            (
+                information_class,
+                size,
+                int(rename.root),
+                rename.name_length,
+                ctypes.string_at(ctypes.addressof(_information), size)[name_offset:],
+            )
+        )
         return 1
 
     api.kernel32.SetFileInformationByHandle = set_information
     api.rename(1, 2, "APP.EXE", replace=False)
 
+    encoded_name = "APP.EXE".encode("utf-16-le")
     assert calls == [
-        (3, ctypes.sizeof(api.FileRenameInfo) + len("APP.EXE".encode("utf-16-le")))
+        (
+            3,
+            api.FileRenameInfo.name.offset + len(encoded_name),
+            2,
+            len(encoded_name),
+            encoded_name,
+        )
     ]
 
 

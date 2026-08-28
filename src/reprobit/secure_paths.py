@@ -760,9 +760,11 @@ class _WindowsHandles:
     def rename(self, handle: Any, parent: Any, name: str, *, replace: bool) -> None:
         encoded_name = name.encode("utf-16-le")
         name_offset = self.FileRenameInfo.name.offset
-        buffer = self.ctypes.create_string_buffer(
-            self.ctypes.sizeof(self.FileRenameInfo) + len(encoded_name)
-        )
+        # FILE_RENAME_INFO ends in a variable-length WCHAR array.  Pass only
+        # the fixed prefix plus FileNameLength bytes; sizeof(struct) includes
+        # the placeholder WCHAR and trailing ABI padding, which Server 2022
+        # rejects as bytes beyond the declared name.
+        buffer = self.ctypes.create_string_buffer(name_offset + len(encoded_name))
         information = self.ctypes.cast(
             buffer,
             self.ctypes.POINTER(self.FileRenameInfo),
