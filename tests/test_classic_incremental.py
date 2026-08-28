@@ -1444,9 +1444,10 @@ def test_target_set_publication_rolls_back_without_overwriting_peer(
         b"peer-app" if peer_replaces_first else b"original-app"
     )
     assert (artifacts / "tool.exe").read_bytes() == b"original-tool"
-    if not peer_replaces_first:
+    if os.name != "nt" and not peer_replaces_first:
         assert (artifacts / "app.exe").stat().st_mode & 0o777 == 0o751
-    assert (artifacts / "tool.exe").stat().st_mode & 0o777 == 0o750
+    if os.name != "nt":
+        assert (artifacts / "tool.exe").stat().st_mode & 0o777 == 0o750
 
 
 @pytest.mark.parametrize("race_after_last_publish", (False, True))
