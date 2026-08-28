@@ -16,10 +16,13 @@ rbit doctor --backend windows_native_v1 \
   --execute-probe
 ```
 
-The native lineage broker uses `CreateProcessWithTokenW` to create its isolated
-logon session. The runner account therefore needs `SeImpersonatePrivilege`.
-`rbit doctor --execute-probe` fails closed with Windows error 1314 when that
-privilege is unavailable; an ordinary drive mapping is not a substitute.
+The native lineage broker uses
+`CreateProcessWithLogonW(LOGON_NETCREDENTIALS_ONLY)` to create its isolated
+logon session without account secrets or special token privileges. Windows
+keeps the caller's local identity, does not validate the deliberately unusable
+network credentials, and creates a fresh LSA logon session. ReproBit verifies
+that fresh identity before defining the private drive; an ordinary drive
+mapping is not a substitute.
 
 The provisioner uses immutable sparse checkouts of:
 

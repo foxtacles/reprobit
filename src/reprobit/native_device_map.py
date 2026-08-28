@@ -13,6 +13,7 @@ import ctypes
 import json
 import os
 import re
+import secrets
 import stat
 import subprocess
 import sys
@@ -46,8 +47,6 @@ _CREATE_SUSPENDED = 0x00000004
 _CREATE_UNICODE_ENVIRONMENT = 0x00000400
 _LOGON_NETCREDENTIALS_ONLY = 0x00000002
 _STARTF_USESTDHANDLES = 0x00000100
-_TOKEN_ASSIGN_PRIMARY = 0x0001
-_TOKEN_DUPLICATE = 0x0002
 _TOKEN_QUERY = 0x0008
 _TOKEN_STATISTICS = 10
 _SYSTEM_AUTHENTICATION_ID = (0x000003E7, 0)
@@ -701,10 +700,10 @@ def _run_logon_broker() -> int:
     kernel32.TerminateProcess.restype = ctypes.c_int
     kernel32.CloseHandle.argtypes = [pointer]
     kernel32.CloseHandle.restype = ctypes.c_int
-    advapi32.OpenProcessToken.argtypes = [pointer, uint32, ctypes.POINTER(pointer)]
-    advapi32.OpenProcessToken.restype = ctypes.c_int
-    advapi32.CreateProcessWithTokenW.argtypes = [
-        pointer,
+    advapi32.CreateProcessWithLogonW.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
         uint32,
         ctypes.c_wchar_p,
         ctypes.c_wchar_p,
@@ -714,15 +713,15 @@ def _run_logon_broker() -> int:
         ctypes.POINTER(StartupInfo),
         ctypes.POINTER(ProcessInformation),
     ]
-    advapi32.CreateProcessWithTokenW.restype = ctypes.c_int
+    advapi32.CreateProcessWithLogonW.restype = ctypes.c_int
     get_last_error = getattr(ctypes, "get_last_error", lambda: 0)
 
     command = _lineage_inner_command()
     command_line = subprocess.list2cmdline(command)
     if len(command_line) > 1023:
         raise NativeDeviceMapError(
-            "internal broker exceeds CreateProcessWithTokenW's command-line limit"
-    )
+            "internal broker exceeds CreateProcessWithLogonW's command-line limit"
+        )
     command_buffer = ctypes.create_unicode_buffer(command_line)
     environment = _serialize_windows_environment(
         _minimal_broker_environment(os.environ)
@@ -738,7 +737,6 @@ def _run_logon_broker() -> int:
         raise NativeDeviceMapError(
             "LocalSystem uses the global DOS namespace and is not a safe lineage broker"
         )
-    token = pointer()
     process = ProcessInformation()
 
     def close_created_handles(primary_error: BaseException | None = None) -> None:
@@ -787,89 +785,71 @@ def _run_logon_broker() -> int:
             primary_error.add_note(f"inner broker cleanup also failed: {cleanup_error}")
         close_created_handles(primary_error)
 
-    access = _TOKEN_ASSIGN_PRIMARY | _TOKEN_DUPLICATE | _TOKEN_QUERY
-    if not advapi32.OpenProcessToken(
-        kernel32.GetCurrentProcess(), access, ctypes.byref(token)
-    ):
-        raise NativeDeviceMapError(
-            f"OpenProcessToken failed with Win32 error {get_last_error()}"
-        )
+    # LOGON_NETCREDENTIALS_ONLY preserves the caller's local identity while
+    # creating a fresh LSA logon session. Windows does not validate these
+    # network-only credentials. Make them unique and intentionally unusable so
+    # this isolation primitive never depends on or exposes an account secret.
+    credential_nonce = secrets.token_hex(16)
+    credential_username = f"rbit-{credential_nonce[:10]}"
+    credential_password = secrets.token_hex(32)
     try:
-        try:
-            create_error = 0
-            with ExitStack() as standard_handles:
-                (
-                    startup.hStdInput,
-                    startup.hStdOutput,
-                    startup.hStdError,
-                ) = _duplicate_standard_handles(kernel32, api, standard_handles)
-                created = advapi32.CreateProcessWithTokenW(
-                    token,
-                    _LOGON_NETCREDENTIALS_ONLY,
-                    sys.executable,
-                    command_buffer,
-                    _CREATE_SUSPENDED
-                    | _CREATE_NEW_PROCESS_GROUP
-                    | _CREATE_UNICODE_ENVIRONMENT,
-                    ctypes.cast(environment_buffer, pointer),
-                    str(Path(sys.executable).resolve(strict=True).parent),
-                    ctypes.byref(startup),
-                    ctypes.byref(process),
-                )
-                # ExitStack closes the temporary inherited handles below, and
-                # CloseHandle is allowed to overwrite the calling thread's
-                # last-error value. Capture the creation failure while it is
-                # still authoritative.
-                if not created:
-                    create_error = int(get_last_error())
+        create_error = 0
+        with ExitStack() as standard_handles:
+            (
+                startup.hStdInput,
+                startup.hStdOutput,
+                startup.hStdError,
+            ) = _duplicate_standard_handles(kernel32, api, standard_handles)
+            created = advapi32.CreateProcessWithLogonW(
+                credential_username,
+                "REPROBIT",
+                credential_password,
+                _LOGON_NETCREDENTIALS_ONLY,
+                sys.executable,
+                command_buffer,
+                _CREATE_SUSPENDED
+                | _CREATE_NEW_PROCESS_GROUP
+                | _CREATE_UNICODE_ENVIRONMENT,
+                ctypes.cast(environment_buffer, pointer),
+                str(Path(sys.executable).resolve(strict=True).parent),
+                ctypes.byref(startup),
+                ctypes.byref(process),
+            )
+            # ExitStack closes the temporary inherited handles below, and
+            # CloseHandle is allowed to overwrite the calling thread's
+            # last-error value. Capture the creation failure while it is still
+            # authoritative.
             if not created:
-                win32_error = create_error
-                detail = (
-                    "; SeImpersonatePrivilege is required"
-                    if win32_error == 1314
-                    else ""
-                )
-                raise NativeDeviceMapError(
-                    "CreateProcessWithTokenW(LOGON_NETCREDENTIALS_ONLY) failed "
-                    f"with Win32 error {win32_error}{detail}"
-                )
-            child_authentication_id = api.process_authentication_id(int(process.hProcess))
-            if child_authentication_id == parent_authentication_id:
-                raise NativeDeviceMapError(
-                    "LOGON_NETCREDENTIALS_ONLY did not create a fresh AuthenticationId"
-                )
-            if kernel32.ResumeThread(process.hThread) == 0xFFFFFFFF:
-                raise NativeDeviceMapError(
-                    f"ResumeThread failed with Win32 error {get_last_error()}"
-                )
-            if kernel32.WaitForSingleObject(process.hProcess, 0xFFFFFFFF) != 0:
-                raise NativeDeviceMapError(
-                    f"WaitForSingleObject failed with Win32 error {get_last_error()}"
-                )
-            exit_code = uint32()
-            if not kernel32.GetExitCodeProcess(
-                process.hProcess, ctypes.byref(exit_code)
-            ):
-                raise NativeDeviceMapError(
-                    f"GetExitCodeProcess failed with Win32 error {get_last_error()}"
-                )
-            result = int(exit_code.value)
-        except BaseException as caught_error:
-            cleanup_created_process(caught_error)
-            raise
-        close_created_handles()
-        return result
-    finally:
-        if token.value is not None:
-            active_error = sys.exception()
-            try:
-                api.close_handle(int(token.value), "broker-token")
-            except BaseException as close_error:
-                if active_error is None:
-                    raise
-                active_error.add_note(
-                    f"broker token cleanup also failed: {close_error}"
-                )
+                create_error = int(get_last_error())
+        if not created:
+            raise NativeDeviceMapError(
+                "CreateProcessWithLogonW(LOGON_NETCREDENTIALS_ONLY) failed "
+                f"with Win32 error {create_error}"
+            )
+        child_authentication_id = api.process_authentication_id(int(process.hProcess))
+        if child_authentication_id == parent_authentication_id:
+            raise NativeDeviceMapError(
+                "LOGON_NETCREDENTIALS_ONLY did not create a fresh AuthenticationId"
+            )
+        if kernel32.ResumeThread(process.hThread) == 0xFFFFFFFF:
+            raise NativeDeviceMapError(
+                f"ResumeThread failed with Win32 error {get_last_error()}"
+            )
+        if kernel32.WaitForSingleObject(process.hProcess, 0xFFFFFFFF) != 0:
+            raise NativeDeviceMapError(
+                f"WaitForSingleObject failed with Win32 error {get_last_error()}"
+            )
+        exit_code = uint32()
+        if not kernel32.GetExitCodeProcess(process.hProcess, ctypes.byref(exit_code)):
+            raise NativeDeviceMapError(
+                f"GetExitCodeProcess failed with Win32 error {get_last_error()}"
+            )
+        result = int(exit_code.value)
+    except BaseException as caught_error:
+        cleanup_created_process(caught_error)
+        raise
+    close_created_handles()
+    return result
 
 
 def _run_suspended_producer_tree(spec: CommandSpec) -> int:
