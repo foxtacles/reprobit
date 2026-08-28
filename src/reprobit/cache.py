@@ -105,6 +105,12 @@ _DOMAIN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _IMPLEMENTATION = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _INDEX = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _LEASE = re.compile(r"^[0-9a-f]{32}\.lease$")
+_LEASE_PUBLICATION_TEMP = re.compile(
+    r"^\.(?:layout|[0-9a-f]{32}\.lease)\.reprobit-[0-9a-f]{32}$"
+)
+_RECORD_PUBLICATION_TEMP = re.compile(
+    r"^\.[0-9a-f]{64}\.json\.reprobit-[0-9a-f]{32}$"
+)
 _MAX_RECORD_BYTES = 16 * 1024 * 1024
 _MAX_INDEX_CANDIDATES = 16
 _LAYOUT_MARKER = b"reprobit-cache-layout-v1\n"
@@ -209,6 +215,22 @@ def _secure_read(path: Path, *, maximum: int | None = None) -> bytes:
     return payload
 
 
+def _read_settled_immutable(path: Path, *, maximum: int | None = None) -> bytes:
+    """Read after a concurrent POSIX hard-link publication has settled."""
+
+    for attempt in range(2):
+        try:
+            return _secure_read(path, maximum=maximum)
+        except CachePoisonError:
+            if attempt == 0:
+                # A winning POSIX publisher removes its temporary hard link
+                # after committing the shared name.  That one-time unlink can
+                # advance ctime during a strict read by another process.
+                continue
+            raise
+    raise AssertionError("immutable read retry loop did not return")
+
+
 def _publish_immutable(path: Path, payload: bytes) -> None:
     """Converge concurrent publishers without ever replacing a named inode."""
 
@@ -218,7 +240,7 @@ def _publish_immutable(path: Path, payload: bytes) -> None:
         return
     except SecurePathError as publication_error:
         try:
-            current = _secure_read(path)
+            current = _read_settled_immutable(path)
         except CachePoisonError:
             raise CachePoisonError(
                 f"immutable cache publication failed: {path}"
@@ -313,9 +335,11 @@ class IncrementalCache:
             self._records_root = self.format_root / "records"
             self._indexes_root = self.format_root / "indexes"
         marker = self.format_root / "format.json"
-        if _secure_read(marker, maximum=1024) != canonical_json({"schema": _FORMAT}):
+        if _read_settled_immutable(marker, maximum=1024) != canonical_json(
+            {"schema": _FORMAT}
+        ):
             raise CachePoisonError("cache format marker is invalid")
-        if _secure_read(self._gate_path, maximum=1) != b"\0":
+        if _read_settled_immutable(self._gate_path, maximum=1) != b"\0":
             raise CachePoisonError("cache gate marker is invalid")
         for root in (
             self._leases_root,
@@ -323,7 +347,7 @@ class IncrementalCache:
             self._records_root,
             self._indexes_root,
         ):
-            if _secure_read(root / ".layout", maximum=64) != _LAYOUT_MARKER:
+            if _read_settled_immutable(root / ".layout", maximum=64) != _LAYOUT_MARKER:
                 raise CachePoisonError(f"cache layout marker is invalid: {root}")
 
     @contextmanager
@@ -342,7 +366,7 @@ class IncrementalCache:
             lease_lock = AdvisoryFileLock(lease_path, create=False)
             if not lease_lock.acquire(nonblocking=True):
                 raise CacheError("fresh cache lease could not be acquired")
-            if _secure_read(lease_path, maximum=1) != b"\0":
+            if _read_settled_immutable(lease_path, maximum=1) != b"\0":
                 raise CachePoisonError("fresh cache lease marker is invalid")
         except BaseException:
             if lease_lock is not None:
@@ -402,7 +426,21 @@ class IncrementalCache:
         for path in sorted(self._leases_root.iterdir(), key=lambda item: item.name):
             if path.name == ".layout":
                 continue
-            if not _LEASE.fullmatch(path.name) or path.is_symlink() or not path.is_file():
+            if _LEASE_PUBLICATION_TEMP.fullmatch(path.name):
+                try:
+                    temporary = path.stat(follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if not stat.S_ISREG(temporary.st_mode):
+                    raise CachePoisonError(
+                        f"cache lease directory contains an unsafe entry: {path}"
+                    )
+                continue
+            if (
+                not _LEASE.fullmatch(path.name)
+                or path.is_symlink()
+                or not path.is_file()
+            ):
                 raise CachePoisonError(f"cache lease directory contains an unsafe entry: {path}")
             try:
                 lock = AdvisoryFileLock(path, create=False)
@@ -568,7 +606,9 @@ class IncrementalCache:
 
     def _parse_record(self, path: Path, *, require_current: bool = True) -> CacheRecord:
         try:
-            value = strict_loads(_secure_read(path, maximum=_MAX_RECORD_BYTES))
+            value = strict_loads(
+                _read_settled_immutable(path, maximum=_MAX_RECORD_BYTES)
+            )
         except (TypeError, ValueError) as exc:
             raise CachePoisonError(f"cache record is malformed: {path}") from exc
         if not isinstance(value, dict) or set(value) != {
@@ -718,10 +758,20 @@ class CacheLease:
             ):
                 raise CachePoisonError(f"cache record domain contains an unsafe prefix: {prefix}")
             for path in sorted(prefix.iterdir(), key=lambda item: item.name):
+                if _RECORD_PUBLICATION_TEMP.fullmatch(path.name):
+                    try:
+                        temporary = path.stat(follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
+                    if not stat.S_ISREG(temporary.st_mode):
+                        raise CachePoisonError(
+                            f"cache record prefix contains an unsafe entry: {path}"
+                        )
+                    continue
                 if (
-                    path.is_symlink()
+                    not re.fullmatch(r"[0-9a-f]{64}\.json", path.name)
+                    or path.is_symlink()
                     or not path.is_file()
-                    or not re.fullmatch(r"[0-9a-f]{64}\.json", path.name)
                 ):
                     raise CachePoisonError(f"cache record prefix contains an unsafe entry: {path}")
                 paths.append(path)
@@ -759,7 +809,7 @@ class CacheLease:
             raise CachePoisonError(f"cache index lock is unsafe: {lock_path}") from exc
         try:
             lock.acquire(nonblocking=False)
-            if _secure_read(lock_path, maximum=1) != _INDEX_LOCK_MARKER:
+            if _read_settled_immutable(lock_path, maximum=1) != _INDEX_LOCK_MARKER:
                 raise CachePoisonError(f"cache index lock is invalid: {lock_path}")
             existing = self._read_index(path, domain, index, value)
             keys = [record.key]
@@ -851,7 +901,7 @@ class CacheLease:
             return ()
         return tuple(key for key in keys if isinstance(key, str))
 
-    def _probe_blob(self, output: CacheOutput) -> Path:
+    def _probe_blob_once(self, output: CacheOutput) -> Path:
         """Perform the cheap pre-restore blob shape check.
 
         Full content validation is fused with the eventual restore copy so a
@@ -870,13 +920,35 @@ class CacheLease:
             raise CachePoisonError(f"cache blob failed integrity validation (wrong size): {path}")
         return path
 
+    def _probe_blob(self, output: CacheOutput) -> Path:
+        for attempt in range(2):
+            try:
+                return self._probe_blob_once(output)
+            except CachePoisonError:
+                if attempt == 0:
+                    # A concurrent POSIX publisher may unlink its staging
+                    # name during any immutable blob shape observation.
+                    continue
+                raise
+        raise AssertionError("immutable blob probe retry loop did not return")
+
     def _validate_existing_blob(self, output: CacheOutput) -> Path:
-        path = self._probe_blob(output)
-        root, relative = _secure_location(path)
-        try:
-            snapshot = digest_relative_file(root, relative)
-        except SecurePathError as exc:
-            raise CachePoisonError(f"cache blob is redirected or unstable: {path}") from exc
+        for attempt in range(2):
+            try:
+                path = self._probe_blob_once(output)
+                root, relative = _secure_location(path)
+                snapshot = digest_relative_file(root, relative)
+                break
+            except CachePoisonError:
+                if attempt == 0:
+                    # The winning publisher's staging unlink can advance ctime
+                    # during either the cheap shape probe or the full digest.
+                    continue
+                raise
+            except SecurePathError as exc:
+                if attempt == 0:
+                    continue
+                raise CachePoisonError(f"cache blob is redirected or unstable: {path}") from exc
         if snapshot.digest.value != output.digest or snapshot.size != output.size:
             raise CachePoisonError(f"cache blob failed integrity validation: {path}")
         return path

@@ -193,7 +193,7 @@ def _matches_windows_snapshot(
         and (not expected.windows_file_id or strong[1] == expected.windows_file_id)
         and (not expected.ctime_ns or strong[4] == expected.ctime_ns)
         and (not expected.windows_attributes or strong[8] == expected.windows_attributes)
-        and strong[0] == basic[0]
+        and (strong[0] & 0xFFFFFFFF) == basic[0]
         and strong[3] == basic[3]
         and strong[5] == basic[2]
         and not strong[7]
@@ -223,7 +223,7 @@ def _windows_snapshot_mismatch_fields(
             or strong[8] == expected.windows_attributes,
             "attributes",
         ),
-        (strong[0] == basic[0], "native-volume-consistency"),
+        ((strong[0] & 0xFFFFFFFF) == basic[0], "native-volume-consistency"),
         (strong[3] == basic[3], "native-write-time-consistency"),
         (strong[5] == basic[2], "native-size-consistency"),
         (not strong[7], "delete-pending"),
@@ -368,6 +368,7 @@ class _WindowsHandles:
     _GENERIC_READ = 0x80000000
     _GENERIC_WRITE = 0x40000000
     _FILE_LIST_DIRECTORY = 0x0001
+    _FILE_TRAVERSE = 0x0020
     _FILE_READ_ATTRIBUTES = 0x0080
     _FILE_WRITE_ATTRIBUTES = 0x0100
     _SHARE_ALL = 0x1 | 0x2 | 0x4
@@ -560,7 +561,10 @@ class _WindowsHandles:
     def root(self, path: Path, *, deny_other_writes: bool = False) -> Any:
         handle = self.kernel32.CreateFileW(
             str(path),
-            self._FILE_LIST_DIRECTORY | self._FILE_READ_ATTRIBUTES | self._SYNCHRONIZE,
+            self._FILE_LIST_DIRECTORY
+            | self._FILE_TRAVERSE
+            | self._FILE_READ_ATTRIBUTES
+            | self._SYNCHRONIZE,
             0x1 if deny_other_writes else self._SHARE_ALL,
             None,
             3,
@@ -609,7 +613,8 @@ class _WindowsHandles:
         handle = self.wintypes.HANDLE()
         access = self._FILE_READ_ATTRIBUTES | self._SYNCHRONIZE
         if directory:
-            access |= self._FILE_LIST_DIRECTORY
+            # Every held directory can become FILE_RENAME_INFO.RootDirectory.
+            access |= self._FILE_LIST_DIRECTORY | self._FILE_TRAVERSE
         elif write:
             access |= self._GENERIC_READ | self._GENERIC_WRITE
         elif read_data:
@@ -755,7 +760,9 @@ class _WindowsHandles:
     def rename(self, handle: Any, parent: Any, name: str, *, replace: bool) -> None:
         encoded_name = name.encode("utf-16-le")
         name_offset = self.FileRenameInfo.name.offset
-        buffer = self.ctypes.create_string_buffer(name_offset + len(encoded_name))
+        buffer = self.ctypes.create_string_buffer(
+            self.ctypes.sizeof(self.FileRenameInfo) + len(encoded_name)
+        )
         information = self.ctypes.cast(
             buffer,
             self.ctypes.POINTER(self.FileRenameInfo),
@@ -2108,10 +2115,15 @@ def atomic_copy_new_relative(
                 )
             after_stat = os.fstat(descriptor)
             terminal = os.stat(name, dir_fd=parent, follow_symlinks=False)
+            content_authorized = expected_digest is not None and expected_size is not None
+            source_identity = (
+                _publication_identity
+                if content_authorized
+                else _identity
+            )
             if (
-                _identity(before_stat) != _identity(after_stat)
-                or _identity(after_stat) != _identity(terminal)
-                or before_stat.st_ctime_ns != after_stat.st_ctime_ns
+                source_identity(before_stat) != source_identity(after_stat)
+                or source_identity(after_stat) != source_identity(terminal)
                 or not stat.S_ISREG(terminal.st_mode)
                 or result.size != after_stat.st_size
             ):

@@ -863,6 +863,58 @@ def _attached_value(arguments: Sequence[str], prefixes: Sequence[str]) -> str | 
     return None
 
 
+def _split_command_line(value: str) -> tuple[str, ...]:
+    """Split migration-time command text without eating native path separators."""
+
+    if os.name != "nt":
+        return tuple(shlex.split(value, posix=True))
+
+    # CMake's Windows command strings use the Microsoft C runtime rules, not
+    # POSIX shell escaping.  In particular, runs of backslashes are special
+    # only when they immediately precede a double quote.
+    arguments: list[str] = []
+    offset = 0
+    while offset < len(value):
+        while offset < len(value) and value[offset].isspace():
+            offset += 1
+        if offset == len(value):
+            break
+        argument: list[str] = []
+        quoted = False
+        while offset < len(value) and (quoted or not value[offset].isspace()):
+            if value[offset] == "\\":
+                start = offset
+                while offset < len(value) and value[offset] == "\\":
+                    offset += 1
+                backslashes = offset - start
+                if offset < len(value) and value[offset] == '"':
+                    argument.extend("\\" * (backslashes // 2))
+                    if backslashes % 2:
+                        argument.append('"')
+                        offset += 1
+                    elif quoted and offset + 1 < len(value) and value[offset + 1] == '"':
+                        argument.append('"')
+                        offset += 2
+                    else:
+                        quoted = not quoted
+                        offset += 1
+                else:
+                    argument.extend("\\" * backslashes)
+                continue
+            if value[offset] == '"':
+                if quoted and offset + 1 < len(value) and value[offset + 1] == '"':
+                    argument.append('"')
+                    offset += 2
+                else:
+                    quoted = not quoted
+                    offset += 1
+                continue
+            argument.append(value[offset])
+            offset += 1
+        arguments.append("".join(argument))
+    return tuple(arguments)
+
+
 def _expand_response(arguments: Iterable[str], *, build_root: Path) -> tuple[str, ...]:
     expanded: list[str] = []
     for argument in arguments:
@@ -876,7 +928,7 @@ def _expand_response(arguments: Iterable[str], *, build_root: Path) -> tuple[str
             response.resolve(strict=True).relative_to(build_root.resolve(strict=True))
         except (OSError, ValueError) as exc:
             raise ProducerGraphError(f"response file escapes configured build: {argument}") from exc
-        expanded.extend(shlex.split(response.read_text(encoding="utf-8"), posix=True))
+        expanded.extend(_split_command_line(response.read_text(encoding="utf-8")))
     return tuple(expanded)
 
 
@@ -884,7 +936,7 @@ def _read_flags(path: Path, prefix: str) -> tuple[str, ...]:
     values: list[str] = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if line.startswith(prefix + " ="):
-            values.extend(shlex.split(line.split("=", 1)[1].strip(), posix=True))
+            values.extend(_split_command_line(line.split("=", 1)[1].strip()))
     return tuple(values)
 
 
@@ -909,7 +961,7 @@ def _resource_commands(build_root: Path) -> tuple[tuple[str, tuple[str, ...]], .
                     "$(RC_INCLUDES)": _read_flags(flags, "RC_INCLUDES"),
                     "$(RC_FLAGS)": _read_flags(flags, "RC_FLAGS"),
                 }
-            tokens = shlex.split(line, posix=True)
+            tokens = _split_command_line(line)
             expanded: list[str] = []
             for token in tokens[1:]:
                 expanded.extend(variables.get(token, (token,)))
@@ -969,7 +1021,7 @@ def extract_cmake_unix_makefiles_graph(
         directory = Path(cast(str, database_item.get("directory"))).resolve(strict=True)
         if directory != build_root:
             raise ProducerGraphError("compile record uses an unexpected working directory")
-        arguments = tuple(shlex.split(cast(str, database_item["command"]), posix=True))
+        arguments = _split_command_line(cast(str, database_item["command"]))
         if not arguments:
             raise ProducerGraphError("compile command is empty")
         try:
@@ -1030,7 +1082,7 @@ def extract_cmake_unix_makefiles_graph(
     for link_file in sorted((build_root / "CMakeFiles").glob("*.dir/link.txt")):
         owner = link_file.parent.name.removesuffix(".dir")
         command = link_file.read_text(encoding="utf-8").strip()
-        arguments = tuple(shlex.split(command, posix=True))
+        arguments = _split_command_line(command)
         if not arguments:
             raise ProducerGraphError(f"empty link command for {owner!r}")
         try:

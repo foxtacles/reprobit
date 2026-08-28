@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import os
+import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -12,6 +15,7 @@ import reprobit.secure_paths as secure_paths
 from reprobit.cache import (
     CacheError,
     CachePoisonError,
+    CacheRecord,
     IncrementalCache,
     cache_key,
 )
@@ -23,6 +27,149 @@ def _key(value: str, *, implementation: str = "test-implementation-v1") -> str:
         {"node": value},
         implementation=implementation,
     )
+
+
+def _hold_posix_unlink_until_competing_observation(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    matches_name: Callable[[str], bool],
+    observation: Literal["read", "stat"] = "read",
+) -> tuple[threading.Event, threading.Event, threading.Event]:
+    unlink_started = threading.Event()
+    observation_started = threading.Event()
+    unlink_finished = threading.Event()
+    publication_identity: tuple[int, int] | None = None
+    original_unlink = secure_paths.os.unlink
+    original_read = secure_paths.os.read
+    original_fstat = secure_paths.os.fstat
+
+    def unlink_after_competing_read_opens(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        dir_fd: int | None = None,
+    ) -> None:
+        nonlocal publication_identity
+        name = os.fsdecode(path)
+        candidate = (
+            os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
+            if dir_fd is not None and matches_name(name)
+            else None
+        )
+        if (
+            not unlink_started.is_set()
+            and candidate is not None
+            and candidate.st_nlink == 2
+        ):
+            publication_identity = (candidate.st_dev, candidate.st_ino)
+            unlink_started.set()
+            if not observation_started.wait(timeout=5):
+                raise RuntimeError("competing cache validation did not begin")
+            try:
+                original_unlink(path, dir_fd=dir_fd)
+            finally:
+                unlink_finished.set()
+            return
+        if dir_fd is None:
+            original_unlink(path)
+        else:
+            original_unlink(path, dir_fd=dir_fd)
+
+    def read_after_staging_unlink(fd: int, size: int) -> bytes:
+        metadata = original_fstat(fd)
+        identity = (metadata.st_dev, metadata.st_ino)
+        if (
+            observation == "read"
+            and unlink_started.is_set()
+            and not unlink_finished.is_set()
+            and identity == publication_identity
+        ):
+            observation_started.set()
+            if not unlink_finished.wait(timeout=5):
+                raise RuntimeError("winning cache publication did not settle")
+        return original_read(fd, size)
+
+    def stat_across_staging_unlink(fd: int) -> os.stat_result:
+        metadata = original_fstat(fd)
+        identity = (metadata.st_dev, metadata.st_ino)
+        if (
+            observation == "stat"
+            and unlink_started.is_set()
+            and not unlink_finished.is_set()
+            and identity == publication_identity
+        ):
+            observation_started.set()
+            if not unlink_finished.wait(timeout=5):
+                raise RuntimeError("winning cache publication did not settle")
+            # Return the deliberately stale pre-unlink metadata once.  The
+            # named entry now has a newer ctime, forcing the strict probe to
+            # reject this observation and exercise its bounded retry.
+        return metadata
+
+    monkeypatch.setattr(secure_paths.os, "unlink", unlink_after_competing_read_opens)
+    if observation == "read":
+        monkeypatch.setattr(secure_paths.os, "read", read_after_staging_unlink)
+    else:
+        monkeypatch.setattr(secure_paths.os, "fstat", stat_across_staging_unlink)
+    return unlink_started, observation_started, unlink_finished
+
+
+def _pause_posix_publication_before_link(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    matches_name: Callable[[str], bool],
+) -> tuple[threading.Event, threading.Event]:
+    link_started = threading.Event()
+    release_link = threading.Event()
+    original_link = secure_paths.os.link
+
+    def pause_matching_link(
+        source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        destination: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        src_dir_fd: int | None = None,
+        dst_dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> None:
+        if not link_started.is_set() and matches_name(os.fsdecode(source)):
+            link_started.set()
+            if not release_link.wait(timeout=5):
+                raise RuntimeError("paused cache publication was not released")
+        original_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(secure_paths.os, "link", pause_matching_link)
+    return link_started, release_link
+
+
+def _store_concurrently(
+    cache: IncrementalCache,
+    key: str,
+    source: Path,
+) -> tuple[list[CacheRecord], list[BaseException]]:
+    barrier = threading.Barrier(2)
+    records: list[CacheRecord] = []
+    errors: list[BaseException] = []
+
+    def publish() -> None:
+        try:
+            with cache.lease() as lease:
+                barrier.wait(timeout=5)
+                records.append(lease.store("producer", key, {"build/a.obj": source}))
+        except BaseException as exc:  # pragma: no cover - asserted by the caller
+            errors.append(exc)
+
+    threads = [threading.Thread(target=publish) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert all(not thread.is_alive() for thread in threads)
+    return records, errors
 
 
 def test_cache_round_trip_restores_by_copy_and_preserves_source(
@@ -69,6 +216,93 @@ def test_cache_round_trip_restores_by_copy_and_preserves_source(
     source.write_bytes(b"source mutation")
     with cache.lease() as lease:
         assert lease.lookup("producer", key) == stored
+
+
+@pytest.mark.parametrize("settlement", ("before_after", "after_terminal"))
+@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication regression")
+def test_cache_restore_accepts_content_authorized_staging_link_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    settlement: str,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    source = tmp_path / "source.obj"
+    source.write_bytes(b"stable")
+    cache = IncrementalCache(state, implementation="test-implementation-v1")
+    with cache.lease() as lease:
+        record = lease.store("producer", _key(settlement), {"build/a.obj": source})
+    output = record.outputs[0]
+    blob = (
+        state
+        / "cache"
+        / "v1"
+        / "blobs"
+        / "sha256"
+        / output.digest[:2]
+        / output.digest
+    )
+    pending = state / "cache" / "v1" / "incoming" / f"pending-{settlement}"
+    os.link(blob, pending)
+    blob_identity = (blob.stat().st_dev, blob.stat().st_ino)
+    settled = threading.Event()
+    original_fstat = secure_paths.os.fstat
+    original_stat = secure_paths.os.stat
+    source_fstats = 0
+    source_stats = 0
+
+    def settle_before_after(fd: int) -> os.stat_result:
+        nonlocal source_fstats
+        metadata = original_fstat(fd)
+        if (metadata.st_dev, metadata.st_ino) == blob_identity:
+            source_fstats += 1
+            if settlement == "before_after" and source_fstats == 3:
+                pending.unlink()
+                settled.set()
+                metadata = original_fstat(fd)
+        return metadata
+
+    def settle_after_terminal(
+        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
+        *,
+        dir_fd: int | None = None,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result:
+        nonlocal source_stats
+        if dir_fd is None:
+            metadata = original_stat(path, follow_symlinks=follow_symlinks)
+        else:
+            metadata = original_stat(
+                path,
+                dir_fd=dir_fd,
+                follow_symlinks=follow_symlinks,
+            )
+        if (metadata.st_dev, metadata.st_ino) == blob_identity:
+            source_stats += 1
+            if settlement == "after_terminal" and source_stats == 2:
+                pending.unlink()
+                settled.set()
+                if dir_fd is None:
+                    metadata = original_stat(path, follow_symlinks=follow_symlinks)
+                else:
+                    metadata = original_stat(
+                        path,
+                        dir_fd=dir_fd,
+                        follow_symlinks=follow_symlinks,
+                    )
+        return metadata
+
+    monkeypatch.setattr(secure_paths.os, "fstat", settle_before_after)
+    monkeypatch.setattr(secure_paths.os, "stat", settle_after_terminal)
+    restore_root = tmp_path / "restore"
+    restore_root.mkdir()
+    destination = restore_root / "build/a.obj"
+
+    with cache.lease() as lease:
+        lease.restore(record, {"build/a.obj": destination}, allowed_root=restore_root)
+
+    assert settled.is_set()
+    assert destination.read_bytes() == b"stable"
 
 
 @pytest.mark.skipif(
@@ -266,15 +500,66 @@ def test_concurrent_publishers_converge_on_one_immutable_record(
     source.write_bytes(b"stable")
     cache = IncrementalCache(state, implementation="test-implementation-v1")
     key = _key("a")
+    records, errors = _store_concurrently(cache, key, source)
+    assert not errors
+    assert len(records) == 2
+    assert records[0] == records[1]
+    assert cache.status().records == 1
+    assert cache.status().blobs == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication regression")
+@pytest.mark.parametrize("observation", ("read", "stat"))
+def test_concurrent_blob_validation_waits_for_posix_link_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    observation: Literal["read", "stat"],
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    source = tmp_path / "a.obj"
+    source.write_bytes(b"stable")
+    cache = IncrementalCache(state, implementation="test-implementation-v1")
+    key = _key("a")
+    unlink_started, validation_started, unlink_finished = (
+        _hold_posix_unlink_until_competing_observation(
+            monkeypatch,
+            matches_name=lambda name: len(name) == 32
+            and all(character in "0123456789abcdef" for character in name),
+            observation=observation,
+        )
+    )
+    records, errors = _store_concurrently(cache, key, source)
+    assert unlink_started.is_set()
+    assert validation_started.is_set()
+    assert unlink_finished.is_set()
+    assert not errors
+    assert len(records) == 2
+    assert records[0] == records[1]
+    assert cache.status().records == 1
+    assert cache.status().blobs == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication regression")
+def test_concurrent_immutable_publication_waits_for_posix_link_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "marker"
+    payload = b"immutable marker\n"
     barrier = threading.Barrier(2)
-    records = []
+    unlink_started, read_started, unlink_finished = (
+        _hold_posix_unlink_until_competing_observation(
+            monkeypatch,
+            matches_name=lambda name: name.startswith(".marker.reprobit-"),
+        )
+    )
     errors: list[BaseException] = []
 
     def publish() -> None:
         try:
-            with cache.lease() as lease:
-                barrier.wait(timeout=5)
-                records.append(lease.store("producer", key, {"build/a.obj": source}))
+            barrier.wait(timeout=5)
+            cache_module._publish_immutable(target, payload)
         except BaseException as exc:  # pragma: no cover - asserted below
             errors.append(exc)
 
@@ -283,11 +568,212 @@ def test_concurrent_publishers_converge_on_one_immutable_record(
         thread.start()
     for thread in threads:
         thread.join(timeout=10)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert unlink_started.is_set()
+    assert read_started.is_set()
+    assert unlink_finished.is_set()
+    assert not errors
+    assert target.read_bytes() == payload
+
+
+def test_layout_validation_retries_one_immutable_settlement_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    cache = IncrementalCache(state, implementation="test-implementation-v1")
+    original_read = cache_module._secure_read
+    transient = True
+
+    def fail_once(path: Path, *, maximum: int | None = None) -> bytes:
+        nonlocal transient
+        if transient and path.name == "format.json":
+            transient = False
+            raise CachePoisonError("simulated POSIX staging-link settlement")
+        return original_read(path, maximum=maximum)
+
+    monkeypatch.setattr(cache_module, "_secure_read", fail_once)
+
+    cache._ensure_layout()
+    assert not transient
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication regression")
+def test_concurrent_record_lookup_waits_for_posix_link_settlement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    source = tmp_path / "a.obj"
+    source.write_bytes(b"stable")
+    cache = IncrementalCache(state, implementation="test-implementation-v1")
+    key = _key("a")
+    unlink_started, read_started, unlink_finished = (
+        _hold_posix_unlink_until_competing_observation(
+            monkeypatch,
+            matches_name=lambda name: name.startswith(f".{key}.json.reprobit-"),
+        )
+    )
+    records, errors = _store_concurrently(cache, key, source)
+    assert unlink_started.is_set()
+    assert read_started.is_set()
+    assert unlink_finished.is_set()
     assert not errors
     assert len(records) == 2
     assert records[0] == records[1]
-    assert cache.status().records == 1
-    assert cache.status().blobs == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication regression")
+def test_record_snapshot_ignores_owned_in_flight_publication_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    source = tmp_path / "a.obj"
+    source.write_bytes(b"stable")
+    cache = IncrementalCache(state, implementation="test-implementation-v1")
+    key = _key("a")
+    with cache.lease() as lease:
+        record = lease.stage_record("producer", key, {"build/a.obj": source})
+    link_started, release_link = _pause_posix_publication_before_link(
+        monkeypatch,
+        matches_name=lambda name: name.startswith(f".{key}.json.reprobit-"),
+    )
+    errors: list[BaseException] = []
+
+    def publish() -> None:
+        try:
+            with cache.lease() as lease:
+                lease.publish_record(record)
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    thread = threading.Thread(target=publish)
+    thread.start()
+    assert link_started.wait(timeout=5)
+    with cache.lease() as lease:
+        assert lease.records("producer") == ()
+    release_link.set()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert not errors
+    with cache.lease() as lease:
+        assert lease.records("producer") == (record,)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication regression")
+def test_status_ignores_owned_in_flight_lease_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    cache = IncrementalCache(state, implementation="test-implementation-v1")
+    link_started, release_link = _pause_posix_publication_before_link(
+        monkeypatch,
+        matches_name=lambda name: bool(
+            re.fullmatch(r"\.[0-9a-f]{32}\.lease\.reprobit-[0-9a-f]{32}", name)
+        ),
+    )
+    errors: list[BaseException] = []
+
+    def acquire_lease() -> None:
+        try:
+            with cache.lease():
+                pass
+        except BaseException as exc:  # pragma: no cover - asserted below
+            errors.append(exc)
+
+    thread = threading.Thread(target=acquire_lease)
+    thread.start()
+    assert link_started.wait(timeout=5)
+    assert cache.status().active_leases == 0
+    release_link.set()
+    thread.join(timeout=10)
+
+    assert not thread.is_alive()
+    assert not errors
+
+
+@pytest.mark.parametrize("location", ("lease", "record"))
+def test_owned_publication_temp_may_disappear_during_scan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    location: str,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    cache = IncrementalCache(state, implementation="test-implementation-v1")
+    if location == "lease":
+        temporary = (
+            cache.format_root
+            / "leases"
+            / f".{('a' * 32)}.lease.reprobit-{'b' * 32}"
+        )
+    else:
+        temporary = (
+            cache.format_root
+            / "records"
+            / cache.implementation
+            / "producer"
+            / "aa"
+            / f".{('a' * 64)}.json.reprobit-{'b' * 32}"
+        )
+        temporary.parent.mkdir(parents=True)
+    temporary.write_bytes(b"in flight")
+    original_stat = Path.stat
+
+    def disappear_then_stat(path: Path, *, follow_symlinks: bool = True) -> os.stat_result:
+        if path == temporary:
+            path.unlink()
+        return original_stat(path, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(Path, "stat", disappear_then_stat)
+
+    if location == "lease":
+        assert cache.status().active_leases == 0
+    else:
+        with cache.lease() as lease:
+            assert lease.records("producer") == ()
+
+
+@pytest.mark.parametrize("location", ("lease", "record"))
+def test_owned_publication_temp_must_still_be_regular(
+    tmp_path: Path,
+    location: str,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    cache = IncrementalCache(state, implementation="test-implementation-v1")
+    if location == "lease":
+        temporary = (
+            cache.format_root
+            / "leases"
+            / f".{('a' * 32)}.lease.reprobit-{'b' * 32}"
+        )
+    else:
+        temporary = (
+            cache.format_root
+            / "records"
+            / cache.implementation
+            / "producer"
+            / "aa"
+            / f".{('a' * 64)}.json.reprobit-{'b' * 32}"
+        )
+        temporary.parent.mkdir(parents=True)
+    temporary.mkdir()
+
+    with pytest.raises(CachePoisonError, match="unsafe entry"):
+        if location == "lease":
+            cache.status()
+        else:
+            with cache.lease() as lease:
+                lease.records("producer")
 
 
 def test_domain_record_snapshot_is_validated_and_canonical(tmp_path: Path) -> None:

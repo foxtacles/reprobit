@@ -502,7 +502,17 @@ def test_native_held_set_and_rollback_use_strong_write_excluding_capabilities(
     root.mkdir()
     payload = b"native"
     basic = (7, 11, len(payload), 13, 0x22)
-    strong = (7, b"file-id", 5, 13, 17, len(payload), 1, False, 0x22)
+    strong = (
+        0x1234567800000007,
+        b"file-id",
+        5,
+        13,
+        17,
+        len(payload),
+        1,
+        False,
+        0x22,
+    )
     expected = secure_paths.SecureFileSnapshot(
         root / "target.exe",
         Digest.from_bytes(payload),

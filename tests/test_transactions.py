@@ -25,6 +25,22 @@ def test_transaction_atomically_writes_and_deletes(tmp_path: Path) -> None:
     assert list((tmp_path / ".reprobit-transactions").glob("*/journal.json")) == []
 
 
+def test_transaction_accepts_native_paths_but_rejects_raw_backslashes(
+    tmp_path: Path,
+) -> None:
+    transaction = CASTransaction(tmp_path)
+    transaction.write(Path("nested") / "result.txt", b"result", expected_sha256=None)
+    transaction.commit()
+
+    assert (tmp_path / "nested/result.txt").read_bytes() == b"result"
+    with pytest.raises(ValueError, match="unsafe character"):
+        CASTransaction(tmp_path).write(
+            r"nested\result.txt",
+            b"unsafe",
+            expected_sha256=None,
+        )
+
+
 def test_preimage_conflict_leaves_every_target_unchanged(tmp_path: Path) -> None:
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"

@@ -57,7 +57,10 @@ def _relative_path(value: Path | str) -> Path:
     path = Path(value)
     if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
         raise ValueError(f"transaction path must be canonical and relative: {value}")
-    if "\\" in str(value) or "\0" in str(value):
+    rendered = str(value)
+    if "\0" in rendered or (
+        "\\" in rendered and (isinstance(value, str) or os.sep != "\\")
+    ):
         raise ValueError(f"transaction path contains an unsafe character: {value}")
     return path
 

@@ -16,8 +16,7 @@ from reprobit.classic_includes import parse_msvc_sbr
 from reprobit.native_device_map import (
     NativeDeviceMapError,
     NativeDeviceMapLease,
-    _ProcessDeviceMapInformation,
-    _ProcessDeviceMapQuery,
+    _NativeApi,
     _ProcessDeviceMapSet,
     probe_native_device_map,
     probe_native_device_map_execution,
@@ -34,12 +33,24 @@ _DDD_EXACT_MATCH_ON_REMOVE = 0x00000004
 _DDD_NO_BROADCAST_SYSTEM = 0x00000008
 
 
-def test_process_device_map_binding_uses_the_complete_native_union() -> None:
+def test_process_device_map_binding_passes_only_the_set_arm() -> None:
     assert ctypes.sizeof(_ProcessDeviceMapSet) == ctypes.sizeof(ctypes.c_void_p)
-    assert ctypes.sizeof(_ProcessDeviceMapQuery) == 36
-    assert ctypes.sizeof(_ProcessDeviceMapInformation) == 40
-    assert _ProcessDeviceMapInformation.Set.offset == 0
-    assert _ProcessDeviceMapInformation.Query.offset == 0
+    lengths: list[int] = []
+    api = object.__new__(_NativeApi)
+
+    def set_information(
+        _process: object,
+        _information_class: int,
+        _information: object,
+        length: int,
+    ) -> int:
+        lengths.append(length)
+        return 0
+
+    api.NtSetInformationProcess = set_information
+    api.set_process_map(1, 2)
+
+    assert lengths == [ctypes.sizeof(_ProcessDeviceMapSet)]
 
 
 def test_native_device_map_rejects_non_letter_drive() -> None:

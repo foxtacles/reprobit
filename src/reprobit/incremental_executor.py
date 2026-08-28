@@ -134,18 +134,26 @@ class _LazyRuntime(Generic[RuntimeT]):
         self.created = False
         self.closed = False
 
+    @staticmethod
+    def _construction_failure(error: Exception) -> IncrementalExecutionError:
+        return IncrementalExecutionError(
+            f"incremental runtime construction failed: {error}"
+        )
+
     def get(self) -> RuntimeT:
         with self._lock:
             if self._error is not None:
-                raise IncrementalExecutionError(
-                    "incremental runtime construction previously failed"
-                ) from self._error
+                if isinstance(self._error, Exception):
+                    raise self._construction_failure(self._error) from self._error
+                raise self._error
             if self._value is None:
                 try:
                     self._value = self._factory()
                     self.created = True
                 except BaseException as exc:
                     self._error = exc
+                    if isinstance(exc, Exception):
+                        raise self._construction_failure(exc) from exc
                     raise
             return self._value
 

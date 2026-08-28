@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+import reprobit.producer_graph as producer_graph
 from reprobit.model import Digest
 from reprobit.producer_graph import (
     ProducerGraphDocument,
@@ -25,6 +26,36 @@ from reprobit.producer_graph import (
 
 def _digest(value: str) -> Digest:
     return Digest(value=value * 64)
+
+
+def test_windows_shell_words_preserve_backslashes_and_strip_quotes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(producer_graph.os, "name", "nt")
+
+    assert producer_graph._split_command_line(
+        r'"C:\Program Files\MSVC\cl.exe" /FoC:\build\unit.obj C:\src\unit.cpp'
+    ) == (
+        r"C:\Program Files\MSVC\cl.exe",
+        r"/FoC:\build\unit.obj",
+        r"C:\src\unit.cpp",
+    )
+
+
+def test_windows_shell_words_follow_crt_backslash_quote_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(producer_graph.os, "name", "nt")
+
+    assert producer_graph._split_command_line(
+        'cl.exe /DVERSION=\\"1.0\\" "C:\\path with space\\\\" "" unit.cpp'
+    ) == (
+        "cl.exe",
+        '/DVERSION="1.0"',
+        "C:\\path with space\\",
+        "",
+        "unit.cpp",
+    )
 
 
 def test_node_refuses_unseated_commands_and_response_files() -> None:

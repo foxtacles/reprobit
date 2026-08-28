@@ -50,10 +50,32 @@ def _windows_attributes(path: Path) -> int:
 def test_windows_file_rename_info_uses_native_boolean_layout() -> None:
     information = _WindowsHandles().FileRenameInfo
 
+    assert ctypes.sizeof(information) == 24
     assert information.replace.offset == 0
     assert information.root.offset == 8
     assert information.name_length.offset == 16
     assert information.name.offset == 20
+
+
+def test_windows_file_rename_buffer_includes_the_native_struct_tail() -> None:
+    api = _WindowsHandles()
+    calls: list[tuple[int, int]] = []
+
+    def set_information(
+        _handle: object,
+        information_class: int,
+        _information: object,
+        size: int,
+    ) -> int:
+        calls.append((information_class, size))
+        return 1
+
+    api.kernel32.SetFileInformationByHandle = set_information
+    api.rename(1, 2, "APP.EXE", replace=False)
+
+    assert calls == [
+        (3, ctypes.sizeof(api.FileRenameInfo) + len("APP.EXE".encode("utf-16-le")))
+    ]
 
 
 def test_windows_handle_relative_publication_replaces_and_reseals(

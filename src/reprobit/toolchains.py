@@ -917,7 +917,7 @@ def _tree_receipt(root: Path, relative_root: str) -> ToolchainTreeReceipt:
                 raise ToolchainError(f"cannot hash toolchain file {child}: {error}") from error
             if (
                 _stable_identity(after_read) != _stable_identity(opened)
-                or _stable_identity(after_path) != _stable_identity(opened)
+                or _stable_identity(after_path) != _stable_identity(before)
                 or not stat.S_ISREG(after_path.st_mode)
                 or _is_reparse_point(after_path)
             ):

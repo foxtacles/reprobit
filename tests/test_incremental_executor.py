@@ -563,21 +563,23 @@ def test_runtime_factory_failure_is_not_retried_and_needs_no_close(
         runtime_close=closed.append,
         max_workers=2,
     )
-    with pytest.raises(IncrementalExecutionError, match="factory failed"):
-        executor.execute(
-            tuple(
-                IncrementalNode(
-                    id=f"node.{index}",
-                    domain="producer",
-                    depends_on=(),
-                    outputs={f"build/{index}.obj": workspace / f"{index}.obj"},
-                    key=lambda _deps, index=index: _node_key(f"factory.{index}"),
-                    execute=lambda _runtime, _cancellation, _inputs: None,
-                    metadata=lambda _deps: {},
-                )
-                for index in range(2)
-            )
+    nodes = tuple(
+        IncrementalNode(
+            id=f"node.{index}",
+            domain="producer",
+            depends_on=(),
+            outputs={f"build/{index}.obj": workspace / f"{index}.obj"},
+            key=lambda _deps, index=index: _node_key(f"factory.{index}"),
+            execute=lambda _runtime, _cancellation, _inputs: None,
+            metadata=lambda _deps: {},
         )
+        for index in range(2)
+    )
+    with pytest.raises(
+        IncrementalExecutionError,
+        match="runtime construction failed: factory failed",
+    ):
+        executor.execute(nodes)
     assert calls == 1
     assert closed == []
 
