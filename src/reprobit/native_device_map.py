@@ -796,6 +796,7 @@ def _run_logon_broker() -> int:
         )
     try:
         try:
+            create_error = 0
             with ExitStack() as standard_handles:
                 (
                     startup.hStdInput,
@@ -815,8 +816,14 @@ def _run_logon_broker() -> int:
                     ctypes.byref(startup),
                     ctypes.byref(process),
                 )
+                # ExitStack closes the temporary inherited handles below, and
+                # CloseHandle is allowed to overwrite the calling thread's
+                # last-error value. Capture the creation failure while it is
+                # still authoritative.
+                if not created:
+                    create_error = int(get_last_error())
             if not created:
-                win32_error = int(get_last_error())
+                win32_error = create_error
                 detail = (
                     "; SeImpersonatePrivilege is required"
                     if win32_error == 1314
