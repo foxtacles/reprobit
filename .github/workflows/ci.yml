@@ -93,14 +93,17 @@ jobs:
     timeout-minutes: 30
     env:
       PYTHONUNBUFFERED: "1"
-      REPROBIT_MSVC_4_2_ROOT: ${{ runner.temp }}\archaic-msvc42
-      REPROBIT_NATIVE_LOG_DIR: ${{ runner.temp }}\native-logs
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.11"
           cache: pip
+      - name: Configure native temporary paths
+        shell: pwsh
+        run: |
+          "REPROBIT_MSVC_4_2_ROOT=$env:RUNNER_TEMP\archaic-msvc42" >> $env:GITHUB_ENV
+          "REPROBIT_NATIVE_LOG_DIR=$env:RUNNER_TEMP\native-logs" >> $env:GITHUB_ENV
       - name: Record native runner identity
         shell: pwsh
         run: |
