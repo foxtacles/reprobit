@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
+  <title id="title">ReproBit</title>
+  <desc id="description">A geometric letter R with an equals sign, representing exact rebuilds.</desc>
+
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="#0b1020"/>
+  <rect x="26" y="26" width="460" height="460" rx="110" fill="none" stroke="#34436f" stroke-width="4"/>
+
+  <!-- The violet leg completes the ReproBit R. -->
+  <path d="M282 310 397 414" fill="none" stroke="#8b5cf6" stroke-width="78" stroke-linecap="round"/>
+
+  <path
+    d="M116 92h162c78 0 124 43 124 114s-46 114-124 114h-84v96h-78V92Zm78 74v80h77c35 0 53-13 53-40s-18-40-53-40h-77Z"
+    fill="#22d3ee"
+    fill-rule="evenodd"
+  />
+
+  <!-- Equality is the promise: rebuilt bytes match the reference bytes. -->
+  <g fill="#f8fafc">
+    <rect x="222" y="187" width="74" height="12" rx="6"/>
+    <rect x="222" y="215" width="74" height="12" rx="6"/>
+  </g>
+</svg>

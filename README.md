@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/reprobit-converging-bits-mark-256.png" width="180" alt="ReproBit: two streams of bits converging into one exact sequence">
+  <img src="docs/assets/reprobit-mark.svg" width="168" alt="ReproBit: a geometric R with an equals sign">
 </p>
 
 <h1 align="center">ReproBit</h1>
@@ -29,11 +29,34 @@ or other incidental state influence the output. We call that **compiler entropy*
 that is not part of the program's intended behavior but still changes its bytes.
 
 ```mermaid
-flowchart LR
-    S["Same logical program"] --> A["Build A<br/>path, order, saved state"]
-    S --> B["Build B<br/>different incidental state"]
-    A --> X["Output bytes A"]
-    B --> Y["Different output bytes"]
+flowchart TB
+    accTitle: How compiler entropy changes a build
+    accDescr: The same code enters two builds with different incidental state, so the files do not match.
+
+    subgraph RA["Run A · same program"]
+        direction LR
+        I1(["Path, order, and state A"]) --> A["Build"] --> X(["Bytes A"])
+    end
+    subgraph RB["Run B · same program"]
+        direction LR
+        I2(["Path, order, and state B"]) --> B["Build"] --> Y(["Bytes B"])
+    end
+    X --> C{"Exact match?"}
+    Y --> C
+    C -->|"No"| D(["Different files"])
+
+    classDef input fill:#eef2ff,stroke:#6366f1,color:#111827,stroke-width:1.5px
+    classDef process fill:#ecfeff,stroke:#0891b2,color:#111827,stroke-width:1.5px
+    classDef decision fill:#fffbeb,stroke:#d97706,color:#111827,stroke-width:1.5px
+    classDef artifact fill:#f8fafc,stroke:#64748b,color:#111827,stroke-width:1.5px
+    classDef mismatch fill:#fef2f2,stroke:#dc2626,color:#111827,stroke-width:1.5px
+    class I1,I2 input
+    class A,B process
+    class C decision
+    class X,Y artifact
+    class D mismatch
+    style RA fill:transparent,stroke:#94a3b8,stroke-width:1.5px
+    style RB fill:transparent,stroke:#94a3b8,stroke-width:1.5px
 ```
 
 _In words: equivalent source can produce different binary files when incidental compiler inputs
@@ -58,7 +81,7 @@ A function can be logically correct while compiler bookkeeping places or describ
 differently. Paths that were visible to the compiler in 1997 matter. So can declaration order,
 shared debug state, parallel compiler processes, and link order.
 For a visual explanation, the LEGO Island development video covers
-[compiler entropy starting at 9:02](https://youtu.be/gthm-0Av93Q?t=542s).
+[compiler entropy starting at 9:03](https://youtu.be/gthm-0Av93Q?t=543s).
 The campaign exposed these issues at real-project scale; ReproBit packages the resulting controls
 and checks into a reusable library. The project's source, targets, and interventions remain in the
 decompilation repository rather than being built into ReproBit.
@@ -80,16 +103,35 @@ production, performs the literal comparison, and writes the report.
 
 ```mermaid
 flowchart LR
-    subgraph P["Clean producer: no reference access"]
-        S["Recorded source"] --> B["Controlled build"]
-        T["Recorded toolchain"] --> B
-        B --> C["Candidate"]
+    accTitle: ReproBit's clean verification boundary
+    accDescr: The producer cannot see the reference. The verifier compares it with the candidate and reports.
+
+    subgraph P["1 · Produce — no reference access"]
+        direction LR
+        S(["Recorded source"]) --> B["Controlled build"]
+        T(["Recorded toolchain"]) --> B
+        B --> C(["Candidate"])
     end
-    subgraph V["Verifier"]
-        C --> Q["Compare and check evidence"]
-        R["Protected reference"] --> Q
-        Q --> O["JSON and HTML report"]
+    subgraph V["2 · Verify — reference allowed"]
+        direction LR
+        R(["Protected reference"]) --> Q["Compare bytes<br/>and check evidence"]
+        Q --> O(["Trust report"])
     end
+    C --> Q
+    P ~~~ V
+
+    classDef input fill:#eef2ff,stroke:#6366f1,color:#111827,stroke-width:1.5px
+    classDef process fill:#ecfeff,stroke:#0891b2,color:#111827,stroke-width:1.5px
+    classDef artifact fill:#f8fafc,stroke:#64748b,color:#111827,stroke-width:1.5px
+    classDef result fill:#ecfdf5,stroke:#059669,color:#111827,stroke-width:1.5px
+    classDef reference fill:#faf5ff,stroke:#8b5cf6,color:#111827,stroke-width:1.5px
+    class S,T input
+    class B,Q process
+    class C artifact
+    class O result
+    class R reference
+    style P fill:transparent,stroke:#94a3b8,stroke-width:1.5px
+    style V fill:transparent,stroke:#94a3b8,stroke-width:1.5px
 ```
 
 _In words: on the clean path, the original binary is available only to the final verifier, never
@@ -112,14 +154,27 @@ between jobs.
 the developer cache as certification evidence.
 
 ```mermaid
-flowchart LR
-    E["Edit source or project data"] --> K["Re-check declared inputs"]
-    K --> H["Restore unchanged steps"]
-    K --> M["Run affected steps"]
-    H --> F["Finish target files"]
+flowchart TB
+    accTitle: ReproBit's incremental build loop
+    accDescr: After an edit, valid steps are restored, affected steps run again, and ReproBit reports.
+
+    E(["Edit source or project data"]) --> K["Re-check declared inputs"]
+    K --> D{"Step still valid?"}
+    D -->|"Yes"| H["Restore cached result"]
+    D -->|"No"| M["Run affected steps"]
+    H --> F(["Target ready"])
     M --> F
-    F --> U["Show hits, misses, reasons, and time"]
-    U --> E
+    F --> U["Report reuse, rebuild reasons, and time"]
+    U -. "Next edit" .-> E
+
+    classDef input fill:#eef2ff,stroke:#6366f1,color:#111827,stroke-width:1.5px
+    classDef process fill:#ecfeff,stroke:#0891b2,color:#111827,stroke-width:1.5px
+    classDef decision fill:#fffbeb,stroke:#d97706,color:#111827,stroke-width:1.5px
+    classDef result fill:#ecfdf5,stroke:#059669,color:#111827,stroke-width:1.5px
+    class E input
+    class K,H,M,U process
+    class D decision
+    class F result
 ```
 
 _In words: each edit invalidates only the dependent work; the CLI explains what it reused and
