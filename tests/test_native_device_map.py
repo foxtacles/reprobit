@@ -17,8 +17,7 @@ from reprobit.native_device_map import (
     NativeDeviceMapError,
     NativeDeviceMapLease,
     _NativeApi,
-    _ProcessDeviceMapInformation,
-    _ProcessDeviceMapQuery,
+    _ObjectAttributes,
     _ProcessDeviceMapSet,
     probe_native_device_map,
     probe_native_device_map_execution,
@@ -35,12 +34,8 @@ _DDD_EXACT_MATCH_ON_REMOVE = 0x00000004
 _DDD_NO_BROADCAST_SYSTEM = 0x00000008
 
 
-def test_process_device_map_binding_passes_the_complete_native_union() -> None:
+def test_process_device_map_binding_passes_only_the_set_arm() -> None:
     assert ctypes.sizeof(_ProcessDeviceMapSet) == ctypes.sizeof(ctypes.c_void_p)
-    assert ctypes.sizeof(_ProcessDeviceMapQuery) == 36
-    assert ctypes.sizeof(_ProcessDeviceMapInformation) == 40
-    assert _ProcessDeviceMapInformation.Set.offset == 0
-    assert _ProcessDeviceMapInformation.Query.offset == 0
     calls: list[tuple[int, int]] = []
     api = object.__new__(_NativeApi)
 
@@ -52,15 +47,48 @@ def test_process_device_map_binding_passes_the_complete_native_union() -> None:
     ) -> int:
         information = ctypes.cast(
             _information,
-            ctypes.POINTER(_ProcessDeviceMapInformation),
+            ctypes.POINTER(_ProcessDeviceMapSet),
         ).contents
-        calls.append((int(information.Set.DirectoryHandle), length))
+        calls.append((int(information.DirectoryHandle), length))
         return 0
 
     api.NtSetInformationProcess = set_information
     api.set_process_map(1, 2)
 
-    assert calls == [(2, ctypes.sizeof(_ProcessDeviceMapInformation))]
+    assert calls == [(2, ctypes.sizeof(_ProcessDeviceMapSet))]
+
+
+def test_private_directory_creation_has_no_explicit_shadow() -> None:
+    calls: list[tuple[int, bool, bool, object, int]] = []
+    api = object.__new__(_NativeApi)
+
+    def create_directory(
+        result: object,
+        access: int,
+        attributes_pointer: object,
+        shadow: object,
+        flags: int,
+    ) -> int:
+        attributes = ctypes.cast(
+            attributes_pointer,
+            ctypes.POINTER(_ObjectAttributes),
+        ).contents
+        calls.append(
+            (
+                access,
+                bool(attributes.RootDirectory),
+                bool(attributes.ObjectName),
+                shadow,
+                flags,
+            )
+        )
+        ctypes.cast(result, ctypes.POINTER(ctypes.c_void_p)).contents.value = 123
+        return 0
+
+    api.NtCreateDirectoryObjectEx = create_directory
+
+    assert api.create_private_directory() == 123
+    assert calls == [(0x0001 | 0x0002 | 0x0004, False, False, None, 0)]
 
 
 def test_native_device_map_rejects_non_letter_drive() -> None:

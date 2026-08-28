@@ -3,9 +3,11 @@
 The public Win32 ``DefineDosDevice`` API writes to a logon-session namespace,
 so it cannot isolate a reproducible build from peer processes.  This module is
 the deliberately small native-API boundary used to construct an unnamed Object
-Manager directory, shadow the caller's existing DOS namespace, and add exactly
-one private drive mapping.  The backend remains responsible for holding the
-mapped filesystem namespace immutable for the same lifetime.
+Manager directory and add exactly one private drive mapping.  Once installed as
+a device map, Windows supplies the directory's normal global-DOS fallback; an
+explicit Object Manager shadow is neither needed nor compatible with that role.
+The backend remains responsible for holding the mapped filesystem namespace
+immutable for the same lifetime.
 
 The ntdll entry points used here are not a supported Win32 contract.  Every
 entry point is therefore resolved at runtime, every NTSTATUS is checked, WOW64
@@ -85,28 +87,6 @@ class _ProcessDeviceMapSet(ctypes.Structure):
     _fields_ = [("DirectoryHandle", ctypes.c_void_p)]
 
 
-class _ProcessDeviceMapQuery(ctypes.Structure):
-    _fields_ = [
-        ("DriveMap", ctypes.c_uint32),
-        ("DriveType", ctypes.c_uint8 * 32),
-    ]
-
-
-class _ProcessDeviceMapInformation(ctypes.Union):
-    """Exact non-EX ``PROCESS_DEVICEMAP_INFORMATION`` input buffer.
-
-    Windows validates the size of the complete union for ``ProcessDeviceMap``
-    even when ``NtSetInformationProcess`` consumes only the set arm.  The
-    36-byte query arm therefore makes this a 40-byte, pointer-aligned union on
-    the supported 64-bit controller.
-    """
-
-    _fields_ = [
-        ("Set", _ProcessDeviceMapSet),
-        ("Query", _ProcessDeviceMapQuery),
-    ]
-
-
 def _handle(value: int) -> ctypes.c_void_p:
     return ctypes.c_void_p(value)
 
@@ -162,7 +142,7 @@ class _NativeApi:
             raise NativeDeviceMapError(
                 "native process device maps require a 64-bit Python controller"
             )
-        if ctypes.sizeof(_ProcessDeviceMapInformation) != 40:
+        if ctypes.sizeof(_ProcessDeviceMapSet) != ctypes.sizeof(ctypes.c_void_p):
             raise NativeDeviceMapError(
                 "native process device-map binding has an unexpected layout"
             )
@@ -294,7 +274,7 @@ class _NativeApi:
             raise NativeDeviceMapError("NtOpenDirectoryObject returned a null handle")
         return int(result.value)
 
-    def create_shadow_directory(self, shadow: int) -> int:
+    def create_private_directory(self) -> int:
         _buffer, _name, attributes = _object_attributes(None)
         result = ctypes.c_void_p()
         status = int(
@@ -302,7 +282,7 @@ class _NativeApi:
                 ctypes.byref(result),
                 _DIRECTORY_QUERY | _DIRECTORY_TRAVERSE | _DIRECTORY_CREATE_OBJECT,
                 ctypes.byref(attributes),
-                _handle(shadow),
+                None,
                 0,
             )
         )
@@ -349,8 +329,7 @@ class _NativeApi:
         return ctypes.wstring_at(buffer, result.Length // 2)
 
     def set_process_map(self, process: int, directory: int) -> None:
-        information = _ProcessDeviceMapInformation()
-        information.Set.DirectoryHandle = _handle(directory)
+        information = _ProcessDeviceMapSet(_handle(directory))
         status = int(
             self.NtSetInformationProcess(
                 _handle(process),
@@ -453,7 +432,7 @@ def probe_native_device_map() -> NativeDeviceMapProbe:
     try:
         api = _NativeApi()
         original = api.open_current_directory()
-        private = api.create_shadow_directory(original)
+        private = api.create_private_directory()
         current = api.open_current_directory()
         try:
             if not api.same_object(current, original):
@@ -464,7 +443,7 @@ def probe_native_device_map() -> NativeDeviceMapProbe:
             api.close(current, "probe-current-directory")
         result = NativeDeviceMapProbe(
             True,
-            "anonymous shadow-directory primitives available; map mutation unprobed",
+            "anonymous private-directory primitives available; map mutation unprobed",
         )
     except (NativeDeviceMapError, OSError) as error:
         result = NativeDeviceMapProbe(False, str(error))
@@ -651,7 +630,7 @@ class NativeDeviceMapLease(AbstractContextManager["NativeDeviceMapLease"]):
                 )
             self._original = api.open_current_directory()
             self._target = api.final_nt_path(resolved)
-            self._private = api.create_shadow_directory(self._original)
+            self._private = api.create_private_directory()
             self._link = api.create_symbolic_link(
                 self._private, device, self._target
             )

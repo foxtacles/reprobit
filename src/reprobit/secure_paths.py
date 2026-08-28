@@ -380,6 +380,7 @@ class _WindowsHandles:
     _OBJ_CASE_INSENSITIVE = 0x40
     _ATTRIBUTE_DIRECTORY = 0x10
     _ATTRIBUTE_REPARSE = 0x400
+    _FILE_RENAME_INFORMATION = 10
     _NOT_FOUND = frozenset({0xC0000034, 0xC000003A})
 
     def __init__(self) -> None:
@@ -462,9 +463,16 @@ class _WindowsHandles:
                 ("file_id", FileId128),
             ]
 
-        class FileRenameInfo(ctypes.Structure):
+        class FileRenameOptions(ctypes.Union):
             _fields_ = [
                 ("replace", ctypes.c_ubyte),
+                ("flags", wintypes.DWORD),
+            ]
+
+        class FileRenameInfo(ctypes.Structure):
+            _anonymous_ = ("options",)
+            _fields_ = [
+                ("options", FileRenameOptions),
                 ("root", wintypes.HANDLE),
                 ("name_length", wintypes.DWORD),
                 ("name", ctypes.c_uint16 * 1),
@@ -549,6 +557,14 @@ class _WindowsHandles:
             wintypes.DWORD,
         ]
         self.ntdll.NtCreateFile.restype = ctypes.c_long
+        self.ntdll.NtSetInformationFile.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(IoStatusBlock),
+            ctypes.c_void_p,
+            wintypes.ULONG,
+            ctypes.c_int,
+        ]
+        self.ntdll.NtSetInformationFile.restype = ctypes.c_long
 
     @staticmethod
     def _status_value(status: int) -> int:
@@ -760,16 +776,17 @@ class _WindowsHandles:
     def rename(self, handle: Any, parent: Any, name: str, *, replace: bool) -> None:
         encoded_name = name.encode("utf-16-le")
         name_offset = self.FileRenameInfo.name.offset
-        # FILE_RENAME_INFO ends in a variable-length WCHAR array.  Pass only
-        # the fixed prefix plus FileNameLength bytes; sizeof(struct) includes
-        # the placeholder WCHAR and trailing ABI padding, which Server 2022
-        # rejects as bytes beyond the declared name.
-        buffer = self.ctypes.create_string_buffer(name_offset + len(encoded_name))
+        # Stay on the same NT handle-relative API used to open both handles.
+        # This avoids another Win32 path interpretation step and supplies the
+        # counted FILE_RENAME_INFORMATION contract directly to the kernel.
+        buffer = self.ctypes.create_string_buffer(
+            self.ctypes.sizeof(self.FileRenameInfo) + len(encoded_name)
+        )
         information = self.ctypes.cast(
             buffer,
             self.ctypes.POINTER(self.FileRenameInfo),
         ).contents
-        information.replace = replace
+        information.replace = int(replace)
         information.root = parent
         information.name_length = len(encoded_name)
         self.ctypes.memmove(
@@ -777,14 +794,20 @@ class _WindowsHandles:
             encoded_name,
             len(encoded_name),
         )
-        if not self.kernel32.SetFileInformationByHandle(
-            handle,
-            3,
-            buffer,
-            len(buffer),
-        ):
+        status_block = self.IoStatusBlock()
+        status = int(
+            self.ntdll.NtSetInformationFile(
+                handle,
+                self.ctypes.byref(status_block),
+                buffer,
+                len(buffer),
+                self._FILE_RENAME_INFORMATION,
+            )
+        )
+        if status < 0:
             raise SecurePathError(
-                f"atomic native publication rename failed: {self.get_last_error()}"
+                "atomic native publication rename failed: "
+                f"0x{self._status_value(status):08x}"
             )
 
     def delete_on_close(self, handle: Any) -> None:

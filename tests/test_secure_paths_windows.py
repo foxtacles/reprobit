@@ -47,25 +47,27 @@ def _windows_attributes(path: Path) -> int:
     return int(path.stat().st_file_attributes)
 
 
-def test_windows_file_rename_info_uses_native_boolean_layout() -> None:
+def test_windows_file_rename_info_uses_native_union_layout() -> None:
     information = _WindowsHandles().FileRenameInfo
 
     assert ctypes.sizeof(information) == 24
     assert information.replace.offset == 0
+    assert information.flags.offset == 0
     assert information.root.offset == 8
     assert information.name_length.offset == 16
     assert information.name.offset == 20
 
 
-def test_windows_file_rename_buffer_ends_at_the_declared_name() -> None:
+def test_windows_file_rename_uses_native_handle_relative_contract() -> None:
     api = _WindowsHandles()
     calls: list[tuple[int, int, int, int, bytes]] = []
 
     def set_information(
         _handle: object,
-        information_class: int,
-        _information: object,
+        _status_block: object,
+        _information: Any,
         size: int,
+        information_class: int,
     ) -> int:
         rename = ctypes.cast(
             _information,
@@ -78,24 +80,42 @@ def test_windows_file_rename_buffer_ends_at_the_declared_name() -> None:
                 size,
                 int(rename.root),
                 rename.name_length,
-                ctypes.string_at(ctypes.addressof(_information), size)[name_offset:],
+                ctypes.string_at(ctypes.addressof(_information), size)[
+                    name_offset : name_offset + rename.name_length
+                ],
             )
         )
-        return 1
+        return 0
 
-    api.kernel32.SetFileInformationByHandle = set_information
+    def reject_win32_wrapper(*_args: object) -> int:
+        pytest.fail("rename must not pass an NT directory handle through the Win32 wrapper")
+
+    api.ntdll.NtSetInformationFile = set_information
+    api.kernel32.SetFileInformationByHandle = reject_win32_wrapper
     api.rename(1, 2, "APP.EXE", replace=False)
 
     encoded_name = "APP.EXE".encode("utf-16-le")
     assert calls == [
         (
-            3,
-            api.FileRenameInfo.name.offset + len(encoded_name),
+            api._FILE_RENAME_INFORMATION,
+            ctypes.sizeof(api.FileRenameInfo) + len(encoded_name),
             2,
             len(encoded_name),
             encoded_name,
         )
     ]
+
+
+def test_windows_file_rename_reports_native_status() -> None:
+    api = _WindowsHandles()
+
+    def invalid_parameter(*_args: object) -> int:
+        return -1073741811  # STATUS_INVALID_PARAMETER (0xc000000d)
+
+    api.ntdll.NtSetInformationFile = invalid_parameter
+
+    with pytest.raises(SecurePathError, match="0xc000000d"):
+        api.rename(1, 2, "APP.EXE", replace=False)
 
 
 def test_windows_handle_relative_publication_replaces_and_reseals(
