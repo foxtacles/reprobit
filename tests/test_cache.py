@@ -521,28 +521,7 @@ def test_concurrent_blob_validation_waits_for_posix_link_settlement(
     source.write_bytes(b"stable")
     cache = IncrementalCache(state, implementation="test-implementation-v1")
     key = _key("a")
-    promotion_ready = threading.Barrier(2)
     original_promote = cache_module.promote_relative_new
-
-    def promote_together(
-        root: Path,
-        source_relative: str,
-        destination_relative: str,
-        *,
-        expected: secure_paths.SecureFileSnapshot,
-    ) -> secure_paths.SecureFileSnapshot:
-        promotion_ready.wait(timeout=5)
-        return original_promote(
-            root,
-            source_relative,
-            destination_relative,
-            expected=expected,
-        )
-
-    # Force both publishers to reach the same CAS commit before either can
-    # win.  The test is about settlement after that collision, not scheduler
-    # luck while each thread copies its private staging file.
-    monkeypatch.setattr(cache_module, "promote_relative_new", promote_together)
     unlink_started, validation_started, unlink_finished = (
         _hold_posix_unlink_until_competing_observation(
             monkeypatch,
@@ -551,6 +530,40 @@ def test_concurrent_blob_validation_waits_for_posix_link_settlement(
             observation=observation,
         )
     )
+    promotion_lock = threading.Lock()
+    follower_ready = threading.Event()
+    promotion_calls = 0
+
+    def promote_together(
+        root: Path,
+        source_relative: str,
+        destination_relative: str,
+        *,
+        expected: secure_paths.SecureFileSnapshot,
+    ) -> secure_paths.SecureFileSnapshot:
+        nonlocal promotion_calls
+        with promotion_lock:
+            promotion_calls += 1
+            leader = promotion_calls == 1
+        if leader:
+            if not follower_ready.wait(timeout=5):
+                raise RuntimeError("competing cache promotion did not begin")
+        else:
+            follower_ready.set()
+            if not unlink_started.wait(timeout=5):
+                raise RuntimeError("winning cache publication did not link")
+        return original_promote(
+            root,
+            source_relative,
+            destination_relative,
+            expected=expected,
+        )
+
+    # Give one publisher a deterministic head start, then release the losing
+    # publisher only while the winner's staging unlink is paused.  A barrier
+    # alone still allowed the loser to validate the tiny blob before that
+    # pause on fast runners, which made this race regression itself flaky.
+    monkeypatch.setattr(cache_module, "promote_relative_new", promote_together)
     records, errors = _store_concurrently(cache, key, source)
     assert unlink_started.is_set()
     assert validation_started.is_set()
