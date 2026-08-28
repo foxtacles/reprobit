@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import time
 import uuid
 from dataclasses import dataclass
@@ -144,6 +145,40 @@ class _FileLock:
                 return False
         self.locked = True
         return True
+
+    def read_locked(self, *, maximum: int) -> bytes:
+        """Read a small marker through the handle that owns the lock.
+
+        Windows byte-range locks are mandatory, so reopening the same marker
+        while it is locked fails even in the owning process.  Reading through
+        this held descriptor works on every supported platform and also lets
+        us confirm that the named path still identifies the locked file.
+        """
+
+        if not self.locked:
+            raise StateError(f"state lock is not held: {self.path}")
+        if maximum < 0:
+            raise ValueError("locked read maximum cannot be negative")
+        held_before = os.fstat(self.stream.fileno())
+        named_before = os.stat(self.path, follow_symlinks=False)
+        if not stat.S_ISREG(named_before.st_mode) or not os.path.samestat(
+            held_before, named_before
+        ):
+            raise StateError(f"state lock path changed while held: {self.path}")
+        self.stream.seek(0)
+        payload = self.stream.read(maximum + 1)
+        self.stream.seek(0)
+        held_after = os.fstat(self.stream.fileno())
+        named_after = os.stat(self.path, follow_symlinks=False)
+        if (
+            not stat.S_ISREG(named_after.st_mode)
+            or not os.path.samestat(held_before, held_after)
+            or not os.path.samestat(held_after, named_after)
+        ):
+            raise StateError(f"state lock path changed while held: {self.path}")
+        if len(payload) > maximum:
+            raise StateError(f"state lock marker is oversized: {self.path}")
+        return payload
 
     def close(self) -> None:
         if self.locked:

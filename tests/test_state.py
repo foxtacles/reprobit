@@ -7,7 +7,26 @@ from pathlib import Path
 import pytest
 
 from reprobit.cache import IncrementalCache, cache_key
-from reprobit.state import KeepWorkspace, RunArena, StateError, StateStore, human_bytes
+from reprobit.state import (
+    AdvisoryFileLock,
+    KeepWorkspace,
+    RunArena,
+    StateError,
+    StateStore,
+    human_bytes,
+)
+
+
+def test_locked_marker_is_read_through_its_own_held_handle(tmp_path: Path) -> None:
+    marker = tmp_path / "marker.lock"
+    marker.write_bytes(b"\0")
+
+    lock = AdvisoryFileLock(marker, create=False)
+    try:
+        assert lock.acquire(nonblocking=False)
+        assert lock.read_locked(maximum=1) == b"\0"
+    finally:
+        lock.close()
 
 
 def test_run_arena_removes_success_and_retains_failure_by_default(

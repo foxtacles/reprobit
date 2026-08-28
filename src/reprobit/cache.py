@@ -35,7 +35,7 @@ from reprobit.secure_paths import (
     remove_regular_relative,
     stat_relative_file,
 )
-from reprobit.state import AdvisoryFileLock
+from reprobit.state import AdvisoryFileLock, StateError
 from reprobit.strict_json import JsonValue, canonical_json, strict_loads
 
 
@@ -231,6 +231,17 @@ def _read_settled_immutable(path: Path, *, maximum: int | None = None) -> bytes:
     raise AssertionError("immutable read retry loop did not return")
 
 
+def _read_locked_marker(lock: AdvisoryFileLock, *, maximum: int) -> bytes:
+    """Validate a marker without reopening a Windows-mandatory locked byte."""
+
+    try:
+        return lock.read_locked(maximum=maximum)
+    except (OSError, StateError) as exc:
+        raise CachePoisonError(
+            f"cache lock is absent, redirected, or unstable: {lock.path}"
+        ) from exc
+
+
 def _publish_immutable(path: Path, payload: bytes) -> None:
     """Converge concurrent publishers without ever replacing a named inode."""
 
@@ -325,7 +336,7 @@ class IncrementalCache:
                 _publish_immutable(path, payload)
         self._ensure_layout()
 
-    def _ensure_layout(self) -> None:
+    def _ensure_layout(self, *, locked_gate: AdvisoryFileLock | None = None) -> None:
         if not os.path.lexists(self.format_root):
             raise CacheError("incremental cache does not exist")
         if not hasattr(self, "_gate_path"):
@@ -339,7 +350,12 @@ class IncrementalCache:
             {"schema": _FORMAT}
         ):
             raise CachePoisonError("cache format marker is invalid")
-        if _read_settled_immutable(self._gate_path, maximum=1) != b"\0":
+        gate_payload = (
+            _read_settled_immutable(self._gate_path, maximum=1)
+            if locked_gate is None
+            else _read_locked_marker(locked_gate, maximum=1)
+        )
+        if gate_payload != b"\0":
             raise CachePoisonError("cache gate marker is invalid")
         for root in (
             self._leases_root,
@@ -361,12 +377,12 @@ class IncrementalCache:
         lease_path = self._leases_root / f"{identifier}.lease"
         lease_lock: AdvisoryFileLock | None = None
         try:
-            self._ensure_layout()
+            self._ensure_layout(locked_gate=gate)
             _publish_immutable(lease_path, b"\0")
             lease_lock = AdvisoryFileLock(lease_path, create=False)
             if not lease_lock.acquire(nonblocking=True):
                 raise CacheError("fresh cache lease could not be acquired")
-            if _read_settled_immutable(lease_path, maximum=1) != b"\0":
+            if _read_locked_marker(lease_lock, maximum=1) != b"\0":
                 raise CachePoisonError("fresh cache lease marker is invalid")
         except BaseException:
             if lease_lock is not None:
@@ -513,7 +529,7 @@ class IncrementalCache:
         gate = AdvisoryFileLock(self._gate_path, create=False)
         gate.acquire(nonblocking=False)
         try:
-            self._ensure_layout()
+            self._ensure_layout(locked_gate=gate)
             active, _ = self._active_lease_count(remove_stale=not dry_run)
             if active:
                 return CacheGCResult(0, 0, 0, active, 0, dry_run)
@@ -809,7 +825,7 @@ class CacheLease:
             raise CachePoisonError(f"cache index lock is unsafe: {lock_path}") from exc
         try:
             lock.acquire(nonblocking=False)
-            if _read_settled_immutable(lock_path, maximum=1) != _INDEX_LOCK_MARKER:
+            if _read_locked_marker(lock, maximum=1) != _INDEX_LOCK_MARKER:
                 raise CachePoisonError(f"cache index lock is invalid: {lock_path}")
             existing = self._read_index(path, domain, index, value)
             keys = [record.key]
