@@ -1,24 +1,32 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title description">
-  <title id="title">ReproBit byte seal</title>
-  <desc id="description">A split eight-punch seal aligned around one exact square bit.</desc>
+  <title id="title">ReproBit dotted R</title>
+  <desc id="description">A bold cyan and violet letter R with three precise bit dots inside its bowl.</desc>
 
-  <rect x="24" y="24" width="464" height="464" rx="112" fill="#101828"/>
+  <defs>
+    <path
+      id="r-body"
+      d="M104 72h174c91 0 144 50 144 132s-53 132-144 132h-70v104H104V72Zm104 96v72h68c31 0 46-12 46-36s-15-36-46-36h-68Z"
+      fill-rule="evenodd"
+    />
+    <path id="r-leg" d="m284 310 124 110"/>
+  </defs>
 
-  <!-- Reference and rebuild share one precise, eight-bit silhouette. -->
-  <path d="M176 76h80v360h-80L76 336V176L176 76Z" fill="#22d3ee"/>
-  <path d="M256 76h80l100 100v160L336 436h-80V76Z" fill="#a78bfa"/>
+  <!-- Dual keylines preserve the transparent mark on light and dark surfaces. -->
+  <use href="#r-leg" fill="none" stroke="#f8fafc" stroke-width="126" stroke-linecap="round"/>
+  <use href="#r-leg" fill="none" stroke="#0f172a" stroke-width="108" stroke-linecap="round"/>
+  <use href="#r-leg" fill="none" stroke="#8b5cf6" stroke-width="78" stroke-linecap="round"/>
 
-  <g fill="#101828">
-    <circle cx="176" cy="176" r="24"/>
-    <circle cx="256" cy="148" r="24"/>
-    <circle cx="336" cy="176" r="24"/>
-    <circle cx="364" cy="256" r="24"/>
-    <circle cx="336" cy="336" r="24"/>
-    <circle cx="256" cy="364" r="24"/>
-    <circle cx="176" cy="336" r="24"/>
-    <circle cx="148" cy="256" r="24"/>
+  <use href="#r-body" fill="#22d3ee" stroke="#f8fafc" stroke-width="44" stroke-linejoin="round" paint-order="stroke fill"/>
+  <use href="#r-body" fill="#22d3ee" stroke="#0f172a" stroke-width="26" stroke-linejoin="round" paint-order="stroke fill"/>
+
+  <g fill="#0f172a">
+    <circle cx="230" cy="204" r="18"/>
+    <circle cx="265" cy="204" r="18"/>
+    <circle cx="300" cy="204" r="18"/>
   </g>
-
-  <rect x="214" y="214" width="84" height="84" rx="18" fill="#f8fafc"/>
-  <rect x="238" y="238" width="36" height="36" rx="7" fill="#101828"/>
+  <g fill="#f8fafc">
+    <circle cx="230" cy="204" r="10"/>
+    <circle cx="265" cy="204" r="10"/>
+    <circle cx="300" cy="204" r="10"/>
+  </g>
 </svg>

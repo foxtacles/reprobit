@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/assets/reprobit-mark.svg" width="168" alt="ReproBit: a split eight-punch byte seal aligned around one exact bit">
+  <img src="docs/assets/reprobit-mark.svg" width="168" alt="ReproBit: a dotted geometric R built from exact bits">
 </p>
 
 <h1 align="center">ReproBit</h1>
