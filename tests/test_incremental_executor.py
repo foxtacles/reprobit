@@ -65,11 +65,16 @@ def test_all_hit_dag_never_constructs_runtime(tmp_path: Path) -> None:
     first_root.mkdir()
     cache = IncrementalCache(state, implementation="dag-test-v1")
     runtime_calls = 0
+    publication_checks = 0
 
     def runtime() -> object:
         nonlocal runtime_calls
         runtime_calls += 1
         return object()
+
+    def before_publish() -> None:
+        nonlocal publication_checks
+        publication_checks += 1
 
     def nodes(root: Path) -> tuple[IncrementalNode[object], ...]:
         first = root / "first.obj"
@@ -122,9 +127,11 @@ def test_all_hit_dag_never_constructs_runtime(tmp_path: Path) -> None:
         runtime_factory=runtime,
         runtime_close=lambda _runtime: None,
         max_workers=2,
+        before_publish=before_publish,
     ).execute(nodes(first_root))
     assert first.summary.producer_misses == 2
     assert runtime_calls == 1
+    assert publication_checks == 1
 
     second_root = tmp_path / "second"
     second_root.mkdir()
@@ -134,12 +141,14 @@ def test_all_hit_dag_never_constructs_runtime(tmp_path: Path) -> None:
         runtime_factory=runtime,
         runtime_close=lambda _runtime: None,
         max_workers=2,
+        before_publish=before_publish,
     ).execute(nodes(second_root))
     assert second.summary.producer_hits == 2
     assert second.summary.producer_misses == 0
     assert second.summary.runtime_init_count == 0
     assert second.runtime_created is False
     assert runtime_calls == 1
+    assert publication_checks == 1
     assert (second_root / "second.lib").read_bytes() == b"object library"
 
 

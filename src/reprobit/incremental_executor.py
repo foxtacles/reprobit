@@ -480,51 +480,56 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                 # reusable record from a failed invocation.
                 lazy.close()
                 runtime_closed = True
-                if self.before_publish is not None:
-                    self.before_publish()
-                # A later producer may have mutated an earlier restored or
-                # staged dependency.  Re-seal every hit and miss as one
-                # complete workspace outcome set immediately before making
-                # any newly staged record name reusable.
-                for node in sorted(nodes, key=lambda item: item.id.casefold()):
-                    outcome = outcomes[node.id]
-                    expected = {item.name: item for item in outcome.record.outputs}
-                    if set(expected) != set(canonical_outputs[node.id]):
-                        raise IncrementalExecutionError(
-                            f"node {node.id!r} outcome differs from its output set"
+                if staged_records:
+                    if self.before_publish is not None:
+                        self.before_publish()
+                    # A later producer may have mutated an earlier restored or
+                    # staged dependency.  Re-seal every hit and miss as one
+                    # complete workspace outcome set immediately before making
+                    # any newly staged record name reusable.  An all-hit run has
+                    # no trust-boundary publication and each restore was already
+                    # authenticated, so avoid hashing the entire workspace twice.
+                    for node in sorted(nodes, key=lambda item: item.id.casefold()):
+                        outcome = outcomes[node.id]
+                        expected = {item.name: item for item in outcome.record.outputs}
+                        if set(expected) != set(canonical_outputs[node.id]):
+                            raise IncrementalExecutionError(
+                                f"node {node.id!r} outcome differs from its output set"
+                            )
+                        for name, output in canonical_outputs[node.id].items():
+                            output_relative = output.relative_to(
+                                self.workspace_root
+                            ).as_posix()
+                            try:
+                                received = digest_relative_file(
+                                    self.workspace_root,
+                                    output_relative,
+                                )
+                            except SecurePathError as exc:
+                                raise IncrementalExecutionError(
+                                    f"node {node.id!r} output {name!r} changed before publication"
+                                ) from exc
+                            receipt = expected[name]
+                            if (
+                                received.digest.value != receipt.digest
+                                or received.size != receipt.size
+                                or bool(received.mode & stat.S_IXUSR) != receipt.executable
+                            ):
+                                raise IncrementalExecutionError(
+                                    f"node {node.id!r} output {name!r} changed before publication"
+                                )
+                    for node, staged in sorted(
+                        staged_records,
+                        key=lambda item: item[0].id.casefold(),
+                    ):
+                        published = lease.publish_record(staged)
+                        prior = outcomes[node.id]
+                        outcomes[node.id] = NodeOutcome(
+                            prior.node_id,
+                            prior.key,
+                            published,
+                            False,
                         )
-                    for name, output in canonical_outputs[node.id].items():
-                        output_relative = output.relative_to(self.workspace_root).as_posix()
-                        try:
-                            received = digest_relative_file(
-                                self.workspace_root,
-                                output_relative,
-                            )
-                        except SecurePathError as exc:
-                            raise IncrementalExecutionError(
-                                f"node {node.id!r} output {name!r} changed before publication"
-                            ) from exc
-                        receipt = expected[name]
-                        if (
-                            received.digest.value != receipt.digest
-                            or received.size != receipt.size
-                            or bool(received.mode & stat.S_IXUSR) != receipt.executable
-                        ):
-                            raise IncrementalExecutionError(
-                                f"node {node.id!r} output {name!r} changed before publication"
-                            )
-                for node, staged in sorted(
-                    staged_records,
-                    key=lambda item: item[0].id.casefold(),
-                ):
-                    published = lease.publish_record(staged)
-                    prior = outcomes[node.id]
-                    outcomes[node.id] = NodeOutcome(
-                        prior.node_id,
-                        prior.key,
-                        published,
-                        False,
-                    )
             with progress_lock:
                 if progress_count != len(nodes):
                     raise IncrementalExecutionError(
