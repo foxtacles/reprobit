@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: ${{ matrix.os }} / Python ${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest, windows-2022]
+        python: ["3.11", "3.14"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: ${{ matrix.python }}
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[test]"
+      - run: python -m pip check
+      - run: python -m pytest
+
+  quality:
+    name: Static checks and wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install --upgrade pip build
+      - run: python -m pip install -e ".[test]"
+      - run: python -m pip check
+      - name: Validate composite Action YAML
+        run: >-
+          ruby -e 'require "yaml";
+          YAML.safe_load(File.read("action.yml"), aliases: true)'
+      - run: python -m ruff check src tests
+      - run: python -m mypy src/reprobit
+      - run: python -m build
+      - name: Verify wheel contents and installed CLI
+        shell: bash
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          rbit --version
+          python - <<'PY'
+          from importlib.metadata import distribution
+          from reprobit.assets import runtime_asset_path
+          from reprobit.cmake import cmake_module_path
+
+          cmake_module = cmake_module_path() / "ReproBit.cmake"
+          runtime_proxy = runtime_asset_path("ReproBitPathProxy.sh")
+          for path in (cmake_module, runtime_proxy):
+              if not path.is_file():
+                  raise SystemExit(f"wheel omitted {path}")
+          installed = distribution("reprobit")
+          files = {str(item) for item in installed.files or ()}
+          license_root = f"reprobit-{installed.version}.dist-info/licenses"
+          required = {
+              "reprobit/py.typed",
+              f"{license_root}/LICENSE",
+              f"{license_root}/NOTICE",
+              "share/reprobit/cmake/ReproBit.cmake",
+              "share/reprobit/runtime/ReproBitPathProxy.sh",
+              "share/reprobit/schemas/build-plan-v3.schema.json",
+              "share/reprobit/schemas/catalog-v3.schema.json",
+              "share/reprobit/schemas/intervention-document-v3.schema.json",
+              "share/reprobit/schemas/oracle-document-v3.schema.json",
+              "share/reprobit/schemas/producer-graph-v2.schema.json",
+              "share/reprobit/schemas/project-v3.schema.json",
+              "share/reprobit/schemas/proof-document-v3.schema.json",
+              "share/reprobit/schemas/report-v2.schema.json",
+              "share/reprobit/schemas/source-manifest-v3.schema.json",
+              "share/reprobit/schemas/toolchain-lock-v3.schema.json",
+          }
+          if missing := sorted(required - files):
+              raise SystemExit(f"wheel omitted {missing}")
+          PY
+
+  native-msvc42:
+    name: Native Windows / authenticated MSVC 4.2
+    runs-on: windows-2022
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1"
+      REPROBIT_MSVC_4_2_ROOT: ${{ runner.temp }}\archaic-msvc42
+      REPROBIT_NATIVE_LOG_DIR: ${{ runner.temp }}\native-logs
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Record native runner identity
+        shell: pwsh
+        run: |
+          "ImageOS=$env:ImageOS" | Tee-Object -FilePath "$env:RUNNER_TEMP\native-runner.txt"
+          "ImageVersion=$env:ImageVersion" | Tee-Object -Append "$env:RUNNER_TEMP\native-runner.txt"
+          "Windows=$([Environment]::OSVersion.VersionString)" | Tee-Object -Append "$env:RUNNER_TEMP\native-runner.txt"
+          python -c "import platform, struct; print(f'Python={platform.python_version()} ({struct.calcsize(chr(80))*8}-bit)')" |
+            Tee-Object -Append "$env:RUNNER_TEMP\native-runner.txt"
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -e ".[test]"
+      - name: Provision and authenticate the external compiler
+        run: >-
+          python scripts/provision_archaic_msvc42.py
+          --destination "$env:REPROBIT_MSVC_4_2_ROOT"
+      - name: Probe native isolation and toolchain
+        run: >-
+          rbit doctor
+          --backend windows_native_v1
+          --toolchain-profile msvc_4_2
+          --toolchain-root "$env:REPROBIT_MSVC_4_2_ROOT"
+          --execute-probe
+      - name: Exercise native DeviceMap, process ownership, and compiler chain
+        run: >-
+          python -m pytest -q
+          --junitxml="$env:RUNNER_TEMP\native-tests.xml"
+          tests/test_native_device_map.py
+          tests/test_secure_paths_windows.py
+          tests/test_sealed_namespace_windows.py
+          tests/test_process.py
+          tests/test_backends.py
+          tests/test_toolchains.py
+      - name: Upload native diagnostics only
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-msvc42-diagnostics
+          path: |
+            ${{ runner.temp }}/native-runner.txt
+            ${{ runner.temp }}/native-tests.xml
+            ${{ runner.temp }}/native-logs/*.log
+          if-no-files-found: warn
+          retention-days: 7

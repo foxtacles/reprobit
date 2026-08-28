@@ -1,0 +1,168 @@
+name: ReproBit byte identity
+description: Build, certify, and report byte-identical compiler output
+
+inputs:
+  project-directory:
+    description: Directory containing reprobit.toml
+    default: .
+  toolchain-root:
+    description: Locally provisioned toolchain root
+    required: true
+  compiler-transport:
+    description: POSIX host transport selector for the locked compiler
+    default: ""
+  resource-transport:
+    description: POSIX host transport selector for the locked resource compiler
+    default: ""
+  jobs:
+    description: Maximum globally scheduled jobs
+    default: "1"
+  policy:
+    description: Optional policy override; clean may narrow allow-quarantine, never broaden it
+    default: ""
+  initialization-timeout:
+    description: Seconds allowed to initialize each isolated execution lane
+    default: "600"
+  compile-timeout:
+    description: Seconds allowed for one compiler or resource producer
+    default: "600"
+  link-timeout:
+    description: Seconds allowed for one librarian or linker producer
+    default: "900"
+  cleanup-timeout:
+    description: Seconds allowed to drain each isolated execution lane
+    default: "10"
+  report-directory:
+    description: Report output directory relative to the project
+    default: build/reprobit-report
+
+outputs:
+  report-produced:
+    description: Whether verification published a validated canonical report
+    value: ${{ steps.summary.outputs.report-produced }}
+  accepted:
+    description: Whether the verification result satisfied the requested policy
+    value: ${{ steps.summary.outputs.accepted }}
+  clean:
+    description: Whether every clean-authenticity claim passed
+    value: ${{ steps.summary.outputs.clean }}
+  byte-exact:
+    description: Whether all selected target bytes equal their oracles
+    value: ${{ steps.summary.outputs.byte-exact }}
+  logic-certified:
+    description: Whether every intervention passed its proof obligations
+    value: ${{ steps.summary.outputs.logic-certified }}
+  toolchain-origin:
+    description: Whether all first-party payload has toolchain ancestry
+    value: ${{ steps.summary.outputs.toolchain-origin }}
+  quarantined:
+    description: Whether any allowlisted legacy action was used
+    value: ${{ steps.summary.outputs.quarantined }}
+  total-cost:
+    description: Cost-model total for selected targets
+    value: ${{ steps.summary.outputs.total-cost }}
+  report-json:
+    description: Canonical JSON report path
+    value: ${{ steps.summary.outputs.report-json }}
+  report-html:
+    description: Self-contained HTML report path
+    value: ${{ steps.summary.outputs.report-html }}
+
+runs:
+  using: composite
+  steps:
+    - name: Install ReproBit from this action checkout
+      shell: bash
+      env:
+        REPROBIT_ACTION_PATH: ${{ github.action_path }}
+      run: python -m pip install "$REPROBIT_ACTION_PATH"
+
+    - name: Initialize this verification invocation
+      id: invocation
+      shell: bash
+      run: |
+        set -euo pipefail
+        nonce="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+        receipt="$RUNNER_TEMP/reprobit-action-$nonce.json"
+        printf 'nonce=%s\n' "$nonce" >> "$GITHUB_OUTPUT"
+        printf 'receipt=%s\n' "$receipt" >> "$GITHUB_OUTPUT"
+
+    - name: Check backend and toolchain
+      shell: bash
+      working-directory: ${{ inputs.project-directory }}
+      env:
+        REPROBIT_TOOLCHAIN_ROOT: ${{ inputs.toolchain-root }}
+      run: >-
+        rbit doctor
+        --toolchain-root "$REPROBIT_TOOLCHAIN_ROOT"
+        --execute-probe
+
+    - name: Run cold verification
+      id: verification
+      continue-on-error: true
+      shell: bash
+      working-directory: ${{ inputs.project-directory }}
+      env:
+        REPROBIT_TOOLCHAIN_ROOT: ${{ inputs.toolchain-root }}
+        REPROBIT_COMPILER_TRANSPORT: ${{ inputs.compiler-transport }}
+        REPROBIT_RESOURCE_TRANSPORT: ${{ inputs.resource-transport }}
+        REPROBIT_JOBS: ${{ inputs.jobs }}
+        REPROBIT_POLICY: ${{ inputs.policy }}
+        REPROBIT_REPORT_DIRECTORY: ${{ inputs.report-directory }}
+        REPROBIT_INITIALIZATION_TIMEOUT: ${{ inputs.initialization-timeout }}
+        REPROBIT_COMPILE_TIMEOUT: ${{ inputs.compile-timeout }}
+        REPROBIT_LINK_TIMEOUT: ${{ inputs.link-timeout }}
+        REPROBIT_CLEANUP_TIMEOUT: ${{ inputs.cleanup-timeout }}
+        REPROBIT_ACTION_NONCE: ${{ steps.invocation.outputs.nonce }}
+        REPROBIT_ACTION_RECEIPT: ${{ steps.invocation.outputs.receipt }}
+      run: |
+        set -euo pipefail
+        transport_args=()
+        policy_args=()
+        if [[ -n "$REPROBIT_COMPILER_TRANSPORT" || -n "$REPROBIT_RESOURCE_TRANSPORT" ]]; then
+          if [[ -z "$REPROBIT_COMPILER_TRANSPORT" || -z "$REPROBIT_RESOURCE_TRANSPORT" ]]; then
+            echo "compiler-transport and resource-transport must be supplied together" >&2
+            exit 2
+          fi
+          transport_args+=(
+            --compiler-transport "$REPROBIT_COMPILER_TRANSPORT"
+            --resource-transport "$REPROBIT_RESOURCE_TRANSPORT"
+          )
+        fi
+        if [[ -n "$REPROBIT_POLICY" ]]; then
+          policy_args+=(--policy "$REPROBIT_POLICY")
+        fi
+        rbit verify \
+          --toolchain-root "$REPROBIT_TOOLCHAIN_ROOT" \
+          --jobs "$REPROBIT_JOBS" \
+          --initialization-timeout "$REPROBIT_INITIALIZATION_TIMEOUT" \
+          --compile-timeout "$REPROBIT_COMPILE_TIMEOUT" \
+          --link-timeout "$REPROBIT_LINK_TIMEOUT" \
+          --cleanup-timeout "$REPROBIT_CLEANUP_TIMEOUT" \
+          --report-dir "$REPROBIT_REPORT_DIRECTORY" \
+          --action-receipt "$REPROBIT_ACTION_RECEIPT" \
+          --action-nonce "$REPROBIT_ACTION_NONCE" \
+          "${policy_args[@]}" \
+          "${transport_args[@]}"
+
+    - name: Publish outputs and job summary
+      id: summary
+      if: always()
+      shell: bash
+      working-directory: ${{ inputs.project-directory }}
+      env:
+        REPROBIT_ACCEPTED: ${{ steps.verification.outcome == 'success' }}
+        REPROBIT_REPORT_DIRECTORY: ${{ inputs.report-directory }}
+        REPROBIT_ACTION_NONCE: ${{ steps.invocation.outputs.nonce }}
+        REPROBIT_ACTION_RECEIPT: ${{ steps.invocation.outputs.receipt }}
+      run: >-
+        python -m reprobit.action_summary
+        --allow-missing
+        --receipt "$REPROBIT_ACTION_RECEIPT"
+        --nonce "$REPROBIT_ACTION_NONCE"
+        "$REPROBIT_REPORT_DIRECTORY/report.json"
+
+    - name: Enforce verification result
+      if: always() && steps.verification.outcome == 'failure'
+      shell: bash
+      run: exit 1

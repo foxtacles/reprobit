@@ -1,0 +1,431 @@
+from __future__ import annotations
+
+import shutil
+import subprocess
+from hashlib import sha256
+from pathlib import Path
+
+import pytest
+
+from reprobit.classic_project import (
+    FAMILY_COVERAGE,
+    ClassicDispatchMaterials,
+    ClassicFamilyDispatcher,
+    ClassicProjectError,
+    _copy_effective_source,
+    materialize_effective_workspace,
+    write_cmake_project_plan,
+)
+from reprobit.cmake import cmake_module_path
+from reprobit.model import Digest, Scope
+from reprobit.schema import (
+    BuildPlanDocument,
+    ClassicField,
+    ClassicProofReceipt,
+    ClassicRecipeFamily,
+    ClassicRecipeIntervention,
+    ClassicRecipeRole,
+    ClassicTargetGate,
+    InterventionDocument,
+    LockedTool,
+    LogicalPathProfile,
+    MsvcRelease,
+    OracleDocument,
+    ProducerGraphBuildAdapter,
+    ProjectBundle,
+    ProjectSpec,
+    ProofDocument,
+    SourceManifestDocument,
+    SourceManifestEntry,
+    TargetSpec,
+    ToolchainLock,
+    ToolchainRef,
+    source_manifest_digest,
+)
+from reprobit.source_authority import SourceAuthorityError, inspect_source_authority
+from reprobit.source_lock import build_source_manifest
+from reprobit.strict_json import canonical_json
+
+
+def _digest(data: bytes) -> Digest:
+    return Digest.from_bytes(data)
+
+
+def _bundle(root: Path) -> tuple[ProjectBundle, bytes]:
+    module = (cmake_module_path() / "ReproBit.cmake").as_posix()
+    files = {
+        "CMakeLists.txt": f'''cmake_minimum_required(VERSION 3.20)
+project(classic_adapter_fixture CXX)
+include("{module}")
+add_library(app STATIC first.cpp last.cpp)
+set(REPROBIT_EFFECTIVE_SOURCE_ROOT "${{CMAKE_CURRENT_SOURCE_DIR}}")
+include("${{REPROBIT_PROJECT_PLAN}}")
+get_target_property(final_sources app SOURCES)
+file(WRITE "${{CMAKE_BINARY_DIR}}/sources.txt" "${{final_sources}}\n")
+'''.encode(),
+        "first.cpp": b"int first() { return 1; }\n",
+        "last.cpp": b"int last() { return 3; }\n",
+    }
+    for relative, data in files.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(data)
+    spec = ProjectSpec(
+        schema_version=3,
+        project_id="fixture",
+        state_dir="state",
+        build=ProducerGraphBuildAdapter(),
+        toolchain=ToolchainRef(profile="compiler-42"),
+        paths=LogicalPathProfile(
+            source=r"R:\source",
+            build=r"R:\build",
+            toolchain=r"R:\toolchain",
+        ),
+        targets=(TargetSpec(id="program", artifact="state/program.exe", oracle="reference.exe"),),
+    )
+    source_manifest = build_source_manifest(root, files, spec=spec)
+    generated = b"class Generated;\n"
+    output = {
+        "path": "generated.cpp",
+        "effective": sha256(generated).hexdigest(),
+        "size": len(generated),
+        "ops": [{"op": "append", "gen": {"k": "fwd", "id": "Generated"}}],
+    }
+    graph = {
+        "generated_tus": [
+            {
+                "path": "generated.cpp",
+                "ordinal": 2,
+                "after": "first.cpp",
+            }
+        ],
+        "link_admissions": [],
+    }
+    intervention = ClassicRecipeIntervention(
+        id="overlay.graph",
+        scope=Scope(target="program"),
+        rationale="exercise the generic generated-source seat",
+        family=ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH,
+        role=ClassicRecipeRole.PROJECT,
+        build_target="app",
+        parameters=(
+            ClassicField.model_validate({"name": "graph", "value": graph}),
+            ClassicField.model_validate({"name": "outputs", "value": [output]}),
+            ClassicField.model_validate({"name": "schema", "value": 2}),
+        ),
+    )
+    source_pin = source_manifest_digest(source_manifest)
+    bundle = ProjectBundle(
+        root=str(root),
+        spec=spec,
+        toolchain_lock=ToolchainLock(
+            schema_version=3,
+            profile="compiler-42",
+            release=MsvcRelease.V4_2,
+            tools=(
+                LockedTool(
+                    id="compiler",
+                    path="bin/CL.EXE",
+                    digest=_digest(b"compiler"),
+                ),
+            ),
+        ),
+        source_manifest=source_manifest,
+        build_plan=BuildPlanDocument(
+            schema_version=3,
+            source_manifest_digest=source_pin,
+            phase=None,
+            translation_units=(),
+            source_overlay_digest=_digest(canonical_json(graph)),
+            source_overlay_interventions=(intervention.id,),
+            archives=(),
+            terminal_producers={},
+            execution_backends={},
+            toolchain_policy={},
+            target_policies=[],
+            target_gates=(
+                ClassicTargetGate(target_id="program", build_target="app", completion={}),
+            ),
+        ),
+        intervention_documents=(
+            InterventionDocument(
+                schema_version=3,
+                target_id="program",
+                interventions=(intervention,),
+            ),
+        ),
+        proof_documents=(
+            ProofDocument(
+                schema_version=3,
+                target_id="program",
+                expected_observations=(
+                    ClassicProofReceipt(
+                        id="proof.overlay",
+                        intervention_id=intervention.id,
+                        family=intervention.family,
+                    ),
+                ),
+            ),
+        ),
+        oracle_documents=(
+            OracleDocument(
+                schema_version=3,
+                target_id="program",
+                image_size=1,
+                image_digest=_digest(b"oracle"),
+            ),
+        ),
+    )
+    return bundle, generated
+
+
+def test_effective_source_copy_rejects_symlinked_manifest_ancestor(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    payload = b"outside header"
+    (outside / "input.h").write_bytes(payload)
+    (project / "vendor").symlink_to(outside, target_is_directory=True)
+    bundle, _generated = _bundle(project)
+    assert bundle.source_manifest is not None
+    manifest = SourceManifestDocument(
+        schema_version=3,
+        complete=True,
+        entries=tuple(
+            sorted(
+                (
+                    *bundle.source_manifest.entries,
+                    SourceManifestEntry(
+                        path="vendor/input.h",
+                        size=len(payload),
+                        digest=Digest.from_bytes(payload),
+                    ),
+                ),
+                key=lambda item: (item.path.casefold(), item.path),
+            )
+        ),
+    )
+    redirected = bundle.model_copy(update={"source_manifest": manifest})
+
+    with pytest.raises(ClassicProjectError, match="without redirection"):
+        _copy_effective_source(
+            project,
+            tmp_path / "effective",
+            bundle=redirected,
+        )
+
+
+@pytest.mark.skipif(shutil.which("cmake") is None, reason="CMake is not installed")
+def test_generated_project_plan_configures_at_exact_graph_seat(tmp_path: Path) -> None:
+    bundle, generated = _bundle(tmp_path)
+    effective = tmp_path / "state/effective"
+    build = tmp_path / "state/configure"
+    intervention_witnesses = materialize_effective_workspace(bundle, tmp_path, effective)
+    assert tuple(item.intervention_id for item in intervention_witnesses) == ("overlay.graph",)
+    assert (effective / "generated.cpp").read_bytes() == generated
+    plan = tmp_path / "state/project-plan.cmake"
+    target_plan = build / "target-plan.json"
+    write_cmake_project_plan(bundle, effective, plan)
+    completed = subprocess.run(
+        [
+            "cmake",
+            "-S",
+            str(effective),
+            "-B",
+            str(build),
+            f"-DREPROBIT_PROJECT_PLAN={plan}",
+            f"-DREPROBIT_TARGET_PLAN={target_plan}",
+        ],
+        check=False,
+        text=True,
+        capture_output=True,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert target_plan.is_file()
+    sources = (build / "sources.txt").read_text(encoding="utf-8")
+    assert "first.cpp;" in sources
+    assert "/generated.cpp;last.cpp" in sources
+
+
+def test_source_authority_rejects_stale_clean_overlay_pin(tmp_path: Path) -> None:
+    bundle, generated = _bundle(tmp_path)
+    clean = b"int value;\n"
+    (tmp_path / "first.cpp").write_bytes(clean)
+    output = {
+        "path": "first.cpp",
+        "clean": sha256(clean).hexdigest(),
+        "effective": sha256(generated + clean).hexdigest(),
+        "size": len(generated + clean),
+        "ops": [
+            {
+                "op": "insert",
+                "anchor": {
+                    "ctx": sha256(b"<SEAT>\0int\0value\0;").hexdigest(),
+                    "b": 0,
+                    "a": 3,
+                    "at": "start",
+                },
+                "gen": {"k": "fwd", "id": "Generated"},
+            }
+        ],
+    }
+    graph = {"generated_tus": [], "link_admissions": []}
+    overlay = next(
+        item
+        for item in bundle.interventions
+        if isinstance(item, ClassicRecipeIntervention)
+        and item.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
+    ).model_copy(
+        update={
+            "parameters": (
+                ClassicField.model_validate({"name": "graph", "value": graph}),
+                ClassicField.model_validate({"name": "outputs", "value": [output]}),
+                ClassicField.model_validate({"name": "schema", "value": 2}),
+            )
+        }
+    )
+    documents = tuple(
+        document.model_copy(
+            update={
+                "interventions": tuple(
+                    overlay if item.id == overlay.id else item for item in document.interventions
+                )
+            }
+        )
+        for document in bundle.intervention_documents
+    )
+    candidate_bundle = bundle.model_copy(update={"intervention_documents": documents})
+    assert candidate_bundle.source_manifest is not None
+    baseline = build_source_manifest(
+        tmp_path,
+        (entry.path for entry in candidate_bundle.source_manifest.entries),
+        spec=candidate_bundle.spec,
+    )
+    inspect_source_authority(candidate_bundle, tmp_path, source_manifest=baseline)
+
+    (tmp_path / "first.cpp").write_bytes(b"int first() { return 2; }\n")
+    refreshed = build_source_manifest(
+        tmp_path,
+        (entry.path for entry in candidate_bundle.source_manifest.entries),
+        spec=candidate_bundle.spec,
+    )
+    with pytest.raises(SourceAuthorityError, match="requires regeneration"):
+        inspect_source_authority(
+            candidate_bundle,
+            tmp_path,
+            source_manifest=refreshed,
+        )
+
+
+def test_family_coverage_is_exhaustive_and_quarantine_fails_closed() -> None:
+    assert set(FAMILY_COVERAGE) == set(ClassicRecipeFamily)
+    simulated = FAMILY_COVERAGE[ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION]
+    assert not simulated.implemented
+    assert simulated.mode.value == "quarantine-only"
+
+
+def test_function_dispatch_restores_typed_legacy_facade_fields(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from reprobit import classic
+
+    symbol = "?Function@@YAHXZ"
+    intervention = ClassicRecipeIntervention(
+        id="function.same-slot",
+        scope=Scope(
+            target="program",
+            translation_unit="unit",
+            function=symbol,
+        ),
+        rationale="exercise the typed schema-v3 producer seam",
+        family=ClassicRecipeFamily.SAME_SLOT_RESIZE,
+        role=ClassicRecipeRole.FUNCTION,
+        build_target="app",
+        dependencies=("donor",),
+        symbol=symbol,
+    )
+    captured: dict[str, object] = {}
+
+    def compose(
+        seed: bytes, donor: bytes, values: dict[str, object]
+    ) -> tuple[bytes, dict[str, object]]:
+        assert donor == b"donor"
+        captured.update(values)
+        return seed, {"accepted": True}
+
+    monkeypatch.setattr(classic, "compose_same_slot_resize", compose)
+    result = ClassicFamilyDispatcher().dispatch(
+        intervention,
+        ClassicDispatchMaterials(
+            seed_object=b"seed",
+            donor_object=b"donor",
+            candidate_constraints={"expected_seed_length": 4},
+        ),
+    )
+    assert result.output == b"seed"
+    assert captured["splice_class"] == "same_slot_resize"
+    assert captured["symbol"] == symbol
+    assert captured["mangled"] == symbol
+
+    with pytest.raises(ClassicProjectError, match="splice class differs"):
+        ClassicFamilyDispatcher().dispatch(
+            intervention,
+            ClassicDispatchMaterials(
+                seed_object=b"seed",
+                donor_object=b"donor",
+                candidate_constraints={"splice_class": "equal_body_strict"},
+            ),
+        )
+
+
+def test_reloc_layout_dispatch_uses_equal_body_composer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from reprobit import classic
+
+    symbol = "?Function@@YAHXZ"
+    intervention = ClassicRecipeIntervention(
+        id="function.reloc-layout",
+        scope=Scope(
+            target="program",
+            translation_unit="unit",
+            function=symbol,
+        ),
+        rationale="exercise the relocation-layout producer route",
+        family=ClassicRecipeFamily.EQUAL_BODY_EH_RELOC_LAYOUT,
+        role=ClassicRecipeRole.FUNCTION,
+        build_target="app",
+        dependencies=("donor",),
+        symbol=symbol,
+    )
+    captured: dict[str, object] = {}
+
+    def compose(
+        seed: bytes, donor: bytes, values: dict[str, object]
+    ) -> tuple[bytes, dict[str, object]]:
+        assert donor == b"donor"
+        captured.update(values)
+        return seed, {"accepted": True}
+
+    def wrong_composer(*_args: object, **_kwargs: object) -> tuple[bytes, dict[str, object]]:
+        raise AssertionError("relocation-layout dispatch reached equal-linked-span FPO")
+
+    monkeypatch.setattr(classic, "compose_equal_body_comdat", compose)
+    monkeypatch.setattr(classic, "compose_equal_linked_span_fpo", wrong_composer)
+
+    result = ClassicFamilyDispatcher().dispatch(
+        intervention,
+        ClassicDispatchMaterials(
+            seed_object=b"seed",
+            donor_object=b"donor",
+            candidate_constraints={"expected_relocation_moves": [[1, 2]]},
+        ),
+    )
+
+    assert result.output == b"seed"
+    assert captured["splice_class"] == "equal_body_eh_reloc_layout"
+    assert captured["symbol"] == symbol
+    assert captured["mangled"] == symbol

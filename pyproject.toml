@@ -1,0 +1,160 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "reprobit"
+version = "0.1.0.dev0"
+description = "Proof-carrying reproduction of byte-identical compiler output"
+readme = "README.md"
+requires-python = ">=3.11"
+license = "LGPL-3.0-only"
+license-files = ["LICENSE", "NOTICE"]
+dependencies = [
+  "pydantic>=2.10,<3",
+  "rich>=13.9,<15",
+]
+
+[project.optional-dependencies]
+test = [
+  "mypy>=1.14,<2",
+  "pytest>=8.3,<10",
+  "pytest-cov>=6,<8",
+  "ruff>=0.9,<1",
+]
+
+[project.scripts]
+rbit = "reprobit.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/reprobit"]
+
+[tool.hatch.build.targets.wheel.force-include]
+"cmake" = "share/reprobit/cmake"
+"runtime" = "share/reprobit/runtime"
+"schemas" = "share/reprobit/schemas"
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+# The classic core is a mechanically extracted, byte-sensitive implementation.
+# Keep its grandfathered diagnostics explicit by module and rule instead of
+# hiding all present and future diagnostics with file-wide noqa directives.
+[tool.ruff.lint.per-file-ignores]
+"src/reprobit/classic/arguments.py" = ["E501", "I001", "SIM102", "UP034"]
+"src/reprobit/classic/coff.py" = ["E501", "I001", "UP034"]
+"src/reprobit/classic/composition.py" = [
+  "B007", "B905", "E501", "F841", "I001", "RUF007", "RUF059", "UP034",
+]
+"src/reprobit/classic/debug.py" = [
+  "B007", "B905", "E501", "I001", "RUF007", "RUF021", "UP034",
+]
+"src/reprobit/classic/floating.py" = [
+  "B023", "E501", "E731", "RUF005", "RUF059", "UP034",
+]
+"src/reprobit/classic/foundation.py" = ["B905", "E501", "UP034"]
+"src/reprobit/classic/ia32.py" = ["B905", "E501", "I001", "UP034"]
+"src/reprobit/classic/registers.py" = [
+  "B905", "E501", "F841", "I001", "RUF007", "SIM102", "UP034", "UP037",
+]
+"src/reprobit/classic/relational.py" = ["B905", "E501", "I001", "UP034", "UP037"]
+"src/reprobit/classic/rewriting.py" = [
+  "B007", "B023", "B905", "E501", "F841", "I001", "RUF005", "RUF007",
+  "RUF015", "RUF059", "UP034",
+]
+"src/reprobit/classic/scheduling.py" = [
+  "B905", "E501", "I001", "RUF021", "RUF059", "SIM114", "UP034", "UP037",
+]
+"src/reprobit/classic/source_proofs.py" = ["B905", "E501", "I001", "UP034"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["reprobit"]
+
+# These suppressions inventory the pre-existing typing debt in the mechanically
+# extracted classic core. Mypy still analyzes every module and rejects any new
+# diagnostic category, unlike a file-wide ignore-errors pragma.
+[[tool.mypy.overrides]]
+module = "reprobit.classic.arguments"
+disable_error_code = ["type-arg"]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.coff"
+disable_error_code = [
+  "arg-type", "index", "no-any-return", "no-untyped-call", "no-untyped-def", "type-arg",
+]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.composition"
+disable_error_code = [
+  "arg-type", "assignment", "attr-defined", "index", "no-any-return", "no-untyped-call",
+  "no-untyped-def", "return-value", "type-arg", "union-attr", "var-annotated",
+]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.debug"
+disable_error_code = [
+  "arg-type", "assignment", "attr-defined", "index", "type-arg", "var-annotated",
+]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.floating"
+disable_error_code = [
+  "arg-type", "assignment", "index", "no-untyped-call", "no-untyped-def", "return-value",
+  "type-arg",
+]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.foundation"
+disable_error_code = [
+  "arg-type", "attr-defined", "call-overload", "index", "operator", "return-value", "type-arg",
+]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.ia32"
+disable_error_code = [
+  "arg-type", "assignment", "attr-defined", "index", "misc", "no-untyped-def", "operator",
+  "return-value", "type-arg", "union-attr", "var-annotated",
+]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.registers"
+disable_error_code = [
+  "arg-type", "assignment", "attr-defined", "call-overload", "dict-item", "index",
+  "no-any-return", "no-untyped-def", "operator", "return-value", "type-arg", "union-attr",
+  "var-annotated",
+]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.relational"
+disable_error_code = [
+  "arg-type", "assignment", "attr-defined", "call-overload", "operator", "return-value",
+  "type-arg", "type-var", "var-annotated",
+]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.rewriting"
+disable_error_code = [
+  "arg-type", "assignment", "attr-defined", "call-overload", "index", "misc",
+  "no-untyped-call", "no-untyped-def", "operator", "return-value", "type-arg", "var-annotated",
+]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.scheduling"
+disable_error_code = [
+  "arg-type", "assignment", "attr-defined", "call-overload", "index", "misc", "no-any-return",
+  "no-untyped-call", "no-untyped-def", "return-value", "type-arg", "union-attr", "var-annotated",
+]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.source_proofs"
+disable_error_code = ["arg-type", "assignment", "operator", "type-arg"]
