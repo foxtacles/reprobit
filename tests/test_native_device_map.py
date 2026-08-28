@@ -445,7 +445,9 @@ def test_concurrent_fresh_luids_isolate_the_same_drive_letter(
     with ThreadPoolExecutor(max_workers=2) as executor:
         outputs = tuple(executor.map(run, range(2)))
 
-    assert outputs == (b"first-private\n", b"second-private\n")
+    assert outputs == tuple(
+        f"{label}{os.linesep}".encode() for label in labels
+    )
 
 
 @pytest.mark.skipif(not _WINDOWS, reason="requires native Windows lineage namespace")
