@@ -131,7 +131,7 @@ from reprobit.secure_paths import (
     remove_published_relative,
     windows_attributes_are_basic_restorable,
 )
-from reprobit.state import AdvisoryFileLock
+from reprobit.state import AdvisoryFileLock, StateError
 from reprobit.strict_json import JsonValue, canonical_json
 from reprobit.toolchains import ClassicMSVCToolchain, ToolchainLock
 
@@ -218,23 +218,13 @@ def _target_publication_transaction(state_root: Path) -> Iterator[None]:
             "warm target publication lock cannot be opened safely"
         ) from exc
     with lock:
-        payload, named = read_relative_file(state_root, relative)
-        held = os.fstat(lock.stream.fileno())
-        if payload != marker or (
-            named.device,
-            named.inode,
-            named.size,
-            named.mtime_ns,
-            named.mode,
-            named.ctime_ns,
-        ) != (
-            held.st_dev,
-            held.st_ino,
-            held.st_size,
-            held.st_mtime_ns,
-            held.st_mode,
-            held.st_ctime_ns,
-        ):
+        try:
+            payload = lock.read_locked(maximum=len(marker))
+        except (OSError, StateError) as exc:
+            raise ClassicIncrementalError(
+                "warm target publication lock changed while acquiring it"
+            ) from exc
+        if payload != marker:
             raise ClassicIncrementalError(
                 "warm target publication lock changed while acquiring it"
             )

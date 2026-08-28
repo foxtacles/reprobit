@@ -801,6 +801,9 @@ def _replace_root(value: str, root: Path, marker: str) -> str:
     result = value
     for candidate in sorted(set(candidates), key=len, reverse=True):
         result = result.replace(candidate, marker)
+    if marker in result:
+        prefix, separator, suffix = result.partition(marker)
+        result = prefix + separator + suffix.replace("\\", "/")
     return result
 
 

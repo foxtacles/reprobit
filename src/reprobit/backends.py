@@ -28,6 +28,14 @@ POSIX_WINE_BACKEND = "posix_wine_v1"
 WINDOWS_NATIVE_BACKEND = "windows_native_v1"
 
 
+def _host_system() -> str:
+    """Identify Windows without allowing ``platform`` to spawn ``ver``."""
+
+    if os.name == "nt":
+        return "Windows"
+    return platform.system()
+
+
 class BackendError(RuntimeError):
     """A backend contract, capability, or owned resource failed closed."""
 
@@ -387,7 +395,7 @@ class PosixWineBackend(ExecutionBackend):
         self._drive_binding_lock = Lock()
 
     def doctor(self, *, execute_probe: bool = False) -> BackendDoctorReport:
-        system = platform.system()
+        system = _host_system()
         checks = [
             DoctorCheck(
                 "host",
@@ -476,7 +484,7 @@ class PosixWineBackend(ExecutionBackend):
         if library_roots:
             variable = (
                 "DYLD_FALLBACK_LIBRARY_PATH"
-                if platform.system() == "Darwin"
+                if _host_system() == "Darwin"
                 else "LD_LIBRARY_PATH"
             )
             environment[variable] = os.pathsep.join(
@@ -899,7 +907,7 @@ class NativeWindowsBackend(ExecutionBackend):
     )
 
     def doctor(self, *, execute_probe: bool = False) -> BackendDoctorReport:
-        system = platform.system()
+        system = _host_system()
         map_probe = probe_native_device_map()
         checks = [
             DoctorCheck(
@@ -941,7 +949,7 @@ class NativeWindowsBackend(ExecutionBackend):
 
 
 def backend_for_host() -> ExecutionBackend:
-    system = platform.system()
+    system = _host_system()
     if os.name == "nt" and system == "Windows":
         return NativeWindowsBackend()
     if os.name == "posix" and system in {"Darwin", "Linux"}:

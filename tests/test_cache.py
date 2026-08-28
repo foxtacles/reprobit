@@ -1051,6 +1051,7 @@ def test_first_large_blob_store_and_restore_use_one_streaming_copy_each(
     assert digest_calls == []
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows chmod has no executable mode bit")
 def test_store_rejects_executable_mode_change_between_stat_and_copy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

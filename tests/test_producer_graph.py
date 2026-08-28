@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 from pydantic import ValidationError
@@ -56,6 +57,23 @@ def test_windows_shell_words_follow_crt_backslash_quote_rules(
         "",
         "unit.cpp",
     )
+
+
+def test_windows_bound_root_suffix_is_normalized_to_portable_separators(
+) -> None:
+    class WindowsRoot:
+        def resolve(self, *, strict: bool) -> WindowsRoot:
+            assert strict
+            return self
+
+        def __fspath__(self) -> str:
+            return r"C:\source"
+
+    assert producer_graph._replace_root(
+        r"/FoC:\source\obj\unit.obj",
+        cast(Path, WindowsRoot()),
+        "${SOURCE}",
+    ) == "/Fo${SOURCE}/obj/unit.obj"
 
 
 def test_node_refuses_unseated_commands_and_response_files() -> None:

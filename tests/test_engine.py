@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -273,19 +272,22 @@ def test_report_publication_removes_stale_commit_when_target_changes_mid_commit(
     target.write_bytes(b"candidate")
     report_json = tmp_path / "reports/report.json"
     report_html = tmp_path / "reports/report.html"
-    original_replace = os.replace
-    replaced = False
+    original_publish = engine_module.atomic_publish_relative
+    published = False
 
-    def replace_then_mutate(
-        source: object, destination: object, **options: object
-    ) -> None:
-        nonlocal replaced
-        original_replace(source, destination, **options)
-        if not replaced:
+    def publish_then_mutate(root: Path, relative: str, payload: bytes):
+        nonlocal published
+        snapshot = original_publish(root, relative, payload)
+        if not published:
             target.write_bytes(b"same-inode mutation")
-            replaced = True
+            published = True
+        return snapshot
 
-    monkeypatch.setattr(engine_module.os, "replace", replace_then_mutate)
+    monkeypatch.setattr(
+        engine_module,
+        "atomic_publish_relative",
+        publish_then_mutate,
+    )
 
     def reseal() -> None:
         if target.read_bytes() != b"candidate":
