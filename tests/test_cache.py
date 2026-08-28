@@ -521,6 +521,28 @@ def test_concurrent_blob_validation_waits_for_posix_link_settlement(
     source.write_bytes(b"stable")
     cache = IncrementalCache(state, implementation="test-implementation-v1")
     key = _key("a")
+    promotion_ready = threading.Barrier(2)
+    original_promote = cache_module.promote_relative_new
+
+    def promote_together(
+        root: Path,
+        source_relative: str,
+        destination_relative: str,
+        *,
+        expected: secure_paths.SecureFileSnapshot,
+    ) -> secure_paths.SecureFileSnapshot:
+        promotion_ready.wait(timeout=5)
+        return original_promote(
+            root,
+            source_relative,
+            destination_relative,
+            expected=expected,
+        )
+
+    # Force both publishers to reach the same CAS commit before either can
+    # win.  The test is about settlement after that collision, not scheduler
+    # luck while each thread copies its private staging file.
+    monkeypatch.setattr(cache_module, "promote_relative_new", promote_together)
     unlink_started, validation_started, unlink_finished = (
         _hold_posix_unlink_until_competing_observation(
             monkeypatch,

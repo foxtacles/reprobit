@@ -2745,6 +2745,12 @@ def execute_classic_incremental_build(
     # replacement observed during the interval fails closed and survives.
     with _target_publication_transaction(state_root):
         census.validate_all()
+        if execution.summary.misses == 0:
+            # Misses revalidate the installed implementation immediately
+            # before publishing new cache records.  An all-hit run has no
+            # cache publication boundary, so retain that fail-closed check
+            # once here without rehashing every restored workspace output.
+            revalidate_package_implementation(implementation_receipt)
         prepared_publications: list[_TargetPublication] = []
         for target in bundle.spec.targets:
             staged, expected_terminal = immutable_terminals[target.id]

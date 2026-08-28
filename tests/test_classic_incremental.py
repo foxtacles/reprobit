@@ -12,6 +12,7 @@ from typing import cast
 import pytest
 
 import reprobit.classic_incremental as classic_incremental
+import reprobit.incremental_executor as incremental_executor
 from reprobit.backends import BackendCapabilities
 from reprobit.cache import CacheLease, CacheRecord, cache_key
 from reprobit.classic_donors import (
@@ -769,6 +770,18 @@ def test_all_hit_build_skips_full_prepare_and_clean_project_ignores_oracle(
         "prepare_classic_producer_graph_run",
         lambda *_a, **_k: pytest.fail("all-hit build constructed a prepared run"),
     )
+    expected_implementation = classic_incremental.package_implementation_digest()
+    implementation_revalidations: list[Digest] = []
+    monkeypatch.setattr(
+        classic_incremental,
+        "revalidate_package_implementation",
+        implementation_revalidations.append,
+    )
+    monkeypatch.setattr(
+        incremental_executor,
+        "digest_relative_file",
+        lambda *_a, **_k: pytest.fail("all-hit executor resealed the workspace"),
+    )
     second = _run(bundle, root=root, state=state, session=tmp_path / "run-2")
     assert second.summary.hits == 4
     assert second.summary.misses == 0
@@ -776,6 +789,7 @@ def test_all_hit_build_skips_full_prepare_and_clean_project_ignores_oracle(
     assert second.summary.published_targets == 0
     assert second.summary.unchanged_targets == 1
     assert len(runtime_calls) == 1
+    assert implementation_revalidations == [expected_implementation]
     assert indexed_records == []
     assert {path: path.stat().st_mtime_ns for path in index_files} == index_mtimes
     target_after = (root / "artifacts" / "app.exe").stat()
