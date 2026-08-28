@@ -32,6 +32,193 @@ def command(tmp_path: Path, program: str, *, timeout: float = 5) -> CommandSpec:
     )
 
 
+def test_windows_job_wait_empty_polls_accounting_until_zero(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = object.__new__(process_module._WindowsJob)
+    active = iter((1, 0))
+    sleeps: list[float] = []
+    job.active_processes = lambda: next(active)
+    monkeypatch.setattr(process_module.time, "sleep", sleeps.append)
+
+    assert job.wait_empty(None) is True
+    assert sleeps == [0.01]
+
+
+def test_windows_job_wait_empty_returns_false_at_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    job = object.__new__(process_module._WindowsJob)
+    monotonic = iter((10.0, 10.0, 10.01))
+    sleeps: list[float] = []
+    job.active_processes = lambda: 1
+    monkeypatch.setattr(process_module.time, "monotonic", lambda: next(monotonic))
+    monkeypatch.setattr(process_module.time, "sleep", sleeps.append)
+
+    assert job.wait_empty(0.01) is False
+    assert len(sleeps) == 1
+    assert 0 < sleeps[0] <= 0.01
+
+
+def test_windows_job_wait_empty_propagates_accounting_failure() -> None:
+    job = object.__new__(process_module._WindowsJob)
+
+    def fail_query() -> int:
+        raise OSError("accounting unavailable")
+
+    job.active_processes = fail_query
+    with pytest.raises(OSError, match="accounting unavailable"):
+        job.wait_empty(1.0)
+
+
+def test_windows_job_process_handle_close_is_idempotent() -> None:
+    closes = 0
+
+    class Handle:
+        closed = False
+
+        def Close(self) -> None:
+            nonlocal closes
+            if not self.closed:
+                self.closed = True
+                closes += 1
+
+    class Process:
+        returncode = 0
+        _handle = Handle()
+
+    job = object.__new__(process_module._WindowsJob)
+    process = Process()
+    job.close_process_handle(process)  # type: ignore[arg-type]
+    job.close_process_handle(process)  # type: ignore[arg-type]
+
+    assert closes == 1
+
+
+def test_windows_job_close_retains_handle_after_close_failure() -> None:
+    class Kernel32:
+        @staticmethod
+        def CloseHandle(_handle: int) -> int:
+            return 0
+
+    job = object.__new__(process_module._WindowsJob)
+    job.handle = 4312
+    job._kernel32 = Kernel32()
+    job._last_error = lambda: 5
+
+    with pytest.raises(OSError, match="CloseHandle"):
+        job.close()
+
+    assert job.handle == 4312
+
+
+def test_windows_lineage_broker_contract_is_isolated_and_minimal() -> None:
+    assert process_module._windows_lineage_broker_command()[1:3] == ("-I", "-m")
+    assert process_module._windows_lineage_broker_environment(
+        {
+            "PYTHONPATH": "/attacker",
+            "SystemRoot": r"C:\Windows",
+            "windir": r"C:\Windows",
+        }
+    ) == {"SystemRoot": r"C:\Windows", "WINDIR": r"C:\Windows"}
+
+
+def test_windows_lineage_plan_is_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class Planner:
+        @staticmethod
+        def windows_lineage_plan(_spec: CommandSpec) -> bytes:
+            return b"12345"
+
+    monkeypatch.setattr(process_module, "_WINDOWS_LINEAGE_PLAN_LIMIT", 4)
+
+    with pytest.raises(process_module.ProcessLaunchError, match="larger than 16 MiB"):
+        process_module._windows_lineage_plan(Planner(), command(tmp_path, "pass"))
+
+
+def test_abort_launch_uses_only_bounded_waits_and_job_close_fallback() -> None:
+    events: list[object] = []
+
+    class StuckProcess:
+        pid = 4312
+        returncode = None
+
+        @staticmethod
+        def poll() -> None:
+            return None
+
+        @staticmethod
+        def kill() -> None:
+            events.append("kill")
+
+        @staticmethod
+        def wait(timeout: float | None = None) -> int:
+            events.append(("wait", timeout))
+            raise process_module.subprocess.TimeoutExpired(("producer",), timeout)
+
+    class Job:
+        @staticmethod
+        def terminate() -> None:
+            events.append("job-terminate")
+
+        @staticmethod
+        def close() -> None:
+            events.append("job-close")
+
+    with pytest.raises(process_module.ProcessError, match="could not be reaped"):
+        ProcessSupervisor._abort_launch(  # type: ignore[arg-type]
+            StuckProcess(),
+            Job(),
+        )
+
+    assert events == [
+        "job-terminate",
+        "kill",
+        ("wait", 2),
+        "kill",
+        ("wait", 2),
+        "job-close",
+    ]
+
+
+def test_forget_attempts_all_cleanup_and_preserves_primary_error() -> None:
+    events: list[str] = []
+
+    class Process:
+        pid = 4312
+
+    class Job:
+        @staticmethod
+        def close() -> None:
+            events.append("job-close")
+            raise OSError("job close failed")
+
+    class Capture:
+        @staticmethod
+        def close() -> None:
+            events.append("capture-close")
+            raise OSError("capture close failed")
+
+    child = process_module._OwnedChild(  # type: ignore[arg-type]
+        Process(),
+        Job(),
+        Capture(),
+    )
+    primary = RuntimeError("primary")
+    with ProcessSupervisor() as supervisor:
+        supervisor._active[4312] = child
+        supervisor._forget(child, primary_error=primary)
+
+    assert events == ["job-close", "capture-close"]
+    assert supervisor.active_pids == ()
+    assert getattr(primary, "__notes__", ()) == [
+        "process cleanup also failed: job close failed",
+        "process cleanup also failed: capture close failed",
+    ]
+
+
 def test_supervisor_captures_output_and_log(tmp_path: Path) -> None:
     with ProcessSupervisor() as supervisor:
         result = supervisor.run(
@@ -156,15 +343,10 @@ def test_output_capture_is_bounded_while_the_child_is_running(tmp_path: Path) ->
     assert len(caught.value.output) == 4096
 
 
-def test_windows_child_initializer_runs_after_containment_before_resume() -> None:
-    events: list[object] = []
+def test_windows_child_is_contained_before_resume() -> None:
+    events: list[str] = []
 
     class Job:
-        @staticmethod
-        def process_handle(process: object) -> int:
-            assert process is child
-            return 4312
-
         @staticmethod
         def assign(process: object) -> None:
             assert process is child
@@ -179,52 +361,20 @@ def test_windows_child_initializer_runs_after_containment_before_resume() -> Non
     process_module._admit_suspended_windows_child(
         Job(),  # type: ignore[arg-type]
         child,  # type: ignore[arg-type]
-        lambda handle: events.append(("initialize", handle)),
     )
 
-    assert events == ["assign", ("initialize", 4312), "resume"]
-
-
-def test_windows_child_initializer_failure_never_resumes() -> None:
-    events: list[str] = []
-
-    class Job:
-        @staticmethod
-        def process_handle(process: object) -> int:
-            del process
-            return 4312
-
-        @staticmethod
-        def assign(process: object) -> None:
-            del process
-            events.append("assign")
-
-        @staticmethod
-        def resume(process: object) -> None:
-            del process
-            events.append("resume")
-
-    def reject(_handle: int) -> None:
-        events.append("initialize")
-        raise RuntimeError("map assignment failed")
-
-    with pytest.raises(RuntimeError, match="map assignment failed"):
-        process_module._admit_suspended_windows_child(
-            Job(),  # type: ignore[arg-type]
-            object(),  # type: ignore[arg-type]
-            reject,
-        )
-
-    assert events == ["assign", "initialize"]
+    assert events == ["assign", "resume"]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="non-Windows fail-closed path")
-def test_suspended_initializer_is_never_ignored_off_windows(tmp_path: Path) -> None:
+def test_windows_lineage_planner_is_never_ignored_off_windows(tmp_path: Path) -> None:
     called = False
 
-    def initialize(_handle: int) -> None:
-        nonlocal called
-        called = True
+    class Planner:
+        def windows_lineage_plan(self, _spec: CommandSpec) -> bytes:
+            nonlocal called
+            called = True
+            return b"{}"
 
     with ProcessSupervisor() as supervisor, pytest.raises(
         process_module.ProcessLaunchError,
@@ -232,7 +382,7 @@ def test_suspended_initializer_is_never_ignored_off_windows(tmp_path: Path) -> N
     ):
         supervisor.run(
             command(tmp_path, "raise AssertionError('must not launch')"),
-            suspended_process_initializer=initialize,
+            windows_lineage_planner=Planner(),
         )
 
     assert called is False

@@ -3055,7 +3055,7 @@ def test_discarded_warm_dependency_replay_erases_arena_after_parse_failure(
         def acquire(self) -> SimpleNamespace:
             return SimpleNamespace(
                 environment={},
-                suspended_process_initializer=None,
+                windows_lineage_planner=None,
             )
 
         def release(self, _lane: object) -> None:
@@ -3507,7 +3507,7 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
         def acquire(self) -> SimpleNamespace:
             return SimpleNamespace(
                 environment=MappingProxyType({"INCLUDE": r"Z:\Toolchain\include"}),
-                suspended_process_initializer=None,
+                windows_lineage_planner=None,
             )
 
         def release(self, _lane: object) -> None:
@@ -3563,10 +3563,10 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
         timeout: float,
         log: Path,
         cancellation: CancellationToken,
-        suspended_process_initializer: object,
+        windows_lineage_planner: object,
     ) -> tuple[ProcessResult, CommandSpec]:
         del timeout, log, cancellation
-        assert suspended_process_initializer is None
+        assert windows_lineage_planner is None
         captured.append((argv, cwd))
         assert cwd.name.endswith("-d_0123456789ab")
         assert (cwd / "s.cpp").read_bytes() == b"rendered source\n"
@@ -3678,7 +3678,7 @@ def test_projected_donor_dependency_parse_failure_is_discarded(
     )
     lane = SimpleNamespace(
         environment=MappingProxyType({"INCLUDE": r"R:\toolchain\include"}),
-        suspended_process_initializer=None,
+        windows_lineage_planner=None,
     )
 
     def run(

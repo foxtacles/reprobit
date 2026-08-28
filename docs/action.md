@@ -52,12 +52,16 @@ steps:
 
 On macOS and Linux, `compiler-transport` and `resource-transport` name the two
 admitted host launchers inside the supplied toolchain root. Supply both or
-neither. Native Windows leaves both inputs empty. Its backend maps the run arena
-through an anonymous process-private DeviceMap, assigns that map to every
-Job Object-contained child before resume, and fails the required pre-build
-probe unless an assigned child passes the map to its descendant. Treat this
-path as certified only after that probe and the pinned Windows compiler gate
-pass on the intended runner. The four timeout inputs independently bound lane
+neither. Native Windows leaves both inputs empty. Its controller validates
+sealed physical roots; logical-drive paths exist only inside producer trees.
+Those trees run through a contained broker with a freshly proved logon-session
+`AuthenticationId`; `DefineDosDeviceW` creates the drive only in that isolated
+session. Each real producer starts suspended, joins a nested kill-on-close Job
+Object, and resumes only after admission. The broker keeps the mapping until
+the complete producer Job is empty. The required pre-build probe fails unless
+that path remains visible to a descendant. Treat this path as certified only
+after that probe and the pinned Windows compiler gate pass on the intended
+runner. The four timeout inputs independently bound lane
 initialization, each compiler/resource process, each librarian/linker process,
 and lane cleanup. CMake is not installed or invoked by the Action.
 
@@ -91,7 +95,7 @@ original policy-rejection status.
 
 Public CI checks the Action metadata and portable package. Its dedicated
 `windows-2022` job also provisions the pinned external Archaic MSVC authority,
-authenticates it, and exercises the native DeviceMap plus CL child chain without
+authenticates it, and exercises the native lineage drive plus CL child chain without
 caching or uploading compiler bytes. That gate remains conditional evidence:
 treat a particular runner/toolchain pairing as ready only after its own
 `rbit doctor --execute-probe` and cold Action fixture pass.

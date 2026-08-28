@@ -2,7 +2,8 @@
 
 ReproBit's Windows certification gate runs on the pinned `windows-2022`
 GitHub-hosted image. A macOS or Linux checkout can test the portable contracts,
-but it cannot certify Windows Object Manager DeviceMap and Job Object behavior.
+but it cannot certify Windows logon-session DOS namespaces and nested Job
+Object behavior.
 
 The compiler is not stored in this repository, a GitHub cache, or workflow
 artifacts. Provision the finite external authority after installing ReproBit:
@@ -14,6 +15,11 @@ rbit doctor --backend windows_native_v1 \
   --toolchain-root C:\toolchains\msvc42 \
   --execute-probe
 ```
+
+The native lineage broker uses `CreateProcessWithTokenW` to create its isolated
+logon session. The runner account therefore needs `SeImpersonatePrivilege`.
+`rbit doctor --execute-probe` fails closed with Windows error 1314 when that
+privilege is unavailable; an ordinary drive mapping is not a substitute.
 
 The provisioner uses immutable sparse checkouts of:
 

@@ -901,7 +901,7 @@ class NativeWindowsBackend(ExecutionBackend):
         identifier=identifier,
         host_systems=("Windows",),
         process_tree_primitive="windows_kill_on_close_job_object",
-        logical_path_primitive="process_private_nt_device_map",
+        logical_path_primitive="fresh_luid_local_dos_device_map",
         private_wine_prefix=False,
         native_windows=True,
     )
@@ -930,7 +930,7 @@ class NativeWindowsBackend(ExecutionBackend):
             execution_probe = probe_native_device_map_execution()
             checks.append(
                 DoctorCheck(
-                    "private-map process lineage",
+                    "fresh-LUID process lineage",
                     execution_probe.available,
                     execution_probe.detail,
                 )

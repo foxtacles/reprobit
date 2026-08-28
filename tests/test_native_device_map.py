@@ -6,94 +6,234 @@ import os
 import subprocess
 import sys
 import textwrap
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path, PureWindowsPath
 from typing import Any
 
 import pytest
 
+import reprobit.native_device_map as native_device_map_module
+import reprobit.process as process_module
 from reprobit.backends import NativeWindowsBackend
 from reprobit.classic_includes import parse_msvc_sbr
 from reprobit.native_device_map import (
     NativeDeviceMapError,
     NativeDeviceMapLease,
-    _NativeApi,
-    _ObjectAttributes,
-    _ProcessDeviceMapSet,
+    _lineage_inner_command,
+    _LineageApi,
+    _minimal_broker_environment,
+    _run_suspended_producer_tree,
+    _serialize_windows_environment,
     probe_native_device_map,
     probe_native_device_map_execution,
 )
 from reprobit.paths import LogicalPathSkeleton, LogicalSeat
-from reprobit.process import CommandSpec, ProcessSupervisor
+from reprobit.process import CommandSpec, ProcessSupervisor, ProcessTimedOut
 
 _WINDOWS = os.name == "nt"
 _CREATE_SUSPENDED = 0x00000004
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
-_DDD_RAW_TARGET_PATH = 0x00000001
-_DDD_REMOVE_DEFINITION = 0x00000002
-_DDD_EXACT_MATCH_ON_REMOVE = 0x00000004
-_DDD_NO_BROADCAST_SYSTEM = 0x00000008
 
-
-def test_process_device_map_binding_passes_only_the_set_arm() -> None:
-    assert ctypes.sizeof(_ProcessDeviceMapSet) == ctypes.sizeof(ctypes.c_void_p)
-    calls: list[tuple[int, int]] = []
-    api = object.__new__(_NativeApi)
-
-    def set_information(
-        _process: object,
-        _information_class: int,
-        _information: object,
-        length: int,
-    ) -> int:
-        information = ctypes.cast(
-            _information,
-            ctypes.POINTER(_ProcessDeviceMapSet),
-        ).contents
-        calls.append((int(information.DirectoryHandle), length))
-        return 0
-
-    api.NtSetInformationProcess = set_information
-    api.set_process_map(1, 2)
-
-    assert calls == [(2, ctypes.sizeof(_ProcessDeviceMapSet))]
-
-
-def test_private_directory_creation_has_no_explicit_shadow() -> None:
-    calls: list[tuple[int, bool, bool, object, int]] = []
-    api = object.__new__(_NativeApi)
-
-    def create_directory(
-        result: object,
-        access: int,
-        attributes_pointer: object,
-        shadow: object,
-        flags: int,
-    ) -> int:
-        attributes = ctypes.cast(
-            attributes_pointer,
-            ctypes.POINTER(_ObjectAttributes),
-        ).contents
-        calls.append(
-            (
-                access,
-                bool(attributes.RootDirectory),
-                bool(attributes.ObjectName),
-                shadow,
-                flags,
-            )
-        )
-        ctypes.cast(result, ctypes.POINTER(ctypes.c_void_p)).contents.value = 123
-        return 0
-
-    api.NtCreateDirectoryObjectEx = create_directory
-
-    assert api.create_private_directory() == 123
-    assert calls == [(0x0001 | 0x0002 | 0x0004, False, False, None, 0)]
 
 
 def test_native_device_map_rejects_non_letter_drive() -> None:
     with pytest.raises(NativeDeviceMapError, match="one ASCII letter"):
         NativeDeviceMapLease(Path.cwd(), "RR")
+
+
+def test_lineage_brokers_are_isolated_and_receive_a_minimal_environment() -> None:
+    assert _lineage_inner_command()[1:3] == ("-I", "-m")
+    entries = _minimal_broker_environment(
+        {
+            "PYTHONPATH": r"C:\attacker",
+            "systemroot": r"C:\Windows",
+            "windir": r"C:\Windows",
+        }
+    )
+
+    assert entries == (
+        ("SystemRoot", r"C:\Windows"),
+        ("WINDIR", r"C:\Windows"),
+    )
+    assert _serialize_windows_environment(entries) == (
+        "SystemRoot=C:\\Windows\0WINDIR=C:\\Windows\0\0"
+    )
+
+
+def test_lineage_plan_preserves_long_commands_and_exact_environment(
+    tmp_path: Path,
+) -> None:
+    lease = NativeDeviceMapLease(tmp_path, "R")
+    lease._active = True
+    lease._target = r"\Device\HarddiskVolume1\private"
+    lease._controller_authentication_id = (123, 0)
+    long_argument = "x" * 4096
+    spec = CommandSpec.create(
+        (r"R:\toolchain\bin\CL.EXE", long_argument),
+        cwd=tmp_path,
+        environment=(("EMPTY", ""), ("VALUE", "exact")),
+    )
+
+    plan = json.loads(lease.windows_lineage_plan(spec))
+    selected = process_module._windows_lineage_plan(
+        lease,
+        spec,
+    )
+
+    assert plan["argv"] == [r"R:\toolchain\bin\CL.EXE", long_argument]
+    assert plan["cwd"] == str(tmp_path)
+    assert plan["environment"] == [["EMPTY", ""], ["VALUE", "exact"]]
+    assert selected is not None and json.loads(selected) == plan
+
+
+@pytest.mark.parametrize(
+    ("leader_exit", "expected_tail"),
+    [
+        (0, ["leader-wait", "leader-handle-close", "job-wait", "job-close"]),
+        (7, ["leader-wait", "leader-handle-close", "job-terminate", "job-close"]),
+    ],
+)
+def test_lineage_tree_drains_after_the_producer_leader(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    leader_exit: int,
+    expected_tail: list[str],
+) -> None:
+    events: list[str] = []
+
+    class FakeProducer:
+        returncode: int | None = None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            events.append("leader-wait")
+            self.returncode = leader_exit
+            return leader_exit
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            events.append("leader-kill")
+
+    class FakeJob:
+        def __init__(self) -> None:
+            events.append("job-create")
+
+        def assign(self, _producer: object) -> None:
+            events.append("job-assign")
+
+        def resume(self, _producer: object) -> None:
+            events.append("job-resume")
+
+        def close_process_handle(self, _producer: object) -> None:
+            events.append("leader-handle-close")
+
+        def wait_empty(self, _timeout: float | None) -> bool:
+            events.append("job-wait")
+            return True
+
+        def terminate_and_drain(self, _timeout: float) -> None:
+            events.append("job-terminate")
+
+        def close(self) -> None:
+            events.append("job-close")
+
+    def fake_popen(*_args: object, **kwargs: object) -> FakeProducer:
+        assert kwargs["creationflags"] == _CREATE_SUSPENDED | _CREATE_NEW_PROCESS_GROUP
+        events.append("producer-create-suspended")
+        return FakeProducer()
+
+    monkeypatch.setattr("reprobit.process._WindowsJob", FakeJob)
+    monkeypatch.setattr("reprobit.native_device_map.subprocess.Popen", fake_popen)
+    spec = CommandSpec.create(
+        ("producer",),
+        cwd=tmp_path,
+        environment={},
+    )
+
+    assert _run_suspended_producer_tree(spec) == leader_exit
+    assert events[:4] == [
+        "job-create",
+        "producer-create-suspended",
+        "job-assign",
+        "job-resume",
+    ]
+    assert events[4:] == expected_tail
+
+
+def test_lineage_broker_keeps_mapping_when_tree_drain_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    failure = NativeDeviceMapError("producer Job drain failed")
+    spec = CommandSpec.create(("producer",), cwd=tmp_path)
+    document = {
+        "argv": ["producer"],
+        "controller_authentication_id": [10, 0],
+        "cwd": str(tmp_path),
+        "drive": "R:",
+        "environment": [],
+        "target": r"\Device\HarddiskVolume1\root",
+        "version": 1,
+    }
+
+    class WindowsOs:
+        name = "nt"
+
+    class FakeApi:
+        @staticmethod
+        def process_authentication_id(_process: int) -> tuple[int, int]:
+            return (20, 0)
+
+        @staticmethod
+        def define_local_drive(_drive: str, _target: str) -> None:
+            events.append("define")
+
+        @staticmethod
+        def remove_local_drive(_drive: str, _target: str) -> None:
+            events.append("remove")
+
+    def fail_tree(_spec: CommandSpec) -> int:
+        events.append("run")
+        raise failure
+
+    monkeypatch.setattr(native_device_map_module, "os", WindowsOs())
+    monkeypatch.setattr(
+        native_device_map_module,
+        "_read_lineage_plan",
+        lambda: (document, spec),
+    )
+    monkeypatch.setattr(native_device_map_module, "_LineageApi", FakeApi)
+    monkeypatch.setattr(
+        native_device_map_module,
+        "_run_suspended_producer_tree",
+        fail_tree,
+    )
+
+    with pytest.raises(NativeDeviceMapError) as caught:
+        native_device_map_module._run_lineage_broker()
+
+    assert caught.value is failure
+    assert events == ["define", "run"]
+
+
+def test_broker_main_surfaces_cleanup_notes(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    failure = NativeDeviceMapError("primary failure")
+    failure.add_note("descendant cleanup failed")
+
+    def fail() -> int:
+        raise failure
+
+    monkeypatch.setattr(native_device_map_module, "_run_lineage_broker", fail)
+
+    assert native_device_map_module._main(["--lineage-inner"]) == 125
+    assert "cleanup note: descendant cleanup failed" in capsys.readouterr().err
 
 
 @pytest.mark.skipif(not _WINDOWS, reason="requires a native Windows junction")
@@ -159,129 +299,39 @@ def _free_drive() -> str:
     for letter in "RQPONMLKJIHGFEDBA":
         if _query_drive(letter) is None:
             return letter
-    pytest.skip("Windows runner has no free logical drive")
+    pytest.skip("Windows runner has no controller-unmapped drive candidate")
 
 
-def _handle_count() -> int:
-    kernel32 = _kernel32()
-    count = ctypes.c_uint32()
-    if not kernel32.GetProcessHandleCount(
-        kernel32.GetCurrentProcess(), ctypes.byref(count)
-    ):
-        raise OSError(int(ctypes.get_last_error()), "GetProcessHandleCount failed")
-    return int(count.value)
-
-
-def _resume(process: subprocess.Popen[str]) -> None:
-    ntdll = ctypes.WinDLL("ntdll", use_last_error=True)
-    ntdll.NtResumeProcess.argtypes = [ctypes.c_void_p]
-    ntdll.NtResumeProcess.restype = ctypes.c_int32
-    native_process: Any = process
-    status = int(ntdll.NtResumeProcess(ctypes.c_void_p(int(native_process._handle))))
-    if status < 0:
-        process.kill()
-        process.wait(timeout=5)
-        raise OSError(status & 0xFFFFFFFF, "NtResumeProcess failed")
-
-
-@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows Object Manager")
+@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows lineage namespace")
 def test_native_device_map_feature_probe_is_harmless() -> None:
     probe = probe_native_device_map()
     assert probe.available, probe.detail
 
 
-@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows Object Manager")
-def test_native_device_map_restores_on_failure_without_handle_leak(
-    tmp_path: Path,
-) -> None:
-    assert probe_native_device_map().available
+@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows lineage namespace")
+def test_lineage_lease_does_not_map_the_controller_drive(tmp_path: Path) -> None:
     drive = _free_drive()
     root = tmp_path / "private-root"
     root.mkdir()
-    (root / "marker.txt").write_text("private", encoding="utf-8")
-    host_probe = Path(sys.executable)
-    before = _handle_count()
-    installed_target: str | None = None
 
-    with (
-        pytest.raises(RuntimeError, match="producer failed"),
-        NativeDeviceMapLease(root, drive),
-    ):
-        installed_target = _query_drive(drive)
-        assert installed_target is not None
-        assert Path(rf"{drive}:\marker.txt").read_text(encoding="utf-8") == "private"
-        assert host_probe.is_file()
-        raise RuntimeError("producer failed")
-
-    assert _query_drive(drive) != installed_target
-    assert host_probe.is_file()
-    assert _handle_count() == before
+    with NativeDeviceMapLease(root, drive):
+        assert _query_drive(drive) is None
+    assert _query_drive(drive) is None
 
 
-@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows Object Manager")
-def test_native_device_map_rejects_an_existing_host_drive(tmp_path: Path) -> None:
-    system_root = Path(os.environ["SYSTEMROOT"])
-    occupied = system_root.drive.rstrip(":")
-    assert occupied and _query_drive(occupied) is not None
-    root = tmp_path / "private-root"
-    root.mkdir()
-
-    with (
-        pytest.raises(NativeDeviceMapError, match="already mapped"),
-        NativeDeviceMapLease(root, occupied),
-    ):
-        raise AssertionError("occupied drive must not be admitted")
-
-
-@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows Object Manager")
-def test_suspended_child_receives_private_map_before_first_instruction(
+@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows lineage namespace")
+def test_lineage_drive_reaches_producer_and_descendant(
     tmp_path: Path,
 ) -> None:
-    drive = _free_drive()
-    root = tmp_path / "private-root"
-    root.mkdir()
-    (root / "marker.txt").write_text("child-private", encoding="utf-8")
-    script = (
-        "from pathlib import Path; "
-        f"print(Path(r'{drive}:\\marker.txt').read_text(encoding='utf-8'))"
-    )
-
-    installed_target: str | None = None
-    with NativeDeviceMapLease(root, drive) as lease:
-        installed_target = _query_drive(drive)
-        assert installed_target is not None
-        child = subprocess.Popen(
-            [sys.executable, "-c", script],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            creationflags=_CREATE_SUSPENDED | _CREATE_NEW_PROCESS_GROUP,
-        )
-        try:
-            native_child: Any = child
-            lease.assign_to_suspended_process(int(native_child._handle))
-            _resume(child)
-            output, _ = child.communicate(timeout=20)
-        except BaseException:
-            child.kill()
-            child.wait(timeout=5)
-            raise
-
-    assert child.returncode == 0, output
-    assert output.strip() == "child-private"
-    assert _query_drive(drive) != installed_target
-
-
-@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows Object Manager")
-def test_supervised_child_passes_private_map_to_its_descendant(
-    tmp_path: Path,
-) -> None:
-    """Gate the exact direct-assignment plus producer-descendant lifecycle."""
+    """A controller-local peer mapping cannot leak into the fresh LUID."""
 
     drive = _free_drive()
     root = tmp_path / "private-root"
+    decoy = tmp_path / "controller-decoy"
     root.mkdir()
+    decoy.mkdir()
     (root / "marker.txt").write_text("descendant-private", encoding="utf-8")
+    (decoy / "marker.txt").write_text("controller-private", encoding="utf-8")
     grandchild = (
         "from pathlib import Path; "
         f"print(Path(r'{drive}:\\marker.txt').read_text(encoding='utf-8'))"
@@ -290,6 +340,9 @@ def test_supervised_child_passes_private_map_to_its_descendant(
         f"""
         import subprocess
         import sys
+        from pathlib import Path
+
+        print(Path(r'{drive}:\\marker.txt').read_text(encoding='utf-8'))
 
         result = subprocess.run(
             [sys.executable, "-c", {grandchild!r}],
@@ -307,21 +360,250 @@ def test_supervised_child_passes_private_map_to_its_descendant(
     if system_root:
         environment["SYSTEMROOT"] = system_root
 
+    api = _LineageApi()
+    device = f"{drive}:"
+    decoy_target = api.final_nt_path(decoy.resolve(strict=True))
+    api.define_local_drive(device, decoy_target)
+    try:
+        assert (
+            Path(rf"{drive}:\marker.txt").read_text(encoding="utf-8")
+            == "controller-private"
+        )
+        with (
+            NativeDeviceMapLease(root, drive) as lease,
+            ProcessSupervisor() as supervisor,
+        ):
+            result = supervisor.run(
+                CommandSpec.create(
+                    (sys.executable, "-c", child),
+                    cwd=root,
+                    environment=environment,
+                    timeout_seconds=20,
+                ),
+                windows_lineage_planner=lease,
+            )
+        assert (
+            Path(rf"{drive}:\marker.txt").read_text(encoding="utf-8")
+            == "controller-private"
+        )
+    finally:
+        api.remove_local_drive(device, decoy_target)
+
+    assert result.output.splitlines() == [
+        b"descendant-private",
+        b"descendant-private",
+    ]
+
+
+@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows lineage namespace")
+def test_concurrent_fresh_luids_isolate_the_same_drive_letter(
+    tmp_path: Path,
+) -> None:
+    drive = _free_drive()
+    roots = (tmp_path / "first-root", tmp_path / "second-root")
+    ready = (tmp_path / "first.ready", tmp_path / "second.ready")
+    labels = ("first-private", "second-private")
+    for root, label in zip(roots, labels, strict=True):
+        root.mkdir()
+        (root / "marker.txt").write_text(label, encoding="utf-8")
+    environment = {"SYSTEMROOT": os.environ["SYSTEMROOT"]}
+
+    def run(index: int) -> bytes:
+        script = textwrap.dedent(
+            f"""
+            import time
+            from pathlib import Path
+
+            own = Path({str(ready[index])!r})
+            peer = Path({str(ready[1 - index])!r})
+            own.write_text("ready", encoding="ascii")
+            deadline = time.monotonic() + 10
+            while not peer.exists():
+                if time.monotonic() >= deadline:
+                    raise RuntimeError("parallel lineage peer did not start")
+                time.sleep(0.01)
+            print(
+                Path(r'{drive}:\\marker.txt').read_text(encoding='utf-8'),
+                flush=True,
+            )
+            """
+        )
+        with (
+            NativeDeviceMapLease(roots[index], drive) as lease,
+            ProcessSupervisor() as supervisor,
+        ):
+            return supervisor.run(
+                CommandSpec.create(
+                    (sys.executable, "-c", script),
+                    cwd=roots[index],
+                    environment=environment,
+                    timeout_seconds=20,
+                ),
+                windows_lineage_planner=lease,
+            ).output
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        outputs = tuple(executor.map(run, range(2)))
+
+    assert outputs == (b"first-private\n", b"second-private\n")
+
+
+@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows lineage namespace")
+def test_lineage_mapping_outlives_an_immediately_exiting_producer(
+    tmp_path: Path,
+) -> None:
+    """The broker must retain R: until an orphaned producer descendant exits."""
+
+    drive = _free_drive()
+    root = tmp_path / "private-root"
+    root.mkdir()
+    (root / "marker.txt").write_text("late-descendant-private", encoding="utf-8")
+    grandchild = textwrap.dedent(
+        f"""
+        import time
+        from pathlib import Path
+
+        time.sleep(0.5)
+        print(
+            Path(r'{drive}:\\marker.txt').read_text(encoding='utf-8'),
+            flush=True,
+        )
+        """
+    )
+    producer = textwrap.dedent(
+        f"""
+        import subprocess
+        import sys
+
+        subprocess.Popen([sys.executable, "-c", {grandchild!r}])
+        print("producer-exit", flush=True)
+        """
+    )
+    environment = {}
+    system_root = os.environ.get("SYSTEMROOT")
+    if system_root:
+        environment["SYSTEMROOT"] = system_root
+
     with (
         NativeDeviceMapLease(root, drive) as lease,
         ProcessSupervisor() as supervisor,
     ):
         result = supervisor.run(
             CommandSpec.create(
-                (sys.executable, "-c", child),
+                (sys.executable, "-c", producer),
                 cwd=root,
                 environment=environment,
                 timeout_seconds=20,
             ),
-            suspended_process_initializer=lease.assign_to_suspended_process,
+            windows_lineage_planner=lease,
         )
 
-    assert result.output.strip() == b"descendant-private"
+    assert result.output.splitlines() == [
+        b"producer-exit",
+        b"late-descendant-private",
+    ]
+
+
+@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows lineage namespace")
+def test_lineage_broker_preserves_long_argv_environment_and_capture(
+    tmp_path: Path,
+) -> None:
+    drive = _free_drive()
+    root = tmp_path / "private-root"
+    root.mkdir()
+    long_argument = "x" * 4096
+    script = textwrap.dedent(
+        """
+        import os
+        import sys
+
+        print(len(sys.argv[1]), flush=True)
+        print(os.environ["LINEAGE_VALUE"], flush=True)
+        print(",".join(sorted(key.casefold() for key in os.environ)), flush=True)
+        print("captured-stderr", file=sys.stderr)
+        """
+    )
+    environment = {"LINEAGE_VALUE": "exact"}
+    system_root = os.environ.get("SYSTEMROOT")
+    if system_root:
+        environment["SYSTEMROOT"] = system_root
+
+    with (
+        NativeDeviceMapLease(root, drive) as lease,
+        ProcessSupervisor() as supervisor,
+    ):
+        result = supervisor.run(
+            CommandSpec.create(
+                (sys.executable, "-c", script, long_argument),
+                cwd=root,
+                environment=environment,
+                timeout_seconds=20,
+            ),
+            windows_lineage_planner=lease,
+        )
+
+    assert result.output.splitlines() == [
+        b"4096",
+        b"exact",
+        b"lineage_value,systemroot",
+        b"captured-stderr",
+    ]
+
+
+@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows lineage namespace")
+def test_lineage_broker_remains_owned_when_the_producer_times_out(
+    tmp_path: Path,
+) -> None:
+    drive = _free_drive()
+    root = tmp_path / "private-root"
+    root.mkdir()
+    started = tmp_path / "descendant.started"
+    release = tmp_path / "descendant.release"
+    forbidden = tmp_path / "descendant-survived"
+    descendant = textwrap.dedent(
+        f"""
+        import time
+        from pathlib import Path
+
+        started = Path({str(started)!r})
+        release = Path({str(release)!r})
+        started.write_text("started", encoding="ascii")
+        while not release.exists():
+            time.sleep(0.01)
+        Path({str(forbidden)!r}).write_text("escaped", encoding="ascii")
+        """
+    )
+    producer = textwrap.dedent(
+        f"""
+        import subprocess
+        import sys
+        import time
+
+        subprocess.Popen([sys.executable, "-c", {descendant!r}])
+        time.sleep(60)
+        """
+    )
+
+    with (
+        NativeDeviceMapLease(root, drive) as lease,
+        ProcessSupervisor(poll_interval=0.01, termination_grace=0.2) as supervisor,
+        pytest.raises(ProcessTimedOut),
+    ):
+        supervisor.run(
+            CommandSpec.create(
+                (sys.executable, "-c", producer),
+                cwd=root,
+                environment={"SYSTEMROOT": os.environ.get("SYSTEMROOT", "")},
+                timeout_seconds=3,
+            ),
+            windows_lineage_planner=lease,
+        )
+
+    assert supervisor.active_pids == ()
+    assert started.is_file(), "producer descendant did not start before the timeout"
+    release.write_text("release", encoding="ascii")
+    time.sleep(0.5)
+    assert not forbidden.exists()
 
 
 @pytest.mark.skipif(not _WINDOWS, reason="requires native Windows and MSVC 4.2")
@@ -398,7 +680,7 @@ def test_native_backend_runs_the_authenticated_msvc42_producer_chain(
                 timeout_seconds=60,
                 log_path=log_root / "native-cl-smoke.log",
             ),
-            suspended_process_initializer=binding.assign_to_suspended_process,
+            windows_lineage_planner=binding,
         )
         assert compile_result.succeeded, compile_result.output_tail
         canonical_object = (build_root / "smoke.obj").read_bytes()
@@ -421,7 +703,7 @@ def test_native_backend_runs_the_authenticated_msvc42_producer_chain(
                 timeout_seconds=60,
                 log_path=log_root / "native-cl-dependencies-smoke.log",
             ),
-            suspended_process_initializer=binding.assign_to_suspended_process,
+            windows_lineage_planner=binding,
         )
         assert dependency_result.succeeded, dependency_result.output_tail
         resource_result = supervisor.run(
@@ -436,7 +718,7 @@ def test_native_backend_runs_the_authenticated_msvc42_producer_chain(
                 timeout_seconds=60,
                 log_path=log_root / "native-rc-smoke.log",
             ),
-            suspended_process_initializer=binding.assign_to_suspended_process,
+            windows_lineage_planner=binding,
         )
         link_result = supervisor.run(
             CommandSpec.create(
@@ -454,7 +736,7 @@ def test_native_backend_runs_the_authenticated_msvc42_producer_chain(
                 timeout_seconds=60,
                 log_path=log_root / "native-link-smoke.log",
             ),
-            suspended_process_initializer=binding.assign_to_suspended_process,
+            windows_lineage_planner=binding,
         )
 
     object_path = build_root / "smoke.obj"
@@ -481,202 +763,3 @@ def test_native_backend_runs_the_authenticated_msvc42_producer_chain(
     assert not (build_root / "smoke.sbr").exists()
     assert resource_path.is_file() and resource_path.stat().st_size > 0
     assert executable_path.is_file() and executable_path.stat().st_size > 0
-
-
-@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows Object Manager")
-def test_automatic_child_and_grandchild_visibility_is_release_gated(
-    tmp_path: Path,
-) -> None:
-    """Record whether an unassigned direct child happens to inherit the map.
-
-    The backend never relies on this behavior: it assigns every direct child
-    while suspended.  Its strict process-lineage gate separately proves that
-    an assigned producer passes the map to its own descendants.
-    """
-
-    drive = _free_drive()
-    root = tmp_path / "private-root"
-    root.mkdir()
-    (root / "marker.txt").write_text("descendant-private", encoding="utf-8")
-    grandchild = (
-        "from pathlib import Path; "
-        f"print(Path(r'{drive}:\\marker.txt').read_text(encoding='utf-8'))"
-    )
-    child = textwrap.dedent(
-        f"""
-        import subprocess
-        import sys
-
-        result = subprocess.run(
-            [sys.executable, "-c", {grandchild!r}],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=15,
-        )
-        print(result.stdout, end="")
-        raise SystemExit(result.returncode)
-        """
-    )
-
-    with NativeDeviceMapLease(root, drive):
-        result = subprocess.run(
-            [sys.executable, "-c", child],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            timeout=20,
-        )
-    if result.returncode != 0 or result.stdout.strip() != "descendant-private":
-        pytest.xfail(
-            "an unassigned direct child did not inherit the controller's DeviceMap; "
-            "the backend's suspended-child assignment remains required"
-        )
-
-
-_PEER_PROGRAM = textwrap.dedent(
-    r"""
-    import ctypes
-    import json
-    import sys
-
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    kernel32.QueryDosDeviceW.argtypes = [
-        ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint32
-    ]
-    kernel32.QueryDosDeviceW.restype = ctypes.c_uint32
-    kernel32.DefineDosDeviceW.argtypes = [
-        ctypes.c_uint32, ctypes.c_wchar_p, ctypes.c_wchar_p
-    ]
-    kernel32.DefineDosDeviceW.restype = ctypes.c_int
-
-    def query(device):
-        buffer = ctypes.create_unicode_buffer(32767)
-        ctypes.set_last_error(0)
-        if kernel32.QueryDosDeviceW(device, buffer, len(buffer)):
-            return buffer.value
-        error = ctypes.get_last_error()
-        if error in (2, 3):
-            return None
-        raise OSError(error, "QueryDosDeviceW failed")
-
-    for raw in sys.stdin:
-        command = json.loads(raw)
-        try:
-            if command["op"] == "query":
-                result = query(command["device"])
-            elif command["op"] == "map":
-                flags = 0x1 | 0x8
-                if not kernel32.DefineDosDeviceW(
-                    flags, command["device"], command["target"]
-                ):
-                    raise OSError(ctypes.get_last_error(), "DefineDosDeviceW failed")
-                result = query(command["device"])
-            elif command["op"] == "remove":
-                flags = 0x1 | 0x2 | 0x4 | 0x8
-                if not kernel32.DefineDosDeviceW(
-                    flags, command["device"], command["target"]
-                ):
-                    raise OSError(ctypes.get_last_error(), "DefineDosDeviceW removal failed")
-                result = query(command["device"])
-            elif command["op"] == "exit":
-                print(json.dumps({"ok": True, "result": None}), flush=True)
-                break
-            else:
-                raise ValueError("unknown operation")
-            print(json.dumps({"ok": True, "result": result}), flush=True)
-        except BaseException as error:
-            print(json.dumps({"ok": False, "error": repr(error)}), flush=True)
-    """
-)
-
-
-def _peer_request(peer: subprocess.Popen[str], request: dict[str, str]) -> str | None:
-    assert peer.stdin is not None and peer.stdout is not None
-    peer.stdin.write(json.dumps(request) + "\n")
-    peer.stdin.flush()
-    response = json.loads(peer.stdout.readline())
-    if not response["ok"]:
-        raise AssertionError(response["error"])
-    result = response["result"]
-    assert result is None or isinstance(result, str)
-    return result
-
-
-@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows Object Manager")
-def test_peer_cannot_observe_or_transiently_remap_private_drive(
-    tmp_path: Path,
-) -> None:
-    drive = _free_drive()
-    device = f"{drive}:"
-    root = tmp_path / "private-root"
-    decoy = tmp_path / "peer-decoy"
-    root.mkdir()
-    decoy.mkdir()
-    (root / "marker.txt").write_text("private", encoding="utf-8")
-    (decoy / "marker.txt").write_text("peer", encoding="utf-8")
-    peer_target = rf"\??\{decoy}"
-
-    # Start the peer before installing the process-private map so it remains in
-    # the ordinary logon-session DOS namespace.
-    peer = subprocess.Popen(
-        [sys.executable, "-c", _PEER_PROGRAM],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    peer_mapped = False
-    installed_target: str | None = None
-    try:
-        with NativeDeviceMapLease(root, drive):
-            installed_target = _query_drive(drive)
-            assert installed_target is not None
-            peer_initial = _peer_request(peer, {"op": "query", "device": device})
-            if peer_initial is not None:
-                pytest.skip(f"logical drive raced with external mapping: {peer_initial}")
-            observed = _peer_request(
-                peer,
-                {
-                    "op": "map",
-                    "device": device,
-                    "target": peer_target,
-                },
-            )
-            peer_mapped = True
-            assert observed == peer_target
-            assert Path(rf"{drive}:\marker.txt").read_text(encoding="utf-8") == "private"
-            assert _query_drive(drive) == installed_target
-            assert (
-                _peer_request(
-                    peer,
-                    {
-                        "op": "remove",
-                        "device": device,
-                        "target": peer_target,
-                    },
-                )
-                is None
-            )
-            peer_mapped = False
-            assert Path(rf"{drive}:\marker.txt").read_text(encoding="utf-8") == "private"
-    finally:
-        if peer_mapped and peer.poll() is None:
-            _peer_request(
-                peer,
-                {
-                    "op": "remove",
-                    "device": device,
-                    "target": peer_target,
-                },
-            )
-        if peer.poll() is None:
-            _peer_request(peer, {"op": "exit", "device": device})
-        try:
-            peer.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            peer.kill()
-            peer.wait(timeout=5)
-
-    assert peer.returncode == 0
-    assert _query_drive(drive) != installed_target

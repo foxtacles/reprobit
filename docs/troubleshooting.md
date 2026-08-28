@@ -35,12 +35,13 @@ Every command has a deadline and belongs to a runner-owned process tree. Wine
 workers use private prefixes, while native Windows exposes bounded Job Object
 primitives. A timeout kills the complete owned tree. Run `rbit doctor
 --execute-probe` before a long campaign: it tests the bounded Wine path on
-POSIX, and on Windows it creates a temporary process-private DeviceMap, assigns
-it to a suspended Job Object child before resume, and verifies visibility in a
-descendant. A Windows failure means the controller architecture, native APIs,
-free-drive admission, child assignment, or descendant inheritance is
-insufficient for certification; do not replace it with `DefineDosDeviceW` or a
-logon-visible mapped drive. Never reuse an unknown global Wine prefix as
+POSIX. On Windows it validates the controller's sealed physical root, then
+launches the logical-drive producer path in a fresh, verified logon session whose local
+`DefineDosDeviceW` mapping remains owned until a nested Job Object reports zero
+active processes. A Windows failure means the controller architecture, native
+APIs, fresh-session drive admission, AuthenticationId isolation, Job admission, or
+descendant inheritance is insufficient for certification. An ordinary mapping
+in the controller's existing logon session is not a substitute. Never reuse an unknown global Wine prefix as
 certification state. Tune
 `--initialization-timeout`, `--compile-timeout`, `--link-timeout`, and
 `--cleanup-timeout` independently rather than replacing process ownership with

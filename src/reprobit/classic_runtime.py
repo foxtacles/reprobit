@@ -132,7 +132,7 @@ from reprobit.process import (
     CommandSpec,
     ProcessResult,
     ProcessSupervisor,
-    SuspendedProcessInitializer,
+    WindowsLineagePlanner,
 )
 from reprobit.producer_graph import (
     ProducerGraphDocument,
@@ -204,12 +204,12 @@ class _ProgressReporter:
 
 @dataclass(frozen=True, slots=True)
 class _ExecutionLane:
-    """One producer environment and its backend-specific child admission."""
+    """One producer environment and its optional Windows lineage plan."""
 
     id: str
     environment: Mapping[str, str]
     worker: WorkerSandbox
-    suspended_process_initializer: SuspendedProcessInitializer | None = None
+    windows_lineage_planner: WindowsLineagePlanner | None = None
 
 
 class _LazyExecutionLanePool:
@@ -2240,7 +2240,7 @@ def _prepare_execution_lanes(
     binding_lock = Lock()
     bindings: list[tuple[WorkerSandbox, ExitStack]] = []
     native_worker: WorkerSandbox | None = None
-    native_initializer: SuspendedProcessInitializer | None = None
+    native_lineage_planner: WindowsLineagePlanner | None = None
 
     def producer_environment(lane_id: str) -> dict[str, str]:
         logical_temporary = _logical_join(bundle.spec.paths.build, f".reprobit-tmp/{lane_id}")
@@ -2266,7 +2266,7 @@ def _prepare_execution_lanes(
 
     def bind_worker(
         worker: WorkerSandbox,
-    ) -> tuple[ExitStack, SuspendedProcessInitializer | None]:
+    ) -> tuple[ExitStack, WindowsLineagePlanner | None]:
         stack = ExitStack()
         try:
             binding = stack.enter_context(
@@ -2276,20 +2276,20 @@ def _prepare_execution_lanes(
                 backend.verify_worker_drive_mappings(
                     worker, logical_drive=logical_workspace.drive_letter
                 )
-            initializer: SuspendedProcessInitializer | None = None
+            lineage_planner: WindowsLineagePlanner | None = None
             if isinstance(backend, NativeWindowsBackend):
                 if not isinstance(binding, NativeDeviceMapLease):
                     raise ClassicProjectError(
                         "native Windows backend returned an unrecognized logical-drive lease"
                     )
-                initializer = binding.assign_to_suspended_process
-            return stack, initializer
+                lineage_planner = binding
+            return stack, lineage_planner
         except BaseException:
             stack.close()
             raise
 
     def create(index: int) -> _ExecutionLane:
-        nonlocal native_initializer, native_worker
+        nonlocal native_lineage_planner, native_worker
         lane_id = f"lane-{index:04d}"
         worker: WorkerSandbox
         stack: ExitStack | None = None
@@ -2302,10 +2302,10 @@ def _prepare_execution_lanes(
                     worker,
                     timeout_seconds=min(initialization_timeout, 300),
                 )
-                stack, initializer = bind_worker(worker)
-                if initializer is not None:
+                stack, lineage_planner = bind_worker(worker)
+                if lineage_planner is not None:
                     raise ClassicProjectError(
-                        "POSIX backend unexpectedly returned a suspended-process initializer"
+                        "POSIX backend unexpectedly returned a Windows lineage planner"
                     )
             except BaseException as original:
                 cleanup_error: BaseException | None = None
@@ -2334,15 +2334,15 @@ def _prepare_execution_lanes(
             with binding_lock:
                 if native_worker is None:
                     candidate = backend.create_worker(backend_workers_root, "producer-graph")
-                    candidate_stack, candidate_initializer = bind_worker(candidate)
+                    candidate_stack, candidate_planner = bind_worker(candidate)
                     if isinstance(backend, NativeWindowsBackend) and (
-                        candidate_initializer is None
+                        candidate_planner is None
                     ):
                         raise ClassicProjectError(
-                            "native Windows lane lacks private DeviceMap assignment"
+                            "native Windows lane lacks a fresh-LUID lineage planner"
                         )
                     native_worker = candidate
-                    native_initializer = candidate_initializer
+                    native_lineage_planner = candidate_planner
                     bindings.append((candidate, candidate_stack))
                 worker = native_worker
 
@@ -2382,7 +2382,7 @@ def _prepare_execution_lanes(
                 lane_id,
                 MappingProxyType(environment),
                 worker,
-                native_initializer,
+                native_lineage_planner,
             )
         except BaseException:
             # The binding is owned by close_created.  The pool records this
@@ -2582,7 +2582,7 @@ def _run(
     timeout: float,
     log: Path,
     cancellation: CancellationToken | None = None,
-    suspended_process_initializer: SuspendedProcessInitializer | None = None,
+    windows_lineage_planner: WindowsLineagePlanner | None = None,
 ) -> tuple[ProcessResult, CommandSpec]:
     spec = CommandSpec.create(
         argv,
@@ -2595,7 +2595,7 @@ def _run(
         supervisor.run(
             spec,
             cancellation=cancellation,
-            suspended_process_initializer=suspended_process_initializer,
+            windows_lineage_planner=windows_lineage_planner,
         ),
         spec,
     )
@@ -3326,8 +3326,8 @@ class ClassicProducerGraphBuildExecutor:
                             self.session_root / "logs" / "warm-dependency-replay" / f"{node.id}.log"
                         ),
                         cancellation=cancellation,
-                        suspended_process_initializer=(
-                            lane.suspended_process_initializer
+                        windows_lineage_planner=(
+                            lane.windows_lineage_planner
                         ),
                     )
                 except Exception as exc:
@@ -3750,7 +3750,7 @@ class ClassicProducerGraphBuildExecutor:
     def _producer_cwd(self, lane: _ExecutionLane, physical: Path) -> Path:
         """Present the mapped DOS cwd to native producers, not its host backing path."""
 
-        if lane.suspended_process_initializer is None:
+        if lane.windows_lineage_planner is None:
             return physical
         if os.name != "nt":
             raise ClassicProjectError(
@@ -5510,7 +5510,7 @@ class ClassicProducerGraphBuildExecutor:
                 timeout=timeout,
                 log=self.session_root / "logs" / log_namespace / f"{node.id}.log",
                 cancellation=cancellation,
-                suspended_process_initializer=lane.suspended_process_initializer,
+                windows_lineage_planner=lane.windows_lineage_planner,
             )
             if node.role is ProducerRole.COMPILER and (
                 compiler_namespace_id is None or include_trace_epoch is None
@@ -5906,7 +5906,7 @@ class ClassicProducerGraphBuildExecutor:
                         / f"{step_id}.log"
                     ),
                     cancellation=cancellation,
-                    suspended_process_initializer=lane.suspended_process_initializer,
+                    windows_lineage_planner=lane.windows_lineage_planner,
                 )
             except Exception as exc:
                 cancellation.raise_if_cancelled()
@@ -6065,7 +6065,7 @@ class ClassicProducerGraphBuildExecutor:
                     timeout=timeout,
                     log=self.session_root / "logs" / "donors" / f"{step_id}.log",
                     cancellation=cancellation,
-                    suspended_process_initializer=lane.suspended_process_initializer,
+                    windows_lineage_planner=lane.windows_lineage_planner,
                 )
                 if capture_dependencies and (
                     donor.request.compiler_additions.include_projection

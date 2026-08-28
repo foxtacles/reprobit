@@ -1,45 +1,34 @@
-"""Run-private DOS device maps for native Windows producer processes.
+"""Run-private DOS drives for native Windows producer trees.
 
-The public Win32 ``DefineDosDevice`` API writes to a logon-session namespace,
-so it cannot isolate a reproducible build from peer processes.  This module is
-the deliberately small native-API boundary used to construct an unnamed Object
-Manager directory and add exactly one private drive mapping.  Once installed as
-a device map, Windows supplies the directory's normal global-DOS fallback; an
-explicit Object Manager shadow is neither needed nor compatible with that role.
-The backend remains responsible for holding the mapped filesystem namespace
-immutable for the same lifetime.
-
-The ntdll entry points used here are not a supported Win32 contract.  Every
-entry point is therefore resolved at runtime, every NTSTATUS is checked, WOW64
-is rejected, and the original process map is retained by handle and compared
-after restoration.  Callers must keep the lease alive until every process to
-which it was assigned has exited.
+The controller validates and seals a physical root without mapping a drive in
+its own logon session. A contained broker receives a fresh LSA logon session,
+proves its ``AuthenticationId`` changed, defines one LUID-local drive, and
+starts the real producer suspended inside a nested Job Object. The mapping
+remains owned until that complete producer tree is empty.
 """
 
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import re
 import stat
+import subprocess
 import sys
 import tempfile
 import textwrap
-from contextlib import AbstractContextManager
+from collections.abc import Mapping
+from contextlib import AbstractContextManager, ExitStack
 from dataclasses import dataclass
 from pathlib import Path
-from threading import Lock
-from typing import Any, Self
+from typing import TYPE_CHECKING, Any, Self
 
-_PROCESS_DEVICE_MAP = 23
-_OBJ_CASE_INSENSITIVE = 0x00000040
-_DIRECTORY_QUERY = 0x0001
-_DIRECTORY_TRAVERSE = 0x0002
-_DIRECTORY_CREATE_OBJECT = 0x0004
-_SYMBOLIC_LINK_QUERY = 0x0001
+if TYPE_CHECKING:
+    from reprobit.process import CommandSpec
+
 _ERROR_FILE_NOT_FOUND = 2
 _ERROR_PATH_NOT_FOUND = 3
-_ERROR_NOT_SAME_OBJECT = 1656
 _MAX_UNICODE_CHARS = 32767
 _CURRENT_PROCESS = -1
 _FILE_READ_ATTRIBUTES = 0x00000080
@@ -48,12 +37,26 @@ _OPEN_EXISTING = 3
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _VOLUME_NAME_NT = 0x00000002
-
-_PROCESS_MAP_LOCK = Lock()
+_DDD_RAW_TARGET_PATH = 0x00000001
+_DDD_REMOVE_DEFINITION = 0x00000002
+_DDD_EXACT_MATCH_ON_REMOVE = 0x00000004
+_DDD_NO_BROADCAST_SYSTEM = 0x00000008
+_CREATE_NEW_PROCESS_GROUP = 0x00000200
+_CREATE_SUSPENDED = 0x00000004
+_CREATE_UNICODE_ENVIRONMENT = 0x00000400
+_LOGON_NETCREDENTIALS_ONLY = 0x00000002
+_STARTF_USESTDHANDLES = 0x00000100
+_TOKEN_ASSIGN_PRIMARY = 0x0001
+_TOKEN_DUPLICATE = 0x0002
+_TOKEN_QUERY = 0x0008
+_TOKEN_STATISTICS = 10
+_SYSTEM_AUTHENTICATION_ID = (0x000003E7, 0)
+_BROKER_DRAIN_TIMEOUT_SECONDS = 5.0
+_DUPLICATE_SAME_ACCESS = 0x00000002
 
 
 class NativeDeviceMapError(RuntimeError):
-    """A native device-map capability or lifetime invariant failed closed."""
+    """A native Windows logical-path or lifetime invariant failed closed."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,152 +67,63 @@ class NativeDeviceMapProbe:
     detail: str
 
 
-class _UnicodeString(ctypes.Structure):
+class _Luid(ctypes.Structure):
+    _fields_ = [("LowPart", ctypes.c_uint32), ("HighPart", ctypes.c_int32)]
+
+
+class _TokenStatistics(ctypes.Structure):
     _fields_ = [
-        ("Length", ctypes.c_uint16),
-        ("MaximumLength", ctypes.c_uint16),
-        ("Buffer", ctypes.c_void_p),
+        ("TokenId", _Luid),
+        ("AuthenticationId", _Luid),
+        ("ExpirationTime", ctypes.c_int64),
+        ("TokenType", ctypes.c_uint32),
+        ("ImpersonationLevel", ctypes.c_uint32),
+        ("DynamicCharged", ctypes.c_uint32),
+        ("DynamicAvailable", ctypes.c_uint32),
+        ("GroupCount", ctypes.c_uint32),
+        ("PrivilegeCount", ctypes.c_uint32),
+        ("ModifiedId", _Luid),
     ]
-
-
-class _ObjectAttributes(ctypes.Structure):
-    _fields_ = [
-        ("Length", ctypes.c_uint32),
-        ("RootDirectory", ctypes.c_void_p),
-        ("ObjectName", ctypes.POINTER(_UnicodeString)),
-        ("Attributes", ctypes.c_uint32),
-        ("SecurityDescriptor", ctypes.c_void_p),
-        ("SecurityQualityOfService", ctypes.c_void_p),
-    ]
-
-
-class _ProcessDeviceMapSet(ctypes.Structure):
-    _fields_ = [("DirectoryHandle", ctypes.c_void_p)]
 
 
 def _handle(value: int) -> ctypes.c_void_p:
     return ctypes.c_void_p(value)
 
 
-def _unicode_string(value: str) -> tuple[ctypes.Array[ctypes.c_wchar], _UnicodeString]:
-    if not value or "\0" in value:
-        raise NativeDeviceMapError("native object names must be non-empty and NUL-free")
-    encoded_length = len(value.encode("utf-16-le"))
-    if encoded_length > 0xFFFC:
-        raise NativeDeviceMapError("native object name exceeds UNICODE_STRING capacity")
-    buffer = ctypes.create_unicode_buffer(value)
-    native = _UnicodeString(
-        encoded_length,
-        encoded_length + 2,
-        ctypes.cast(buffer, ctypes.c_void_p),
-    )
-    return buffer, native
-
-
-def _object_attributes(
-    name: str | None, *, root: int | None = None
-) -> tuple[ctypes.Array[ctypes.c_wchar] | None, _UnicodeString | None, _ObjectAttributes]:
-    buffer: ctypes.Array[ctypes.c_wchar] | None = None
-    native_name: _UnicodeString | None = None
-    name_pointer: Any = None
-    if name is not None:
-        buffer, native_name = _unicode_string(name)
-        name_pointer = ctypes.pointer(native_name)
-    attributes = _ObjectAttributes(
-        ctypes.sizeof(_ObjectAttributes),
-        None if root is None else _handle(root),
-        name_pointer,
-        _OBJ_CASE_INSENSITIVE,
-        None,
-        None,
-    )
-    return buffer, native_name, attributes
-
-
-def _status_hex(status: int) -> str:
-    return f"0x{status & 0xFFFFFFFF:08X}"
-
-
-class _NativeApi:
-    """Exact ctypes bindings for the small native surface used by the lease."""
+class _LineageApi:
+    """Narrow supported Win32 surface used inside lineage brokers."""
 
     def __init__(self) -> None:
         if os.name != "nt":
-            raise NativeDeviceMapError("native process device maps require Windows")
-        if ctypes.sizeof(ctypes.c_void_p) != 8:
-            # ProcessDeviceMap is known to be broken through the WOW64 thunk.
-            # Requiring a native 64-bit controller is both simpler and fail-closed.
-            raise NativeDeviceMapError(
-                "native process device maps require a 64-bit Python controller"
-            )
-        if ctypes.sizeof(_ProcessDeviceMapSet) != ctypes.sizeof(ctypes.c_void_p):
-            raise NativeDeviceMapError(
-                "native process device-map binding has an unexpected layout"
-            )
+            raise NativeDeviceMapError("Windows lineage namespaces require Windows")
         win_dll = getattr(ctypes, "WinDLL", None)
         if win_dll is None:
             raise NativeDeviceMapError("ctypes WinDLL is unavailable")
         try:
-            self.ntdll = win_dll("ntdll", use_last_error=True)
             self.kernel32 = win_dll("kernel32", use_last_error=True)
-            self.kernelbase = win_dll("kernelbase", use_last_error=True)
-            self.NtOpenDirectoryObject = self.ntdll.NtOpenDirectoryObject
-            self.NtCreateDirectoryObjectEx = self.ntdll.NtCreateDirectoryObjectEx
-            self.NtCreateSymbolicLinkObject = self.ntdll.NtCreateSymbolicLinkObject
-            self.NtQuerySymbolicLinkObject = self.ntdll.NtQuerySymbolicLinkObject
-            self.NtSetInformationProcess = self.ntdll.NtSetInformationProcess
-            self.NtClose = self.ntdll.NtClose
-            self.RtlNtStatusToDosError = self.ntdll.RtlNtStatusToDosError
+            self.advapi32 = win_dll("advapi32", use_last_error=True)
             self.QueryDosDeviceW = self.kernel32.QueryDosDeviceW
+            self.DefineDosDeviceW = self.kernel32.DefineDosDeviceW
+            self.CloseHandle = self.kernel32.CloseHandle
             self.CreateFileW = self.kernel32.CreateFileW
             self.GetFinalPathNameByHandleW = self.kernel32.GetFinalPathNameByHandleW
-            self.GetCurrentProcess = self.kernel32.GetCurrentProcess
-            self.IsWow64Process2 = self.kernel32.IsWow64Process2
-            self.CompareObjectHandles = self.kernelbase.CompareObjectHandles
+            self.OpenProcessToken = self.advapi32.OpenProcessToken
+            self.GetTokenInformation = self.advapi32.GetTokenInformation
         except AttributeError as error:
             raise NativeDeviceMapError(
-                f"required native device-map entry point is unavailable: {error}"
+                f"required lineage-namespace entry point is unavailable: {error}"
             ) from error
 
         pointer = ctypes.c_void_p
         uint32 = ctypes.c_uint32
         self._get_last_error = getattr(ctypes, "get_last_error", lambda: 0)
         self._set_last_error = getattr(ctypes, "set_last_error", lambda _value: None)
-        self.NtOpenDirectoryObject.argtypes = [
-            ctypes.POINTER(pointer),
-            uint32,
-            ctypes.POINTER(_ObjectAttributes),
-        ]
-        self.NtOpenDirectoryObject.restype = ctypes.c_int32
-        self.NtCreateDirectoryObjectEx.argtypes = [
-            ctypes.POINTER(pointer),
-            uint32,
-            ctypes.POINTER(_ObjectAttributes),
-            pointer,
-            uint32,
-        ]
-        self.NtCreateDirectoryObjectEx.restype = ctypes.c_int32
-        self.NtCreateSymbolicLinkObject.argtypes = [
-            ctypes.POINTER(pointer),
-            uint32,
-            ctypes.POINTER(_ObjectAttributes),
-            ctypes.POINTER(_UnicodeString),
-        ]
-        self.NtCreateSymbolicLinkObject.restype = ctypes.c_int32
-        self.NtQuerySymbolicLinkObject.argtypes = [
-            pointer,
-            ctypes.POINTER(_UnicodeString),
-            ctypes.POINTER(uint32),
-        ]
-        self.NtQuerySymbolicLinkObject.restype = ctypes.c_int32
-        self.NtSetInformationProcess.argtypes = [pointer, uint32, pointer, uint32]
-        self.NtSetInformationProcess.restype = ctypes.c_int32
-        self.NtClose.argtypes = [pointer]
-        self.NtClose.restype = ctypes.c_int32
-        self.RtlNtStatusToDosError.argtypes = [ctypes.c_int32]
-        self.RtlNtStatusToDosError.restype = uint32
         self.QueryDosDeviceW.argtypes = [ctypes.c_wchar_p, ctypes.c_wchar_p, uint32]
         self.QueryDosDeviceW.restype = uint32
+        self.DefineDosDeviceW.argtypes = [uint32, ctypes.c_wchar_p, ctypes.c_wchar_p]
+        self.DefineDosDeviceW.restype = ctypes.c_int
+        self.CloseHandle.argtypes = [pointer]
+        self.CloseHandle.restype = ctypes.c_int
         self.CreateFileW.argtypes = [
             ctypes.c_wchar_p,
             uint32,
@@ -227,129 +141,61 @@ class _NativeApi:
             uint32,
         ]
         self.GetFinalPathNameByHandleW.restype = uint32
-        self.GetCurrentProcess.argtypes = []
-        self.GetCurrentProcess.restype = pointer
-        self.IsWow64Process2.argtypes = [
+        self.OpenProcessToken.argtypes = [pointer, uint32, ctypes.POINTER(pointer)]
+        self.OpenProcessToken.restype = ctypes.c_int
+        self.GetTokenInformation.argtypes = [
             pointer,
-            ctypes.POINTER(ctypes.c_uint16),
-            ctypes.POINTER(ctypes.c_uint16),
+            ctypes.c_int,
+            pointer,
+            uint32,
+            ctypes.POINTER(uint32),
         ]
-        self.IsWow64Process2.restype = ctypes.c_int
-        self.CompareObjectHandles.argtypes = [pointer, pointer]
-        self.CompareObjectHandles.restype = ctypes.c_int
+        self.GetTokenInformation.restype = ctypes.c_int
 
-        process_machine = ctypes.c_uint16()
-        native_machine = ctypes.c_uint16()
-        if not self.IsWow64Process2(
-            self.GetCurrentProcess(),
-            ctypes.byref(process_machine),
-            ctypes.byref(native_machine),
+    def close_handle(self, handle: int, label: str) -> None:
+        self._set_last_error(0)
+        if not self.CloseHandle(_handle(handle)):
+            raise NativeDeviceMapError(
+                f"CloseHandle({label}) failed with Win32 error "
+                f"{self._get_last_error()}"
+            )
+
+    def process_authentication_id(self, process: int) -> tuple[int, int]:
+        """Return the target token's exact local-DOS-namespace identity."""
+
+        token = ctypes.c_void_p()
+        self._set_last_error(0)
+        if not self.OpenProcessToken(
+            _handle(process), _TOKEN_QUERY, ctypes.byref(token)
         ):
             raise NativeDeviceMapError(
-                f"IsWow64Process2 failed with Win32 error {self._get_last_error()}"
+                f"OpenProcessToken failed with Win32 error {self._get_last_error()}"
             )
-        if process_machine.value != 0:
-            raise NativeDeviceMapError("WOW64 cannot safely set ProcessDeviceMap")
-
-    def _check(self, status: int, operation: str) -> None:
-        if status >= 0:
-            return
-        win32 = int(self.RtlNtStatusToDosError(status))
-        raise NativeDeviceMapError(
-            f"{operation} failed with NTSTATUS {_status_hex(status)} (Win32 {win32})"
-        )
-
-    def open_current_directory(self) -> int:
-        _buffer, _name, attributes = _object_attributes(r"\??")
-        result = ctypes.c_void_p()
-        status = int(
-            self.NtOpenDirectoryObject(
-                ctypes.byref(result),
-                _DIRECTORY_QUERY | _DIRECTORY_TRAVERSE,
-                ctypes.byref(attributes),
-            )
-        )
-        self._check(status, r"NtOpenDirectoryObject(\??)")
-        if result.value is None:
-            raise NativeDeviceMapError("NtOpenDirectoryObject returned a null handle")
-        return int(result.value)
-
-    def create_private_directory(self) -> int:
-        _buffer, _name, attributes = _object_attributes(None)
-        result = ctypes.c_void_p()
-        status = int(
-            self.NtCreateDirectoryObjectEx(
-                ctypes.byref(result),
-                _DIRECTORY_QUERY | _DIRECTORY_TRAVERSE | _DIRECTORY_CREATE_OBJECT,
-                ctypes.byref(attributes),
-                None,
-                0,
-            )
-        )
-        self._check(status, "NtCreateDirectoryObjectEx")
-        if result.value is None:
-            raise NativeDeviceMapError("NtCreateDirectoryObjectEx returned a null handle")
-        return int(result.value)
-
-    def create_symbolic_link(self, directory: int, name: str, target: str) -> int:
-        _name_buffer, _name, attributes = _object_attributes(name, root=directory)
-        _target_buffer, target_string = _unicode_string(target)
-        result = ctypes.c_void_p()
-        status = int(
-            self.NtCreateSymbolicLinkObject(
-                ctypes.byref(result),
-                _SYMBOLIC_LINK_QUERY,
-                ctypes.byref(attributes),
-                ctypes.byref(target_string),
-            )
-        )
-        self._check(status, f"NtCreateSymbolicLinkObject({name})")
-        if result.value is None:
-            raise NativeDeviceMapError(
-                "NtCreateSymbolicLinkObject returned a null handle"
-            )
-        return int(result.value)
-
-    def query_symbolic_link(self, link: int) -> str:
-        buffer = ctypes.create_unicode_buffer(_MAX_UNICODE_CHARS)
-        result = _UnicodeString(
-            0,
-            ctypes.sizeof(buffer),
-            ctypes.cast(buffer, ctypes.c_void_p),
-        )
-        returned = ctypes.c_uint32()
-        status = int(
-            self.NtQuerySymbolicLinkObject(
-                _handle(link), ctypes.byref(result), ctypes.byref(returned)
-            )
-        )
-        self._check(status, "NtQuerySymbolicLinkObject")
-        if result.Length % 2 or result.Length > result.MaximumLength:
-            raise NativeDeviceMapError("NtQuerySymbolicLinkObject returned invalid length")
-        return ctypes.wstring_at(buffer, result.Length // 2)
-
-    def set_process_map(self, process: int, directory: int) -> None:
-        information = _ProcessDeviceMapSet(_handle(directory))
-        status = int(
-            self.NtSetInformationProcess(
-                _handle(process),
-                _PROCESS_DEVICE_MAP,
-                ctypes.byref(information),
-                ctypes.sizeof(information),
-            )
-        )
-        self._check(status, "NtSetInformationProcess(ProcessDeviceMap)")
-
-    def same_object(self, first: int, second: int) -> bool:
-        self._set_last_error(0)
-        if self.CompareObjectHandles(_handle(first), _handle(second)):
-            return True
-        error = int(self._get_last_error())
-        if error == _ERROR_NOT_SAME_OBJECT:
-            return False
-        raise NativeDeviceMapError(
-            f"CompareObjectHandles failed with Win32 error {error}"
-        )
+        if token.value is None:
+            raise NativeDeviceMapError("OpenProcessToken returned a null handle")
+        try:
+            statistics = _TokenStatistics()
+            returned = ctypes.c_uint32()
+            self._set_last_error(0)
+            if not self.GetTokenInformation(
+                token,
+                _TOKEN_STATISTICS,
+                ctypes.byref(statistics),
+                ctypes.sizeof(statistics),
+                ctypes.byref(returned),
+            ):
+                raise NativeDeviceMapError(
+                    "GetTokenInformation(TokenStatistics) failed with Win32 error "
+                    f"{self._get_last_error()}"
+                )
+            if returned.value != ctypes.sizeof(statistics):
+                raise NativeDeviceMapError(
+                    "GetTokenInformation(TokenStatistics) returned an unexpected size"
+                )
+            authentication_id = statistics.AuthenticationId
+            return int(authentication_id.LowPart), int(authentication_id.HighPart)
+        finally:
+            self.close_handle(int(token.value), "process-token")
 
     def query_drive(self, drive: str) -> str | None:
         buffer = ctypes.create_unicode_buffer(_MAX_UNICODE_CHARS)
@@ -364,8 +210,51 @@ class _NativeApi:
             f"QueryDosDeviceW({drive}) failed with Win32 error {error}"
         )
 
+    def define_local_drive(self, drive: str, target: str) -> None:
+        """Define and verify one mapping in the caller's LUID-local namespace."""
+
+        if self.query_drive(drive) is not None:
+            raise NativeDeviceMapError(
+                f"lineage-local logical drive {drive} already exists"
+            )
+        flags = _DDD_RAW_TARGET_PATH | _DDD_NO_BROADCAST_SYSTEM
+        self._set_last_error(0)
+        if not self.DefineDosDeviceW(flags, drive, target):
+            raise NativeDeviceMapError(
+                f"DefineDosDeviceW({drive}) failed with Win32 error "
+                f"{self._get_last_error()}"
+            )
+        try:
+            if self.query_drive(drive) != target:
+                raise NativeDeviceMapError(
+                    "lineage-local logical drive differs from its admitted target"
+                )
+        except BaseException:
+            self.remove_local_drive(drive, target)
+            raise
+
+    def remove_local_drive(self, drive: str, target: str) -> None:
+        """Remove exactly the mapping created by :meth:`define_local_drive`."""
+
+        flags = (
+            _DDD_RAW_TARGET_PATH
+            | _DDD_REMOVE_DEFINITION
+            | _DDD_EXACT_MATCH_ON_REMOVE
+            | _DDD_NO_BROADCAST_SYSTEM
+        )
+        self._set_last_error(0)
+        if not self.DefineDosDeviceW(flags, drive, target):
+            raise NativeDeviceMapError(
+                f"DefineDosDeviceW removal for {drive} failed with Win32 error "
+                f"{self._get_last_error()}"
+            )
+        if self.query_drive(drive) == target:
+            raise NativeDeviceMapError(
+                "lineage-local logical drive remained after exact removal"
+            )
+
     def final_nt_path(self, path: Path) -> str:
-        """Resolve one directory handle to its final NT device-object path."""
+        """Seal one directory to its final NT device-object path."""
 
         self._set_last_error(0)
         raw_handle = self.CreateFileW(
@@ -409,79 +298,48 @@ class _NativeApi:
                     raise NativeDeviceMapError(
                         "native logical-drive root exceeds Windows path capacity"
                     )
-                # On insufficient space the wide API returns the required
-                # capacity including its terminator.
                 capacity = length
         finally:
-            self.close(handle, "logical-drive-root")
+            self.close_handle(handle, "logical-drive-root")
 
-    def close(self, handle: int, label: str) -> None:
-        status = int(self.NtClose(_handle(handle)))
-        self._check(status, f"NtClose({label})")
 
 
 def probe_native_device_map() -> NativeDeviceMapProbe:
-    """Probe exports and harmless construction, without mutating a DeviceMap."""
+    """Probe the supported Win32 surface without creating a drive mapping."""
 
     if os.name != "nt":
-        return NativeDeviceMapProbe(False, "native process device maps require Windows")
-    api: _NativeApi | None = None
-    original: int | None = None
-    private: int | None = None
-    result: NativeDeviceMapProbe
+        return NativeDeviceMapProbe(False, "native lineage drives require Windows")
     try:
-        api = _NativeApi()
-        original = api.open_current_directory()
-        private = api.create_private_directory()
-        current = api.open_current_directory()
-        try:
-            if not api.same_object(current, original):
-                raise NativeDeviceMapError(
-                    "current DOS directory identity changed during feature probe"
-                )
-        finally:
-            api.close(current, "probe-current-directory")
-        result = NativeDeviceMapProbe(
+        authentication_id = _LineageApi().process_authentication_id(_CURRENT_PROCESS)
+        if authentication_id == _SYSTEM_AUTHENTICATION_ID:
+            raise NativeDeviceMapError(
+                "LocalSystem uses the global DOS namespace and is not a safe lineage controller"
+            )
+        return NativeDeviceMapProbe(
             True,
-            "anonymous private-directory primitives available; map mutation unprobed",
+            "fresh-LUID local-drive primitives available; execution unprobed",
         )
     except (NativeDeviceMapError, OSError) as error:
-        result = NativeDeviceMapProbe(False, str(error))
-    if api is not None:
-        cleanup_errors: list[BaseException] = []
-        for handle, label in (
-            (private, "probe-private-directory"),
-            (original, "probe-original-directory"),
-        ):
-            if handle is None:
-                continue
-            try:
-                api.close(handle, label)
-            except (NativeDeviceMapError, OSError) as error:
-                cleanup_errors.append(error)
-        if cleanup_errors:
-            return NativeDeviceMapProbe(
-                False,
-                "feature-probe cleanup failed: "
-                + "; ".join(str(error) for error in cleanup_errors),
-            )
-    return result
+        return NativeDeviceMapProbe(False, str(error))
 
 
 def probe_native_device_map_execution() -> NativeDeviceMapProbe:
-    """Mutate one temporary map and prove direct-child plus descendant visibility."""
+    """Prove one fresh-LUID drive through a producer and descendant."""
 
     primitives = probe_native_device_map()
     if not primitives.available:
         return primitives
     try:
-        api = _NativeApi()
+        api = _LineageApi()
         drive = next(
             (letter for letter in "RQPONMLKJIHGFEDBA" if api.query_drive(f"{letter}:") is None),
             None,
         )
         if drive is None:
-            return NativeDeviceMapProbe(False, "no free logical drive is available for probing")
+            return NativeDeviceMapProbe(
+                False,
+                "no controller-unmapped logical-drive candidate is available for probing",
+            )
 
         from reprobit.process import CommandSpec, ProcessSupervisor
 
@@ -496,6 +354,9 @@ def probe_native_device_map_execution() -> NativeDeviceMapProbe:
                 f"""
                 import subprocess
                 import sys
+                from pathlib import Path
+
+                print(Path(r'{drive}:\\marker.txt').read_text(encoding='ascii'))
 
                 result = subprocess.run(
                     [sys.executable, "-c", {grandchild!r}],
@@ -522,30 +383,26 @@ def probe_native_device_map_execution() -> NativeDeviceMapProbe:
                         environment=environment,
                         timeout_seconds=20,
                     ),
-                    suspended_process_initializer=lease.assign_to_suspended_process,
+                    windows_lineage_planner=lease,
                 )
-        if result.output.strip() != b"private-descendant":
+        if result.output.splitlines() != [
+            b"private-descendant",
+            b"private-descendant",
+        ]:
             return NativeDeviceMapProbe(
                 False,
-                "private DeviceMap did not remain visible through a child descendant",
+                "fresh-LUID drive did not remain visible through a child descendant",
             )
         return NativeDeviceMapProbe(
             True,
-            "private DeviceMap direct assignment and descendant inheritance verified",
+            "fresh-LUID local drive and descendant lifetime verified",
         )
     except Exception as error:
-        return NativeDeviceMapProbe(False, f"private DeviceMap execution probe failed: {error}")
+        return NativeDeviceMapProbe(False, f"lineage-drive execution probe failed: {error}")
 
 
 class NativeDeviceMapLease(AbstractContextManager["NativeDeviceMapLease"]):
-    """One process-private logical drive with exact original-map restoration.
-
-    ``assign_to_suspended_process`` exists because modern Win32 process
-    creation must not be assumed to inherit a parent's custom DeviceMap.  The
-    caller must invoke it after ``CREATE_SUSPENDED`` and before resuming the
-    target.  This lease also installs the map in the controller process for its
-    bounded lifetime so direct logical-path checks use the identical namespace.
-    """
+    """One sealed physical root plus a descendant-safe producer namespace."""
 
     def __init__(self, root: Path | str, drive_letter: str) -> None:
         if not isinstance(drive_letter, str) or not re.fullmatch(
@@ -554,45 +411,17 @@ class NativeDeviceMapLease(AbstractContextManager["NativeDeviceMapLease"]):
             raise NativeDeviceMapError("logical drive must be one ASCII letter")
         self.root = Path(root)
         self.drive_letter = drive_letter.upper()
-        self._api: _NativeApi | None = None
-        self._original: int | None = None
-        self._private: int | None = None
-        self._link: int | None = None
         self._active = False
-        self._owns_lock = False
         self._target: str | None = None
-
-    def _require_api(self) -> _NativeApi:
-        if self._api is None:
-            raise NativeDeviceMapError("native device-map lease is not active")
-        return self._api
-
-    def _assert_current_map(self, expected: int, phase: str) -> None:
-        api = self._require_api()
-        current = api.open_current_directory()
-        try:
-            if not api.same_object(current, expected):
-                raise NativeDeviceMapError(
-                    f"current DOS directory identity differs {phase}"
-                )
-        finally:
-            api.close(current, f"{phase}-current-directory")
+        self._controller_authentication_id: tuple[int, int] | None = None
 
     def open(self) -> None:
-        if self._active or self._owns_lock:
-            raise NativeDeviceMapError("native device-map lease is already active")
-        if not _PROCESS_MAP_LOCK.acquire(blocking=False):
-            raise NativeDeviceMapError(
-                "another native device-map lease is active in this process"
-            )
-        self._owns_lock = True
+        if self._active:
+            raise NativeDeviceMapError("native lineage lease is already active")
         try:
-            api = _NativeApi()
-            self._api = api
+            api = _LineageApi()
             if not self.root.is_absolute():
-                raise NativeDeviceMapError(
-                    "native logical-drive root must be absolute"
-                )
+                raise NativeDeviceMapError("native logical-drive root must be absolute")
             try:
                 root_metadata = self.root.lstat()
             except OSError as error:
@@ -617,111 +446,56 @@ class NativeDeviceMapLease(AbstractContextManager["NativeDeviceMapLease"]):
                 raise NativeDeviceMapError(
                     f"native logical-drive root is not a plain directory: {resolved}"
                 )
-            physical = str(resolved)
-            if not re.match(r"^[A-Za-z]:\\", physical):
+            if re.match(r"^[A-Za-z]:\\", str(resolved)) is None:
                 raise NativeDeviceMapError(
                     "native logical-drive root must reside on a local drive"
                 )
-            device = f"{self.drive_letter}:"
-            conflict = api.query_drive(device)
-            if conflict is not None:
+            authentication_id = api.process_authentication_id(_CURRENT_PROCESS)
+            if authentication_id == _SYSTEM_AUTHENTICATION_ID:
                 raise NativeDeviceMapError(
-                    f"native logical drive {device} is already mapped to {conflict}"
+                    "LocalSystem uses the global DOS namespace and cannot isolate a producer"
                 )
-            self._original = api.open_current_directory()
             self._target = api.final_nt_path(resolved)
-            self._private = api.create_private_directory()
-            self._link = api.create_symbolic_link(
-                self._private, device, self._target
-            )
-            if api.query_symbolic_link(self._link) != self._target:
-                raise NativeDeviceMapError(
-                    "private logical-drive link differs from its admitted target"
-                )
-            api.set_process_map(_CURRENT_PROCESS, self._private)
+            self._controller_authentication_id = authentication_id
             self._active = True
-            self._assert_current_map(self._private, "after installation")
-            if api.query_drive(device) != self._target:
-                raise NativeDeviceMapError(
-                    "private logical drive does not resolve to its admitted target"
-                )
-        except BaseException as original_error:
-            try:
-                self._rollback_open()
-            except BaseException as cleanup_error:
-                original_error.add_note(
-                    f"native device-map rollback also failed: {cleanup_error}"
-                )
+        except BaseException:
+            self._target = None
+            self._controller_authentication_id = None
             raise
 
-    def assign_to_suspended_process(self, process_handle: int) -> None:
-        """Install this exact map in an admitted process before its first resume."""
+    def windows_lineage_plan(self, spec: CommandSpec) -> bytes:
+        """Serialize the producer contract for the inherited-handle broker."""
 
         if (
             not self._active
-            or self._private is None
-            or isinstance(process_handle, bool)
-            or process_handle <= 0
+            or self._target is None
+            or self._controller_authentication_id is None
         ):
             raise NativeDeviceMapError(
-                "device-map assignment requires an active lease and process handle"
+                "Windows lineage planning requires an active lineage lease"
             )
-        self._require_api().set_process_map(process_handle, self._private)
-
-    def _close_handle(self, attribute: str, label: str) -> None:
-        handle = getattr(self, attribute)
-        if handle is None:
-            return
-        self._require_api().close(handle, label)
-        setattr(self, attribute, None)
-
-    def _release_resources(self) -> None:
-        errors: list[BaseException] = []
-        for attribute, label in (
-            ("_link", "private-logical-drive"),
-            ("_private", "private-directory"),
-            ("_original", "original-directory"),
-        ):
-            try:
-                self._close_handle(attribute, label)
-            except BaseException as error:
-                errors.append(error)
-        self._api = None
-        self._target = None
-        if self._owns_lock:
-            self._owns_lock = False
-            _PROCESS_MAP_LOCK.release()
-        if errors:
-            raise NativeDeviceMapError(
-                "; ".join(str(error) for error in errors)
-            ) from errors[0]
-
-    def _rollback_open(self) -> None:
-        if self._active:
-            if self._original is None:
-                raise NativeDeviceMapError(
-                    "active private map lost its original-directory handle"
-                )
-            self._require_api().set_process_map(_CURRENT_PROCESS, self._original)
-            self._assert_current_map(self._original, "after rollback")
-            self._active = False
-        self._release_resources()
+        document = {
+            "argv": list(spec.argv),
+            "controller_authentication_id": list(
+                self._controller_authentication_id
+            ),
+            "cwd": str(spec.cwd),
+            "drive": f"{self.drive_letter}:",
+            "environment": [list(entry) for entry in spec.environment],
+            "target": self._target,
+            "version": 1,
+        }
+        return json.dumps(
+            document,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
 
     def close(self) -> None:
-        if not self._active and not self._owns_lock:
-            return
-        if self._active:
-            if self._original is None:
-                raise NativeDeviceMapError(
-                    "active private map lost its original-directory handle"
-                )
-            # Restoration and identity proof happen before any object handle is
-            # released.  On failure handles and the process lock remain owned so
-            # a caller can retry instead of silently continuing in an unknown map.
-            self._require_api().set_process_map(_CURRENT_PROCESS, self._original)
-            self._assert_current_map(self._original, "after restoration")
-            self._active = False
-        self._release_resources()
+        self._active = False
+        self._target = None
+        self._controller_authentication_id = None
 
     def __enter__(self) -> Self:
         self.open()
@@ -731,6 +505,503 @@ class NativeDeviceMapLease(AbstractContextManager["NativeDeviceMapLease"]):
         self.close()
 
 
+def _lineage_inner_command() -> tuple[str, ...]:
+    return (
+        sys.executable,
+        "-I",
+        "-m",
+        "reprobit.native_device_map",
+        "--lineage-inner",
+    )
+
+
+def _minimal_broker_environment(
+    source: Mapping[str, str],
+) -> tuple[tuple[str, str], ...]:
+    folded = {key.casefold(): value for key, value in source.items()}
+    if "systemroot" not in folded:
+        raise NativeDeviceMapError("Windows lineage broker environment lacks SystemRoot")
+    return tuple(
+        (name, folded[name.casefold()])
+        for name in ("SystemRoot", "WINDIR")
+        if name.casefold() in folded
+    )
+
+
+def _serialize_windows_environment(
+    entries: tuple[tuple[str, str], ...],
+) -> str:
+    seen: set[str] = set()
+    normalized: list[tuple[str, str]] = []
+    for key, value in entries:
+        if not key or "=" in key or "\0" in key or "\0" in value:
+            raise NativeDeviceMapError("Windows lineage broker environment is invalid")
+        folded = key.casefold()
+        if folded in seen:
+            raise NativeDeviceMapError(
+                f"duplicate Windows lineage broker environment key: {key}"
+            )
+        seen.add(folded)
+        normalized.append((key, value))
+    ordered = sorted(normalized, key=lambda entry: (entry[0].casefold(), entry[0]))
+    return "\0".join(f"{key}={value}" for key, value in ordered) + "\0\0"
+
+
+def _duplicate_standard_handles(
+    kernel32: Any,
+    api: _LineageApi,
+    stack: ExitStack,
+) -> tuple[int, int, int]:
+    """Create inheritable copies for STARTF_USESTDHANDLES."""
+
+    current_process = kernel32.GetCurrentProcess()
+    invalid = ctypes.c_void_p(-1).value
+    duplicated: list[int] = []
+    for identifier, label in (
+        (-10, "broker-stdin"),
+        (-11, "broker-stdout"),
+        (-12, "broker-stderr"),
+    ):
+        source = kernel32.GetStdHandle(ctypes.c_uint32(identifier & 0xFFFFFFFF))
+        if source in {None, invalid}:
+            raise NativeDeviceMapError(
+                f"Windows lineage broker lacks valid {label.removeprefix('broker-')}"
+            )
+        target = ctypes.c_void_p()
+        if not kernel32.DuplicateHandle(
+            current_process,
+            source,
+            current_process,
+            ctypes.byref(target),
+            0,
+            True,
+            _DUPLICATE_SAME_ACCESS,
+        ):
+            raise NativeDeviceMapError(
+                f"DuplicateHandle({label}) failed with Win32 error "
+                f"{api._get_last_error()}"
+            )
+        if target.value is None:
+            raise NativeDeviceMapError(f"DuplicateHandle({label}) returned null")
+        handle = int(target.value)
+        stack.callback(api.close_handle, handle, label)
+        duplicated.append(handle)
+    return duplicated[0], duplicated[1], duplicated[2]
+
+
+
+def _read_lineage_plan() -> tuple[dict[str, Any], CommandSpec]:
+    """Read and validate the broker contract from the inherited input handle."""
+
+    from reprobit.process import CommandSpec
+
+    payload = sys.stdin.buffer.read(16 * 1024 * 1024 + 1)
+    if not payload or len(payload) > 16 * 1024 * 1024:
+        raise NativeDeviceMapError("Windows lineage plan is absent or too large")
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise NativeDeviceMapError("Windows lineage plan is not valid UTF-8 JSON") from error
+    if not isinstance(document, dict) or set(document) != {
+        "argv",
+        "controller_authentication_id",
+        "cwd",
+        "drive",
+        "environment",
+        "target",
+        "version",
+    }:
+        raise NativeDeviceMapError("Windows lineage plan has an unexpected shape")
+    if document["version"] != 1:
+        raise NativeDeviceMapError("Windows lineage plan version is unsupported")
+    argv = document["argv"]
+    environment = document["environment"]
+    if not isinstance(argv, list) or not all(isinstance(value, str) for value in argv):
+        raise NativeDeviceMapError("Windows lineage argv is invalid")
+    if not isinstance(environment, list) or not all(
+        isinstance(entry, list)
+        and len(entry) == 2
+        and all(isinstance(value, str) for value in entry)
+        for entry in environment
+    ):
+        raise NativeDeviceMapError("Windows lineage environment is invalid")
+    spec = CommandSpec.create(
+        argv,
+        cwd=document["cwd"],
+        environment=[(entry[0], entry[1]) for entry in environment],
+    )
+    return document, spec
+
+
+def _run_logon_broker() -> int:
+    """Launch the mapping broker in one fresh, verified LSA logon session."""
+
+    if os.name != "nt":
+        raise NativeDeviceMapError("Windows lineage broker requires native Windows")
+    from ctypes import wintypes
+
+    class StartupInfo(ctypes.Structure):
+        _fields_ = [
+            ("cb", wintypes.DWORD),
+            ("lpReserved", wintypes.LPWSTR),
+            ("lpDesktop", wintypes.LPWSTR),
+            ("lpTitle", wintypes.LPWSTR),
+            ("dwX", wintypes.DWORD),
+            ("dwY", wintypes.DWORD),
+            ("dwXSize", wintypes.DWORD),
+            ("dwYSize", wintypes.DWORD),
+            ("dwXCountChars", wintypes.DWORD),
+            ("dwYCountChars", wintypes.DWORD),
+            ("dwFillAttribute", wintypes.DWORD),
+            ("dwFlags", wintypes.DWORD),
+            ("wShowWindow", wintypes.WORD),
+            ("cbReserved2", wintypes.WORD),
+            ("lpReserved2", ctypes.POINTER(ctypes.c_ubyte)),
+            ("hStdInput", wintypes.HANDLE),
+            ("hStdOutput", wintypes.HANDLE),
+            ("hStdError", wintypes.HANDLE),
+        ]
+
+    class ProcessInformation(ctypes.Structure):
+        _fields_ = [
+            ("hProcess", wintypes.HANDLE),
+            ("hThread", wintypes.HANDLE),
+            ("dwProcessId", wintypes.DWORD),
+            ("dwThreadId", wintypes.DWORD),
+        ]
+
+    win_dll = getattr(ctypes, "WinDLL", None)
+    if win_dll is None:
+        raise NativeDeviceMapError("ctypes WinDLL is unavailable")
+    kernel32 = win_dll("kernel32", use_last_error=True)
+    advapi32 = win_dll("advapi32", use_last_error=True)
+    pointer = ctypes.c_void_p
+    uint32 = ctypes.c_uint32
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = pointer
+    kernel32.GetStdHandle.argtypes = [uint32]
+    kernel32.GetStdHandle.restype = pointer
+    kernel32.DuplicateHandle.argtypes = [
+        pointer,
+        pointer,
+        pointer,
+        ctypes.POINTER(pointer),
+        uint32,
+        ctypes.c_int,
+        uint32,
+    ]
+    kernel32.DuplicateHandle.restype = ctypes.c_int
+    kernel32.ResumeThread.argtypes = [pointer]
+    kernel32.ResumeThread.restype = uint32
+    kernel32.WaitForSingleObject.argtypes = [pointer, uint32]
+    kernel32.WaitForSingleObject.restype = uint32
+    kernel32.GetExitCodeProcess.argtypes = [pointer, ctypes.POINTER(uint32)]
+    kernel32.GetExitCodeProcess.restype = ctypes.c_int
+    kernel32.TerminateProcess.argtypes = [pointer, uint32]
+    kernel32.TerminateProcess.restype = ctypes.c_int
+    kernel32.CloseHandle.argtypes = [pointer]
+    kernel32.CloseHandle.restype = ctypes.c_int
+    advapi32.OpenProcessToken.argtypes = [pointer, uint32, ctypes.POINTER(pointer)]
+    advapi32.OpenProcessToken.restype = ctypes.c_int
+    advapi32.CreateProcessWithTokenW.argtypes = [
+        pointer,
+        uint32,
+        ctypes.c_wchar_p,
+        ctypes.c_wchar_p,
+        uint32,
+        pointer,
+        ctypes.c_wchar_p,
+        ctypes.POINTER(StartupInfo),
+        ctypes.POINTER(ProcessInformation),
+    ]
+    advapi32.CreateProcessWithTokenW.restype = ctypes.c_int
+    get_last_error = getattr(ctypes, "get_last_error", lambda: 0)
+
+    command = _lineage_inner_command()
+    command_line = subprocess.list2cmdline(command)
+    if len(command_line) > 1023:
+        raise NativeDeviceMapError(
+            "internal broker exceeds CreateProcessWithTokenW's command-line limit"
+    )
+    command_buffer = ctypes.create_unicode_buffer(command_line)
+    environment = _serialize_windows_environment(
+        _minimal_broker_environment(os.environ)
+    )
+    environment_buffer = (ctypes.c_wchar * len(environment))(*environment)
+    startup = StartupInfo()
+    startup.cb = ctypes.sizeof(startup)
+    startup.dwFlags = _STARTF_USESTDHANDLES
+
+    api = _LineageApi()
+    parent_authentication_id = api.process_authentication_id(_CURRENT_PROCESS)
+    if parent_authentication_id == _SYSTEM_AUTHENTICATION_ID:
+        raise NativeDeviceMapError(
+            "LocalSystem uses the global DOS namespace and is not a safe lineage broker"
+        )
+    token = pointer()
+    process = ProcessInformation()
+
+    def close_created_handles(primary_error: BaseException | None = None) -> None:
+        cleanup_errors: list[str] = []
+        for attribute, label in (
+            ("hThread", "inner-thread"),
+            ("hProcess", "inner-process"),
+        ):
+            handle = getattr(process, attribute)
+            if not handle:
+                continue
+            if kernel32.CloseHandle(handle):
+                setattr(process, attribute, None)
+            else:
+                cleanup_errors.append(
+                    f"CloseHandle({label}) failed with Win32 error {get_last_error()}"
+                )
+        if not cleanup_errors:
+            return
+        if primary_error is not None:
+            for cleanup_error in cleanup_errors:
+                primary_error.add_note(f"inner broker cleanup also failed: {cleanup_error}")
+            return
+        failure = NativeDeviceMapError("inner broker handle cleanup failed")
+        for cleanup_error in cleanup_errors:
+            failure.add_note(cleanup_error)
+        raise failure
+
+    def cleanup_created_process(primary_error: BaseException) -> None:
+        cleanup_errors: list[str] = []
+        if process.hProcess:
+            if not kernel32.TerminateProcess(process.hProcess, 125):
+                cleanup_errors.append(
+                    f"TerminateProcess failed with Win32 error {get_last_error()}"
+                )
+            wait_result = kernel32.WaitForSingleObject(
+                process.hProcess,
+                int(_BROKER_DRAIN_TIMEOUT_SECONDS * 1000),
+            )
+            if wait_result != 0:
+                cleanup_errors.append(
+                    "inner process did not terminate during cleanup "
+                    f"(wait result {wait_result}, Win32 error {get_last_error()})"
+                )
+        for cleanup_error in cleanup_errors:
+            primary_error.add_note(f"inner broker cleanup also failed: {cleanup_error}")
+        close_created_handles(primary_error)
+
+    access = _TOKEN_ASSIGN_PRIMARY | _TOKEN_DUPLICATE | _TOKEN_QUERY
+    if not advapi32.OpenProcessToken(
+        kernel32.GetCurrentProcess(), access, ctypes.byref(token)
+    ):
+        raise NativeDeviceMapError(
+            f"OpenProcessToken failed with Win32 error {get_last_error()}"
+        )
+    try:
+        try:
+            with ExitStack() as standard_handles:
+                (
+                    startup.hStdInput,
+                    startup.hStdOutput,
+                    startup.hStdError,
+                ) = _duplicate_standard_handles(kernel32, api, standard_handles)
+                created = advapi32.CreateProcessWithTokenW(
+                    token,
+                    _LOGON_NETCREDENTIALS_ONLY,
+                    sys.executable,
+                    command_buffer,
+                    _CREATE_SUSPENDED
+                    | _CREATE_NEW_PROCESS_GROUP
+                    | _CREATE_UNICODE_ENVIRONMENT,
+                    ctypes.cast(environment_buffer, pointer),
+                    str(Path(sys.executable).resolve(strict=True).parent),
+                    ctypes.byref(startup),
+                    ctypes.byref(process),
+                )
+            if not created:
+                win32_error = int(get_last_error())
+                detail = (
+                    "; SeImpersonatePrivilege is required"
+                    if win32_error == 1314
+                    else ""
+                )
+                raise NativeDeviceMapError(
+                    "CreateProcessWithTokenW(LOGON_NETCREDENTIALS_ONLY) failed "
+                    f"with Win32 error {win32_error}{detail}"
+                )
+            child_authentication_id = api.process_authentication_id(int(process.hProcess))
+            if child_authentication_id == parent_authentication_id:
+                raise NativeDeviceMapError(
+                    "LOGON_NETCREDENTIALS_ONLY did not create a fresh AuthenticationId"
+                )
+            if kernel32.ResumeThread(process.hThread) == 0xFFFFFFFF:
+                raise NativeDeviceMapError(
+                    f"ResumeThread failed with Win32 error {get_last_error()}"
+                )
+            if kernel32.WaitForSingleObject(process.hProcess, 0xFFFFFFFF) != 0:
+                raise NativeDeviceMapError(
+                    f"WaitForSingleObject failed with Win32 error {get_last_error()}"
+                )
+            exit_code = uint32()
+            if not kernel32.GetExitCodeProcess(
+                process.hProcess, ctypes.byref(exit_code)
+            ):
+                raise NativeDeviceMapError(
+                    f"GetExitCodeProcess failed with Win32 error {get_last_error()}"
+                )
+            result = int(exit_code.value)
+        except BaseException as caught_error:
+            cleanup_created_process(caught_error)
+            raise
+        close_created_handles()
+        return result
+    finally:
+        if token.value is not None:
+            active_error = sys.exception()
+            try:
+                api.close_handle(int(token.value), "broker-token")
+            except BaseException as close_error:
+                if active_error is None:
+                    raise
+                active_error.add_note(
+                    f"broker token cleanup also failed: {close_error}"
+                )
+
+
+def _run_suspended_producer_tree(spec: CommandSpec) -> int:
+    """Run one producer tree and return only after its nested Job is empty."""
+
+    from reprobit.process import _WindowsJob
+
+    job = _WindowsJob()
+    producer: subprocess.Popen[bytes] | None = None
+    assigned = False
+    try:
+        producer = subprocess.Popen(
+            spec.argv,
+            cwd=spec.cwd,
+            env=spec.environment_mapping,
+            stdin=subprocess.DEVNULL,
+            creationflags=_CREATE_SUSPENDED | _CREATE_NEW_PROCESS_GROUP,
+        )
+        job.assign(producer)
+        assigned = True
+        job.resume(producer)
+        exit_code = producer.wait()
+        job.close_process_handle(producer)
+        if exit_code == 0:
+            # A successful leader may deliberately leave a descendant doing
+            # final work. Keep the LUID mapping until the complete tree exits.
+            if not job.wait_empty(None):
+                raise NativeDeviceMapError(
+                    "lineage producer Job Object unexpectedly timed out"
+                )
+        else:
+            # A failed leader does not get to leave work behind.
+            job.terminate_and_drain(_BROKER_DRAIN_TIMEOUT_SECONDS)
+        return exit_code
+    except BaseException as error:
+        cleanup_errors: list[BaseException] = []
+        if producer is not None:
+            if assigned:
+                try:
+                    job.terminate()
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+            else:
+                try:
+                    if producer.poll() is None:
+                        producer.kill()
+                    producer.wait(timeout=5)
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+            if producer.poll() is None:
+                try:
+                    producer.wait(timeout=5)
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+            if producer.returncode is not None:
+                try:
+                    job.close_process_handle(producer)
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+            if assigned:
+                try:
+                    if not job.wait_empty(_BROKER_DRAIN_TIMEOUT_SECONDS):
+                        raise NativeDeviceMapError(
+                            "lineage producer Job Object did not drain"
+                        )
+                except BaseException as cleanup_error:
+                    cleanup_errors.append(cleanup_error)
+        for item in cleanup_errors:
+            error.add_note(f"lineage producer cleanup also failed: {item}")
+        raise
+    finally:
+        active_error = sys.exception()
+        try:
+            job.close()
+        except BaseException as close_error:
+            if active_error is None:
+                raise
+            active_error.add_note(f"lineage Job Object close also failed: {close_error}")
+
+
+def _run_lineage_broker() -> int:
+    """Define one LUID-local drive, run its producer tree, and remove it."""
+
+    if os.name != "nt":
+        raise NativeDeviceMapError("Windows lineage broker requires native Windows")
+    document, spec = _read_lineage_plan()
+    drive = document["drive"]
+    target = document["target"]
+    expected = document["controller_authentication_id"]
+    if not isinstance(drive, str) or re.fullmatch(r"[A-Z]:", drive) is None:
+        raise NativeDeviceMapError("Windows lineage drive is invalid")
+    if (
+        not isinstance(target, str)
+        or "\0" in target
+        or not target.startswith("\\Device\\")
+    ):
+        raise NativeDeviceMapError("Windows lineage target is invalid")
+    if (
+        not isinstance(expected, list)
+        or len(expected) != 2
+        or any(isinstance(value, bool) or not isinstance(value, int) for value in expected)
+    ):
+        raise NativeDeviceMapError(
+            "Windows lineage controller AuthenticationId is invalid"
+        )
+
+    api = _LineageApi()
+    authentication_id = api.process_authentication_id(_CURRENT_PROCESS)
+    if authentication_id == (expected[0], expected[1]):
+        raise NativeDeviceMapError(
+            "Windows lineage broker did not receive a fresh AuthenticationId"
+        )
+
+    api.define_local_drive(drive, target)
+    result = _run_suspended_producer_tree(spec)
+    # That call returns only after the nested producer Job is proved empty.
+    # On failure, retain the mapping for any survivor; Windows destroys the
+    # fresh-LUID namespace after its final token/process reference disappears.
+    api.remove_local_drive(drive, target)
+    return result
+
+
+def _main(argv: list[str]) -> int:
+    if argv == ["--lineage-broker"]:
+        operation = _run_logon_broker
+    elif argv == ["--lineage-inner"]:
+        operation = _run_lineage_broker
+    else:
+        print("native_device_map is an internal ReproBit helper", file=sys.stderr)
+        return 2
+    try:
+        return operation()
+    except Exception as error:
+        print(f"reprobit Windows lineage broker failed: {error}", file=sys.stderr)
+        for note in getattr(error, "__notes__", ()):
+            print(f"cleanup note: {note}", file=sys.stderr)
+        return 125
+
+
 __all__ = [
     "NativeDeviceMapError",
     "NativeDeviceMapLease",
@@ -738,3 +1009,7 @@ __all__ = [
     "probe_native_device_map",
     "probe_native_device_map_execution",
 ]
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main(sys.argv[1:]))

@@ -50,7 +50,7 @@ def test_capabilities_are_inspectable_cross_host() -> None:
     assert wine.process_tree_primitive == "posix_process_group"
     assert native.native_windows is True
     assert native.process_tree_primitive == "windows_kill_on_close_job_object"
-    assert native.logical_path_primitive == "process_private_nt_device_map"
+    assert native.logical_path_primitive == "fresh_luid_local_dos_device_map"
     assert backend_by_id(wine.identifier).identifier == wine.identifier
     with pytest.raises(BackendError, match="unsupported"):
         backend_by_id("unknown")
@@ -109,10 +109,10 @@ def test_native_doctor_executes_process_lineage_only_when_requested(
     active = NativeWindowsBackend().doctor(execute_probe=True)
 
     assert passive.executed_probe is False
-    assert all(check.name != "private-map process lineage" for check in passive.checks)
+    assert all(check.name != "fresh-LUID process lineage" for check in passive.checks)
     assert active.executed_probe is True
     assert next(
-        check for check in active.checks if check.name == "private-map process lineage"
+        check for check in active.checks if check.name == "fresh-LUID process lineage"
     ).passed
     assert calls == ["primitives", "primitives", "execution"]
 
@@ -134,7 +134,7 @@ def test_native_backend_lease_fails_closed_off_windows(tmp_path: Path) -> None:
         pass
 
 
-def test_native_backend_returns_exact_private_device_map_lease(
+def test_native_backend_returns_exact_lineage_drive_lease(
     tmp_path: Path,
 ) -> None:
     backend = NativeWindowsBackend()
