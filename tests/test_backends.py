@@ -70,6 +70,7 @@ def test_doctor_does_not_execute_wine_by_default(monkeypatch: pytest.MonkeyPatch
     assert called is False
 
 
+@pytest.mark.skipif(os.name == "nt", reason="requires a non-Windows host")
 def test_native_doctor_fails_closed_when_host_lacks_private_device_map() -> None:
     report = NativeWindowsBackend().doctor(execute_probe=True)
 
@@ -150,6 +151,7 @@ def test_native_backend_returns_exact_private_device_map_lease(
     assert binding.drive_letter == "Q"
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Wine prefixes require POSIX symlinks")
 def test_wine_workers_have_private_prefixes_and_drive_links(tmp_path: Path) -> None:
     backend = PosixWineBackend()
     worker = backend.create_worker(tmp_path / "workers", "compile:one")
@@ -173,6 +175,7 @@ def test_wine_workers_have_private_prefixes_and_drive_links(tmp_path: Path) -> N
     assert not binding.link.exists()
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Wine lifecycle requires POSIX process groups")
 def test_wine_prefix_bootstrap_keeps_server_live_and_scrubs_host_mappings(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

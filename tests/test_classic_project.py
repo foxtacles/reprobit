@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from hashlib import sha256
@@ -219,6 +220,7 @@ def test_effective_source_copy_rejects_symlinked_manifest_ancestor(
 
 
 @pytest.mark.skipif(shutil.which("cmake") is None, reason="CMake is not installed")
+@pytest.mark.skipif(os.name != "posix", reason="project-plan configuration is migration-only")
 def test_generated_project_plan_configures_at_exact_graph_seat(tmp_path: Path) -> None:
     bundle, generated = _bundle(tmp_path)
     effective = tmp_path / "state/effective"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import stat
 import sys
 from pathlib import Path
@@ -88,6 +89,7 @@ def _executable(path: Path, payload: str = "#!/bin/sh\nexit 0\n") -> Path:
     ("mutate_source", "link_admission"),
     ((False, False), (True, False), (False, True)),
 )
+@pytest.mark.skipif(os.name != "posix", reason="migration uses POSIX Unix Makefiles transports")
 def test_graph_configure_is_fresh_bounded_and_never_builds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

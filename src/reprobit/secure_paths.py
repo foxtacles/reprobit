@@ -200,6 +200,52 @@ def _matches_windows_snapshot(
     )
 
 
+def _windows_snapshot_mismatch_fields(
+    basic: tuple[int, int, int, int, int],
+    strong: tuple[int, bytes, int, int, int, int, int, bool, int],
+    expected: SecureFileSnapshot,
+) -> tuple[str, ...]:
+    """Name failed native snapshot invariants without exposing host values."""
+
+    mismatches: list[str] = []
+    checks = (
+        (basic[0] == expected.device, "volume"),
+        (basic[1] == expected.inode, "file-index"),
+        (basic[2] == expected.size, "size"),
+        (basic[3] == expected.mtime_ns, "write-time"),
+        (
+            not expected.windows_file_id or strong[1] == expected.windows_file_id,
+            "file-id",
+        ),
+        (not expected.ctime_ns or strong[4] == expected.ctime_ns, "change-time"),
+        (
+            not expected.windows_attributes
+            or strong[8] == expected.windows_attributes,
+            "attributes",
+        ),
+        (strong[0] == basic[0], "native-volume-consistency"),
+        (strong[3] == basic[3], "native-write-time-consistency"),
+        (strong[5] == basic[2], "native-size-consistency"),
+        (not strong[7], "delete-pending"),
+    )
+    mismatches.extend(label for passed, label in checks if not passed)
+    return tuple(mismatches)
+
+
+def _same_windows_identity_except_change_time(
+    before: tuple[int, bytes, int, int, int, int, int, bool, int],
+    after: tuple[int, bytes, int, int, int, int, int, bool, int],
+) -> bool:
+    """Compare native identity across an expected metadata-time transition.
+
+    A rename, or finalizing access metadata when a read handle closes, may
+    advance Windows' file change time even though the continuously held file
+    object, payload, write time, links, and attributes remain unchanged.
+    """
+
+    return before[:4] == after[:4] and before[5:] == after[5:]
+
+
 def _directory_flags() -> int:
     return (
         os.O_RDONLY
@@ -323,6 +369,7 @@ class _WindowsHandles:
     _GENERIC_WRITE = 0x40000000
     _FILE_LIST_DIRECTORY = 0x0001
     _FILE_READ_ATTRIBUTES = 0x0080
+    _FILE_WRITE_ATTRIBUTES = 0x0100
     _SHARE_ALL = 0x1 | 0x2 | 0x4
     _FILE_OPEN = 1
     _FILE_CREATE = 2
@@ -384,8 +431,8 @@ class _WindowsHandles:
                 ("index_low", wintypes.DWORD),
             ]
 
-        class FileDispositionInfo(ctypes.Structure):
-            _fields_ = [("delete_file", ctypes.c_ubyte)]
+        class FileDispositionInfoEx(ctypes.Structure):
+            _fields_ = [("flags", wintypes.DWORD)]
 
         class FileBasicInfo(ctypes.Structure):
             _fields_ = [
@@ -414,16 +461,25 @@ class _WindowsHandles:
                 ("file_id", FileId128),
             ]
 
+        class FileRenameInfo(ctypes.Structure):
+            _fields_ = [
+                ("replace", ctypes.c_ubyte),
+                ("root", wintypes.HANDLE),
+                ("name_length", wintypes.DWORD),
+                ("name", ctypes.c_uint16 * 1),
+            ]
+
         self.ctypes = ctypes
         self.wintypes = wintypes
         self.UnicodeString = UnicodeString
         self.ObjectAttributes = ObjectAttributes
         self.IoStatusBlock = IoStatusBlock
         self.ByHandleFileInformation = ByHandleFileInformation
-        self.FileDispositionInfo = FileDispositionInfo
+        self.FileDispositionInfoEx = FileDispositionInfoEx
         self.FileBasicInfo = FileBasicInfo
         self.FileStandardInfo = FileStandardInfo
         self.FileIdInfo = FileIdInfo
+        self.FileRenameInfo = FileRenameInfo
         self.kernel32 = win_dll("kernel32", use_last_error=True)
         self.ntdll = win_dll("ntdll", use_last_error=True)
         self.get_last_error = getattr(ctypes, "get_last_error", lambda: 0)
@@ -532,6 +588,7 @@ class _WindowsHandles:
         delete: bool = False,
         allow_missing: bool = False,
         deny_other_writes: bool = False,
+        read_data: bool = True,
     ) -> Any | None:
         buffer = self.ctypes.create_unicode_buffer(name)
         length = len(name.encode("utf-16-le"))
@@ -553,10 +610,14 @@ class _WindowsHandles:
         access = self._FILE_READ_ATTRIBUTES | self._SYNCHRONIZE
         if directory:
             access |= self._FILE_LIST_DIRECTORY
-        else:
-            access |= self._GENERIC_WRITE if write else self._GENERIC_READ
+        elif write:
+            access |= self._GENERIC_READ | self._GENERIC_WRITE
+        elif read_data:
+            access |= self._GENERIC_READ
         if delete:
-            access |= self._DELETE
+            # FileDispositionInfoEx needs FILE_WRITE_ATTRIBUTES when deleting
+            # an admitted READONLY artifact with IGNORE_READONLY_ATTRIBUTE.
+            access |= self._DELETE | self._FILE_WRITE_ATTRIBUTES
         disposition = (
             self._FILE_OPEN_IF
             if directory and create
@@ -692,44 +753,62 @@ class _WindowsHandles:
             )
 
     def rename(self, handle: Any, parent: Any, name: str, *, replace: bool) -> None:
-        file_rename_info = type(
-            "FileRenameInfo",
-            (self.ctypes.Structure,),
-            {
-                "_fields_": [
-                    ("replace", self.wintypes.BOOL),
-                    ("root", self.wintypes.HANDLE),
-                    ("name_length", self.wintypes.DWORD),
-                    ("name", self.ctypes.c_wchar * max(1, len(name))),
-                ]
-            },
-        )
-
-        information = file_rename_info()
+        encoded_name = name.encode("utf-16-le")
+        name_offset = self.FileRenameInfo.name.offset
+        buffer = self.ctypes.create_string_buffer(name_offset + len(encoded_name))
+        information = self.ctypes.cast(
+            buffer,
+            self.ctypes.POINTER(self.FileRenameInfo),
+        ).contents
         information.replace = replace
         information.root = parent
-        information.name_length = len(name.encode("utf-16-le"))
-        information.name = name
+        information.name_length = len(encoded_name)
+        self.ctypes.memmove(
+            self.ctypes.addressof(buffer) + name_offset,
+            encoded_name,
+            len(encoded_name),
+        )
         if not self.kernel32.SetFileInformationByHandle(
             handle,
             3,
-            self.ctypes.byref(information),
-            self.ctypes.sizeof(information),
+            buffer,
+            len(buffer),
         ):
             raise SecurePathError(
                 f"atomic native publication rename failed: {self.get_last_error()}"
             )
 
     def delete_on_close(self, handle: Any) -> None:
-        information = self.FileDispositionInfo(True)
+        # The native lane requires Server 2022.  The extended disposition
+        # contract preserves exact READONLY artifacts while still allowing
+        # rollback/removal through the already identity-held handle.
+        information = self.FileDispositionInfoEx(0x01 | 0x10)
         if not self.kernel32.SetFileInformationByHandle(
             handle,
-            4,
+            21,
             self.ctypes.byref(information),
             self.ctypes.sizeof(information),
         ):
             raise SecurePathError(
                 f"cannot discard failed native publication: {self.get_last_error()}"
+            )
+
+    def suppress_time_updates(self, handle: Any) -> None:
+        """Keep publication metadata stable when this writer eventually closes."""
+
+        basic = self.FileBasicInfo()
+        basic.access = -1
+        basic.write = -1
+        basic.change = -1
+        if not self.kernel32.SetFileInformationByHandle(
+            handle,
+            0,
+            self.ctypes.byref(basic),
+            self.ctypes.sizeof(basic),
+        ):
+            raise SecurePathError(
+                "cannot stabilize native publication timestamps: "
+                f"{self.get_last_error()}"
             )
 
     def set_attributes(self, handle: Any, attributes: int) -> None:
@@ -738,15 +817,6 @@ class _WindowsHandles:
         if not windows_attributes_are_basic_restorable(attributes):
             raise SecurePathError("native publication attributes are unsafe")
         basic = self.FileBasicInfo()
-        if not self.kernel32.GetFileInformationByHandleEx(
-            handle,
-            0,
-            self.ctypes.byref(basic),
-            self.ctypes.sizeof(basic),
-        ):
-            raise SecurePathError(
-                f"cannot read native publication attributes: {self.get_last_error()}"
-            )
         basic.attributes = attributes
         if not self.kernel32.SetFileInformationByHandle(
             handle,
@@ -833,46 +903,69 @@ def _windows_read_relative_file(root: Path, relative: str) -> tuple[bytes, Secur
     canonical = _relative(relative)
     with _HeldWindowsRoot(root) as held:
         handles, edges, name = held.parent_chain(canonical, create=False)
+        file_handle: Any = None
+        terminal: Any = None
         try:
             file_handle = held.api.open_relative(handles[-1], name, directory=False)
             if file_handle is None:
                 raise SecurePathError(f"native source input is absent: {relative!r}")
-            try:
-                before = held.api.identity(file_handle)
-                before_strong = held.api.strong_identity(file_handle)
-                payload = held.api.read(file_handle)
-                after = held.api.identity(file_handle)
-                after_strong = held.api.strong_identity(file_handle)
-                if (
-                    before != after
-                    or before_strong != after_strong
-                    or len(payload) != after[2]
-                ):
-                    raise SecurePathError(f"native source input changed while read: {relative!r}")
-                terminal = held.api.open_relative(handles[-1], name, directory=False)
-                if terminal is None:
-                    raise SecurePathError(f"native source input disappeared: {relative!r}")
-                try:
-                    if held.api.strong_identity(terminal) != after_strong:
-                        raise SecurePathError(f"native source input changed identity: {relative!r}")
-                finally:
-                    held.api.close(terminal)
-                held.recheck(edges)
-                return payload, SecureFileSnapshot(
-                    held.path.joinpath(*canonical.parts),
-                    Digest.from_bytes(payload),
-                    len(payload),
-                    after[0],
-                    after[1],
-                    after[3],
-                    0,
-                    after_strong[4],
-                    after_strong[1],
-                    after_strong[8],
+            before = held.api.identity(file_handle)
+            before_strong = held.api.strong_identity(file_handle)
+            payload = held.api.read(file_handle)
+            after = held.api.identity(file_handle)
+            after_strong = held.api.strong_identity(file_handle)
+            if (
+                before != after
+                or before_strong != after_strong
+                or len(payload) != after[2]
+            ):
+                raise SecurePathError(f"native source input changed while read: {relative!r}")
+            terminal = held.api.open_relative(
+                handles[-1],
+                name,
+                directory=False,
+                deny_other_writes=True,
+                read_data=False,
+            )
+            if terminal is None:
+                raise SecurePathError(f"native source input disappeared: {relative!r}")
+            if (
+                held.api.identity(terminal) != after
+                or held.api.strong_identity(terminal) != after_strong
+            ):
+                raise SecurePathError(f"native source input changed identity: {relative!r}")
+
+            # Windows may finalize access/change metadata only when the handle
+            # that performed the read closes.  Transfer the deny-write lease to
+            # a metadata-only handle first, then capture the settled snapshot.
+            held.api.close(file_handle)
+            file_handle = None
+            settled = held.api.identity(terminal)
+            settled_strong = held.api.strong_identity(terminal)
+            if settled != after or not _same_windows_identity_except_change_time(
+                after_strong, settled_strong
+            ):
+                raise SecurePathError(
+                    f"native source input changed while finalizing read: {relative!r}"
                 )
-            finally:
-                held.api.close(file_handle)
+            held.recheck(edges)
+            return payload, SecureFileSnapshot(
+                held.path.joinpath(*canonical.parts),
+                Digest.from_bytes(payload),
+                len(payload),
+                settled[0],
+                settled[1],
+                settled[3],
+                0,
+                settled_strong[4],
+                settled_strong[1],
+                settled_strong[8],
+            )
         finally:
+            if terminal is not None:
+                held.api.close(terminal)
+            if file_handle is not None:
+                held.api.close(file_handle)
             for handle in reversed(handles[1:]):
                 held.api.close(handle)
 
@@ -943,12 +1036,10 @@ def _windows_atomic_publish_relative(
             )
             if handle is None:
                 raise SecurePathError("native publication temp file was not created")
+            held.api.suppress_time_updates(handle)
+            payload_digest = Digest.from_bytes(payload)
             held.api.write(handle, payload)
-            if windows_attributes is not None:
-                held.api.set_attributes(handle, windows_attributes)
-                held.api.flush_file(handle)
             before = held.api.identity(handle)
-            before_strong = held.api.strong_identity(handle)
             if before[2] != len(payload):
                 raise SecurePathError(f"native publication produced a short file: {relative!r}")
             if expected is not None:
@@ -974,38 +1065,65 @@ def _windows_atomic_publish_relative(
                     held.api.close(current)
             held.api.rename(handle, handles[-1], name, replace=replace)
             published = True
-            final = held.api.open_relative(handles[-1], name, directory=False)
+            if windows_attributes is not None:
+                # Windows rename may add ARCHIVE.  Apply the admitted final
+                # attributes only after the name transition, without resetting
+                # the writer's timestamp-suppression state.
+                held.api.set_attributes(handle, windows_attributes)
+                held.api.flush_file(handle)
+            published_identity = held.api.identity(handle)
+            published_strong = held.api.strong_identity(handle)
+            if published_identity[2] != len(payload):
+                raise SecurePathError(
+                    f"native publication target changed during commit: {relative!r}"
+                )
+            final = held.api.open_relative(
+                handles[-1],
+                name,
+                directory=False,
+                read_data=False,
+            )
             if final is None:
-                raise SecurePathError(f"native publication target disappeared: {relative!r}")
+                raise SecurePathError(
+                    f"native publication target disappeared: {relative!r}"
+                )
             try:
                 after = held.api.identity(final)
                 after_strong = held.api.strong_identity(final)
-                received_payload = held.api.read(final)
-                if (
-                    after != before
-                    or after_strong != before_strong
-                    or len(received_payload) != len(payload)
-                    or Digest.from_bytes(received_payload) != Digest.from_bytes(payload)
-                ):
+                if after != published_identity or after_strong != published_strong:
                     raise SecurePathError(
                         f"native publication target changed during commit: {relative!r}"
                     )
             finally:
                 held.api.close(final)
+
+            held.api.rewind(handle)
+            received_payload = held.api.read(handle)
+            settled = held.api.identity(handle)
+            settled_strong = held.api.strong_identity(handle)
+            if (
+                settled != published_identity
+                or settled_strong != published_strong
+                or len(received_payload) != len(payload)
+                or Digest.from_bytes(received_payload) != payload_digest
+            ):
+                raise SecurePathError(
+                    f"native publication target changed while finalizing: {relative!r}"
+                )
             held.recheck(edges)
             held.api.flush_directory(handles[-1])
             committed = True
             return SecureFileSnapshot(
                 held.path.joinpath(*canonical.parts),
-                Digest.from_bytes(payload),
+                payload_digest,
                 len(payload),
-                after[0],
-                after[1],
-                after[3],
+                settled[0],
+                settled[1],
+                settled[3],
                 0,
-                after_strong[4],
-                after_strong[1],
-                after_strong[8],
+                settled_strong[4],
+                settled_strong[1],
+                settled_strong[8],
             )
         finally:
             if handle is not None:
@@ -1341,6 +1459,7 @@ def _windows_atomic_publish_new_relative_from_stream(
             )
             if handle is None:
                 raise SecurePathError("native streamed publication temp was not created")
+            held.api.suppress_time_updates(handle)
             hasher = hashlib.sha256()
             size = 0
             while True:
@@ -1353,8 +1472,6 @@ def _windows_atomic_publish_new_relative_from_stream(
                 hasher.update(block)
                 size += len(block)
             held.api.flush_file(handle)
-            if windows_attributes is not None:
-                held.api.set_attributes(handle, windows_attributes)
             digest = Digest(value=hasher.hexdigest())
             _validate_stream_expectations(
                 digest,
@@ -1364,14 +1481,27 @@ def _windows_atomic_publish_new_relative_from_stream(
                 relative=relative,
             )
             before = held.api.identity(handle)
-            before_strong = held.api.strong_identity(handle)
             if before[2] != size:
                 raise SecurePathError(
                     f"native streamed publication produced a short file: {relative!r}"
                 )
             held.api.rename(handle, handles[-1], name, replace=False)
             published = True
-            final = held.api.open_relative(handles[-1], name, directory=False)
+            if windows_attributes is not None:
+                held.api.set_attributes(handle, windows_attributes)
+                held.api.flush_file(handle)
+            published_identity = held.api.identity(handle)
+            published_strong = held.api.strong_identity(handle)
+            if published_identity[2] != size:
+                raise SecurePathError(
+                    f"native streamed publication target changed during commit: {relative!r}"
+                )
+            final = held.api.open_relative(
+                handles[-1],
+                name,
+                directory=False,
+                read_data=False,
+            )
             if final is None:
                 raise SecurePathError(
                     f"native streamed publication target disappeared: {relative!r}"
@@ -1379,12 +1509,21 @@ def _windows_atomic_publish_new_relative_from_stream(
             try:
                 after = held.api.identity(final)
                 after_strong = held.api.strong_identity(final)
-                if after != before or after_strong != before_strong:
+                if after != published_identity or after_strong != published_strong:
                     raise SecurePathError(
                         f"native streamed publication target changed during commit: {relative!r}"
                     )
             finally:
                 held.api.close(final)
+            settled = held.api.identity(handle)
+            settled_strong = held.api.strong_identity(handle)
+            if (
+                settled != published_identity
+                or settled_strong != published_strong
+            ):
+                raise SecurePathError(
+                    f"native streamed publication target changed while finalizing: {relative!r}"
+                )
             held.recheck(edges)
             held.api.flush_directory(handles[-1])
             committed = True
@@ -1392,13 +1531,13 @@ def _windows_atomic_publish_new_relative_from_stream(
                 held.path.joinpath(*canonical.parts),
                 digest,
                 size,
-                after[0],
-                after[1],
-                after[3],
+                settled[0],
+                settled[1],
+                settled[3],
                 0,
-                after_strong[4],
-                after_strong[1],
-                after_strong[8],
+                settled_strong[4],
+                settled_strong[1],
+                settled_strong[8],
             )
         finally:
             if handle is not None:
@@ -1720,6 +1859,7 @@ def digest_relative_file(root: Path, relative: str) -> SecureFileSnapshot:
         with _HeldWindowsRoot(root) as held:
             handles, edges, name = held.parent_chain(canonical, create=False)
             handle: Any = None
+            terminal: Any = None
             try:
                 handle = held.api.open_relative(handles[-1], name, directory=False)
                 if handle is None:
@@ -1738,33 +1878,56 @@ def digest_relative_file(root: Path, relative: str) -> SecureFileSnapshot:
                     raise SecurePathError(
                         f"native source input changed while hashed: {relative!r}"
                     )
-                terminal = held.api.open_relative(handles[-1], name, directory=False)
+                basic = held.api.identity(handle)
+                terminal = held.api.open_relative(
+                    handles[-1],
+                    name,
+                    directory=False,
+                    deny_other_writes=True,
+                    read_data=False,
+                )
                 if terminal is None:
                     raise SecurePathError(
                         f"native source input disappeared: {relative!r}"
                     )
-                try:
-                    if held.api.strong_identity(terminal) != after_strong:
-                        raise SecurePathError(
-                            f"native source input changed identity: {relative!r}"
-                        )
-                finally:
-                    held.api.close(terminal)
+                if (
+                    held.api.identity(terminal) != basic
+                    or held.api.strong_identity(terminal) != after_strong
+                ):
+                    raise SecurePathError(
+                        f"native source input changed identity: {relative!r}"
+                    )
+
+                # Query the final timestamp state only after closing the handle
+                # that performed I/O.  The metadata-only handle continuously
+                # denies writes, so accepting Windows' own change-time advance
+                # does not admit an external mutation.
+                held.api.close(handle)
+                handle = None
+                settled = held.api.identity(terminal)
+                settled_strong = held.api.strong_identity(terminal)
+                if settled != basic or not _same_windows_identity_except_change_time(
+                    after_strong, settled_strong
+                ):
+                    raise SecurePathError(
+                        f"native source input changed while finalizing hash: {relative!r}"
+                    )
                 held.recheck(edges)
-                basic = held.api.identity(handle)
                 return SecureFileSnapshot(
                     held.path.joinpath(*canonical.parts),
                     Digest(value=hasher.hexdigest()),
                     size,
-                    basic[0],
-                    basic[1],
-                    basic[3],
+                    settled[0],
+                    settled[1],
+                    settled[3],
                     0,
-                    after_strong[4],
-                    after_strong[1],
-                    after_strong[8],
+                    settled_strong[4],
+                    settled_strong[1],
+                    settled_strong[8],
                 )
             finally:
+                if terminal is not None:
+                    held.api.close(terminal)
                 if handle is not None:
                     held.api.close(handle)
                 for current in reversed(handles[1:]):
@@ -1998,6 +2161,7 @@ def promote_relative_new(
                     source_name,
                     directory=False,
                     delete=True,
+                    deny_other_writes=True,
                 )
                 if source_handle is None:
                     raise SecurePathError(
@@ -2041,7 +2205,9 @@ def promote_relative_new(
                     after_strong = held.api.strong_identity(final)
                     if (
                         after_native != before_native
-                        or after_strong != before_strong
+                        or not _same_windows_identity_except_change_time(
+                            before_strong, after_strong
+                        )
                     ):
                         raise SecurePathError(
                             f"native promotion target changed: {destination_relative!r}"
@@ -2526,16 +2692,35 @@ def hold_relative_file_set(
                     after_identity = held.api.identity(handle)
                     after_strong = held.api.strong_identity(handle)
                     expected_snapshot = expected[relative]
+                    snapshot_mismatches = _windows_snapshot_mismatch_fields(
+                        identity,
+                        strong,
+                        expected_snapshot,
+                    )
+                    digest_matches = (
+                        Digest.from_bytes(payload) == expected_snapshot.digest
+                    )
                     if (
                         identity != after_identity
                         or strong != after_strong
-                        or not _matches_windows_snapshot(
-                            identity, strong, expected_snapshot
-                        )
-                        or Digest.from_bytes(payload) != expected_snapshot.digest
+                        or snapshot_mismatches
+                        or not digest_matches
                     ):
+                        reasons = []
+                        if identity != after_identity:
+                            reasons.append("basic identity changed during read")
+                        if strong != after_strong:
+                            reasons.append("strong identity changed during read")
+                        if snapshot_mismatches:
+                            reasons.append(
+                                "snapshot fields differ: "
+                                + ", ".join(snapshot_mismatches)
+                            )
+                        if not digest_matches:
+                            reasons.append("digest differs")
                         raise SecurePathError(
-                            f"held file set member changed: {relative!r}"
+                            f"held file set member changed: {relative!r} "
+                            f"({'; '.join(reasons)})"
                         )
                     snapshots[relative] = expected_snapshot
                 yield MappingProxyType(snapshots)
@@ -2554,17 +2739,33 @@ def hold_relative_file_set(
                         held_identity = held.api.identity(handle)
                         held_strong = held.api.strong_identity(handle)
                         expected_snapshot = expected[relative]
+                        named_identity = held.api.identity(named)
+                        named_strong = held.api.strong_identity(named)
+                        snapshot_mismatches = _windows_snapshot_mismatch_fields(
+                            held_identity,
+                            held_strong,
+                            expected_snapshot,
+                        )
                         if (
                             held_identity != identity
                             or held_strong != strong
-                            or held.api.identity(named) != identity
-                            or held.api.strong_identity(named) != strong
-                            or not _matches_windows_snapshot(
-                                held_identity, held_strong, expected_snapshot
-                            )
+                            or named_identity != identity
+                            or named_strong != strong
+                            or snapshot_mismatches
                         ):
+                            reasons = []
+                            if held_identity != identity or held_strong != strong:
+                                reasons.append("held capability changed")
+                            if named_identity != identity or named_strong != strong:
+                                reasons.append("named entry changed")
+                            if snapshot_mismatches:
+                                reasons.append(
+                                    "snapshot fields differ: "
+                                    + ", ".join(snapshot_mismatches)
+                                )
                             raise SecurePathError(
-                                f"held file set member changed: {relative!r}"
+                                f"held file set member changed: {relative!r} "
+                                f"({'; '.join(reasons)})"
                             )
                     finally:
                         held.api.close(named)

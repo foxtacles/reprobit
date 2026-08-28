@@ -96,7 +96,11 @@ def write_json(path: Path, value: object) -> None:
 
 
 def create_tree(root: Path) -> None:
-    (root / "reprobit.toml").write_text(PROJECT_TOML, encoding="utf-8")
+    (root / "reprobit.toml").write_text(
+        PROJECT_TOML,
+        encoding="utf-8",
+        newline="\n",
+    )
     write_json(
         root / "reprobit/source-manifest.json",
         {

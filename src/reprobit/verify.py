@@ -10,6 +10,49 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+_INTEGRITY_BLOCK_SIZE = 64 * 1024
+_FileIdentity = tuple[int, int, int, int, int, int]
+
+
+def _stat_identity(metadata: os.stat_result) -> _FileIdentity:
+    """Return change metadata available on every supported host."""
+
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+        metadata.st_mode,
+    )
+
+
+def _read_descriptor_at(descriptor: int, offset: int, length: int) -> bytes:
+    if hasattr(os, "pread"):
+        return os.pread(descriptor, length, offset)
+    os.lseek(descriptor, offset, os.SEEK_SET)
+    return os.read(descriptor, length)
+
+
+def _seal_descriptor_content(descriptor: int, size: int) -> tuple[bytes, tuple[bytes, ...]]:
+    """Commit the initial bytes once, retaining only cryptographic digests."""
+
+    digest = sha256()
+    blocks: list[bytes] = []
+    offset = 0
+    try:
+        while offset < size:
+            expected = min(_INTEGRITY_BLOCK_SIZE, size - offset)
+            block = _read_descriptor_at(descriptor, offset, expected)
+            if len(block) != expected:
+                raise VerificationError("oracle changed while being sealed")
+            digest.update(block)
+            blocks.append(sha256(block).digest())
+            offset += len(block)
+    except OSError as error:
+        raise VerificationError(f"cannot seal oracle content: {error}") from error
+    return digest.digest(), tuple(blocks)
+
 
 class VerificationError(RuntimeError):
     """Raised when literal verification cannot produce a trustworthy receipt."""
@@ -45,7 +88,14 @@ class OracleCapability(Protocol):
 class SealedFileOracle:
     """An already-open reference file with no public payload accessor."""
 
-    __slots__ = ("__descriptor", "__identity", "__lock", "__size")
+    __slots__ = (
+        "__block_digests",
+        "__content_digest",
+        "__descriptor",
+        "__identity",
+        "__lock",
+        "__size",
+    )
 
     def __init_subclass__(cls, **kwargs: object) -> None:
         del kwargs
@@ -55,11 +105,15 @@ class SealedFileOracle:
         self,
         descriptor: int,
         size: int,
-        identity: tuple[int, int, int, int],
+        identity: _FileIdentity,
+        content_digest: bytes,
+        block_digests: tuple[bytes, ...],
     ) -> None:
         self.__descriptor = descriptor
         self.__size = size
         self.__identity = identity
+        self.__content_digest = content_digest
+        self.__block_digests = block_digests
         self.__lock = threading.Lock()
 
     @classmethod
@@ -79,8 +133,17 @@ class SealedFileOracle:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode):
                 raise VerificationError("oracle must be a regular file")
-            identity = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
-            return cls(descriptor, info.st_size, identity)
+            identity = _stat_identity(info)
+            content_digest, block_digests = _seal_descriptor_content(descriptor, info.st_size)
+            if _stat_identity(os.fstat(descriptor)) != identity:
+                raise VerificationError("oracle changed while being sealed")
+            return cls(
+                descriptor,
+                info.st_size,
+                identity,
+                content_digest,
+                block_digests,
+            )
         except Exception:
             os.close(descriptor)
             raise
@@ -126,6 +189,28 @@ class SealedFileOracle:
             os.lseek(self.__descriptor, offset, os.SEEK_SET)
             return os.read(self.__descriptor, length)
 
+    def _read_committed_range(self, offset: int, length: int) -> bytes:
+        """Read and authenticate only the integrity blocks covering one range."""
+
+        if length == 0:
+            return b""
+        first_block = offset // _INTEGRITY_BLOCK_SIZE
+        final_block = (offset + length - 1) // _INTEGRITY_BLOCK_SIZE
+        received = bytearray()
+        for block_index in range(first_block, final_block + 1):
+            block_offset = block_index * _INTEGRITY_BLOCK_SIZE
+            block_size = min(_INTEGRITY_BLOCK_SIZE, self.__size - block_offset)
+            block = self._read_at(block_offset, block_size)
+            if (
+                len(block) != block_size
+                or sha256(block).digest() != self.__block_digests[block_index]
+            ):
+                raise VerificationError("sealed oracle changed before quarantined read")
+            slice_start = max(offset, block_offset) - block_offset
+            slice_end = min(offset + length, block_offset + block_size) - block_offset
+            received.extend(block[slice_start:slice_end])
+        return bytes(received)
+
     def _read_exact_at(self, offset: int, length: int) -> bytes:
         """Read one bounded slice for the isolated legacy-oracle bridge.
 
@@ -142,15 +227,13 @@ class SealedFileOracle:
             raise VerificationError("sealed oracle read is outside the frozen file")
         try:
             before = os.fstat(self.__descriptor)
-            identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-            if identity != self.__identity:
+            if _stat_identity(before) != self.__identity:
                 raise VerificationError("sealed oracle changed before quarantined read")
-            value = self._read_at(offset, length)
+            value = self._read_committed_range(offset, length)
             after = os.fstat(self.__descriptor)
         except OSError as error:
             raise VerificationError(f"sealed oracle read failed: {error}") from error
-        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-        if after_identity != self.__identity:
+        if _stat_identity(after) != self.__identity:
             raise VerificationError("sealed oracle changed during quarantined read")
         if len(value) != length:
             raise VerificationError("sealed oracle produced a short read")
@@ -166,8 +249,7 @@ class SealedFileOracle:
         offset = 0
         try:
             before = os.fstat(self.__descriptor)
-            identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-            if identity != self.__identity:
+            if _stat_identity(before) != self.__identity:
                 raise VerificationError("sealed oracle changed before digest receipt")
             while offset < self.__size:
                 block = self._read_at(offset, min(chunk_size, self.__size - offset))
@@ -178,9 +260,10 @@ class SealedFileOracle:
             after = os.fstat(self.__descriptor)
         except OSError as error:
             raise VerificationError(f"sealed oracle digest failed: {error}") from error
-        after_identity = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-        if after_identity != self.__identity:
+        if _stat_identity(after) != self.__identity:
             raise VerificationError("sealed oracle changed during digest receipt")
+        if digest.digest() != self.__content_digest:
+            raise VerificationError("sealed oracle changed before or during digest receipt")
         return digest.hexdigest(), self.__size
 
     def _compare_candidate(self, candidate: Path, *, chunk_size: int) -> ComparisonReceipt:
@@ -207,13 +290,7 @@ class SealedFileOracle:
                 if not stat.S_ISREG(candidate_before.st_mode):
                     raise VerificationError("candidate must be a regular file")
                 oracle_before = os.fstat(self.__descriptor)
-                oracle_identity = (
-                    oracle_before.st_dev,
-                    oracle_before.st_ino,
-                    oracle_before.st_size,
-                    oracle_before.st_mtime_ns,
-                )
-                if oracle_identity != self.__identity:
+                if _stat_identity(oracle_before) != self.__identity:
                     raise VerificationError("sealed oracle changed before verification")
                 if (
                     candidate_before.st_dev,
@@ -245,28 +322,12 @@ class SealedFileOracle:
                 oracle_after = os.fstat(self.__descriptor)
         except OSError as error:
             raise VerificationError(f"literal verification failed: {error}") from error
-        before_identity = (
-            candidate_before.st_dev,
-            candidate_before.st_ino,
-            candidate_before.st_size,
-            candidate_before.st_mtime_ns,
-        )
-        after_identity = (
-            candidate_after.st_dev,
-            candidate_after.st_ino,
-            candidate_after.st_size,
-            candidate_after.st_mtime_ns,
-        )
-        if before_identity != after_identity:
+        if _stat_identity(candidate_before) != _stat_identity(candidate_after):
             raise VerificationError("candidate changed during literal verification")
-        oracle_after_identity = (
-            oracle_after.st_dev,
-            oracle_after.st_ino,
-            oracle_after.st_size,
-            oracle_after.st_mtime_ns,
-        )
-        if oracle_after_identity != self.__identity:
+        if _stat_identity(oracle_after) != self.__identity:
             raise VerificationError("sealed oracle changed during verification")
+        if oracle_digest.digest() != self.__content_digest:
+            raise VerificationError("sealed oracle changed before or during verification")
         exact = first_difference is None and candidate_size == oracle_size
         return ComparisonReceipt(
             candidate_digest=candidate_digest.hexdigest(),

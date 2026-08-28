@@ -419,8 +419,6 @@ class CASTransaction:
                     if operation.data is not None:
                         payload = payloads / str(index)
                         os.replace(payload, target)
-                        with target.open("rb") as stream:
-                            os.fsync(stream.fileno())
                         if sha256_file(target) != operation.result_sha256:
                             raise TransactionError(f"installed output digest differs: {target}")
                     _fsync_directory(target.parent)

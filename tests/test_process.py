@@ -34,7 +34,9 @@ def command(tmp_path: Path, program: str, *, timeout: float = 5) -> CommandSpec:
 
 def test_supervisor_captures_output_and_log(tmp_path: Path) -> None:
     with ProcessSupervisor() as supervisor:
-        result = supervisor.run(command(tmp_path, "print('complete')"))
+        result = supervisor.run(
+            command(tmp_path, "import sys; sys.stdout.buffer.write(b'complete\\n')")
+        )
 
     assert result.succeeded
     assert result.output == b"complete\n"

@@ -800,6 +800,16 @@ def _stable_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int,
     )
 
 
+def _is_reparse_point(metadata: object) -> bool:
+    """Reject every Windows redirection primitive, including junctions."""
+
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    return bool(
+        getattr(metadata, "st_reparse_tag", 0)
+        or getattr(metadata, "st_file_attributes", 0) & reparse_attribute
+    )
+
+
 def _tree_receipt(root: Path, relative_root: str) -> ToolchainTreeReceipt:
     """Hash a portable, data-only input tree without following symlinks.
 
@@ -816,7 +826,7 @@ def _tree_receipt(root: Path, relative_root: str) -> ToolchainTreeReceipt:
         root_before = root.stat(follow_symlinks=False)
     except OSError as error:
         raise ToolchainError(f"cannot inspect toolchain tree {root}: {error}") from error
-    if not stat.S_ISDIR(root_before.st_mode):
+    if not stat.S_ISDIR(root_before.st_mode) or _is_reparse_point(root_before):
         raise ToolchainError(f"toolchain tree root is absent or unsafe: {root}")
     records: list[dict[str, object]] = [{"path": ".", "type": "directory"}]
     observed_max_depth = 0
@@ -852,16 +862,22 @@ def _tree_receipt(root: Path, relative_root: str) -> ToolchainTreeReceipt:
                 raise ToolchainError(f"toolchain tree contains an unsafe entry: {name!r}")
             child_relative = relative / name
             logical_path = child_relative.as_posix()
+            child = Path(entry.path)
             try:
                 logical_path.encode("utf-8")
-                before = entry.stat(follow_symlinks=False)
+                # Windows may populate DirEntry.stat() from cached directory
+                # enumeration data whose device/inode fields differ from an
+                # opened handle.  A path stat supplies comparable identity
+                # metadata while still refusing to follow redirected entries.
+                before = child.stat(follow_symlinks=False)
             except (OSError, UnicodeEncodeError) as error:
                 raise ToolchainError(
                     f"cannot inspect toolchain tree entry {logical_path!r}: {error}"
                 ) from error
-            child = Path(entry.path)
             if stat.S_ISLNK(before.st_mode):
                 raise ToolchainError(f"toolchain tree contains a symlink: {child}")
+            if _is_reparse_point(before):
+                raise ToolchainError(f"toolchain tree contains a reparse point: {child}")
             if stat.S_ISDIR(before.st_mode):
                 append({"path": logical_path, "type": "directory"})
                 walk(child, child_relative, depth + 1)
@@ -871,8 +887,10 @@ def _tree_receipt(root: Path, relative_root: str) -> ToolchainTreeReceipt:
                     raise ToolchainError(
                         f"toolchain directory changed while hashed: {child}"
                     ) from error
-                if not stat.S_ISDIR(after.st_mode) or _stable_identity(after) != _stable_identity(
-                    before
+                if (
+                    not stat.S_ISDIR(after.st_mode)
+                    or _is_reparse_point(after)
+                    or _stable_identity(after) != _stable_identity(before)
                 ):
                     raise ToolchainError(f"toolchain directory changed while hashed: {child}")
                 continue
@@ -901,6 +919,7 @@ def _tree_receipt(root: Path, relative_root: str) -> ToolchainTreeReceipt:
                 _stable_identity(after_read) != _stable_identity(opened)
                 or _stable_identity(after_path) != _stable_identity(opened)
                 or not stat.S_ISREG(after_path.st_mode)
+                or _is_reparse_point(after_path)
             ):
                 raise ToolchainError(f"toolchain file changed while hashed: {child}")
             append(
@@ -918,7 +937,9 @@ def _tree_receipt(root: Path, relative_root: str) -> ToolchainTreeReceipt:
         root_after = root.stat(follow_symlinks=False)
     except OSError as error:
         raise ToolchainError(f"toolchain tree changed while hashed: {root}") from error
-    if _stable_identity(root_after) != _stable_identity(root_before):
+    if _is_reparse_point(root_after) or _stable_identity(root_after) != _stable_identity(
+        root_before
+    ):
         raise ToolchainError(f"toolchain tree changed while hashed: {root}")
     membership_records = [
         {key: value for key, value in record.items() if key != "sha256"}

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import reprobit.verify as verify_module
 from reprobit.verify import (
     LiteralVerifier,
     SealedFileOracle,
@@ -80,6 +81,47 @@ def test_sealed_oracle_may_not_change_after_it_is_opened(tmp_path: Path) -> None
         reference.write_bytes(b"after!")
         with pytest.raises(VerificationError, match="changed before"):
             LiteralVerifier().verify(candidate, oracle)
+
+
+def test_sealed_oracle_content_commitment_survives_metadata_collision(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = tmp_path / "reference.bin"
+    candidate = tmp_path / "candidate.bin"
+    reference.write_bytes(b"before")
+    candidate.write_bytes(b"after!")
+
+    frozen_identity = (0, 0, 0, 0, 0, 0)
+    monkeypatch.setattr(verify_module, "_stat_identity", lambda _: frozen_identity)
+    with seal_file_oracle(reference) as oracle:
+        reference.write_bytes(b"after!")
+        with pytest.raises(VerificationError, match="changed before"):
+            LiteralVerifier().verify(candidate, oracle)
+
+
+def test_quarantined_read_authenticates_only_covered_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = tmp_path / "reference.bin"
+    reference.write_bytes(b"a" * (verify_module._INTEGRITY_BLOCK_SIZE + 1))
+
+    frozen_identity = (0, 0, 0, 0, 0, 0)
+    monkeypatch.setattr(verify_module, "_stat_identity", lambda _: frozen_identity)
+    with seal_file_oracle(reference) as oracle:
+        reads: list[tuple[int, int]] = []
+        original_read = SealedFileOracle._read_at
+
+        def observed_read(value: SealedFileOracle, offset: int, length: int) -> bytes:
+            reads.append((offset, length))
+            return original_read(value, offset, length)
+
+        monkeypatch.setattr(SealedFileOracle, "_read_at", observed_read)
+        reference.write_bytes(b"b" * (verify_module._INTEGRITY_BLOCK_SIZE + 1))
+        with pytest.raises(VerificationError, match="changed before quarantined read"):
+            oracle._read_exact_at(0, 1)
+        assert reads == [(0, verify_module._INTEGRITY_BLOCK_SIZE)]
 
 
 def test_sealed_oracle_cannot_be_overridden_by_a_forged_comparator() -> None:

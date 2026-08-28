@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import io
 import os
 from pathlib import Path
 from typing import Any
@@ -9,8 +10,13 @@ import pytest
 
 from reprobit.secure_paths import (
     SecurePathError,
+    _HeldWindowsRoot,
+    _WindowsHandles,
+    atomic_publish_new_relative_from_stream,
     atomic_publish_relative,
     atomic_publish_relative_if_current,
+    digest_relative_file,
+    promote_relative_new,
     read_relative_file,
     remove_published_relative,
     reseal_relative_file,
@@ -18,6 +24,7 @@ from reprobit.secure_paths import (
 
 _FILE_ATTRIBUTE_HIDDEN = 0x0002
 _FILE_ATTRIBUTE_ARCHIVE = 0x0020
+_FILE_ATTRIBUTE_READONLY = 0x0001
 
 pytestmark = pytest.mark.skipif(
     os.name != "nt", reason="native Windows handle-relative implementation"
@@ -40,6 +47,15 @@ def _windows_attributes(path: Path) -> int:
     return int(path.stat().st_file_attributes)
 
 
+def test_windows_file_rename_info_uses_native_boolean_layout() -> None:
+    information = _WindowsHandles().FileRenameInfo
+
+    assert information.replace.offset == 0
+    assert information.root.offset == 8
+    assert information.name_length.offset == 16
+    assert information.name.offset == 20
+
+
 def test_windows_handle_relative_publication_replaces_and_reseals(
     tmp_path: Path,
 ) -> None:
@@ -51,6 +67,28 @@ def test_windows_handle_relative_publication_replaces_and_reseals(
     assert first.digest != second.digest
     assert (root / "build/APP.EXE").read_bytes() == b"second"
     assert reseal_relative_file(root, "build/APP.EXE", expected=second) == second
+
+
+def test_windows_stream_publication_and_promotion_return_settled_snapshots(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "state"
+    root.mkdir()
+    staged = atomic_publish_new_relative_from_stream(
+        root,
+        "incoming/object",
+        io.BytesIO(b"streamed candidate"),
+        windows_attributes=_FILE_ATTRIBUTE_ARCHIVE,
+    )
+
+    assert reseal_relative_file(root, "incoming/object", expected=staged) == staged
+    promoted = promote_relative_new(
+        root,
+        "incoming/object",
+        "blobs/object",
+        expected=digest_relative_file(root, "incoming/object"),
+    )
+    assert reseal_relative_file(root, "blobs/object", expected=promoted) == promoted
 
 
 def test_windows_handle_relative_paths_reject_reparse_ancestor(
@@ -110,6 +148,48 @@ def test_windows_conditional_publication_applies_attributes_and_rolls_back(
     assert reseal_relative_file(root, relative, expected=replacement) == replacement
     assert remove_published_relative(root, relative, expected=replacement)
     assert not target.exists()
+
+
+def test_windows_readonly_publication_can_be_removed_and_rolled_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    attributes = _FILE_ATTRIBUTE_READONLY | _FILE_ATTRIBUTE_ARCHIVE
+    removable = atomic_publish_relative_if_current(
+        root,
+        "build/removable.exe",
+        b"removable",
+        expected=None,
+        windows_attributes=attributes,
+    )
+    assert remove_published_relative(
+        root,
+        "build/removable.exe",
+        expected=removable,
+    )
+    assert not (root / "build/removable.exe").exists()
+
+    original_recheck = _HeldWindowsRoot.recheck
+
+    def fail_after_publication(
+        held: _HeldWindowsRoot,
+        edges: list[tuple[Any, str, tuple[int, int]]],
+    ) -> None:
+        original_recheck(held, edges)
+        raise SecurePathError("injected post-publication failure")
+
+    monkeypatch.setattr(_HeldWindowsRoot, "recheck", fail_after_publication)
+    with pytest.raises(SecurePathError, match="injected post-publication failure"):
+        atomic_publish_relative_if_current(
+            root,
+            "build/rollback.exe",
+            b"rollback",
+            expected=None,
+            windows_attributes=attributes,
+        )
+    assert not (root / "build/rollback.exe").exists()
 
 
 def test_windows_attribute_only_preimage_change_blocks_replace_and_rollback(

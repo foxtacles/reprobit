@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 from hashlib import sha256
@@ -31,6 +32,7 @@ def test_installed_module_lookup_ignores_unrelated_cmake_directory(
 
 
 @pytest.mark.skipif(shutil.which("cmake") is None, reason="CMake is not installed")
+@pytest.mark.skipif(os.name != "posix", reason="CMake integration is migration-only")
 def test_cmake_module_serializes_targets_and_all_admission_fields(tmp_path: Path) -> None:
     source = tmp_path / "source"
     build = tmp_path / "build"
@@ -76,6 +78,7 @@ reprobit_write_plan(OUTPUT \"${{CMAKE_BINARY_DIR}}/reprobit-plan.json\")
 
 
 @pytest.mark.skipif(shutil.which("cmake") is None, reason="CMake is not installed")
+@pytest.mark.skipif(os.name != "posix", reason="CMake integration is migration-only")
 def test_cmake_module_applies_checked_source_and_link_seats(tmp_path: Path) -> None:
     source = tmp_path / "source"
     build = tmp_path / "build"

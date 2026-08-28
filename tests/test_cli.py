@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import subprocess
 import sys
 from io import StringIO
@@ -674,6 +675,7 @@ def test_init_is_transactional_and_emits_stable_ndjson(
     assert "preimage conflict" in capsys.readouterr().err
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Wine backend is supported only on POSIX")
 def test_doctor_never_executes_wine_without_probe(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

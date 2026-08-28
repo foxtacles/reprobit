@@ -4005,6 +4005,7 @@ def _bound_wine_runtime(
     return backend, worker, dosdevices, c_drive, stack
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Wine drive leases require POSIX symlinks")
 def test_close_runtime_rejects_drive_exposed_while_producers_were_live(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4032,6 +4033,7 @@ def test_close_runtime_rejects_drive_exposed_while_producers_were_live(
     assert tuple(dosdevices.iterdir()) == (c_drive,)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="Wine drive leases require POSIX symlinks")
 def test_close_runtime_rejects_transient_drive_mapping_create_delete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -4062,6 +4064,7 @@ def test_close_runtime_rejects_transient_drive_mapping_create_delete(
 
 
 @pytest.mark.parametrize("residual_kind", ("symlink", "regular"))
+@pytest.mark.skipif(os.name != "posix", reason="Wine drive leases require POSIX symlinks")
 def test_close_runtime_scrubs_recreated_wine_drives_after_server_reap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

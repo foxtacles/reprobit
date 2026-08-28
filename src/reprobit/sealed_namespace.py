@@ -872,12 +872,17 @@ class _WindowsNamespaceLease:
         *,
         seal_contents: bool = False,
     ) -> _WindowsDirectory:
-        handle = self.api.open_relative(
-            parent.handle,
-            name,
-            directory=True,
-            deny_other_writes=True,
-        )
+        try:
+            handle = self.api.open_relative(
+                parent.handle,
+                name,
+                directory=True,
+                deny_other_writes=True,
+            )
+        except SecurePathError as exc:
+            raise SealedNamespaceError(
+                f"native namespace directory is absent or redirected: {path}"
+            ) from exc
         if handle is None:
             raise SealedNamespaceError(f"native namespace directory is absent: {path}")
         return self._register_directory(
@@ -946,12 +951,17 @@ class _WindowsNamespaceLease:
         parent: _WindowsDirectory,
         name: str,
     ) -> None:
-        handle = self.api.open_relative(
-            parent.handle,
-            name,
-            directory=False,
-            deny_other_writes=True,
-        )
+        try:
+            handle = self.api.open_relative(
+                parent.handle,
+                name,
+                directory=False,
+                deny_other_writes=True,
+            )
+        except SecurePathError as exc:
+            raise SealedNamespaceError(
+                f"native namespace file is absent or redirected: {path}"
+            ) from exc
         if handle is None:
             raise SealedNamespaceError(f"native namespace file is absent: {path}")
         try:

@@ -16,6 +16,9 @@ from reprobit.classic_includes import parse_msvc_sbr
 from reprobit.native_device_map import (
     NativeDeviceMapError,
     NativeDeviceMapLease,
+    _ProcessDeviceMapInformation,
+    _ProcessDeviceMapQuery,
+    _ProcessDeviceMapSet,
     probe_native_device_map,
     probe_native_device_map_execution,
 )
@@ -31,9 +34,36 @@ _DDD_EXACT_MATCH_ON_REMOVE = 0x00000004
 _DDD_NO_BROADCAST_SYSTEM = 0x00000008
 
 
+def test_process_device_map_binding_uses_the_complete_native_union() -> None:
+    assert ctypes.sizeof(_ProcessDeviceMapSet) == ctypes.sizeof(ctypes.c_void_p)
+    assert ctypes.sizeof(_ProcessDeviceMapQuery) == 36
+    assert ctypes.sizeof(_ProcessDeviceMapInformation) == 40
+    assert _ProcessDeviceMapInformation.Set.offset == 0
+    assert _ProcessDeviceMapInformation.Query.offset == 0
+
+
 def test_native_device_map_rejects_non_letter_drive() -> None:
     with pytest.raises(NativeDeviceMapError, match="one ASCII letter"):
         NativeDeviceMapLease(Path.cwd(), "RR")
+
+
+@pytest.mark.skipif(not _WINDOWS, reason="requires a native Windows junction")
+def test_native_device_map_rejects_junction_root(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    junction = tmp_path / "junction"
+    target.mkdir()
+    result = subprocess.run(
+        ["cmd", "/d", "/c", "mklink", "/J", str(junction), str(target)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"fixture host cannot create a junction: {result.stdout.strip()}")
+
+    with pytest.raises(NativeDeviceMapError, match="must not be redirected"):
+        NativeDeviceMapLease(junction, _free_drive()).open()
 
 
 @pytest.mark.skipif(_WINDOWS, reason="non-Windows capability result")

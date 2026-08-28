@@ -477,6 +477,8 @@ def _configured_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     source = tmp_path / "effective"
     build = tmp_path / "configured"
     toolchain = tmp_path / "toolchain"
+    source_shell = source.as_posix()
+    toolchain_shell = toolchain.as_posix()
     for path in (
         source / "src/unit.cpp",
         source / "res/app.rc",
@@ -499,13 +501,13 @@ def _configured_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
                     "file": str(source / "src/unit.cpp"),
                     "command": " ".join(
                         (
-                            str(toolchain / "wine/x86/cl"),
+                            f"{toolchain_shell}/wine/x86/cl",
                             "/nologo",
-                            f"-I{source}/include",
+                            f"-I{source_shell}/include",
                             f"/Fo{compile_output}",
                             f"/Fd{compile_pdb}",
                             "-c",
-                            str(source / "src/unit.cpp"),
+                            f"{source_shell}/src/unit.cpp",
                         )
                     ),
                 }
@@ -518,34 +520,35 @@ def _configured_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     app_dir.mkdir(parents=True)
     core_dir.mkdir(parents=True)
     (app_dir / "flags.make").write_text(
-        f"RC_DEFINES = -DWIN32\nRC_INCLUDES = -I {source}/include\nRC_FLAGS =\n",
+        f"RC_DEFINES = -DWIN32\nRC_INCLUDES = -I {source_shell}/include\nRC_FLAGS =\n",
         encoding="utf-8",
     )
     (app_dir / "build.make").write_text(
         "\n".join(
             (
                 "Building RC object",
-                f"\t{toolchain}/wine/x86/rc $(RC_DEFINES) $(RC_INCLUDES) "
-                f"$(RC_FLAGS) /fo CMakeFiles/app.dir/res/app.rc.res {source}/res/app.rc",
+                f"\t{toolchain_shell}/wine/x86/rc $(RC_DEFINES) $(RC_INCLUDES) "
+                f"$(RC_FLAGS) /fo CMakeFiles/app.dir/res/app.rc.res {source_shell}/res/app.rc",
             )
         ),
         encoding="utf-8",
     )
     (core_dir / "objects1.rsp").write_text(compile_output, encoding="utf-8")
     (core_dir / "link.txt").write_text(
-        f"{toolchain}/wine/x86/lib /nologo /out:core.lib @CMakeFiles/core.dir/objects1.rsp",
+        f"{toolchain_shell}/wine/x86/lib /nologo /out:core.lib "
+        "@CMakeFiles/core.dir/objects1.rsp",
         encoding="utf-8",
     )
     (app_dir / "objects1.rsp").write_text("CMakeFiles/app.dir/res/app.rc.res", encoding="utf-8")
     (app_dir / "link.txt").write_text(
         " ".join(
             (
-                f"{toolchain}/wine/x86/link",
+                f"{toolchain_shell}/wine/x86/link",
                 "/nologo",
                 "@CMakeFiles/app.dir/objects1.rsp",
                 "core.lib",
                 "kernel32.lib",
-                f"/DEF:{source}/app.def",
+                f"/DEF:{source_shell}/app.def",
                 "/out:APP.EXE",
                 "/implib:APP.lib",
                 "/pdb:APP.pdb",

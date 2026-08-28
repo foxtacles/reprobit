@@ -396,6 +396,82 @@ def test_portable_tree_receipts_ignore_physical_roots_and_host_modes(
     assert {item.algorithm for item in first_receipts} == {"portable-tree-v1"}
 
 
+def test_portable_tree_receipt_does_not_use_cached_scandir_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    toolchain = fake_installation(tmp_path, MSVC_42)
+    real_scandir = os.scandir
+
+    class IncompleteIdentityEntry:
+        def __init__(self, entry: os.DirEntry[str]) -> None:
+            self.name = entry.name
+            self.path = entry.path
+
+        def stat(self, *, follow_symlinks: bool = True) -> SimpleNamespace:
+            metadata = Path(self.path).stat(follow_symlinks=follow_symlinks)
+            return SimpleNamespace(
+                st_mode=metadata.st_mode,
+                st_dev=0,
+                st_ino=0,
+                st_size=metadata.st_size,
+                st_mtime_ns=metadata.st_mtime_ns,
+                st_ctime_ns=metadata.st_ctime_ns,
+            )
+
+    class IncompleteIdentityScan:
+        def __init__(self, directory: Path) -> None:
+            self._iterator = real_scandir(directory)
+
+        def __enter__(self) -> object:
+            return iter(IncompleteIdentityEntry(entry) for entry in self._iterator)
+
+        def __exit__(self, *args: object) -> None:
+            self._iterator.close()
+
+    monkeypatch.setattr(
+        "reprobit.toolchains.os.scandir",
+        lambda directory: IncompleteIdentityScan(Path(directory)),
+    )
+
+    assert toolchain.create_lock().tree_digests
+
+
+def test_portable_tree_receipt_rejects_windows_reparse_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    toolchain = fake_installation(tmp_path, MSVC_42)
+    redirected = toolchain.host_path("include/redirected")
+    redirected.mkdir()
+    (redirected / "outside.dat").write_bytes(b"outside")
+    real_stat = Path.stat
+
+    def tagged_stat(
+        path: Path,
+        *,
+        follow_symlinks: bool = True,
+    ) -> os.stat_result | SimpleNamespace:
+        metadata = real_stat(path, follow_symlinks=follow_symlinks)
+        if path != redirected:
+            return metadata
+        return SimpleNamespace(
+            st_mode=metadata.st_mode,
+            st_dev=metadata.st_dev,
+            st_ino=metadata.st_ino,
+            st_size=metadata.st_size,
+            st_mtime_ns=metadata.st_mtime_ns,
+            st_ctime_ns=metadata.st_ctime_ns,
+            st_reparse_tag=0,
+            st_file_attributes=0x0400,
+        )
+
+    monkeypatch.setattr(Path, "stat", tagged_stat)
+
+    with pytest.raises(ToolchainError, match="contains a reparse point"):
+        toolchain.create_lock()
+
+
 def test_portable_tree_receipt_rejects_symlinks(tmp_path: Path) -> None:
     toolchain = fake_installation(tmp_path, MSVC_42)
     link = toolchain.host_path("include/linked.dat")

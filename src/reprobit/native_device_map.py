@@ -19,6 +19,7 @@ from __future__ import annotations
 import ctypes
 import os
 import re
+import stat
 import sys
 import tempfile
 import textwrap
@@ -43,6 +44,7 @@ _FILE_READ_ATTRIBUTES = 0x00000080
 _FILE_SHARE_ALL = 0x00000001 | 0x00000002 | 0x00000004
 _OPEN_EXISTING = 3
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _VOLUME_NAME_NT = 0x00000002
 
 _PROCESS_MAP_LOCK = Lock()
@@ -81,6 +83,27 @@ class _ObjectAttributes(ctypes.Structure):
 
 class _ProcessDeviceMapSet(ctypes.Structure):
     _fields_ = [("DirectoryHandle", ctypes.c_void_p)]
+
+
+class _ProcessDeviceMapQuery(ctypes.Structure):
+    _fields_ = [
+        ("DriveMap", ctypes.c_uint32),
+        ("DriveType", ctypes.c_uint8 * 32),
+    ]
+
+
+class _ProcessDeviceMapInformation(ctypes.Union):
+    """Exact non-EX PROCESS_DEVICEMAP_INFORMATION buffer.
+
+    Although a set operation consumes only ``Set.DirectoryHandle``, Windows
+    requires the size of the complete union.  On 64-bit Windows the 36-byte
+    query arm is rounded to the pointer-aligned 40-byte union.
+    """
+
+    _fields_ = [
+        ("Set", _ProcessDeviceMapSet),
+        ("Query", _ProcessDeviceMapQuery),
+    ]
 
 
 def _handle(value: int) -> ctypes.c_void_p:
@@ -137,6 +160,10 @@ class _NativeApi:
             # Requiring a native 64-bit controller is both simpler and fail-closed.
             raise NativeDeviceMapError(
                 "native process device maps require a 64-bit Python controller"
+            )
+        if ctypes.sizeof(_ProcessDeviceMapInformation) != 40:
+            raise NativeDeviceMapError(
+                "native process device-map binding has an unexpected layout"
             )
         win_dll = getattr(ctypes, "WinDLL", None)
         if win_dll is None:
@@ -321,7 +348,8 @@ class _NativeApi:
         return ctypes.wstring_at(buffer, result.Length // 2)
 
     def set_process_map(self, process: int, directory: int) -> None:
-        information = _ProcessDeviceMapSet(_handle(directory))
+        information = _ProcessDeviceMapInformation()
+        information.Set.DirectoryHandle = _handle(directory)
         status = int(
             self.NtSetInformationProcess(
                 _handle(process),
@@ -585,9 +613,24 @@ class NativeDeviceMapLease(AbstractContextManager["NativeDeviceMapLease"]):
                 raise NativeDeviceMapError(
                     "native logical-drive root must be absolute"
                 )
-            if self.root.is_symlink():
+            try:
+                root_metadata = self.root.lstat()
+            except OSError as error:
                 raise NativeDeviceMapError(
-                    f"native logical-drive root must not be a symlink: {self.root}"
+                    f"cannot inspect native logical-drive root {self.root}: {error}"
+                ) from error
+            if (
+                stat.S_ISLNK(root_metadata.st_mode)
+                or int(getattr(root_metadata, "st_reparse_tag", False))
+                or int(getattr(root_metadata, "st_file_attributes", False))
+                & _FILE_ATTRIBUTE_REPARSE_POINT
+            ):
+                raise NativeDeviceMapError(
+                    f"native logical-drive root must not be redirected: {self.root}"
+                )
+            if not stat.S_ISDIR(root_metadata.st_mode):
+                raise NativeDeviceMapError(
+                    f"native logical-drive root is not a plain directory: {self.root}"
                 )
             resolved = self.root.resolve(strict=True)
             if not resolved.is_dir():

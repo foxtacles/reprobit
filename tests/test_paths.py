@@ -103,7 +103,7 @@ def test_materialization_is_owned_and_cleaned(tmp_path: Path) -> None:
 
     with skeleton.temporary_materialization(tmp_path / "runs") as materialized:
         link = materialized.root / "src"
-        assert link.is_symlink()
+        assert os.path.lexists(link)
         assert link.resolve() == source
         temporary_root = materialized.root
     assert not temporary_root.exists()

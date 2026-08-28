@@ -11,7 +11,7 @@ candidate-only terminal pipeline.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
@@ -72,9 +72,11 @@ class ClassicUnitComposition:
     output: bytes
     witnesses: tuple[InterventionWitness, ...]
     group_order_evidence: Digest | None = None
-    donor_semantic_proofs: Mapping[str, SemanticProof] = MappingProxyType({})
-    donor_semantic_uses: Mapping[str, tuple[DonorSemanticUse, ...]] = MappingProxyType(
-        {}
+    donor_semantic_proofs: Mapping[str, SemanticProof] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    donor_semantic_uses: Mapping[str, tuple[DonorSemanticUse, ...]] = field(
+        default_factory=lambda: MappingProxyType({})
     )
 
 
