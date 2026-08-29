@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -611,7 +611,9 @@ def discovery_report_json_schema() -> JsonValue:
 class DiscoveryCompileOutput:
     object_path: Path
     receipt: CompileReceipt
-    metadata: Mapping[str, JsonValue] = MappingProxyType({})
+    metadata: Mapping[str, JsonValue] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
 
 @dataclass(frozen=True, slots=True)
