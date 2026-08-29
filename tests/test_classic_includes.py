@@ -63,6 +63,76 @@ def test_vc4_sbr_parser_preserves_nested_source_ancestry() -> None:
     )
 
 
+def _sbr_with_main(*records: bytes) -> bytes:
+    return (
+        b"\x00\x02\x00\x07\x00R:\\build\0"
+        b"\x01R:\\source\\main.cpp\0"
+        + b"".join(records)
+        + b"\x0a"
+    )
+
+
+def test_vc4_sbr_parser_accepts_0208_parent_record_and_preserves_alignment() -> None:
+    payload = _sbr_with_main(
+        # Define the observed three-byte identifier for the parent-class record.
+        b"\x43\x01\x00\x00\xdb\xae\x00Base\0",
+        # 0x0208 is a terminal parent record followed by one word. VC4 emits
+        # the extended-width 0x4c form for this record in the real trace.
+        b"\x4c\xdb\xae\x00\x08\x02\x30\x00",
+        # A line record proves parsing resumed on the next opcode boundary.
+        b"\x02\x78\x56",
+    )
+
+    trace = parse_msvc_sbr(payload)
+
+    assert trace.sources == (MsvcSbrSource(r"R:\source\main.cpp", None),)
+
+
+def test_vc4_sbr_parser_rejects_truncated_0208_parent_record() -> None:
+    payload = (
+        b"\x00\x02\x00\x07\x00R:\\build\0"
+        b"\x01R:\\source\\main.cpp\0"
+        b"\x03\x01\x00\x00\x34\x12Base\0"
+        b"\x0c\x34\x12\x08\x02"
+    )
+
+    with pytest.raises(ClassicIncludeTraceError, match="truncated"):
+        parse_msvc_sbr(payload)
+
+
+def test_vc4_sbr_parser_accepts_forward_symbol_reference() -> None:
+    trace = parse_msvc_sbr(_sbr_with_main(b"\x44\x34\x12\x00"))
+
+    assert trace.sources == (MsvcSbrSource(r"R:\source\main.cpp", None),)
+
+
+def test_vc4_sbr_parser_preserves_identifier_binding_consistency() -> None:
+    payload = _sbr_with_main(
+        b"\x04\x01\x00\x34\x12First\0",
+        b"\x04\x01\x00\x34\x12Second\0",
+    )
+
+    with pytest.raises(ClassicIncludeTraceError, match="identifier table is inconsistent"):
+        parse_msvc_sbr(payload)
+
+
+def test_vc4_sbr_parser_still_rejects_unknown_parent_identifier() -> None:
+    payload = _sbr_with_main(b"\x0c\x34\x12\x09\x02")
+
+    with pytest.raises(ClassicIncludeTraceError, match="parent class references"):
+        parse_msvc_sbr(payload)
+
+
+def test_vc4_sbr_parser_still_rejects_unknown_parent_opcode() -> None:
+    payload = _sbr_with_main(
+        b"\x03\x01\x00\x00\x34\x12Base\0",
+        b"\x0c\x34\x12\x09\x02",
+    )
+
+    with pytest.raises(ClassicIncludeTraceError, match="parent opcode 0x0209"):
+        parse_msvc_sbr(payload)
+
+
 @pytest.mark.parametrize(
     "payload",
     (

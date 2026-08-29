@@ -219,14 +219,15 @@ def _bind_identifier(
     name_width: int | None = None,
 ) -> None:
     identifier_code = reader.address(identifier_width)
-    if identifier_code in {0x01, 0x02, 0x21, 0x22, 0x40, 0x60}:
-        name_code = reader.address(name_width or identifier_width)
-        name = reader.cstring()
-        previous = identifiers.setdefault(name_code, name)
-        if previous != name:
-            raise ClassicIncludeTraceError("SBR identifier table is inconsistent")
-    elif identifier_code not in identifiers:
-        raise ClassicIncludeTraceError("SBR references an unknown identifier")
+    if identifier_code not in {0x01, 0x02, 0x21, 0x22, 0x40, 0x60}:
+        # VC4 browser streams permit forward symbol references.  They carry no
+        # payload beyond this fixed-width code and cannot affect source nesting.
+        return
+    name_code = reader.address(name_width or identifier_width)
+    name = reader.cstring()
+    previous = identifiers.setdefault(name_code, name)
+    if previous != name:
+        raise ClassicIncludeTraceError("SBR identifier table is inconsistent")
 
 
 def _statement(reader: _Reader, identifiers: dict[int, str], width: int) -> None:
@@ -300,7 +301,7 @@ def parse_msvc_sbr(payload: bytes) -> MsvcSbrTrace:
                     continue
                 if parent_opcode in {0x0902, 0x0904}:
                     break
-                if parent_opcode in {0x0203, 0x0204, 0x0205}:
+                if parent_opcode in {0x0203, 0x0204, 0x0205, 0x0208}:
                     reader.word()
                     break
                 raise ClassicIncludeTraceError(
