@@ -18,6 +18,7 @@ import reprobit.classic_incremental_keys as incremental_keys
 import reprobit.classic_incremental_nodes as incremental_nodes
 import reprobit.classic_incremental_planning as incremental_planning
 import reprobit.classic_publication as classic_publication
+import reprobit.incremental as incremental
 import reprobit.incremental_executor as incremental_executor
 from reprobit.backends import BackendCapabilities
 from reprobit.cache import CacheLease, CacheRecord, cache_key
@@ -950,6 +951,69 @@ def _run(
     )
 
 
+def test_implementation_drift_is_rejected_before_planning_mutates_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    bundle, _units, _sources = _fixture_bundle(root)
+    session = tmp_path / "run"
+    monkeypatch.setattr(
+        incremental,
+        "producer_implementation_digest",
+        lambda: Digest.from_bytes(b"changed incremental producer closure"),
+    )
+
+    with pytest.raises(RuntimeError, match="implementation changed"):
+        _run(bundle, root=root, state=state, session=session)
+
+    assert not session.exists()
+
+
+def test_implementation_drift_after_planning_leaves_cache_records_unpublished(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    bundle, units, sources = _fixture_bundle(root)
+    runtime_calls: list[_FakePrepared] = []
+    _patch_planner(
+        monkeypatch,
+        bundle=bundle,
+        units=units,
+        sources=sources,
+        project_root=root,
+        runtime_calls=runtime_calls,
+    )
+    calls = 0
+
+    def drift_after_planning() -> Digest:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return incremental.PRODUCER_IMPLEMENTATION_DIGEST
+        return Digest.from_bytes(b"changed incremental producer closure")
+
+    monkeypatch.setattr(
+        incremental,
+        "producer_implementation_digest",
+        drift_after_planning,
+    )
+
+    with pytest.raises(RuntimeError, match="implementation changed"):
+        _run(bundle, root=root, state=state, session=tmp_path / "run")
+
+    assert calls == 2
+    assert not tuple((state / "cache" / "v1" / "records").rglob("*.json"))
+    assert not (root / "artifacts" / "app.exe").exists()
+
+
 def test_all_hit_build_skips_full_prepare_and_clean_project_ignores_oracle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1001,7 +1065,7 @@ def test_all_hit_build_skips_full_prepare_and_clean_project_ignores_oracle(
         "prepare_classic_producer_graph_run",
         lambda *_a, **_k: pytest.fail("all-hit build constructed a prepared run"),
     )
-    expected_implementation = incremental_planning.producer_implementation_digest()
+    expected_implementation = incremental.PRODUCER_IMPLEMENTATION_DIGEST
     implementation_revalidations: list[Digest] = []
     monkeypatch.setattr(
         incremental_execution,
@@ -1028,6 +1092,54 @@ def test_all_hit_build_skips_full_prepare_and_clean_project_ignores_oracle(
         target_before.st_dev,
         target_before.st_ino,
         target_before.st_mtime_ns,
+    )
+
+
+def test_implementation_drift_after_all_hit_planning_blocks_target_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    bundle, units, sources = _fixture_bundle(root)
+    runtime_calls: list[_FakePrepared] = []
+    _patch_planner(
+        monkeypatch,
+        bundle=bundle,
+        units=units,
+        sources=sources,
+        project_root=root,
+        runtime_calls=runtime_calls,
+    )
+    _run(bundle, root=root, state=state, session=tmp_path / "run-1")
+    artifact = root / "artifacts" / "app.exe"
+    before = artifact.stat()
+    calls = 0
+
+    def drift_after_planning() -> Digest:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return incremental.PRODUCER_IMPLEMENTATION_DIGEST
+        return Digest.from_bytes(b"changed incremental producer closure")
+
+    monkeypatch.setattr(
+        incremental,
+        "producer_implementation_digest",
+        drift_after_planning,
+    )
+
+    with pytest.raises(RuntimeError, match="implementation changed"):
+        _run(bundle, root=root, state=state, session=tmp_path / "run-2")
+
+    assert calls == 2
+    after = artifact.stat()
+    assert (after.st_dev, after.st_ino, after.st_mtime_ns) == (
+        before.st_dev,
+        before.st_ino,
+        before.st_mtime_ns,
     )
 
 

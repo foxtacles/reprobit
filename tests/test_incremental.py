@@ -9,6 +9,7 @@ from reprobit.cache import IncrementalCache, cache_key
 from reprobit.implementation import package_implementation_digest
 from reprobit.incremental import (
     PRODUCER_CACHE_IMPLEMENTATION,
+    PRODUCER_IMPLEMENTATION_DIGEST,
     IncrementalAuthorityError,
     IncrementalBuildSummary,
     current_worktree_authority,
@@ -66,6 +67,13 @@ def test_package_implementation_digest_change_is_a_cache_miss(tmp_path: Path) ->
         lease.store("producer", key, {"build/out.obj": output})
     with IncrementalCache(state, implementation=second_implementation).lease() as lease:
         assert lease.lookup("producer", key) is None
+
+
+def test_captured_producer_digest_defines_cache_namespace() -> None:
+    assert (
+        producer_cache_implementation(PRODUCER_IMPLEMENTATION_DIGEST)
+        == PRODUCER_CACHE_IMPLEMENTATION
+    )
 
 
 def test_package_reseal_includes_runtime_proxy_asset(

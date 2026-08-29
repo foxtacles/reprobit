@@ -58,7 +58,8 @@ def producer_cache_implementation(
     return f"classic-producer-graph-v1-{digest.value}"
 
 
-PRODUCER_CACHE_IMPLEMENTATION = producer_cache_implementation()
+PRODUCER_IMPLEMENTATION_DIGEST = producer_implementation_digest()
+PRODUCER_CACHE_IMPLEMENTATION = producer_cache_implementation(PRODUCER_IMPLEMENTATION_DIGEST)
 
 
 class IncrementalAuthorityError(ValueError):
@@ -379,6 +380,7 @@ def producer_cache_key(material: dict[str, JsonValue]) -> str:
 
 __all__ = [
     "PRODUCER_CACHE_IMPLEMENTATION",
+    "PRODUCER_IMPLEMENTATION_DIGEST",
     "DeveloperAuthority",
     "IncrementalAuthorityError",
     "IncrementalBuildSummary",

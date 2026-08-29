@@ -26,7 +26,7 @@ from reprobit.classic_publication import (
 )
 from reprobit.execution import BuildExecutionReceipt, FileReceipt
 from reprobit.incremental import (
-    PRODUCER_CACHE_IMPLEMENTATION,
+    producer_cache_implementation,
     revalidate_producer_implementation,
 )
 from reprobit.incremental_executor import (
@@ -58,7 +58,7 @@ def execute_classic_incremental_plan(
     runtime_factory = partial(warm_context.runtime_factory, plan)
     cache = IncrementalCache(
         state_root,
-        implementation=PRODUCER_CACHE_IMPLEMENTATION,
+        implementation=producer_cache_implementation(implementation_receipt),
     )
 
     def lane_count() -> int:

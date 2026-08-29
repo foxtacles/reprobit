@@ -44,7 +44,11 @@ from reprobit.classic_runtime_graph import (
     _graph_role_bindings,
     _graph_system_library_map,
 )
-from reprobit.incremental import DeveloperAuthority, producer_implementation_digest
+from reprobit.incremental import (
+    PRODUCER_IMPLEMENTATION_DIGEST,
+    DeveloperAuthority,
+    revalidate_producer_implementation,
+)
 from reprobit.incremental_executor import IncrementalProgress
 from reprobit.model import Digest
 from reprobit.paths import normalize_logical_path
@@ -601,6 +605,8 @@ def prepare_classic_incremental_plan(
     cleanup_timeout: float,
     progress: IncrementalProgress | None,
 ) -> ClassicIncrementalPlan:
+    implementation_receipt = PRODUCER_IMPLEMENTATION_DIGEST
+    revalidate_producer_implementation(implementation_receipt)
     bundle = authority.bundle
     graph = bundle.producer_graph
     if not isinstance(bundle.spec.build, ProducerGraphBuildAdapter) or graph is None:
@@ -637,7 +643,6 @@ def prepare_classic_incremental_plan(
         for object_identity, (intervention, receipt, _values) in rdata_graph_authority.items()
     }
     graph_digest_value = producer_graph_digest(graph).value
-    implementation_receipt = producer_implementation_digest()
     project_root = project_root.resolve(strict=True)
     toolchain_root = toolchain_root.resolve(strict=True)
     census = PhysicalInputCensus()
