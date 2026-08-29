@@ -4135,19 +4135,33 @@ def test_donor_compiler_command_preserves_committed_visible_path_contract(
 
 
 @pytest.mark.parametrize(
-    ("projection", "compiler_target", "expect_replay"),
+    ("projection", "compiler_target", "owning_source", "expect_replay"),
     (
-        (DonorIncludeProjection.SOURCE_ROOT_MIRROR_ONLY, "program", True),
-        (DonorIncludeProjection.NONE, "config", True),
-        (DonorIncludeProjection.NONE, "program", False),
+        (
+            DonorIncludeProjection.SOURCE_ROOT_MIRROR_ONLY,
+            "program",
+            "src/unit.cpp",
+            True,
+        ),
+        (DonorIncludeProjection.NONE, "config", "src/unit.cpp", True),
+        (DonorIncludeProjection.NONE, "program", "owner/unit.cpp", True),
+        (DonorIncludeProjection.NONE, "program", "src/unit.cpp", False),
+        (DonorIncludeProjection.NONE, "PROGRAM", "SRC/UNIT.CPP", False),
     ),
-    ids=("projected", "ordinary-cross-target", "ordinary-same-target"),
+    ids=(
+        "projected",
+        "ordinary-cross-target",
+        "ordinary-cross-source",
+        "ordinary-same-lane",
+        "ordinary-same-lane-dos-case",
+    ),
 )
 def test_donor_invocation_replays_only_dependency_tracked_donors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     projection: DonorIncludeProjection,
     compiler_target: str,
+    owning_source: str,
     expect_replay: bool,
 ) -> None:
     drive = tmp_path / "drive"
@@ -4173,7 +4187,7 @@ def test_donor_invocation_replays_only_dependency_tracked_donors(
         build_target=compiler_target,
     )
     record = classic_runtime_graph.ClassicCompileRecord(
-        f"compiler.{compiler_target}.0000",
+        f"compiler.{compiler_target.casefold()}.0000",
         build_root,
         source,
         build_root / "unit.obj",
@@ -4210,7 +4224,7 @@ def test_donor_invocation_replays_only_dependency_tracked_donors(
         plan=SimpleNamespace(
             id="tu_fixture",
             build_target="program",
-            source="owner/unit.cpp",
+            source=owning_source,
         ),
         donors=(
             SimpleNamespace(
@@ -4337,7 +4351,7 @@ def test_donor_invocation_replays_only_dependency_tracked_donors(
 
     assert len(captured) == (2 if expect_replay else 1)
     assert captured[0][1] == build_root.parent / "donors" / (
-        "composed-program-owner_unit.cpp-d_0123456789ab"
+        f"composed-program-{owning_source.replace('/', '_')}-d_0123456789ab"
     )
     assert captured[0][0][-5:] == (
         "/FIrun.h",

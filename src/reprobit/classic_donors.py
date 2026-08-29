@@ -467,6 +467,22 @@ class DonorCompileRequest:
     overlay_receipts: tuple[ClassicOverlayOutputReceipt, ...] = ()
 
 
+def donor_requires_dependency_tracking(
+    request: DonorCompileRequest,
+    *,
+    owning_build_target: str,
+    owning_logical_source: str,
+) -> bool:
+    """Return whether a donor reads outside its owning compiler lane."""
+
+    request_lane = (request.build_target.casefold(), request.logical_source.casefold())
+    owning_lane = (owning_build_target.casefold(), owning_logical_source.casefold())
+    return (
+        request.compiler_additions.include_projection is not DonorIncludeProjection.NONE
+        or request_lane != owning_lane
+    )
+
+
 def _legacy_identity(value: object) -> str:
     """Hash the historical, stable indented JSON identity claim."""
 
@@ -1336,6 +1352,7 @@ __all__ = [
     "DonorIncludeProjection",
     "DonorRecipeValidation",
     "DonorSourceError",
+    "donor_requires_dependency_tracking",
     "generate_declaration_shape",
     "generate_extern_run",
     "generate_forward_run",

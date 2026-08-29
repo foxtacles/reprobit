@@ -21,7 +21,11 @@ from reprobit.classic.semantic_contracts import (
     EffectiveOverlayReceipt,
     _ClassicDonorSemanticMaterial,
 )
-from reprobit.classic_donors import DonorCompileRequest, DonorIncludeProjection
+from reprobit.classic_donors import (
+    DonorCompileRequest,
+    DonorIncludeProjection,
+    donor_requires_dependency_tracking,
+)
 from reprobit.classic_evidence import (
     ClassicDonorOutputReceipt,
     ClassicObjectTransformReceipt,
@@ -582,10 +586,10 @@ class ClassicDonorComposition:
                     cancellation=cancellation,
                     windows_lineage_planner=lane.windows_lineage_planner,
                 )
-                dependency_tracked = (
-                    donor.request.compiler_additions.include_projection
-                    is not DonorIncludeProjection.NONE
-                    or donor.request.build_target != unit.plan.build_target
+                dependency_tracked = donor_requires_dependency_tracking(
+                    donor.request,
+                    owning_build_target=unit.plan.build_target,
+                    owning_logical_source=unit.plan.source,
                 )
                 if capture_dependencies and dependency_tracked:
                     self.producer.require_regular(
@@ -690,9 +694,10 @@ class ClassicDonorComposition:
             compiler_epoch=compiler_epoch,
             capture_dependencies=dependency_replays is not None,
         )
-        dependency_tracked = (
-            donor.request.compiler_additions.include_projection is not DonorIncludeProjection.NONE
-            or donor.request.build_target != unit.plan.build_target
+        dependency_tracked = donor_requires_dependency_tracking(
+            donor.request,
+            owning_build_target=unit.plan.build_target,
+            owning_logical_source=unit.plan.source,
         )
         if dependency_replays is not None and dependency_tracked:
             if invocation.dependency_replay is None:

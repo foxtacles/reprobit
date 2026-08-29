@@ -14,7 +14,10 @@ from reprobit.assets import runtime_asset_path
 from reprobit.backends import ExecutionBackend, PosixWineBackend
 from reprobit.classic.arguments import validate_compile_arguments
 from reprobit.classic_cache import DonorDependencyResolutionContext
-from reprobit.classic_donors import DonorIncludeProjection
+from reprobit.classic_donors import (
+    DonorIncludeProjection,
+    donor_requires_dependency_tracking,
+)
 from reprobit.classic_includes import IncludeOrigin, SealedIncludeAuthority, SealedIncludeFile
 from reprobit.classic_incremental_context import (
     ClassicIncrementalError,
@@ -384,9 +387,11 @@ def _donor_dependency_resolution_contexts(
             (
                 donor
                 for donor in unit.donors
-                if donor.request.compiler_additions.include_projection
-                is not DonorIncludeProjection.NONE
-                or donor.request.build_target != unit.plan.build_target
+                if donor_requires_dependency_tracking(
+                    donor.request,
+                    owning_build_target=unit.plan.build_target,
+                    owning_logical_source=unit.plan.source,
+                )
             ),
             key=lambda item: item.intervention.id.casefold(),
         )
