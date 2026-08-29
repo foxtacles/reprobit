@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from scripts import provision_archaic_msvc42 as provisioner
+from reprobit import msvc42_provision as provisioner
+from scripts import provision_archaic_msvc42 as provisioner_script
 
 
 def _sha256(path: Path) -> str:
@@ -26,6 +27,18 @@ def test_packaged_transport_assets_match_fixed_authority(
     assert source.stat().st_size == authority.size
     assert _sha256(source) == authority.sha256
     assert b"Permission to use, copy, modify" in source.read_bytes()
+
+
+def test_missing_packaged_transport_is_a_provision_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def missing(_name: str) -> Path:
+        raise FileNotFoundError("simulated missing wheel asset")
+
+    monkeypatch.setattr(provisioner, "runtime_asset_directory", missing)
+
+    with pytest.raises(provisioner.ProvisionError, match="missing wheel asset"):
+        provisioner._transport_asset("wine/x86/cl", provisioner._TRANSPORT_FILES["wine/x86/cl"])
 
 
 def test_transport_install_is_exact_regular_and_non_overwriting(tmp_path: Path) -> None:
@@ -52,10 +65,10 @@ def test_complete_verification_requires_cross_host_transport(
     monkeypatch.setattr(provisioner, "_TREES", {})
 
     with pytest.raises(provisioner.ProvisionError, match="absent or redirected"):
-        provisioner.verify(tmp_path)
+        provisioner.verify_msvc42(tmp_path)
 
     provisioner._install_transport_assets(tmp_path)
-    provisioner.verify(tmp_path)
+    provisioner.verify_msvc42(tmp_path)
 
 
 def test_complete_verification_rejects_transport_mutation(
@@ -69,7 +82,7 @@ def test_complete_verification_rejects_transport_mutation(
     transport.write_bytes(transport.read_bytes() + b"\n")
 
     with pytest.raises(provisioner.ProvisionError, match="file authority differs"):
-        provisioner.verify(tmp_path)
+        provisioner.verify_msvc42(tmp_path)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="portable symlink creation")
@@ -80,4 +93,25 @@ def test_provision_rejects_redirected_destination(tmp_path: Path) -> None:
     redirected.symlink_to(real, target_is_directory=True)
 
     with pytest.raises(provisioner.ProvisionError, match="redirected path"):
-        provisioner.provision(redirected)
+        provisioner.provision_msvc42(redirected)
+
+
+def test_original_script_is_a_thin_compatible_wrapper() -> None:
+    assert provisioner_script.provision is provisioner.provision_msvc42
+    assert provisioner_script.verify is provisioner.verify_msvc42
+
+
+def test_existing_exact_destination_reports_progress_and_returns_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    messages: list[str] = []
+    monkeypatch.setattr(provisioner, "verify_msvc42", lambda _root: None)
+
+    result = provisioner.provision_msvc42(tmp_path, progress=messages.append)
+
+    assert result == tmp_path.resolve(strict=True)
+    assert messages == [
+        f"verifying existing destination {tmp_path.resolve(strict=True)}",
+        "existing toolchain is exact; no download needed",
+    ]

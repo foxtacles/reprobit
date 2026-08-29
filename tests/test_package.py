@@ -6,10 +6,11 @@ from pathlib import Path
 import pytest
 
 import reprobit
+import reprobit.assets as assets
 import reprobit.classic.coff as classic_coff
 import reprobit.classic.foundation as classic_foundation
 import reprobit.classic.ia32 as classic_ia32
-from reprobit.assets import runtime_asset_path
+from reprobit.assets import runtime_asset_directory, runtime_asset_path
 from reprobit.discovery_contracts import discovery_report_json_schema
 from reprobit.msvc_discovery import msvc_discovery_request_json_schema
 from reprobit.report_io import report_json_schema
@@ -83,6 +84,25 @@ def test_wheel_declares_required_non_python_assets() -> None:
 def test_runtime_asset_lookup_rejects_non_component_names(name: str) -> None:
     with pytest.raises(ValueError, match="one safe path component"):
         runtime_asset_path(name)
+
+
+def test_runtime_directory_lookup_rejects_non_component_names() -> None:
+    with pytest.raises(ValueError, match="one safe path component"):
+        runtime_asset_directory("msvc42-wine/wine-msvc.sh")
+
+
+def test_runtime_directory_lookup_supports_installed_wheel_layout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = tmp_path / "site-packages" / "reprobit"
+    package.mkdir(parents=True)
+    (package / "assets.py").touch()
+    installed = tmp_path / "site-packages" / "share" / "reprobit" / "runtime" / "bundle"
+    installed.mkdir(parents=True)
+    monkeypatch.setattr(assets, "__file__", str(package / "assets.py"))
+
+    assert assets.runtime_asset_directory("bundle") == installed.resolve(strict=True)
 
 
 def test_classic_core_has_no_blanket_static_analysis_suppressions() -> None:
