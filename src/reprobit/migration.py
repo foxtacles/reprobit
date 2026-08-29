@@ -522,11 +522,11 @@ def _migrate_donor_compile_lane(
     return required_define
 
 
-def _legacy_workspace_root(contract: Mapping[str, Any]) -> PurePosixPath:
+def _legacy_workspace_root(contract: Mapping[str, Any]) -> Path:
     value = contract.get("build_root")
     if not isinstance(value, str):
         raise MigrationError("legacy path contract lacks its build root")
-    workspace = PurePosixPath(value)
+    workspace = Path(value)
     if (
         not workspace.is_absolute()
         or workspace.as_posix() != value
@@ -571,7 +571,7 @@ def _legacy_compile_lane_owners(
     if not isinstance(contract, dict):
         raise MigrationError("legacy toolchain lacks compiler-visible path contract")
     workspace = _legacy_workspace_root(contract)
-    workspace_path = Path(workspace.as_posix()).resolve(strict=False)
+    workspace_path = workspace.resolve(strict=False)
     build_root = (workspace_path / "build").resolve(strict=False)
     source_root = (workspace_path / "src").resolve(strict=False)
     database_path = build_root / "compile_commands.json"
