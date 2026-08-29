@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+from fractions import Fraction
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from reprobit.costs import CostClass, FunctionCost, RationalCost
 from reprobit.model import (
     Artifact,
     ArtifactKind,
@@ -17,6 +19,7 @@ from reprobit.model import (
     ProvenanceKind,
     ProvenanceNode,
     Quarantine,
+    Scope,
     SemanticArtifactClaim,
     SemanticProof,
     Verdict,
@@ -38,6 +41,10 @@ from reprobit.report import (
     RuntimeProofBinding,
     StageTiming,
     TargetComparisonSummary,
+)
+from reprobit.report_html import _scope_key
+from reprobit.report_html_format import cost_class_label, format_fraction
+from reprobit.report_io import (
     read_report_json,
     render_report_html,
     write_report_html,
@@ -61,6 +68,31 @@ from reprobit.schema import (
     ToolchainRef,
 )
 from reprobit.strict_json import canonical_json
+
+
+@pytest.mark.parametrize(
+    ("cost_class", "label"),
+    (
+        (CostClass.CROSS_TU_OR_OVERLAY, "Cross-TU or overlay"),
+        (CostClass.EQUAL_BODY_DONOR, "Equal-body donor"),
+        (CostClass.BINARY_SURGERY, "Binary surgery"),
+    ),
+)
+def test_html_cost_class_labels_are_intentionally_humanized(
+    cost_class: CostClass,
+    label: str,
+) -> None:
+    assert cost_class_label(cost_class) == label
+
+
+def test_html_cost_helpers_keep_full_scope_and_compact_whole_fractions() -> None:
+    assert _scope_key(
+        Scope(target="program", translation_unit="first", function="same_name")
+    ) != _scope_key(
+        Scope(target="program", translation_unit="second", function="same_name")
+    )
+    assert format_fraction(Fraction(12, 1)) == "12"
+    assert format_fraction(Fraction(5, 2)) == "5/2"
 
 
 def digest(seed: bytes) -> Digest:
@@ -324,6 +356,79 @@ def test_report_is_deterministic_and_canonical(tmp_path: Path) -> None:
     assert read_report_json(destination) == first
 
 
+def test_html_reconciles_shared_cost_and_marks_only_the_exact_quarantine_scope() -> None:
+    proof = proof_report()
+    base = Report.from_bundle(
+        bundle(),
+        Verdict(
+            cold=True,
+            byte_exact=True,
+            logic_certified=True,
+            toolchain_origin=True,
+        ),
+        evidence=proof.summary,
+        proof=proof,
+        target_results={"program": True},
+        target_artifacts={"program": (100, digest(b"oracle"))},
+    )
+    quarantined_scope = Scope(
+        target="program",
+        translation_unit="first",
+        function="same_name",
+    )
+    costs = base.costs.model_copy(
+        update={
+            "project_total": 100,
+            "unallocated_shared_cost": 40,
+            "by_function": (
+                FunctionCost(
+                    scope=quarantined_scope,
+                    direct_cost=30,
+                    allocated_shared_cost=RationalCost(numerator=0),
+                    exposure_cost=0,
+                ),
+                FunctionCost(
+                    scope=Scope(
+                        target="program",
+                        translation_unit="second",
+                        function="same_name",
+                    ),
+                    direct_cost=30,
+                    allocated_shared_cost=RationalCost(numerator=0),
+                    exposure_cost=0,
+                ),
+            ),
+        }
+    )
+    verdict = Verdict(
+        cold=True,
+        byte_exact=True,
+        logic_certified=True,
+        toolchain_origin=False,
+        quarantines=(
+            Quarantine(
+                id="scoped-exception",
+                kind="legacy.oracle_install",
+                artifact_id="program.image",
+                ranges=(ByteRange(offset=0, length=1),),
+                byte_count=1,
+                reason="scoped fixture",
+                scope=quarantined_scope,
+            ),
+        ),
+    )
+
+    rendered = render_report_html(base.model_copy(update={"costs": costs, "verdict": verdict}))
+
+    assert "Attributed to functions" in rendered
+    assert "Unallocated project/TU shared" in rendered
+    assert "40.0% of the project total" in rendered
+    assert "Exposure is context, not an additive total" in rendered
+    assert "Function-level cost attribution rows" in rendered
+    assert "Complete function-cost allocation" not in rendered
+    assert rendered.count('<span class="exception-note">authenticity exception</span>') == 1
+
+
 def test_certified_report_cache_is_explicitly_bypassed() -> None:
     assert CacheSummary().model_dump(mode="json") == {
         "mode": "bypassed",
@@ -465,18 +570,32 @@ def test_html_is_self_contained_escaped_and_warns_for_quarantine(tmp_path: Path)
         target_artifacts={"program": (100, digest(b"oracle"))},
     )
     rendered = render_report_html(report)
-    assert "Authenticity quarantine" in rendered
-    assert "1 action(s), 1 range(s), 3 byte(s)" in rendered
+    assert "Disclosed authenticity exceptions remain" in rendered
+    assert "1 intervention affects 1 range" in rendered
+    assert "3 bytes total" in rendered
+    assert "action(s)" not in rendered
     assert "artifact-file" in rendered
     assert "[0x8, 0xb)" in rendered
     assert "disclosed legacy ancestry" in rendered
-    assert "build/&lt;script&gt;.exe" in rendered
+    assert "<code>build/&lt;script&gt;.exe</code>" in rendered
+    assert '<code class="identifier">legacy-action</code>' in rendered
     assert "Portable input trees" in rendered
     assert "header contents" not in rendered
     assert digest(b"header contents").value in rendered
     assert "https://" not in rendered
     assert "src=" not in rendered
-    assert "\\u003cscript\\u003e" in rendered
+    assert '<script type="application/json"' not in rendered
+    assert '<a class="machine-link" href="report.json">' in rendered
+    assert "complete machine-readable record" in rendered
+    assert "Raw function-cost table" in rendered
+    assert "Raw intervention table" in rendered
+    assert "Filter by target, TU, or function" in rendered
+    assert "Filter by ID, class, target, TU, or function" in rendered
+    assert '<details class="advanced"' in rendered
+    assert "data-table-filter" in rendered
+    assert rendered.index("Exact match, with authenticity exceptions") < rendered.index(
+        "Every disclosed reference-derived byte range"
+    )
 
     destination = tmp_path / "report.html"
     write_report_html(report, destination)
@@ -504,6 +623,16 @@ def test_report_identity_rejects_public_verdict_and_timing_tampering() -> None:
         target_artifacts={"program": (100, digest(b"oracle"))},
         timings=(StageTiming(stage="build", seconds=1.0),),
     )
+    rendered = render_report_html(report)
+    assert 'id="cost-class-chart-title"' in rendered
+    assert 'id="cost-target-chart-title"' in rendered
+    assert 'id="cost-hotspot-chart-title"' in rendered
+    assert 'id="timing-chart-title"' in rendered
+    assert "Stage timing" in rendered
+    assert "1.00 s" in rendered
+    assert "Cost ranks interventions; it is not elapsed time." in rendered
+    assert '<nav class="section-nav" aria-label="Report sections">' in rendered
+    assert 'href="#advanced"' in rendered
     for field, value in (("toolchain_origin", False), ("logic_certified", False)):
         payload = report.model_dump(mode="json", exclude_computed_fields=True)
         payload["verdict"][field] = value
