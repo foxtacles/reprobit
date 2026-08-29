@@ -14,7 +14,6 @@ from reprobit.cli_paths import (
     resolve_program,
     safe_project_path,
 )
-from reprobit.migration import validate_migration_files
 from reprobit.model import Digest
 from reprobit.producer_graph import (
     graph_reference,
@@ -23,7 +22,7 @@ from reprobit.producer_graph import (
     toolchain_document_digest,
 )
 from reprobit.producer_graph_cmake import extract_cmake_unix_makefiles_graph
-from reprobit.project_loader import load_project, load_project_tree
+from reprobit.project_loader import load_project, load_project_tree, validate_project_files
 from reprobit.schema import (
     ProducerGraphBuildAdapter,
     ProjectSpec,
@@ -267,7 +266,7 @@ def command_graph_extract(args: argparse.Namespace, output: CLIOutput) -> int:
     validation_files, validation_authority = _producer_graph_validation_files(
         root, spec, graph_data
     )
-    validate_migration_files(validation_files)
+    validate_project_files(validation_files)
     previous_graph = (
         (root / graph_relative_output).read_bytes()
         if (root / graph_relative_output).is_file()

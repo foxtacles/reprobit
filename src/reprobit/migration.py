@@ -9,7 +9,6 @@ import os
 import re
 import shlex
 import stat
-import tempfile
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -21,7 +20,6 @@ from pydantic import ValidationError
 
 from reprobit.model import AuthenticityPolicy, ByteRange, Digest, Scope
 from reprobit.paths import normalize_logical_path
-from reprobit.project_loader import load_project_tree
 from reprobit.schema import (
     BuildPlanDocument,
     ClassicArchiveAuthority,
@@ -43,7 +41,6 @@ from reprobit.schema import (
     MsvcRelease,
     OracleDocument,
     OracleInstallRange,
-    ProjectBundle,
     ProofDocument,
     SourceManifestDocument,
     SourceManifestEntry,
@@ -71,20 +68,6 @@ class MigrationOutput:
     source_sha256: str
     intervention_count: int
     proof_count: int
-
-
-def validate_migration_files(
-    files: Mapping[PurePosixPath, bytes],
-) -> ProjectBundle:
-    """Load and cross-validate one complete in-memory migration candidate."""
-
-    with tempfile.TemporaryDirectory(prefix="reprobit-migration-") as directory:
-        root = Path(directory)
-        for relative, data in files.items():
-            destination = root.joinpath(*relative.parts)
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(data)
-        return load_project_tree(root, verify_source_authority=False)
 
 
 _SAFE_ID = re.compile(r"[^a-z0-9_.-]+")
@@ -2164,5 +2147,4 @@ __all__ = [
     "convert_v2_manifest",
     "load_legacy_manifest",
     "migration_output",
-    "validate_migration_files",
 ]

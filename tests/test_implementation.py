@@ -20,6 +20,7 @@ CLASSIC_ROOT_MODULES = (
     "reprobit.classic_runtime_preparation",
 )
 PRODUCER_ROOT_MODULES = ("reprobit.classic_incremental",)
+GRAPH_CLI_ROOT_MODULES = ("reprobit.cli_graph",)
 
 
 def _copy_package(tmp_path: Path) -> Path:
@@ -103,6 +104,14 @@ def test_classic_validator_revalidation_rejects_a_changed_closure(
 
     with pytest.raises(ClassicSemanticError, match="validator implementation changed"):
         semantic_contracts.revalidate_classic_validator_implementation()
+
+
+def test_graph_cli_import_closure_excludes_schema_v2_migration() -> None:
+    relative = _relative_closure(PACKAGE_ROOT, GRAPH_CLI_ROOT_MODULES)
+
+    assert "cli_graph.py" in relative
+    assert "project_loader.py" in relative
+    assert "migration.py" not in relative
 
 
 def test_incremental_producer_import_closure_has_a_narrow_product_boundary() -> None:

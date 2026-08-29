@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from pydantic import ValidationError
@@ -14,7 +14,11 @@ from reprobit.producer_graph import (
     source_topology_digest,
     toolchain_document_digest,
 )
-from reprobit.project_loader import load_project, load_project_tree
+from reprobit.project_loader import (
+    load_project,
+    load_project_tree,
+    validate_project_files,
+)
 from reprobit.schema import (
     BuildPlanDocument,
     ClassicArchiveAuthority,
@@ -540,6 +544,33 @@ def test_load_project_tree_cross_validates_and_rejects_duplicates(tmp_path: Path
     oracle.write_text('{"schema_version":3,"target_id":"program","target_id":"other"}')
     with pytest.raises(SchemaError, match="duplicate JSON object key"):
         load_project_tree(tmp_path)
+
+
+def test_validate_project_files_cross_validates_an_in_memory_candidate(
+    tmp_path: Path,
+) -> None:
+    create_tree(tmp_path)
+    files = {
+        PurePosixPath(path.relative_to(tmp_path).as_posix()): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    bundle = validate_project_files(files)
+
+    assert bundle.spec.project_id == "sample"
+    invalid = dict(files)
+    invalid[PurePosixPath("reprobit/oracles/program.json")] = canonical_json(
+        {
+            "schema_version": 3,
+            "target_id": "other",
+            "image_size": 10,
+            "image_digest": sha(b"reference"),
+            "functions": [],
+        }
+    )
+    with pytest.raises(SchemaError, match="oracle target mismatch"):
+        validate_project_files(invalid)
 
 
 def test_project_tree_rejects_ghost_cost_beneficiaries(tmp_path: Path) -> None:

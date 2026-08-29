@@ -43,11 +43,10 @@ from reprobit.discovery_grind_cli import (
     command_discover_grind,
     command_discover_grind_init,
 )
-from reprobit.migration import validate_migration_files
 from reprobit.model import AuthenticityPolicy, Digest
 from reprobit.producer_graph import producer_graph_accepts_source
 from reprobit.progress import ProgressKind
-from reprobit.project_loader import load_project, load_project_tree
+from reprobit.project_loader import load_project, load_project_tree, validate_project_files
 from reprobit.schema import (
     BuildPlanDocument,
     CommandBuildAdapter,
@@ -662,7 +661,7 @@ def _command_manifest_migrate(args: argparse.Namespace, output: CLIOutput) -> in
     )
     with output.activity("converting and validating schema-v2 manifest"):
         result = migration_output(source, semantic_claims_path=semantic_claims)
-        candidate = validate_migration_files(result.files)
+        candidate = validate_project_files(result.files)
     root = project_root(args.project_root)
     generated_paths = {item.as_posix() for item in result.files}
     existing_additions = _migration_existing_schema_additions(

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import tomllib
-from pathlib import Path
+from collections.abc import Mapping
+from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, TypeVar
 
 from reprobit.model import StrictModel
@@ -164,3 +166,17 @@ def load_project_tree(
         return bundle
     except ValueError as exc:
         raise SchemaError(f"invalid project tree: {exc}") from exc
+
+
+def validate_project_files(
+    files: Mapping[PurePosixPath, bytes],
+) -> ProjectBundle:
+    """Load and cross-validate one complete in-memory schema-v3 project."""
+
+    with tempfile.TemporaryDirectory(prefix="reprobit-project-candidate-") as directory:
+        root = Path(directory)
+        for relative, data in files.items():
+            destination = root.joinpath(*relative.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        return load_project_tree(root, verify_source_authority=False)
