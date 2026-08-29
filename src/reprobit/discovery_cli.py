@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import shutil
 from collections import Counter
 from collections.abc import Iterator, Mapping
@@ -649,7 +648,7 @@ def _execute_campaign(
             include_trees=True,
             runtime_paths=runtime.runtime_paths,
         )
-    toolchain_authority = Digest.from_bytes(canonical_json(toolchain_lock.to_dict()))
+    toolchain_authority = Digest.from_bytes(canonical_json(toolchain_lock))
 
     def probe_toolchain() -> Digest:
         installation.doctor(toolchain_lock).require_ok()
@@ -730,86 +729,8 @@ def _validate_selected_artifacts(
             raise CLIError("discovery report path overlaps a campaign input")
 
 
-def _scaffold_identifier(value: str) -> str:
-    rendered = re.sub(r"[^a-z0-9._-]+", "-", value.casefold()).strip("._-")
-    if not rendered:
-        return "unit"
-    if not rendered[0].isalpha():
-        rendered = f"unit-{rendered}"
-    return rendered[:128].rstrip("._-") or "unit"
-
-
-def _parse_scaffold_references(values: list[str]) -> tuple[tuple[str, str], ...]:
-    references: list[tuple[str, str]] = []
-    for value in values:
-        symbol, separator, object_path = value.partition("=")
-        if not separator or not symbol or not object_path:
-            raise CLIError("--reference must use the exact SYMBOL=OBJECT_PATH form")
-        references.append((symbol, object_path))
-    if not references:
-        raise CLIError("discover init requires at least one --reference SYMBOL=OBJECT_PATH")
-    return tuple(references)
-
-
-def command_discover_init(args: argparse.Namespace, output: CLIOutput) -> int:
-    """Write one small, bounded request without running or applying anything."""
-
-    from reprobit.discovery_scaffold import scaffold_msvc_discovery_request
-
-    if args.source is None:
-        raise CLIError("discover init requires --source SOURCE.cpp")
-    references = _parse_scaffold_references(args.reference)
-    translation_unit = args.translation_unit or _scaffold_identifier(Path(args.source).stem)
-    payload = scaffold_msvc_discovery_request(
-        source=args.source,
-        target=args.discovery_target,
-        translation_unit=translation_unit,
-        references=references,
-        compiler_arguments=args.compiler_argument,
-    )
-    root = Path.cwd().resolve(strict=True)
-    destination = relative_output(root, args.request_file)
-    if destination.suffix.casefold() != ".json":
-        raise CLIError("discovery request output must end in .json")
-    for input_path in (Path(args.source), *(Path(path) for _symbol, path in references)):
-        if _paths_overlap(destination, input_path):
-            raise CLIError("discovery request output must not overlap a campaign input")
-    transaction = CASTransaction(root)
-    transaction.write(destination, payload, expected_sha256=None)
-    result = transaction.commit()
-    output.emit(
-        "discovery_request_created",
-        f"Created a bounded 4-state discovery request at {root / destination}\n"
-        "Nothing was compiled or applied.\n"
-        f"Next: rbit discover {destination}",
-        request=root / destination,
-        states=4,
-        target=args.discovery_target,
-        translation_unit=translation_unit,
-        symbols=[symbol for symbol, _path in references],
-        certifying=False,
-        applied=False,
-        transaction_id=result.transaction_id,
-        next_command=f"rbit discover {destination}",
-    )
-    return 0
-
-
 def command_discover(args: argparse.Namespace, output: CLIOutput) -> int:
     """Run one non-certifying, preview-only MSVC 4.2 discovery campaign."""
-
-    if args.request == "init":
-        return command_discover_init(args, output)
-    if any(
-        value is not None and value != []
-        for value in (
-            args.source,
-            args.reference,
-            args.translation_unit,
-            args.compiler_argument,
-        )
-    ) or args.request_file != "discovery-request.json" or args.discovery_target != "program":
-        raise CLIError("discover init options can only be used with `rbit discover init`")
     from reprobit.state_lock import AdvisoryFileLock
 
     paths = _resolve_paths(args)
@@ -840,4 +761,4 @@ def command_discover(args: argparse.Namespace, output: CLIOutput) -> int:
         session_lock.close()
 
 
-__all__ = ["command_discover", "command_discover_init"]
+__all__ = ["command_discover"]

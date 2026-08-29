@@ -8,6 +8,8 @@
 /*.egg-info/
 /.reprobit-state/
 /.reprobit-discovery/
+/.reprobit-transactions/
+/.reprobit-grind-*/
 /examples/declaration-discovery/.sample-state/
 /examples/declaration-discovery/reference.obj
 /examples/declaration-discovery/*.report.json

@@ -11,7 +11,8 @@ CMake.
 The workflow that calls ReproBit must:
 
 1. check out the project and provide Python 3.11 or newer;
-2. provision the compiler and any protected reference files;
+2. run ReproBit's authenticated compiler provisioner and provide any protected
+   reference files;
 3. provide Wine launchers on macOS or Linux, when that backend is used; and
 4. pass the physical toolchain directory to the Action.
 
@@ -33,10 +34,17 @@ steps:
   - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
     with:
       python-version: "3.11"
-  - name: Provision private compiler inputs
-    run: ./ci/provision-toolchain
+  - name: Install the pinned ReproBit CLI
+    run: >-
+      python -m pip install
+      "git+https://github.com/foxtacles/reprobit.git@0123456789abcdef0123456789abcdef01234567"
+  - name: Provision and authenticate MSVC 4.2
+    run: >-
+      rbit toolchain provision
+      --destination "${{ runner.temp }}/msvc42"
+      --no-save
   - id: reprobit
-    uses: owner/reprobit@0123456789abcdef0123456789abcdef01234567
+    uses: foxtacles/reprobit@0123456789abcdef0123456789abcdef01234567
     with:
       project-directory: .
       toolchain-root: ${{ runner.temp }}/msvc42
@@ -90,7 +98,7 @@ The Action exports:
 | `logic-certified` | Every intervention passed its required checks. |
 | `toolchain-origin` | First-party program bytes came from the declared toolchain. |
 | `quarantined` | An allowlisted legacy action ran. |
-| `total-cost` | Total intervention cost for the selected targets. |
+| `total-cost` | Total intervention cost in relative points for the project. |
 | `report-json` | Path to the canonical JSON report. |
 | `report-html` | Path to the self-contained HTML report. |
 

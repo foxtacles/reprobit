@@ -1,20 +1,85 @@
-# Preview compiler interventions
+# Find compiler interventions
 
-`rbit discover` helps answer a narrow question: can a small, declaration-only
-change make MSVC 4.2 reproduce a reference function, or provide a safe donor
-for it? It compiles a finite set of declared states, indexes every emitted
-function, and reports three kinds of review candidates:
+ReproBit discovery tries small, declaration-only changes that can steer an old
+compiler toward the reference bytes without changing your program's intended
+behavior. The normal human workflow is `grind`: give it one source file, symbol,
+and reference object, then let it try a small low-cost search.
 
-- a whole matching function produced by one state;
-- a private same-project donor with the required object structure; or
-- a bounded same-symbol instruction mosaic assembled from a seed and at most
-  two qualified donors.
+## Automatic grind
 
-Discovery is a preview tool. It never edits source, applies an intervention, or
-turns a finding into certified project authority. The generated intervention
-data must still go through the normal adapter review and proof workflow.
+Start from a configured ReproBit project whose normal build already runs. Create
+the small search plan once:
 
-## Run a campaign
+```console
+rbit discover init . \
+  --source src/widget.cpp \
+  --symbol '?Transform@Widget@@QAEHH@Z' \
+  --reference reference/widget.obj
+```
+
+ReproBit finds the matching committed compiler lane and writes the compact
+`reprobit/discovery.json` plan. It does not compile anything or change
+project files. The default plan tries four declaration states and is
+easy to widen deliberately:
+
+```json
+{
+  "schema_version": 1,
+  "reference_object": "reference/widget.obj",
+  "target": "widget",
+  "translation_unit": "tu.widget",
+  "symbol": "?Transform@Widget@@QAEHH@Z",
+  "classes": {"start": 1, "stop": 4},
+  "functions": {"start": 10, "stop": 10}
+}
+```
+
+Run a read-only preview first:
+
+```console
+rbit discover grind .
+```
+
+Each candidate is compiled through the project's locked compiler graph. A
+candidate only counts as a solution after a separate cold build reproduces every
+target byte for byte and passes the required logic checks. Every completed
+bounded search writes a human summary to
+`.reprobit-state/reports/grind/report.html`, including searches with no exact
+solution. An exact result links to its separate `cold-verification.html` and
+`cold-verification.json` evidence in the same directory. The preview does not
+change project files.
+
+When the result looks right, authorize a fresh proof run and atomic publication:
+
+```console
+rbit discover grind . --accept-exact
+git diff -- reprobit/interventions reprobit/proofs
+rbit verify .
+```
+
+Advance approval is not proof and does not reuse an old preview verdict. ReproBit
+recompiles and cold-verifies the solution, then changes only the owning
+intervention and proof shards in one compare-and-swap transaction. A concurrent
+source, plan, reference, oracle, toolchain, graph, or project-record edit aborts
+the save. If no exact solution passes, no project files change. Writing review
+reports is separate from saving the accepted intervention and proof records. If
+the local report cannot be written after those records were saved, the CLI emits
+a nonfatal warning while still reporting the project changes accurately.
+
+Try the complete small project in the
+[grind example](../examples/grind/README.md). It intentionally starts one byte
+away, finds two low-cost records, and verifies the result again from scratch.
+
+## Advanced: raw request campaigns
+
+`rbit discover run` is the lower-level inspection tool. It compiles a finite set
+of declared states, indexes every emitted function, and reports whole-function,
+private-donor, and bounded same-symbol mosaic proposals. These proposals are
+review evidence only: this advanced command never edits source or project
+authority. Use it when you need to study candidates beyond the automatic grind's
+small admitted recipe.
+
+### Run a campaign
 
 Start with the guided [declaration-discovery example](../examples/declaration-discovery/README.md).
 Its request, source, reference objects, and optional seed objects are resolved
@@ -27,10 +92,12 @@ and private state from aliasing one another. Those cross-field rules are stated 
 the schema description but cannot all be expressed by portable JSON Schema keywords.
 
 ```console
-rbit discover discovery-request.json \
-  --toolchain-root /opt/toolchains/MSVC420 \
-  --jobs 4
+rbit discover run discovery-request.json --jobs 4
 ```
+
+This uses the compiler location remembered by `rbit setup` or
+`rbit toolchain provision`. Pass `--toolchain-root` only to override it for one
+run.
 
 The request fixes the symbols, compiler arguments, search ranges, and maximum
 cell count before any compiler starts. Source is staged under the fixed name
@@ -66,7 +133,7 @@ on `PATH`, and `--cleanup-timeout` to change the bounded shutdown limit. Termina
 output shows elapsed progress, while `rbit --format ndjson discover ...` emits
 stable cache-hit and cache-miss events for CI and other tools.
 
-## Resume and review
+### Resume and review
 
 By default, reusable state lives in `.reprobit-discovery` beside the request.
 Each completed compiler cell is immutable and keyed by its exact compiler,

@@ -130,7 +130,6 @@ def _bundle(root: Path, *, protected: bool = False) -> ProjectBundle:
     plan = BuildPlanDocument(
         schema_version=3,
         source_manifest_digest=source_manifest_digest(manifest),
-        phase=None,
         translation_units=(
             ClassicTranslationUnitPlan(
                 id="unit",
@@ -138,21 +137,15 @@ def _bundle(root: Path, *, protected: bool = False) -> ProjectBundle:
                 build_target="program",
                 source="src/unit.cpp",
                 source_digest=unit_digest,
-                mode="ordinary",
             ),
         ),
         source_overlay_digest=Digest.from_bytes(b"no overlays"),
         source_overlay_interventions=(),
         archives=(),
-        terminal_producers={},
-        execution_backends={},
-        toolchain_policy={},
-        target_policies=[],
         target_gates=(
             ClassicTargetGate(
                 target_id="program",
                 build_target="program",
-                completion={},
             ),
         ),
     )

@@ -88,7 +88,7 @@ def _write_summary(report: Report, *, accepted: bool) -> None:
         f"| Byte exact | {_bool(report.verdict.byte_exact)} |",
         f"| Logic certified | {_bool(report.verdict.logic_certified)} |",
         f"| Toolchain origin | {_bool(report.verdict.toolchain_origin)} |",
-        f"| Total cost | {report.costs.project_total} |",
+        f"| Intervention cost | {report.costs.project_total} relative points |",
         "",
     ]
     if report.verdict.quarantined:

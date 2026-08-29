@@ -11,12 +11,14 @@ from reprobit.producer_graph import (
     ProducerGraphDocument,
     ProducerNode,
     ProducerRole,
+    source_topology_digest,
     toolchain_document_digest,
 )
 from reprobit.project_loader import load_project, load_project_tree
 from reprobit.schema import (
     BuildPlanDocument,
     ClassicArchiveAuthority,
+    ClassicGroupOrderPlan,
     ClassicProofReceipt,
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
@@ -32,7 +34,6 @@ from reprobit.schema import (
     SchemaVersionError,
     SourceManifestDocument,
     SourceManifestEntry,
-    classic_analysis_link_options,
     classic_analysis_pdb_paths,
     project_document_schemas,
     schema_catalog,
@@ -73,42 +74,33 @@ def sha(seed: bytes) -> dict[str, str]:
     return Digest.from_bytes(seed).model_dump(mode="json")
 
 
-def _build_plan_with_terminal_policy(terminal_producers: object) -> BuildPlanDocument:
+def _build_plan_with_link_options(options: object = ()) -> BuildPlanDocument:
     return BuildPlanDocument(
         schema_version=3,
         source_manifest_digest=Digest.from_bytes(b"source"),
-        phase=None,
         translation_units=(),
         source_overlay_digest=Digest.from_bytes(b"overlay"),
         source_overlay_interventions=(),
         archives=(),
-        terminal_producers=terminal_producers,
-        execution_backends={},
-        toolchain_policy={},
-        target_policies=[],
+        analysis_link_options=options,  # type: ignore[arg-type]
         target_gates=(),
     )
 
 
 def test_analysis_link_options_are_json_native_and_closed() -> None:
-    plan = _build_plan_with_terminal_policy(
-        {"link": {"analysis_added_options": ["/DEBUG"]}}
-    )
+    plan = _build_plan_with_link_options(("/DEBUG",))
     reparsed = BuildPlanDocument.model_validate_json(plan.model_dump_json())
-    assert classic_analysis_link_options(reparsed) == ("/DEBUG",)
-    assert classic_analysis_link_options(_build_plan_with_terminal_policy({})) == ()
+    assert reparsed.analysis_link_options == ("/DEBUG",)
+    assert _build_plan_with_link_options().analysis_link_options == ()
 
 
 @pytest.mark.parametrize(
     "options",
-    ([], ["/debug"], ["/DEBUG", "/DEBUG"], "/DEBUG"),
+    (["/debug"], ["/DEBUG", "/DEBUG"], "/DEBUG"),
 )
 def test_analysis_link_options_reject_malformed_or_widened_values(options: object) -> None:
-    plan = _build_plan_with_terminal_policy(
-        {"link": {"analysis_added_options": options}}
-    )
     with pytest.raises(ValidationError):
-        classic_analysis_link_options(plan)
+        _build_plan_with_link_options(options)
 
 
 def test_analysis_pdb_path_cannot_alias_a_verification_oracle(tmp_path: Path) -> None:
@@ -123,9 +115,7 @@ def test_analysis_pdb_path_cannot_alias_a_verification_oracle(tmp_path: Path) ->
             )
         }
     )
-    plan = _build_plan_with_terminal_policy(
-        {"link": {"analysis_added_options": ["/DEBUG"]}}
-    ).model_copy(
+    plan = _build_plan_with_link_options(("/DEBUG",)).model_copy(
         update={
             "source_manifest_digest": source_manifest_digest(
                 baseline.source_manifest
@@ -146,7 +136,6 @@ def test_build_target_can_lead_with_a_digit_without_widening_internal_ids() -> N
             build_target="3dmanager",
             source="src/sample.cpp",
             source_digest=Digest(value="0" * 64),
-            mode="compose",
         ).build_target
         == "3dmanager"
     )
@@ -157,8 +146,46 @@ def test_build_target_can_lead_with_a_digit_without_widening_internal_ids() -> N
             build_target="3dmanager",
             source="src/sample.cpp",
             source_digest=Digest(value="0" * 64),
-            mode="compose",
         )
+
+
+def test_translation_unit_group_order_is_explicit_and_closed() -> None:
+    transform = ClassicGroupOrderPlan(
+        operation="restore_comdat_group_order",
+        orders=(("?first@@YAXXZ", "?second@@YAXXZ"),),
+    )
+    unit = ClassicTranslationUnitPlan(
+        id="tu_sample",
+        target_id="program",
+        build_target="program",
+        source="src/sample.cpp",
+        source_digest=Digest(value="0" * 64),
+        group_order=transform,
+    )
+    assert unit.group_order == transform
+
+    with pytest.raises(ValidationError, match="must be unique"):
+        ClassicGroupOrderPlan(
+            operation="swap_comdat_group_order",
+            orders=(("?same@@YAXXZ", "?same@@YAXXZ"),),
+        )
+
+
+@pytest.mark.parametrize(
+    "obsolete",
+    (
+        "migration_source_digest",
+        "phase",
+        "terminal_producers",
+        "execution_backends",
+        "target_policies",
+    ),
+)
+def test_build_plan_rejects_pre_release_migration_fields(obsolete: str) -> None:
+    payload = _build_plan_with_link_options().model_dump(mode="json")
+    payload[obsolete] = None
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
+        BuildPlanDocument.model_validate(payload)
 
 
 def write_json(path: Path, value: object) -> None:
@@ -557,10 +584,10 @@ def test_project_tree_binds_closed_producer_graph(tmp_path: Path) -> None:
     baseline = load_project_tree(tmp_path)
     assert baseline.source_manifest is not None
     graph = {
-        "schema_version": 1,
-        "source_manifest_digest": source_manifest_digest(baseline.source_manifest).model_dump(
-            mode="json"
-        ),
+        "schema_version": 2,
+        "source_topology_digest": source_topology_digest(
+            item.path for item in baseline.source_manifest.entries
+        ).model_dump(mode="json"),
         "toolchain_lock_digest": toolchain_document_digest(baseline.toolchain_lock).model_dump(
             mode="json"
         ),
@@ -648,22 +675,19 @@ def test_quarantine_archive_edges_require_exact_build_plan_and_source_pins(
     plan = BuildPlanDocument(
         schema_version=3,
         source_manifest_digest=source_manifest_digest(manifest),
-        phase=None,
         translation_units=(),
         source_overlay_digest=Digest.from_bytes(b"empty overlay"),
         source_overlay_interventions=(),
         archives=(authority,),
-        terminal_producers={},
-        execution_backends={},
-        toolchain_policy={},
-        target_policies=[],
         target_gates=(
-            ClassicTargetGate(target_id="program", build_target="program", completion={}),
+            ClassicTargetGate(target_id="program", build_target="program"),
         ),
     )
     graph = ProducerGraphDocument(
-        schema_version=1,
-        source_manifest_digest=source_manifest_digest(manifest),
+        schema_version=2,
+        source_topology_digest=source_topology_digest(
+            item.path for item in manifest.entries
+        ),
         toolchain_lock_digest=toolchain_document_digest(baseline.toolchain_lock),
         path_profile_id=baseline.spec.paths.id,
         extractor="cmake-unix-makefiles-v1",
@@ -727,6 +751,8 @@ def test_generated_schema_contains_all_document_models(tmp_path: Path) -> None:
     assert b'"ProjectSpec"' in encoded
     assert b'"LegacyOracleInstallIntervention"' in encoded
     assert b'"ProducerGraphDocument"' in encoded
+    assert b'"SourceOverlayIntervention"' not in encoded
+    assert b'"source_overlay"' not in encoded
     destination = tmp_path / "catalog.schema.json"
     write_json_schema(destination)
     assert json.loads(destination.read_bytes())["title"] == "SchemaCatalog"

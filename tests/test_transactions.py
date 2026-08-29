@@ -99,6 +99,40 @@ def test_compare_only_precondition_aborts_a_racing_write(tmp_path: Path) -> None
     assert not (tmp_path / "result.json").exists()
 
 
+def test_directory_membership_assertion_only_transaction_is_checked(
+    tmp_path: Path,
+) -> None:
+    authority = tmp_path / "authority"
+    authority.mkdir()
+    (authority / "first.json").write_bytes(b"first")
+    transaction = CASTransaction(tmp_path)
+    transaction.assert_json_members(
+        "authority",
+        expected_members=("first.json",),
+    )
+
+    committed = transaction.commit()
+
+    assert committed.changed_paths == ()
+
+
+def test_directory_membership_assertion_only_transaction_rejects_a_race(
+    tmp_path: Path,
+) -> None:
+    authority = tmp_path / "authority"
+    authority.mkdir()
+    (authority / "first.json").write_bytes(b"first")
+    transaction = CASTransaction(tmp_path)
+    transaction.assert_json_members(
+        "authority",
+        expected_members=("first.json",),
+    )
+    (authority / "second.json").write_bytes(b"second")
+
+    with pytest.raises(TransactionConflict, match="authority membership conflict"):
+        transaction.commit()
+
+
 def test_recovery_rolls_back_an_interrupted_install(tmp_path: Path) -> None:
     target = tmp_path / "value.txt"
     target.write_bytes(b"new")

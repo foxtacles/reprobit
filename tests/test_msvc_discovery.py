@@ -45,7 +45,10 @@ from reprobit.msvc_discovery import (
     MsvcDiscoveryRequest,
     msvc_discovery_request_json_schema,
 )
-from reprobit.msvc_discovery_analysis import MsvcFunctionReference
+from reprobit.msvc_discovery_analysis import (
+    MsvcFunctionReference,
+    qualify_msvc_reference_object,
+)
 from reprobit.process import CancellationToken, ProcessCancelled
 from reprobit.strict_json import JsonValue
 
@@ -174,6 +177,28 @@ def _coff(
         0,
     )
     return bytes(header + headers + payload + symbols + strings)
+
+
+def _with_primary_relocation(payload: bytes, relocation_type: int) -> bytes:
+    """Add one self-relocation to the first COMDAT in a neutral test object."""
+
+    coff = CoffObject(payload)
+    section = coff.sections[0]
+    assert section["raw_size"] >= 5
+    old_symbol_offset = coff.symbol_offset
+    new_symbol_offset = old_symbol_offset + 10
+    result = bytearray(payload)
+    result[old_symbol_offset:old_symbol_offset] = struct.pack(
+        "<IIH",
+        1,
+        2,
+        relocation_type,
+    )
+    struct.pack_into("<I", result, 8, new_symbol_offset)
+    struct.pack_into("<I", result, section["header_offset"] + 24, old_symbol_offset)
+    struct.pack_into("<H", result, section["header_offset"] + 32, 1)
+    struct.pack_into("<H", result, new_symbol_offset + 18 + 4, 1)
+    return bytes(result)
 
 
 class _NeverCompiler:
@@ -399,6 +424,49 @@ def test_exact_body_with_different_associated_comdat_content_is_not_qualified(
         )
         == ()
     )
+
+
+def test_project_qualification_accepts_retained_associated_content() -> None:
+    body = bytes.fromhex("b802000000c3")
+    reference = _coff([(TARGET, body)], associated_body=b"reference metadata")
+    candidate = _coff([(TARGET, body)], associated_body=b"retained seed metadata")
+
+    qualify_msvc_reference_object(
+        reference_object=reference,
+        candidate_object=candidate,
+        symbol=TARGET,
+    )
+
+
+def test_project_qualification_still_rejects_changed_function_body() -> None:
+    reference = _coff(
+        [(TARGET, bytes.fromhex("b802000000c3"))],
+        associated_body=b"reference metadata",
+    )
+    candidate = _coff(
+        [(TARGET, bytes.fromhex("b803000000c3"))],
+        associated_body=b"retained seed metadata",
+    )
+
+    with pytest.raises(DiscoveryError, match="body does not match reference"):
+        qualify_msvc_reference_object(
+            reference_object=reference,
+            candidate_object=candidate,
+            symbol=TARGET,
+        )
+
+
+def test_project_qualification_still_rejects_changed_relocation_semantics() -> None:
+    body = bytes.fromhex("b800000000c3")
+    reference = _with_primary_relocation(_coff([(TARGET, body)]), 6)
+    candidate = _with_primary_relocation(_coff([(TARGET, body)]), 20)
+
+    with pytest.raises(DiscoveryError, match="incompatible relocations"):
+        qualify_msvc_reference_object(
+            reference_object=reference,
+            candidate_object=candidate,
+            symbol=TARGET,
+        )
 
 
 def test_two_donor_mosaic_is_bounded_and_reproduces_reference(tmp_path: Path) -> None:

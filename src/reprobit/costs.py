@@ -62,7 +62,6 @@ class CostModel:
             "equal_body_donor": CostClass.EQUAL_BODY_DONOR,
             "structural_donor": CostClass.STRUCTURAL_DONOR,
             "cross_tu_donor": CostClass.CROSS_TU_OR_OVERLAY,
-            "source_overlay": CostClass.CROSS_TU_OR_OVERLAY,
             "semantic_rewrite": CostClass.SEMANTIC_REWRITE,
             "binary_surgery": CostClass.BINARY_SURGERY,
             "legacy.oracle_install": CostClass.ORACLE_INSTALL,

@@ -79,16 +79,19 @@ def _render_quarantine_details(report: Report) -> str:
         (
             code(item.id, css_class="identifier"),
             code(item.artifact_id, css_class="identifier"),
-            code(item.scope.function)
+            code(item.scope.function, css_class="symbol")
             if item.scope is not None and item.scope.function
             else "",
             code(item.coordinate_space, css_class="identifier"),
             code(f"0x{item.base_address:08x}", css_class="identifier")
             if item.base_address is not None
             else "",
-            code(", ".join(f"[0x{span.offset:x}, 0x{span.end:x})" for span in item.ranges)),
+            code(
+                ", ".join(f"[0x{span.offset:x}, 0x{span.end:x})" for span in item.ranges),
+                css_class="ranges",
+            ),
             format_integer(item.byte_count),
-            code(item.proof_binding.value)
+            code(item.proof_binding.value, css_class="identifier")
             if item.proof_binding is not None
             else "not bound",
             item.reason,
@@ -260,7 +263,7 @@ def _render_cost_details(report: Report) -> str:
             (
                 "Project total",
                 format_integer(report.costs.project_total),
-                "Every intervention, counted once",
+                "All typed work; intervention IDs deduplicated",
             ),
             (
                 "Attributed to functions",
@@ -348,6 +351,22 @@ def _render_intervention_details(report: Report) -> str:
             code(item.scope.target),
             code(item.scope.translation_unit) if item.scope.translation_unit else "",
             code(item.scope.function) if item.scope.function else "",
+            code(
+                ", ".join(
+                    "/".join(
+                        part
+                        for part in (
+                            scope.target,
+                            scope.translation_unit,
+                            scope.function,
+                        )
+                        if part is not None
+                    )
+                    for scope in item.beneficiaries
+                )
+            )
+            if item.beneficiaries
+            else "",
             code(", ".join(f"{unit.kind.value} x {unit.count}" for unit in item.units)),
             str(item.cost),
         )
@@ -358,7 +377,17 @@ def _render_intervention_details(report: Report) -> str:
         label="Filter by ID, class, target, TU, or function",
         count=len(rows),
     ) + table(
-        ("ID", "Kind", "Class", "Target", "TU", "Function", "Units", "Cost"),
+        (
+            "ID",
+            "Kind",
+            "Class",
+            "Target",
+            "TU",
+            "Function",
+            "Shared beneficiaries",
+            "Units",
+            "Cost",
+        ),
         rows,
         caption="Complete intervention ledger",
         table_id=table_id,

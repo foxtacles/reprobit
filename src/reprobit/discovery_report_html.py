@@ -409,8 +409,8 @@ def _render_next_steps(report: DiscoveryCampaignReport) -> str:
             ),
             (
                 "Certify separately",
-                "If accepted, create reviewed project authority and require a cold "
-                "ReproBit verification.",
+                "If accepted, create reviewed intervention and proof records, then require "
+                "a cold ReproBit verification.",
             ),
         )
     else:

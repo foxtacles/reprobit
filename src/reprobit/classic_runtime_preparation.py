@@ -24,7 +24,6 @@ from reprobit.classic_orchestration import (
 from reprobit.classic_project import (
     ClassicProjectError,
     InterventionWitness,
-    _overlay_dialect,
     materialize_effective_workspace,
 )
 from reprobit.classic_runtime import (
@@ -64,9 +63,8 @@ from reprobit.schema import (
     ClassicRecipeIntervention,
     ProducerGraphBuildAdapter,
     ProjectBundle,
-    classic_analysis_link_options,
 )
-from reprobit.toolchains import ClassicMSVCToolchain, ToolchainLock
+from reprobit.toolchains import ClassicMSVCToolchain
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,10 +283,7 @@ def prepare_classic_producer_graph_run(
         )
     if bundle.build_plan is None or bundle.source_manifest is None:
         raise ClassicProjectError("classic graph execution requires source and build plans")
-    try:
-        analysis_link_options = classic_analysis_link_options(bundle.build_plan)
-    except ValueError as exc:
-        raise ClassicProjectError(f"classic analysis-link policy is malformed: {exc}") from exc
+    analysis_link_options = bundle.build_plan.analysis_link_options
     if jobs < 1 or min(initialization_timeout, compile_timeout, link_timeout, cleanup_timeout) <= 0:
         raise ClassicProjectError("classic execution limits must be positive")
     project_root = project_root.resolve(strict=True)
@@ -340,8 +335,8 @@ def prepare_classic_producer_graph_run(
         admitted_toolchain_root,
         logical_root=bundle.spec.paths.toolchain,
     )
-    runtime_lock = ToolchainLock.from_schema_v3(bundle.toolchain_lock)
-    source_installation.doctor(runtime_lock).require_ok()
+    toolchain_lock = bundle.toolchain_lock
+    source_installation.doctor(toolchain_lock).require_ok()
     original_toolchain_inputs = _project_locked_toolchain(
         bundle,
         source_root=source_installation.root,
@@ -352,7 +347,7 @@ def prepare_classic_producer_graph_run(
         logical_workspace.toolchain_entry,
         logical_root=bundle.spec.paths.toolchain,
     )
-    installation.doctor(runtime_lock).require_ok()
+    installation.doctor(toolchain_lock).require_ok()
     role_tool_ids, role_relatives = _graph_role_bindings(bundle, installation)
 
     wrapper_files: tuple[Path, ...] = ()
@@ -476,7 +471,6 @@ def prepare_classic_producer_graph_run(
         bundle,
         clean_sources=clean_sources,
         effective_sources=effective_sources,
-        overlay_dialect=_overlay_dialect(bundle),
     )
     compile_records = _graph_compile_records(
         bundle,

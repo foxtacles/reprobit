@@ -144,6 +144,7 @@ pre > code { white-space: pre; }
 }
 .lede { color: var(--muted); font-size: 1.05rem; }
 .hero {
+  scroll-margin-top: 4.5rem;
   padding: clamp(1.2rem, 3vw, 2rem);
   background: var(--panel);
   border: 1px solid var(--line);
@@ -268,14 +269,23 @@ details.advanced {
   box-shadow: var(--shadow);
 }
 details.advanced > summary {
-  display: flex;
-  justify-content: space-between;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
   gap: 1rem;
   padding: .85rem 1rem;
   cursor: pointer;
   font-weight: 700;
+  list-style: none;
 }
-details.advanced > summary::marker { color: var(--accent); }
+details.advanced > summary::-webkit-details-marker { display: none; }
+details.advanced > summary::before {
+  content: "\203A";
+  color: var(--accent);
+  font-size: 1.25rem;
+  line-height: 1;
+}
+details.advanced[open] > summary::before { transform: rotate(90deg); }
 details.advanced[open] > summary { border-bottom: 1px solid var(--line); }
 .summary-meta { color: var(--muted); font-size: .82rem; font-weight: 500; text-align: right; }
 .detail-body { padding: 1rem; }
@@ -301,7 +311,14 @@ caption { padding: .6rem; text-align: left; font-weight: 700; }
 th, td { padding: .48rem .55rem; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
 th { position: sticky; top: 0; z-index: 1; background: #edf2f4; white-space: nowrap; }
 td { max-width: 34rem; overflow-wrap: anywhere; }
-.table-scroll code.path, .table-scroll code.identifier { white-space: nowrap; }
+.table-scroll code {
+  overflow-wrap: normal;
+  word-break: normal;
+}
+.table-scroll code.path,
+.table-scroll code.identifier,
+.table-scroll code.symbol,
+.table-scroll code.ranges { white-space: nowrap; }
 tbody tr:nth-child(even) { background: #fafcfc; }
 tbody tr:hover { background: var(--accent-soft); }
 .empty { padding: .8rem; color: var(--muted); font-style: italic; }
@@ -335,8 +352,8 @@ tbody tr:hover { background: var(--accent-soft); }
 @media (max-width: 680px) {
   .topbar-inner { align-items: flex-start; flex-direction: column; }
   .section-heading, .table-tools { align-items: stretch; flex-direction: column; }
-  details.advanced > summary { align-items: flex-start; flex-direction: column; gap: .2rem; }
-  .summary-meta { text-align: left; }
+  details.advanced > summary { grid-template-columns: auto minmax(0, 1fr); gap: .2rem .7rem; }
+  .summary-meta { grid-column: 2; text-align: left; }
   .bar-row { grid-template-columns: minmax(0, 1fr) auto; }
   .bar-label span { white-space: normal; }
   .bar-track { grid-column: 1 / -1; grid-row: 2; }

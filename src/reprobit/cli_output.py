@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
+import subprocess
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -45,6 +48,13 @@ _MAX_FAILURE_DETAIL = 160
 _ASCII_BAR_WIDTH = 24
 
 
+def human_command(argv: Sequence[str | Path]) -> str:
+    """Render copyable human text while machine events retain the argv array."""
+
+    arguments = tuple(os.fspath(value) for value in argv)
+    return subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
+
+
 class _ASCIIBarColumn(ProgressColumn):
     """Compact terminal-safe bar using only portable ASCII characters."""
 
@@ -73,6 +83,13 @@ _FRIENDLY_PHASES = {
     "discovery-compile": "Trying declaration states",
     "discovery-enumerate": "Planning the search",
     "discovery-finalize": "Writing discovery results",
+    "grind-donors": "Compiling bounded donor candidates",
+    "grind-finalize": "Finishing the exact-search run",
+    "grind-publish": "Saving proven project files",
+    "grind-qualify": "Checking candidate compatibility",
+    "grind-seed": "Compiling the current translation unit",
+    "grind-skip": "Skipping incompatible candidates",
+    "grind-verify": "Cold-verifying the best candidate",
     "donor-compile": "Building donor candidates",
     "evidence": "Checking authenticity evidence",
     "input-namespace": "Sealing compiler inputs",

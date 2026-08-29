@@ -234,8 +234,8 @@ def test_graph_requires_closed_build_dependencies() -> None:
     )
     with pytest.raises(ValidationError, match="without a direct dependency"):
         ProducerGraphDocument(
-            schema_version=1,
-            source_manifest_digest=_digest("1"),
+            schema_version=2,
+            source_topology_digest=_digest("1"),
             toolchain_lock_digest=_digest("2"),
             path_profile_id="stable",
             extractor="cmake-unix-makefiles-v1",
@@ -300,17 +300,14 @@ def test_graph_v2_binds_path_topology_but_not_source_content() -> None:
 
     assert producer_graph_accepts_source(
         graph,
-        manifest_digest=_digest("3"),
         paths=("src/unit.cpp", "include/unit.h"),
     )
     assert producer_graph_accepts_source(
         graph,
-        manifest_digest=_digest("4"),
         paths=("include/unit.h", "src/unit.cpp"),
     )
     assert not producer_graph_accepts_source(
         graph,
-        manifest_digest=_digest("4"),
         paths=("include/unit.h", "src/added.cpp", "src/unit.cpp"),
     )
 
@@ -318,10 +315,7 @@ def test_graph_v2_binds_path_topology_but_not_source_content() -> None:
 @pytest.mark.parametrize(
     "values",
     (
-        {
-            "schema_version": 1,
-            "source_topology_digest": _digest("1"),
-        },
+        {"schema_version": 1, "source_topology_digest": _digest("1")},
         {
             "schema_version": 2,
             "source_manifest_digest": _digest("1"),
@@ -333,7 +327,7 @@ def test_graph_v2_binds_path_topology_but_not_source_content() -> None:
         },
     ),
 )
-def test_graph_versions_require_exactly_one_source_binding(
+def test_graph_rejects_obsolete_source_bindings(
     values: dict[str, object],
 ) -> None:
     node = ProducerNode(
@@ -344,7 +338,7 @@ def test_graph_versions_require_exactly_one_source_binding(
         inputs=("source/src/unit.cpp",),
         outputs=("build/obj/unit.obj",),
     )
-    with pytest.raises(ValidationError, match="requires only"):
+    with pytest.raises(ValidationError):
         ProducerGraphDocument(
             **values,
             toolchain_lock_digest=_digest("2"),
@@ -662,7 +656,6 @@ def test_extracts_closed_direct_graph_and_round_trips(tmp_path: Path) -> None:
         },
     )
     assert graph.schema_version == 2
-    assert graph.source_manifest_digest is None
     assert graph.source_topology_digest == _digest("3")
     roles = [node.role for node in graph.nodes]
     assert roles.count(ProducerRole.COMPILER) == 1

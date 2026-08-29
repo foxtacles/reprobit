@@ -13,12 +13,14 @@ import pytest
 
 from reprobit.classic_project import ClassicProjectError
 from reprobit.cli import (
+    _human_intervention_detail,
     _legacy_oracle_targets,
     _positive_seconds,
     main,
 )
 from reprobit.cli_output import CLIOutput
 from reprobit.cli_paths import CLIError
+from reprobit.costs import calculate_cost
 from reprobit.discovery_cli import (
     _discovery_wineserver_lifecycle,
     _resolve_paths,
@@ -69,6 +71,7 @@ from reprobit.schema import (
     InterventionDocument,
     LegacyAllowlistEntry,
     LegacyOracleInstallIntervention,
+    LinkOrderingIntervention,
     LockedTool,
     MsvcRelease,
     OracleDocument,
@@ -83,7 +86,7 @@ from reprobit.schema import (
 from reprobit.source_lock import build_source_manifest
 from reprobit.state import KeepWorkspace, RunArena
 from reprobit.strict_json import canonical_json, strict_load
-from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES
+from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES, profile_source_pins_for_paths
 from reprobit.transactions import CASTransaction, TransactionResult
 
 
@@ -144,6 +147,7 @@ def test_discover_rejects_report_aliasing_input_by_case(
         main(
             [
                 "discover",
+                "run",
                 str(request),
                 "--toolchain-root",
                 str(tmp_path / "unused-toolchain"),
@@ -166,6 +170,7 @@ def test_discover_rejects_input_paths_aliasing_by_case(
         main(
             [
                 "discover",
+                "run",
                 str(request),
                 "--toolchain-root",
                 str(tmp_path / "unused-toolchain"),
@@ -186,6 +191,7 @@ def test_discover_keeps_report_outside_incremental_state(
         main(
             [
                 "discover",
+                "run",
                 str(request),
                 "--toolchain-root",
                 str(tmp_path / "unused-toolchain"),
@@ -208,6 +214,7 @@ def test_discover_keeps_inputs_outside_incremental_state(
         main(
             [
                 "discover",
+                "run",
                 str(request),
                 "--toolchain-root",
                 str(tmp_path / "unused-toolchain"),
@@ -277,6 +284,7 @@ def test_discover_has_no_ambiguous_output_flag(
         main(
             [
                 "discover",
+                "run",
                 str(request),
                 "--toolchain-root",
                 str(tmp_path / "unused-toolchain"),
@@ -671,26 +679,49 @@ def _complete_project(root: Path, *, command_build: bool = False) -> None:
     reference = root / "reference" / "program.bin"
     reference.parent.mkdir()
     reference.write_bytes(b"expected")
-    compiler_source = TOOLCHAIN_PROFILES[MSVC_42].source_for_path("bin/CL.EXE")
+    toolchain_profile = TOOLCHAIN_PROFILES[MSVC_42]
+    locked_paths = (
+        *toolchain_profile.required_producers,
+        *toolchain_profile.required_runtime_files,
+    )
+    source_pins = profile_source_pins_for_paths(toolchain_profile, locked_paths)
+    producer_roles = {
+        toolchain_profile.compiler.casefold(): ("compiler",),
+        toolchain_profile.linker.casefold(): ("linker",),
+        toolchain_profile.librarian.casefold(): ("librarian",),
+        toolchain_profile.resource_compiler.casefold(): ("resource-compiler",),
+    }
     lock = ToolchainLock(
         schema_version=3,
         profile=MSVC_42,
         release=MsvcRelease.V4_2,
-        profile_sources=(
+        profile_sources=tuple(
             ToolchainProfileSource(
-                repository=compiler_source.repository,
-                revision=compiler_source.revision,
-                paths=("bin/cl.exe",),
-            ),
+                repository=source.repository,
+                revision=source.revision,
+                paths=source.paths,
+            )
+            for source in source_pins
         ),
-        tools=(
+        tools=tuple(
             LockedTool(
-                id="compiler",
-                path="bin/cl.exe",
-                digest=Digest.from_bytes(b"compiler"),
-                size=8,
-                roles=("compiler",),
-            ),
+                id=f"producer.{index}",
+                path=path,
+                digest=Digest.from_bytes(path.encode()),
+                size=len(path.encode()),
+                roles=producer_roles.get(path.casefold(), ("runtime",)),
+            )
+            for index, path in enumerate(toolchain_profile.required_producers)
+        ),
+        runtime_files=tuple(
+            LockedTool(
+                id=f"runtime.{index}",
+                path=path,
+                digest=Digest.from_bytes(path.encode()),
+                size=len(path.encode()),
+                roles=("runtime",),
+            )
+            for index, path in enumerate(toolchain_profile.required_runtime_files)
         ),
     )
     intervention = StateCarrierIntervention(
@@ -743,7 +774,6 @@ def _complete_translation_unit_project(root: Path) -> tuple[str, Digest]:
     plan = BuildPlanDocument(
         schema_version=3,
         source_manifest_digest=source_manifest_digest(manifest),
-        phase={},
         translation_units=(
             ClassicTranslationUnitPlan(
                 id=unit_id,
@@ -751,21 +781,15 @@ def _complete_translation_unit_project(root: Path) -> tuple[str, Digest]:
                 build_target="program",
                 source="src/unit.cpp",
                 source_digest=source_digest,
-                mode="clean",
             ),
         ),
         source_overlay_digest=Digest.from_bytes(b"no source overlays"),
         source_overlay_interventions=(),
         archives=(),
-        terminal_producers={},
-        execution_backends={},
-        toolchain_policy={},
-        target_policies=[],
         target_gates=(
             ClassicTargetGate(
                 target_id="program",
                 build_target="program",
-                completion={},
             ),
         ),
     )
@@ -1201,23 +1225,6 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     assert terminal.directive_inputs == ("system-library/mfcs42.lib",)
 
     graph_path = project / "reprobit/producer-graph.json"
-    extracted_v2 = json.loads(graph_path.read_bytes())
-    extracted_v2.pop("source_topology_digest")
-    extracted_v2["schema_version"] = 1
-    loaded_manifest = load_project_tree(project).source_manifest
-    assert loaded_manifest is not None
-    extracted_v2["source_manifest_digest"] = source_manifest_digest(loaded_manifest).model_dump(
-        mode="json"
-    )
-    graph_path.write_bytes(canonical_json(extracted_v2))
-    assert main(["graph", "upgrade", "--project", str(project)]) == 0
-    upgraded = load_project_tree(project).producer_graph
-    assert upgraded is not None
-    assert upgraded.schema_version == 2
-    assert upgraded.source_manifest_digest is None
-    assert main(["graph", "upgrade", "--project", str(project)]) == 0
-    assert "already schema v2" in capsys.readouterr().out
-
     committed_graph = graph_path.read_bytes()
     target_plan_path = configured / "reprobit-target-plan.json"
     target_plan_value = json.loads(target_plan_path.read_bytes())
@@ -1310,20 +1317,6 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     capsys.readouterr()
     link_file.write_text(f"{linker} {object_path} /out:APP.EXE\n", encoding="utf-8")
 
-    stale_v1 = json.loads(committed_graph)
-    stale_v1.pop("source_topology_digest")
-    stale_v1["schema_version"] = 1
-    stale_v1["source_manifest_digest"] = source_manifest_digest(loaded_manifest).model_dump(
-        mode="json"
-    )
-    stale_v1["toolchain_lock_digest"] = Digest.from_bytes(b"previous lock").model_dump(mode="json")
-    graph_path.write_bytes(canonical_json(stale_v1))
-    assert main(["graph", "upgrade", "--project", str(project)]) == 2
-    stale_error = capsys.readouterr().err
-    assert "cannot repin a changed toolchain" in stale_error
-    assert "graph configure" in stale_error and "graph extract" in stale_error
-    graph_path.write_bytes(committed_graph)
-
     source.write_text("int main() { return 1; }\n", encoding="utf-8")
     lock_argv = [
         "source",
@@ -1347,6 +1340,18 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     assert (project / "reprobit/producer-graph.json").is_file()
     assert main([*topology_change, "--invalidate-producer-graph"]) == 0
     assert not (project / "reprobit/producer-graph.json").exists()
+
+
+def test_graph_upgrade_command_is_not_exposed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        main(["graph", "upgrade"])
+
+    assert stopped.value.code == 2
+    message = capsys.readouterr().err
+    assert "invalid choice: 'upgrade'" in message
+    assert "configure" in message and "extract" in message
 
 
 def test_version_is_available_for_packaging_smoke(
@@ -1614,7 +1619,7 @@ def test_validate_explain_cost_build_and_cold_verify_refusal(
     assert main(["validate", str(project)]) == 0
     assert "validated sample" in capsys.readouterr().out
     assert main(["cost", str(project)]) == 0
-    assert "project cost: 1" in capsys.readouterr().out
+    assert "project intervention cost: 1 relative points" in capsys.readouterr().out
     assert main(["explain", str(project), "--intervention", "state.one"]) == 0
     assert "cost=1" in capsys.readouterr().out
     assert main(["build", str(project), "--cold"]) == 0
@@ -1635,7 +1640,8 @@ def test_cost_and_selected_explain_are_compact_in_text_and_complete_in_ndjson(
 
     assert main(["cost", str(project)]) == 0
     cost_text = capsys.readouterr().out
-    assert "project cost: 1 (model v2)" in cost_text
+    assert "project intervention cost: 1 relative points (model v2)" in cost_text
+    assert "function attribution: 0 attributed, 1 unallocated project/TU shared" in cost_text
     assert "targets:\n  program: 1 (interventions=1, units=1)" in cost_text
     assert "classes:\n  state_carrier: 1 (interventions=1, units=1)" in cost_text
 
@@ -1649,6 +1655,7 @@ def test_cost_and_selected_explain_are_compact_in_text_and_complete_in_ndjson(
     assert "cost class: state_carrier" in selected_text
     assert "typed units: intervention: 1 x 1 = 1" in selected_text
     assert "dependencies: none" in selected_text
+    assert "shared beneficiaries: none" in selected_text
     assert "rationale: stabilize one compiler state carrier" in selected_text
 
     assert main(["--format", "ndjson", "cost", str(project)]) == 0
@@ -1677,9 +1684,30 @@ def test_cost_and_selected_explain_are_compact_in_text_and_complete_in_ndjson(
     assert explain_event["cost_class"] == "state_carrier"
     assert explain_event["rationale"] == "stabilize one compiler state carrier"
     assert explain_event["dependencies"] == []
+    assert explain_event["beneficiaries"] == []
     assert explain_event["units"] == [
         {"cost": 1, "count": 1, "kind": "intervention", "unit_cost": 1}
     ]
+
+
+def test_selected_explain_names_shared_cost_beneficiaries() -> None:
+    beneficiary = Scope(
+        target="program",
+        translation_unit="main",
+        function="work()",
+    )
+    intervention = LinkOrderingIntervention(
+        id="shared-order",
+        scope=Scope(target="program"),
+        rationale="attribute one shared ordering intervention",
+        beneficiaries=(beneficiary,),
+        item_ids=("first", "second"),
+    )
+    cost = calculate_cost((intervention,)).interventions[0]
+
+    rendered = _human_intervention_detail(intervention, cost)
+
+    assert "shared beneficiaries: program/main/work()" in rendered
 
 
 def test_cost_and_explain_read_committed_metadata_without_hashing_dirty_sources(
@@ -1692,7 +1720,7 @@ def test_cost_and_explain_read_committed_metadata_without_hashing_dirty_sources(
     (project / "src/unit.cpp").write_bytes(b"int main() { return 7; }\n")
 
     assert main(["cost", str(project)]) == 0
-    assert "project cost: 1" in capsys.readouterr().out
+    assert "project intervention cost: 1 relative points" in capsys.readouterr().out
     assert main(["explain", str(project), "--intervention", "state.one"]) == 0
     assert "cost=1" in capsys.readouterr().out
 
@@ -2057,6 +2085,18 @@ def test_manifest_preview_and_apply_use_the_cas_transaction(
     loaded = load_project_tree(destination)
     assert loaded.spec.project_id == "sample"
     assert any(item.id == "state.extra" for item in loaded.interventions)
+
+
+def test_report_help_explains_the_input_and_output_paths(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        main(["report", "--help"])
+
+    assert stopped.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "canonical report.json to validate and render" in help_text
+    assert "replace the input suffix with .html" in help_text
 
 
 def test_report_and_cmake_module_commands(

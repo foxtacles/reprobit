@@ -5,7 +5,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from reprobit.cli_output import human_command
 from reprobit.project_loader import load_project, load_project_tree
+
+_BUILD_AUTHORITY_GUIDE = (
+    "https://github.com/foxtacles/reprobit/blob/main/"
+    "docs/cli.md#complete-project-build-authority"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,7 +72,7 @@ def inspect_project_readiness(root: Path) -> ProjectReadiness:
                     "Project",
                     False,
                     "reprobit.toml has not been created",
-                    f"rbit init {candidate}",
+                    human_command(("rbit", "init", candidate)),
                 ),
             ),
         )
@@ -109,17 +115,27 @@ def inspect_project_readiness(root: Path) -> ProjectReadiness:
         ReadinessItem("project", "Project", True, f"{spec.project_id} uses schema 3")
     ]
     next_commands = {
-        "toolchain_lock": f"rbit setup {candidate}",
-        "source_manifest": f"rbit source lock --project {candidate}",
-        "producer_graph": f"rbit graph configure --project {candidate}",
+        "toolchain_lock": human_command(("rbit", "setup", candidate)),
+        "source_manifest": human_command(
+            ("rbit", "source", "lock", "--project", candidate)
+        ),
+        "producer_graph": human_command(
+            ("rbit", "graph", "configure", "--project", candidate)
+        ),
     }
     for identifier, label, present, path in structural:
+        missing_detail = f"missing {path}"
+        if identifier == "build_plan":
+            missing_detail += (
+                "; machine setup can be complete, but the project still needs reviewed "
+                f"build authority. Guide: {_BUILD_AUTHORITY_GUIDE}"
+            )
         items.append(
             ReadinessItem(
                 identifier,
                 label,
                 present,
-                "ready" if present else f"missing {path}",
+                "ready" if present else missing_detail,
                 None if present else next_commands.get(identifier),
             )
         )
@@ -176,7 +192,9 @@ def inspect_project_readiness(root: Path) -> ProjectReadiness:
             "Authority",
             validated,
             validation_detail,
-            None if validated else f"rbit validate {candidate}",
+            None
+            if validated
+            else human_command(("rbit", "validate", candidate)),
         )
     )
     return ProjectReadiness(candidate, tuple(items))

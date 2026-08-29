@@ -721,13 +721,6 @@ def _statement_payload_digest(statement: Mapping[str, object], *, name: str) -> 
         return None
 
 
-def _donor_legacy_id(intervention: ClassicRecipeIntervention) -> str | None:
-    matches = [field.value for field in intervention.parameters if field.name == "legacy_recipe_id"]
-    if len(matches) != 1 or not isinstance(matches[0], str) or not matches[0]:
-        return None
-    return matches[0]
-
-
 def _donor_input_is_authorized(
     donor: ClassicRecipeIntervention,
     consumer: ClassicRecipeIntervention,
@@ -742,9 +735,6 @@ def _donor_input_is_authorized(
     constraints = statement.get("candidate_constraints")
     if not isinstance(constraints, Mapping):
         return False
-    legacy_id = _donor_legacy_id(donor)
-    if legacy_id is None:
-        return False
     named_constraints = {
         "target_donor_object": "target_donor",
         "complete_donor_object": "complete_donor",
@@ -752,12 +742,12 @@ def _donor_input_is_authorized(
     }
     constraint_name = named_constraints.get(input_name)
     if constraint_name is not None:
-        return constraints.get(constraint_name) == legacy_id
-    if input_name != f"additional_donor:{legacy_id}":
+        return constraints.get(constraint_name) == donor.id
+    if input_name != f"additional_donor:{donor.id}":
         return False
     variants = constraints.get("donor_variants")
     return isinstance(variants, list) and any(
-        isinstance(item, Mapping) and item.get("donor") == legacy_id for item in variants
+        isinstance(item, Mapping) and item.get("donor") == donor.id for item in variants
     )
 
 

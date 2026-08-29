@@ -8,10 +8,10 @@ import os
 import re
 import stat
 from collections.abc import Iterable, Mapping
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Literal
 
 from reprobit.context import CompileContext
 from reprobit.paths import normalize_logical_path
@@ -425,268 +425,10 @@ def _source_assignments(
     return assignments
 
 
-@dataclass(frozen=True, slots=True)
-class ToolchainLock:
-    schema: str
-    profile: str
-    profile_sources: tuple[ToolchainSourcePin, ...]
-    files: tuple[ToolchainFileReceipt, ...]
-    tree_digests: tuple[ToolchainTreeReceipt, ...] = ()
-    runtime_files: tuple[ToolchainFileReceipt, ...] = ()
-
-    SCHEMA = "reprobit.toolchain-lock.v2"
-
-    def __post_init__(self) -> None:
-        if self.schema != self.SCHEMA:
-            raise ValueError(f"unsupported runtime toolchain lock schema: {self.schema}")
-        selected = profile(self.profile)
-        file_paths = [item.path.casefold() for item in self.files]
-        runtime_paths = [item.path.casefold() for item in self.runtime_files]
-        tree_paths = [item.path.casefold() for item in self.tree_digests]
-        if len(file_paths) != len(set(file_paths)):
-            raise ValueError("runtime toolchain lock repeats a producer path")
-        if len(tree_paths) != len(set(tree_paths)):
-            raise ValueError("runtime toolchain lock repeats an input tree path")
-        if len(runtime_paths) != len(set(runtime_paths)):
-            raise ValueError("runtime toolchain lock repeats a runtime-file path")
-        if set(file_paths) & set(runtime_paths):
-            raise ValueError("runtime toolchain producer and runtime paths overlap")
-        locked_paths = {*file_paths, *runtime_paths, *tree_paths}
-        assignments = _source_assignments(self.profile_sources)
-        unknown_paths = set(assignments) - locked_paths
-        if unknown_paths:
-            raise ValueError(
-                "toolchain profile-source mapping names unlocked paths: "
-                f"{sorted(unknown_paths)}"
-            )
-        expected = _source_assignments(
-            profile_source_pins_for_paths(selected, locked_paths)
-        )
-        if set(assignments) != set(expected):
-            raise ValueError(
-                "runtime toolchain profile-source assignment set differs; "
-                f"missing={sorted(set(expected) - set(assignments))}, "
-                f"extra={sorted(set(assignments) - set(expected))}"
-            )
-        mismatched = {
-            path
-            for path, source in expected.items()
-            if assignments.get(path) != source
-        }
-        if mismatched:
-            raise ValueError(
-                "runtime toolchain profile-source mapping differs for paths: "
-                f"{sorted(mismatched)}"
-            )
-
-    def to_dict(self) -> dict[str, object]:
-        body: dict[str, object] = {
-            "schema": self.schema,
-            "profile": self.profile,
-            "profile_sources": [asdict(item) for item in self.profile_sources],
-            "files": [asdict(item) for item in self.files],
-            "tree_digests": [asdict(item) for item in self.tree_digests],
-            "runtime_files": [asdict(item) for item in self.runtime_files],
-        }
-        digest = hashlib.sha256(
-            json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        body["sha256"] = digest
-        return body
-
-    @classmethod
-    def from_dict(cls, document: Mapping[str, Any]) -> ToolchainLock:
-        """Load and authenticate the internal v2 receipt representation."""
-
-        required_fields = {
-            "schema",
-            "profile",
-            "profile_sources",
-            "files",
-            "tree_digests",
-            "sha256",
-        }
-        allowed_fields = required_fields | {"runtime_files"}
-        if not required_fields.issubset(document) or not set(document).issubset(allowed_fields):
-            raise ToolchainError("runtime toolchain lock fields differ from v2")
-        body = {key: value for key, value in document.items() if key != "sha256"}
-        actual_digest = hashlib.sha256(
-            json.dumps(body, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest()
-        if document["sha256"] != actual_digest:
-            raise ToolchainError("runtime toolchain lock receipt digest differs")
-        try:
-            files_value = document["files"]
-            trees_value = document["tree_digests"]
-            runtime_value = document.get("runtime_files", [])
-            sources_value = document["profile_sources"]
-            if not all(
-                isinstance(value, list)
-                for value in (files_value, trees_value, runtime_value, sources_value)
-            ):
-                raise TypeError("lock receipt collections must be arrays")
-            sources = tuple(ToolchainSourcePin(**item) for item in sources_value)
-            files = tuple(ToolchainFileReceipt(**item) for item in files_value)
-            trees = tuple(ToolchainTreeReceipt(**item) for item in trees_value)
-            runtime_files = tuple(ToolchainFileReceipt(**item) for item in runtime_value)
-            return cls(
-                schema=str(document["schema"]),
-                profile=str(document["profile"]),
-                profile_sources=sources,
-                files=files,
-                tree_digests=trees,
-                runtime_files=runtime_files,
-            )
-        except (TypeError, ValueError) as error:
-            raise ToolchainError(f"invalid runtime toolchain lock: {error}") from error
-
-    def to_schema_v3(self) -> SchemaToolchainLock:
-        """Convert the internal receipt to the sole committed lock format."""
-
-        from reprobit.model import Digest
-        from reprobit.schema import (
-            InputTreeReceipt,
-            LockedTool,
-            MsvcRelease,
-            ToolchainProfileSource,
-        )
-        from reprobit.schema import ToolchainLock as SchemaToolchainLock
-
-        selected = profile(self.profile)
-        release = MsvcRelease(selected.release)
-        tools = tuple(
-            LockedTool(
-                id=_receipt_identifier("tool", item.path),
-                path=item.path,
-                digest=Digest(value=item.sha256),
-                size=item.size,
-                roles=item.roles or _producer_roles(selected, item.path),
-            )
-            for item in self.files
-        )
-        trees = tuple(
-            InputTreeReceipt(
-                id=_receipt_identifier("tree", item.path),
-                path=item.path,
-                algorithm=item.algorithm,
-                entry_count=item.entry_count,
-                max_depth=item.max_depth,
-                membership_digest=Digest(value=item.membership_sha256),
-                content_digest=Digest(value=item.content_sha256),
-            )
-            for item in self.tree_digests
-        )
-        runtime_files = tuple(
-            LockedTool(
-                id=_receipt_identifier("runtime", item.path),
-                path=item.path,
-                digest=Digest(value=item.sha256),
-                size=item.size,
-                roles=item.roles or ("runtime",),
-            )
-            for item in self.runtime_files
-        )
-        return SchemaToolchainLock(
-            schema_version=3,
-            profile=self.profile,
-            release=release,
-            profile_sources=tuple(
-                ToolchainProfileSource(
-                    repository=source.repository,
-                    revision=source.revision,
-                    paths=source.paths,
-                )
-                for source in self.profile_sources
-            ),
-            tools=tools,
-            runtime_files=runtime_files,
-            input_trees=trees,
-        )
-
-    @classmethod
-    def from_schema_v3(cls, document: Any) -> ToolchainLock:
-        """Explicitly project a validated schema-v3 lock into runtime receipts."""
-
-        from reprobit.schema import ToolchainLock as SchemaToolchainLock
-
-        if not isinstance(document, SchemaToolchainLock):
-            document = SchemaToolchainLock.model_validate(document)
-        selected = profile(document.profile)
-        runtime_sources = validate_toolchain_profile_sources(document)
-        required = {
-            path.casefold(): path for path in selected.required_producers
-        }
-        known_runtime = {
-            path.casefold(): path for path in selected.required_runtime_files
-        }
-        locked = (*document.tools, *document.runtime_files)
-        producer_items = tuple(
-            item for item in locked if item.path.casefold() in required
-        )
-        received = {item.path.casefold() for item in producer_items}
-        missing = set(required) - received
-        if missing:
-            raise ToolchainError(
-                "schema-v3 lock omits required producers: "
-                f"{sorted(required[path] for path in missing)}"
-            )
-        runtime_items = tuple(
-            item for item in locked if item.path.casefold() not in required
-        )
-        received_runtime = {item.path.casefold() for item in runtime_items}
-        missing_runtime = set(known_runtime) - received_runtime
-        if missing_runtime:
-            raise ToolchainError(
-                "schema-v3 lock omits required runtime files: "
-                f"{sorted(known_runtime[path] for path in missing_runtime)}"
-            )
-        known_trees = {
-            path.casefold(): path
-            for path in (*selected.include_roots, *selected.library_roots)
-        }
-        return cls(
-            schema=cls.SCHEMA,
-            profile=document.profile,
-            profile_sources=runtime_sources,
-            files=tuple(
-                ToolchainFileReceipt(
-                    required[item.path.casefold()],
-                    item.size,
-                    item.digest.value,
-                    item.roles,
-                )
-                for item in producer_items
-            ),
-            tree_digests=tuple(
-                ToolchainTreeReceipt(
-                    known_trees.get(item.path.casefold(), item.path),
-                    item.entry_count,
-                    item.max_depth,
-                    item.membership_digest.value,
-                    item.content_digest.value,
-                    item.algorithm,
-                )
-                for item in document.input_trees
-            ),
-            runtime_files=tuple(
-                ToolchainFileReceipt(
-                    known_runtime.get(item.path.casefold(), item.path),
-                    item.size,
-                    item.digest.value,
-                    item.roles,
-                )
-                for item in runtime_items
-            ),
-        )
-
-
-def validate_toolchain_profile_sources(document: Any) -> tuple[ToolchainSourcePin, ...]:
+def _validate_toolchain_profile_sources(
+    document: SchemaToolchainLock,
+) -> tuple[ToolchainSourcePin, ...]:
     """Validate a schema lock's repository inputs against its known profile."""
-
-    from reprobit.schema import ToolchainLock as SchemaToolchainLock
-
-    if not isinstance(document, SchemaToolchainLock):
-        document = SchemaToolchainLock.model_validate(document)
     if document.adapter != "classic-msvc":
         raise ToolchainError("schema-v3 lock is not for the classic adapter")
     selected = profile(document.profile)
@@ -727,6 +469,50 @@ def validate_toolchain_profile_sources(document: Any) -> tuple[ToolchainSourcePi
     return runtime_sources
 
 
+def validate_toolchain_lock(document: SchemaToolchainLock) -> None:
+    """Validate the sole toolchain-lock model against its selected profile."""
+
+    selected = profile(document.profile)
+    _validate_toolchain_profile_sources(document)
+    required_producers = {
+        path.casefold(): path for path in selected.required_producers
+    }
+    received_producers = {item.path.casefold(): item.path for item in document.tools}
+    misplaced_tools = {
+        path for folded, path in received_producers.items() if folded not in required_producers
+    }
+    if misplaced_tools:
+        raise ToolchainError(
+            "toolchain lock tools contain non-producer files: "
+            f"{sorted(misplaced_tools, key=str.casefold)}"
+        )
+    missing_producers = set(required_producers) - set(received_producers)
+    if missing_producers:
+        raise ToolchainError(
+            "toolchain lock omits required producers: "
+            f"{sorted(required_producers[path] for path in missing_producers)}"
+        )
+
+    required_runtime = {
+        path.casefold(): path for path in selected.required_runtime_files
+    }
+    received_runtime = {item.path.casefold(): item.path for item in document.runtime_files}
+    misplaced_runtime = {
+        path for folded, path in received_runtime.items() if folded in required_producers
+    }
+    if misplaced_runtime:
+        raise ToolchainError(
+            "toolchain lock runtime_files contain producer files: "
+            f"{sorted(misplaced_runtime, key=str.casefold)}"
+        )
+    missing_runtime = set(required_runtime) - set(received_runtime)
+    if missing_runtime:
+        raise ToolchainError(
+            "toolchain lock omits required runtime files: "
+            f"{sorted(required_runtime[path] for path in missing_runtime)}"
+        )
+
+
 def _receipt_identifier(kind: str, path: str) -> str:
     normalized = re.sub(r"[^a-z0-9._-]+", ".", path.casefold()).strip(".-")
     identifier = f"{kind}.{normalized}"
@@ -747,6 +533,75 @@ def _producer_roles(selected: ToolchainProfile, path: str) -> tuple[str, ...]:
         if path.casefold() == producer.casefold():
             roles.append(role)
     return tuple(roles or ("runtime",))
+
+
+def _toolchain_lock_document(
+    *,
+    profile_id: str,
+    profile_sources: tuple[ToolchainSourcePin, ...],
+    producers: tuple[ToolchainFileReceipt, ...],
+    input_trees: tuple[ToolchainTreeReceipt, ...],
+    runtime_files: tuple[ToolchainFileReceipt, ...],
+) -> SchemaToolchainLock:
+    """Build the one public lock model from freshly measured installation receipts."""
+
+    from reprobit.model import Digest
+    from reprobit.schema import (
+        InputTreeReceipt,
+        LockedTool,
+        MsvcRelease,
+        ToolchainProfileSource,
+    )
+    from reprobit.schema import ToolchainLock as SchemaToolchainLock
+
+    selected = profile(profile_id)
+    document = SchemaToolchainLock(
+        schema_version=3,
+        profile=profile_id,
+        release=MsvcRelease(selected.release),
+        profile_sources=tuple(
+            ToolchainProfileSource(
+                repository=source.repository,
+                revision=source.revision,
+                paths=source.paths,
+            )
+            for source in profile_sources
+        ),
+        tools=tuple(
+            LockedTool(
+                id=_receipt_identifier("tool", item.path),
+                path=item.path,
+                digest=Digest(value=item.sha256),
+                size=item.size,
+                roles=item.roles or _producer_roles(selected, item.path),
+            )
+            for item in producers
+        ),
+        runtime_files=tuple(
+            LockedTool(
+                id=_receipt_identifier("runtime", item.path),
+                path=item.path,
+                digest=Digest(value=item.sha256),
+                size=item.size,
+                roles=item.roles or ("runtime",),
+            )
+            for item in runtime_files
+        ),
+        input_trees=tuple(
+            InputTreeReceipt(
+                id=_receipt_identifier("tree", item.path),
+                path=item.path,
+                algorithm=item.algorithm,
+                entry_count=item.entry_count,
+                max_depth=item.max_depth,
+                membership_digest=Digest(value=item.membership_sha256),
+                content_digest=Digest(value=item.content_sha256),
+            )
+            for item in input_trees
+        ),
+    )
+    validate_toolchain_lock(document)
+    return document
 
 
 @dataclass(frozen=True, slots=True)
@@ -1012,9 +867,9 @@ class ClassicMSVCToolchain:
     def resource_compiler_path(self) -> str:
         return self.logical_path(self.profile.resource_compiler)
 
-    def doctor(self, lock: ToolchainLock | None = None) -> ToolchainDoctorReport:
+    def doctor(self, lock: SchemaToolchainLock | None = None) -> ToolchainDoctorReport:
         expected = (
-            {item.path.casefold(): item for item in lock.files} if lock is not None else {}
+            {item.path.casefold(): item for item in lock.tools} if lock is not None else {}
         )
         expected_runtime = (
             {item.path.casefold(): item for item in lock.runtime_files}
@@ -1023,21 +878,18 @@ class ClassicMSVCToolchain:
         )
         checks: list[ToolchainCheck] = []
         if lock is not None:
-            if (
-                lock.schema != ToolchainLock.SCHEMA
-                or lock.profile != self.profile.identifier
-            ):
-                checks.append(
-                    ToolchainCheck(
-                        "lock", False, "lock schema or profile differs"
-                    )
-                )
+            try:
+                validate_toolchain_lock(lock)
+            except ToolchainError as error:
+                checks.append(ToolchainCheck("lock", False, str(error)))
+            if lock.profile != self.profile.identifier:
+                checks.append(ToolchainCheck("lock", False, "lock profile differs"))
             required = {path.casefold() for path in self.profile.required_producers}
             received = {path.casefold() for path in expected}
             if received != required:
                 checks.append(
                     ToolchainCheck(
-                        "lock.files",
+                        "lock.tools",
                         False,
                         "producer set differs; "
                         f"missing={sorted(required - received)}, "
@@ -1062,10 +914,7 @@ class ClassicMSVCToolchain:
                 )
                 continue
             actual = _hash_file(path, relative)
-            matches = (
-                (pinned.size is None or actual.size == pinned.size)
-                and actual.sha256 == pinned.sha256
-            )
+            matches = actual.size == pinned.size and actual.sha256 == pinned.digest.value
             checks.append(
                 ToolchainCheck(relative, matches, "digest matches" if matches else "digest differs")
             )
@@ -1105,10 +954,7 @@ class ClassicMSVCToolchain:
                 checks.append(ToolchainCheck(relative, True, "present"))
                 continue
             actual = _hash_file(path, relative, pinned.roles)
-            matches = (
-                (pinned.size is None or actual.size == pinned.size)
-                and actual.sha256 == pinned.sha256
-            )
+            matches = actual.size == pinned.size and actual.sha256 == pinned.digest.value
             checks.append(
                 ToolchainCheck(
                     relative,
@@ -1129,13 +975,13 @@ class ClassicMSVCToolchain:
             )
         if lock is not None:
             actual_tree = {
-                relative: _tree_receipt(self.host_path(relative), relative)
+                relative.casefold(): _tree_receipt(self.host_path(relative), relative)
                 for relative in (
                     *self.profile.include_roots,
                     *self.profile.library_roots,
                 )
             }
-            expected_tree_paths = {item.path for item in lock.tree_digests}
+            expected_tree_paths = {item.path for item in lock.input_trees}
             declared_tree_paths = {
                 *self.profile.include_roots,
                 *self.profile.library_roots,
@@ -1148,15 +994,22 @@ class ClassicMSVCToolchain:
                         "lock.input_trees", False, "input tree set differs from the profile"
                     )
                 )
-            for expected_receipt in lock.tree_digests:
-                actual_receipt = actual_tree.get(expected_receipt.path)
+            for expected_receipt in lock.input_trees:
+                actual_receipt = actual_tree.get(expected_receipt.path.casefold())
+                matches = actual_receipt is not None and (
+                    actual_receipt.path.casefold() == expected_receipt.path.casefold()
+                    and actual_receipt.entry_count == expected_receipt.entry_count
+                    and actual_receipt.max_depth == expected_receipt.max_depth
+                    and actual_receipt.membership_sha256
+                    == expected_receipt.membership_digest.value
+                    and actual_receipt.content_sha256 == expected_receipt.content_digest.value
+                    and actual_receipt.algorithm == expected_receipt.algorithm
+                )
                 checks.append(
                     ToolchainCheck(
                         expected_receipt.path,
-                        actual_receipt == expected_receipt,
-                        "tree receipt matches"
-                        if actual_receipt == expected_receipt
-                        else "tree receipt differs",
+                        matches,
+                        "tree receipt matches" if matches else "tree receipt differs",
                     )
                 )
         return ToolchainDoctorReport(self.profile.identifier, self.root, tuple(checks))
@@ -1166,7 +1019,7 @@ class ClassicMSVCToolchain:
         *,
         include_trees: bool = True,
         runtime_paths: Iterable[str] = (),
-    ) -> ToolchainLock:
+    ) -> SchemaToolchainLock:
         self.doctor().require_ok()
         files: list[ToolchainFileReceipt] = []
         for relative in self.profile.required_producers:
@@ -1207,13 +1060,12 @@ class ClassicMSVCToolchain:
             *(item.path for item in runtime_files),
             *(item.path for item in trees),
         )
-        return ToolchainLock(
-            ToolchainLock.SCHEMA,
-            self.profile.identifier,
-            profile_source_pins_for_paths(self.profile, locked_paths),
-            tuple(files),
-            tuple(trees),
-            tuple(runtime_files),
+        return _toolchain_lock_document(
+            profile_id=self.profile.identifier,
+            profile_sources=profile_source_pins_for_paths(self.profile, locked_paths),
+            producers=tuple(files),
+            input_trees=tuple(trees),
+            runtime_files=tuple(runtime_files),
         )
 
     def default_environment(self, *, temp_directory: str) -> dict[str, str]:
@@ -1332,12 +1184,11 @@ __all__ = [
     "ToolchainDoctorReport",
     "ToolchainError",
     "ToolchainFileReceipt",
-    "ToolchainLock",
     "ToolchainProfile",
     "ToolchainSourcePin",
     "ToolchainTreeReceipt",
     "portable_tree_receipt",
     "profile",
     "profile_source_pins_for_paths",
-    "validate_toolchain_profile_sources",
+    "validate_toolchain_lock",
 ]

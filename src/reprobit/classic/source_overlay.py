@@ -48,9 +48,7 @@ from reprobit.classic_link_topology import (
     terminal_link_input_topology,
 )
 from reprobit.classic_overlay import (
-    ClassicOverlayDialect,
     ClassicOverlayOutputReceipt,
-    infer_classic_overlay_dialect,
     render_classic_overlay,
     render_classic_overlay_leaf_subset,
 )
@@ -240,7 +238,6 @@ def _receipt_trace(receipt: ClassicOverlayOutputReceipt) -> dict[str, object]:
 
 def _overlay_source_trace(
     *,
-    dialect: ClassicOverlayDialect,
     receipts: Sequence[ClassicOverlayOutputReceipt],
     operation_census: Mapping[str, int],
     semantic_claim_count: int,
@@ -250,9 +247,6 @@ def _overlay_source_trace(
     """Build the canonical per-overlay source-language evidence trace."""
 
     return {
-        "dialect": {
-            "qualified_member_probe_return_type": dialect.qualified_member_probe_return_type
-        },
         "render_receipts": [
             _receipt_trace(item) for item in sorted(receipts, key=lambda item: item.path.casefold())
         ],
@@ -388,7 +382,7 @@ def _token_census(payloads: Iterable[bytes]) -> dict[str, int]:
 
 
 _LeafKey = tuple[str, str, int]
-_RenderContext = tuple[dict[str, object], Mapping[str, bytes], ClassicOverlayDialect]
+_RenderContext = tuple[dict[str, object], Mapping[str, bytes]]
 
 
 def _validate_declaration_project_closure(
@@ -516,7 +510,7 @@ def _render_declaration_counterfactuals(
     declaration_outputs: dict[str, bytes] = {}
     declaration_leaf_keys: dict[str, tuple[tuple[str, int], ...]] = {}
     for overlay in overlays:
-        document, context_clean_inputs, dialect = render_contexts[overlay.id]
+        document, context_clean_inputs = render_contexts[overlay.id]
         selected_keys = frozenset(
             (operation_id, leaf_index)
             for overlay_id, operation_id, leaf_index in selected_leaves
@@ -527,7 +521,6 @@ def _render_declaration_counterfactuals(
                 document,
                 context_clean_inputs,
                 selected_keys,
-                dialect=dialect,
             )
         except ValueError as exc:
             raise ClassicSemanticError(
@@ -711,10 +704,7 @@ def _validate_project_overlay_sources(
     projection_sources: set[str] = set()
     projection_all = False
     traces: dict[str, object] = {}
-    render_contexts: dict[
-        str,
-        tuple[dict[str, object], Mapping[str, bytes], ClassicOverlayDialect],
-    ] = {}
+    render_contexts: dict[str, _RenderContext] = {}
     all_counterfactual_leaves: set[tuple[str, str, int]] = set()
     selected_counterfactual_leaves: set[tuple[str, str, int]] = set()
     compiler_replay_paths: set[str] = set()
@@ -769,25 +759,19 @@ def _validate_project_overlay_sources(
             raise ClassicSemanticError(
                 f"overlay {overlay.id!r} lacks immutable clean render inputs"
             )
-        clean_cpp = {source.path: source.payload for source in clean_sources.values()}
         document = _overlay_document(overlay)
         render_clean_inputs = {
             path: payload for path, payload in clean_inputs.items() if isinstance(payload, bytes)
         }
         try:
-            dialect = infer_classic_overlay_dialect(document, clean_cpp)
-            rendered = render_classic_overlay(
-                document,
-                render_clean_inputs,
-                dialect=dialect,
-            )
+            rendered = render_classic_overlay(document, render_clean_inputs)
         except ValueError as exc:
             raise ClassicSemanticError(
                 f"overlay {overlay.id!r} cannot be re-rendered from clean authority: {exc}"
             ) from exc
         if set(rendered.outputs) != set(outputs):
             raise ClassicSemanticError(f"overlay {overlay.id!r} render universe changed")
-        render_contexts[overlay.id] = (document, render_clean_inputs, dialect)
+        render_contexts[overlay.id] = (document, render_clean_inputs)
         for path, payload in rendered.outputs.items():
             pair = source_pairs.get(path.casefold())
             if not isinstance(pair, ProjectOverlaySourcePair) or pair.effective_payload != payload:
@@ -1069,7 +1053,6 @@ def _validate_project_overlay_sources(
                 f"overlay {overlay.id!r} has unused or missing semantic claims"
             )
         traces[overlay.id] = _overlay_source_trace(
-            dialect=dialect,
             receipts=rendered.receipts,
             operation_census=operation_census,
             semantic_claim_count=len(claims),

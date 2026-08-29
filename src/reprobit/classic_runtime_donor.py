@@ -259,20 +259,23 @@ class ClassicDonorComposition:
 
     def record_for_donor(self, unit: ClassicPreparedUnit, donor_index: int) -> ClassicCompileRecord:
         donor = unit.donors[donor_index]
+        if donor.request.build_target != unit.plan.build_target:
+            raise ClassicProjectError(
+                f"donor {donor.intervention.id!r} target differs from its owning TU: "
+                f"{donor.request.build_target!r} != {unit.plan.build_target!r}"
+            )
         source = (self.effective_root / donor.request.logical_source).resolve(strict=True)
-        required_define = donor.request.compiler_additions.required_define
-        matches: list[ClassicCompileRecord] = []
-        for item in self.compile_records:
-            if item.source != source:
-                continue
-            parsed = validate_compile_arguments(list(item.arguments))
-            definitions = {definition[1] for definition in parsed["definitions"]}
-            if required_define in definitions:
-                matches.append(item)
+        matches = [
+            item
+            for item in self.compile_records
+            if item.source == source
+            and item.build_target == donor.request.build_target
+        ]
         if len(matches) != 1:
             raise ClassicProjectError(
                 f"donor {donor.intervention.id!r} has {len(matches)} committed compile "
-                f"lanes for required define {required_define!r}"
+                "lanes for its target/source identity: "
+                f"{donor.request.build_target}/{donor.request.logical_source}"
             )
         return matches[0]
 
@@ -282,7 +285,7 @@ class ClassicDonorComposition:
         request: DonorCompileRequest,
         arena: Path,
     ) -> tuple[str, ...]:
-        """Rebuild the proven legacy donor argv without changing visible paths."""
+        """Rebuild the committed donor compiler argv with private path seats."""
 
         arguments = list(record.arguments)
         try:
@@ -520,10 +523,10 @@ class ClassicDonorComposition:
         donor_root = self.build_root.parent / "donors"
         if donor_root.is_symlink() or not donor_root.is_dir():
             raise ClassicProjectError("classic donor arena root is absent or redirected")
-        legacy_recipe_id = _safe_relative(donor.request.legacy_recipe_id)
-        if len(PurePosixPath(legacy_recipe_id).parts) != 1:
-            raise ClassicProjectError("classic donor legacy recipe ID is not one path component")
-        arena = donor_root / f"{marker_stem}-{legacy_recipe_id}"
+        intervention_id = _safe_relative(donor.request.intervention_id)
+        if len(PurePosixPath(intervention_id).parts) != 1:
+            raise ClassicProjectError("classic donor intervention ID is not one path component")
+        arena = donor_root / f"{marker_stem}-{intervention_id}"
         arena.mkdir(exist_ok=False)
         if donor.request.compiler_additions.include_projection is not DonorIncludeProjection.NONE:
             shutil.copytree(self.effective_root, arena / "inc" / "source")
@@ -533,13 +536,6 @@ class ClassicDonorComposition:
             path = arena.joinpath(*PurePosixPath(_safe_relative(relative)).parts)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(payload)
-        parsed = validate_compile_arguments(list(record.arguments))
-        definitions = {item[1] for item in parsed["definitions"]}
-        required_define = donor.request.compiler_additions.required_define
-        if required_define not in definitions:
-            raise ClassicProjectError(
-                f"donor {donor.intervention.id!r} compile lane lacks {required_define!r}"
-            )
         donor_object = arena / "o.obj"
         donor_pdb = arena / "o.pdb"
         command = self._donor_compiler_command(record, donor.request, arena)
@@ -895,11 +891,7 @@ class ClassicDonorComposition:
                 or composition.group_order_input_size is None
             ):
                 raise ClassicProjectError("group-order composition receipt is incomplete")
-            operation = (
-                "swap_comdat_group_order"
-                if unit.plan.mode == "swap_comdat_group_order"
-                else "restore_comdat_group_order"
-            )
+            operation = unit.plan.group_order.operation
             compiler_node = next(
                 (item for item in self.graph.nodes if item.id == record.node_id),
                 None,

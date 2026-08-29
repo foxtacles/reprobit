@@ -19,7 +19,7 @@ from reprobit.project_loader import load_project
 from reprobit.project_readiness import inspect_project_readiness, render_project_readiness
 from reprobit.schema import ToolchainLock as SchemaToolchainLock
 from reprobit.strict_json import canonical_json, strict_load
-from reprobit.toolchains import MSVC_42, ClassicMSVCToolchain, ToolchainLock
+from reprobit.toolchains import MSVC_42, ClassicMSVCToolchain, validate_toolchain_lock
 from reprobit.transactions import CASTransaction
 from reprobit.user_config import (
     default_toolchain_root,
@@ -88,9 +88,10 @@ def command_toolchain_provision(args: argparse.Namespace, output: CLIOutput) -> 
     return 0
 
 
-def _runtime_lock(path: Path) -> ToolchainLock:
+def _load_toolchain_lock(path: Path) -> SchemaToolchainLock:
     document = SchemaToolchainLock.model_validate_json(canonical_json(strict_load(path)))
-    return ToolchainLock.from_schema_v3(document)
+    validate_toolchain_lock(document)
+    return document
 
 
 def _create_project_lock(
@@ -114,8 +115,7 @@ def _create_project_lock(
                 + ", ".join(missing)
             )
         runtime_paths = present
-    runtime = installation.create_lock(include_trees=True, runtime_paths=runtime_paths)
-    document = runtime.to_schema_v3()
+    document = installation.create_lock(include_trees=True, runtime_paths=runtime_paths)
     relative = lock_path.relative_to(root)
     transaction = CASTransaction(root)
     transaction.write(relative, canonical_json(document), expected_sha256=None)
@@ -167,7 +167,7 @@ def command_setup(args: argparse.Namespace, output: CLIOutput) -> int:
         raise CLIError(f"toolchain lock is redirected: {lock_path}")
     created_lock = False
     if lock_path.is_file():
-        runtime_lock = _runtime_lock(lock_path)
+        lock_document = _load_toolchain_lock(lock_path)
     else:
         with output.activity("locking exact compiler files", phase="toolchain-lock"):
             document = _create_project_lock(
@@ -176,9 +176,9 @@ def command_setup(args: argparse.Namespace, output: CLIOutput) -> int:
                 installation=installation,
                 lock_path=lock_path,
             )
-        runtime_lock = ToolchainLock.from_schema_v3(document)
+        lock_document = document
         created_lock = True
-    toolchain_report = installation.doctor(runtime_lock)
+    toolchain_report = installation.doctor(lock_document)
     toolchain_report.require_ok()
 
     backend = _selected_backend(args)

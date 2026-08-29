@@ -24,7 +24,10 @@ from types import MappingProxyType
 from typing import NoReturn, cast
 
 from reprobit.artifacts import digest_bytes
-from reprobit.source import SourceEditError
+
+
+class SourceEditError(ValueError):
+    """A declarative source overlay is malformed or cannot resolve exactly."""
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -99,23 +102,6 @@ class ClassicOverlayRenderResult:
 
     outputs: Mapping[str, bytes]
     receipts: tuple[ClassicOverlayOutputReceipt, ...]
-
-
-@dataclass(frozen=True, slots=True)
-class ClassicOverlayDialect:
-    """Explicit bindings for underspecified legacy schema-v2 spellings.
-
-    Schema v2's qualified-member probe fixed a project-local return-type alias
-    outside the generator record.  A reusable implementation cannot silently
-    embed that alias, so callers that still carry this legacy kind must bind it
-    explicitly.  Newly authored overlays should include all type spellings in
-    their own typed generator records instead.
-    """
-
-    qualified_member_probe_return_type: str | None = None
-
-
-_DEFAULT_DIALECT = ClassicOverlayDialect()
 
 
 @dataclass(frozen=True, slots=True)
@@ -1179,7 +1165,6 @@ def _render_declaration_generator(
 def _render_sequence(
     value: Mapping[str, object],
     context: str,
-    dialect: ClassicOverlayDialect,
     *,
     relocation_ranges: Mapping[tuple[str, str], bytes] | None = None,
     allow_unresolved_relocation: bool = False,
@@ -1233,7 +1218,6 @@ def _render_sequence(
         fragment = _render_generator(
             expanded_child,
             item_context,
-            dialect,
             relocation_ranges=relocation_ranges,
             allow_unresolved_relocation=allow_unresolved_relocation,
         )
@@ -2343,7 +2327,6 @@ def _render_relocation_range(data: bytes, spec: _RelocationSpec) -> bytes:
 def _render_generator(
     raw: object,
     context: str,
-    dialect: ClassicOverlayDialect,
     *,
     relocation_ranges: Mapping[tuple[str, str], bytes] | None = None,
     allow_unresolved_relocation: bool = False,
@@ -2391,7 +2374,6 @@ def _render_generator(
         semantic, layout = _render_sequence(
             value,
             context,
-            dialect,
             relocation_ranges=relocation_ranges,
             allow_unresolved_relocation=allow_unresolved_relocation,
         )
@@ -2539,13 +2521,11 @@ def _render_generator(
                 "inline_depth",
                 "qualified_member",
                 "receiver_type",
+                "return_type",
             },
         )
-        return_type_binding = dialect.qualified_member_probe_return_type
-        if return_type_binding is None:
-            _fail(f"{context} requires ClassicOverlayDialect.qualified_member_probe_return_type")
         return_type = _render_cpp_type(
-            _cpp_type(return_type_binding, "dialect.qualified_member_probe_return_type")
+            _cpp_type(value.get("return_type"), f"{context}.return_type")
         )
         receiver = _render_cpp_type(
             _cpp_type(value.get("receiver_type"), f"{context}.receiver_type")
@@ -2827,12 +2807,10 @@ def _render_generator(
 
 def render_classic_overlay_generator(
     generator: Mapping[str, object],
-    *,
-    dialect: ClassicOverlayDialect = _DEFAULT_DIALECT,
 ) -> bytes:
     """Validate and render one standalone typed schema-v2 generator."""
 
-    return _render_generator(generator, "generator", dialect)
+    return _render_generator(generator, "generator")
 
 
 def _validate_generator_owner(generator: Mapping[str, object], path: str, context: str) -> None:
@@ -2858,7 +2836,6 @@ def _parse_operation(
     *,
     path: str,
     index: int,
-    dialect: ClassicOverlayDialect,
 ) -> _Operation:
     context = f"overlay output {path!r} operation[{index}]"
     value = _object(raw, context)
@@ -2872,7 +2849,6 @@ def _parse_operation(
         _render_generator(
             generator,
             f"{context}.gen",
-            dialect,
             allow_unresolved_relocation=True,
         )
         _validate_generator_owner(generator, path, f"{context}.gen")
@@ -2885,7 +2861,6 @@ def _parse_operation(
         _render_generator(
             generator,
             f"{context}.gen",
-            dialect,
             allow_unresolved_relocation=True,
         )
         _validate_generator_owner(generator, path, f"{context}.gen")
@@ -2909,7 +2884,6 @@ def _parse_operation(
         _render_generator(
             generator,
             f"{context}.gen",
-            dialect,
             allow_unresolved_relocation=True,
         )
         _validate_generator_owner(generator, path, f"{context}.gen")
@@ -2956,7 +2930,6 @@ def _validate_relocation_closure(outputs: Sequence[_Output]) -> None:
 def _parse_declarations(
     declarations: object,
     *,
-    dialect: ClassicOverlayDialect,
     require_sizes: bool,
 ) -> tuple[_Output, ...]:
     raw_outputs = _array(declarations, "overlay.outputs", minimum=1, maximum=2000)
@@ -2981,7 +2954,7 @@ def _parse_declarations(
         folded[path.casefold()] = path
         clean_digest = _digest(value.get("clean"), f"{context}.clean") if "clean" in value else None
         operations = tuple(
-            _parse_operation(operation, path=path, index=operation_index, dialect=dialect)
+            _parse_operation(operation, path=path, index=operation_index)
             for operation_index, operation in enumerate(
                 _array(value.get("ops"), f"{context}.ops", minimum=1, maximum=100_000)
             )
@@ -3127,24 +3100,22 @@ def _validate_graph(value: object, outputs: tuple[_Output, ...]) -> tuple[str, .
     return tuple(unit[1] for unit in units)
 
 
-def _parse_document(value: object, *, dialect: ClassicOverlayDialect) -> _ValidatedOverlay:
+def _parse_document(value: object) -> _ValidatedOverlay:
     document = _object(value, "overlay")
     _keys(document, {"schema", "outputs", "graph"}, "overlay")
     if _integer(document.get("schema"), "overlay.schema", minimum=2, maximum=2) != 2:
         _fail("overlay.schema differs")
-    outputs = _parse_declarations(document.get("outputs"), dialect=dialect, require_sizes=True)
+    outputs = _parse_declarations(document.get("outputs"), require_sizes=True)
     generated = _validate_graph(document.get("graph"), outputs)
     return _ValidatedOverlay(outputs, generated)
 
 
 def validate_classic_overlay(
     document: Mapping[str, object],
-    *,
-    dialect: ClassicOverlayDialect = _DEFAULT_DIALECT,
 ) -> None:
     """Validate a complete generic schema-v2 overlay document fail-closed."""
 
-    _parse_document(document, dialect=dialect)
+    _parse_document(document)
 
 
 @dataclass(frozen=True, slots=True)
@@ -3214,7 +3185,6 @@ def _render_outputs(
     outputs: tuple[_Output, ...],
     clean_inputs: Mapping[str, bytes],
     *,
-    dialect: ClassicOverlayDialect,
     session: ClassicOverlayRenderSession,
     verify_output_identity: bool = True,
 ) -> ClassicOverlayRenderResult:
@@ -3309,7 +3279,6 @@ def _render_outputs(
                 fragment = _render_generator(
                     operation.generator,
                     f"{context} generator",
-                    dialect,
                     relocation_ranges=relocation_ranges,
                 )
             if operation.action == "delete":
@@ -3378,7 +3347,6 @@ def render_classic_overlay_declarations(
     declarations: Sequence[Mapping[str, object]],
     clean_inputs: Mapping[str, bytes],
     *,
-    dialect: ClassicOverlayDialect = _DEFAULT_DIALECT,
     session: ClassicOverlayRenderSession | None = None,
 ) -> ClassicOverlayRenderResult:
     """Render a declaration list without graph policy.
@@ -3390,33 +3358,26 @@ def render_classic_overlay_declarations(
     string.
     """
 
-    outputs = _parse_declarations(list(declarations), dialect=dialect, require_sizes=False)
+    outputs = _parse_declarations(list(declarations), require_sizes=False)
     if session is None:
         with ClassicOverlayRenderSession() as invocation:
-            return _render_outputs(
-                outputs, clean_inputs, dialect=dialect, session=invocation
-            )
-    return _render_outputs(outputs, clean_inputs, dialect=dialect, session=session)
+            return _render_outputs(outputs, clean_inputs, session=invocation)
+    return _render_outputs(outputs, clean_inputs, session=session)
 
 
 def render_classic_overlay(
     document: Mapping[str, object],
     clean_inputs: Mapping[str, bytes],
     *,
-    dialect: ClassicOverlayDialect = _DEFAULT_DIALECT,
     session: ClassicOverlayRenderSession | None = None,
 ) -> ClassicOverlayRenderResult:
     """Validate and render one complete generic schema-v2 overlay document."""
 
-    validated = _parse_document(document, dialect=dialect)
+    validated = _parse_document(document)
     if session is None:
         with ClassicOverlayRenderSession() as invocation:
-            return _render_outputs(
-                validated.outputs, clean_inputs, dialect=dialect, session=invocation
-            )
-    return _render_outputs(
-        validated.outputs, clean_inputs, dialect=dialect, session=session
-    )
+            return _render_outputs(validated.outputs, clean_inputs, session=invocation)
+    return _render_outputs(validated.outputs, clean_inputs, session=session)
 
 
 def render_classic_overlay_subset(
@@ -3424,7 +3385,6 @@ def render_classic_overlay_subset(
     clean_inputs: Mapping[str, bytes],
     operation_ids: frozenset[str],
     *,
-    dialect: ClassicOverlayDialect = _DEFAULT_DIALECT,
     session: ClassicOverlayRenderSession | None = None,
 ) -> ClassicOverlayRenderResult:
     """Render a validated operation subset against the immutable clean inputs.
@@ -3441,7 +3401,7 @@ def render_classic_overlay_subset(
         not isinstance(item, str) or not item for item in operation_ids
     ):
         _fail("overlay subset operation_ids must be a frozenset of non-empty strings")
-    validated = _parse_document(document, dialect=dialect)
+    validated = _parse_document(document)
     available = {
         operation.operation_id
         for output in validated.outputs
@@ -3469,18 +3429,15 @@ def render_classic_overlay_subset(
             return _render_outputs(
                 selected,
                 clean_inputs,
-                dialect=dialect,
                 session=invocation,
                 verify_output_identity=False,
             )
     return _render_outputs(
         selected,
         clean_inputs,
-        dialect=dialect,
         session=session,
         verify_output_identity=False,
     )
-
 
 def _generator_leaf_count(value: Mapping[str, object]) -> int:
     if value.get("k") != "seq":
@@ -3535,7 +3492,6 @@ def render_classic_overlay_leaf_subset(
     clean_inputs: Mapping[str, bytes],
     leaf_keys: frozenset[tuple[str, int]],
     *,
-    dialect: ClassicOverlayDialect = _DEFAULT_DIALECT,
     session: ClassicOverlayRenderSession | None = None,
 ) -> ClassicOverlayRenderResult:
     """Render selected generator leaves while retaining their sequence canvases.
@@ -3557,7 +3513,7 @@ def render_classic_overlay_leaf_subset(
         for key in leaf_keys
     ):
         _fail("overlay leaf subset keys must be a frozenset of (operation_id, index)")
-    validated = _parse_document(document, dialect=dialect)
+    validated = _parse_document(document)
     available: set[tuple[str, int]] = set()
     selected_outputs: list[_Output] = []
     for output in validated.outputs:
@@ -3617,295 +3573,12 @@ def render_classic_overlay_leaf_subset(
             return _render_outputs(
                 selected,
                 clean_inputs,
-                dialect=dialect,
                 session=invocation,
                 verify_output_identity=False,
             )
     return _render_outputs(
         selected,
         clean_inputs,
-        dialect=dialect,
         session=session,
         verify_output_identity=False,
     )
-
-
-def _type_text_from_tokens(tokens: Sequence[str]) -> str:
-    rendered = ""
-    previous: str | None = None
-    for token in tokens:
-        if not rendered:
-            rendered = token
-        elif token in {"::", "<", ">", ">>", "*", "&"}:
-            rendered += token
-        elif token == ",":
-            rendered += ", "
-        elif previous in {"::", "<"}:
-            rendered += token
-        elif previous in {"*", "&"} and token == "const":
-            rendered += " const"
-        else:
-            rendered += " " + token
-        previous = token
-    return rendered
-
-
-def _matching_token(
-    tokens: Sequence[tuple[str, int, int]],
-    opening: int,
-    opening_token: str,
-    closing_token: str,
-) -> int | None:
-    depth = 0
-    for index in range(opening, len(tokens)):
-        token = tokens[index][0]
-        if token == opening_token:
-            depth += 1
-        elif token == closing_token:
-            depth -= 1
-            if depth == 0:
-                return index
-    return None
-
-
-def _parameter_arity(
-    tokens: Sequence[tuple[str, int, int]], opening: int, closing: int
-) -> int:
-    content = [token for token, _, _ in tokens[opening + 1 : closing]]
-    if not content or content == ["void"]:
-        return 0
-    depth = 0
-    commas = 0
-    for token in content:
-        if token in {"(", "[", "<"}:
-            depth += 1
-        elif token in {")", "]", ">"}:
-            depth = max(0, depth - 1)
-        elif token == ">>":
-            depth = max(0, depth - 2)
-        elif token == "," and depth == 0:
-            commas += 1
-    return commas + 1
-
-
-def _return_type_before_member(
-    tokens: Sequence[tuple[str, int, int]], member_index: int, lower_bound: int
-) -> str | None:
-    boundary = member_index - 1
-    while boundary >= lower_bound and tokens[boundary][0] not in {";", "{", "}", ":"}:
-        boundary -= 1
-    first = boundary + 1
-    candidates: list[tuple[int, str]] = []
-    for start in range(first, member_index):
-        candidate = _type_text_from_tokens(
-            [token for token, _, _ in tokens[start:member_index]]
-        )
-        try:
-            parsed = _cpp_type(candidate, "member-probe inferred return type")
-        except SourceEditError:
-            continue
-        candidates.append((member_index - start, _render_cpp_type(parsed)))
-    if not candidates:
-        return None
-    maximum = max(length for length, _ in candidates)
-    longest = {candidate for length, candidate in candidates if length == maximum}
-    if len(longest) != 1:
-        _fail("member-probe return-type token run is ambiguous")
-    return next(iter(longest))
-
-
-def _class_member_return_types(
-    data: bytes,
-    owner: str,
-    member: str,
-    argument_count: int,
-    *,
-    session: ClassicOverlayRenderSession | None = None,
-) -> set[str]:
-    if session is None:
-        tokens = _tokens(data)
-    else:
-        _key, compact_index = session._token_index(data, digest_bytes(data))
-        tokens = _tokens_from_index(compact_index)
-    discovered: set[str] = set()
-    for class_index, (token, _, _) in enumerate(tokens):
-        if token not in {"class", "struct"}:
-            continue
-        opening: int | None = None
-        owner_is_named = False
-        for index in range(class_index + 1, min(len(tokens), class_index + 65)):
-            header_token = tokens[index][0]
-            if header_token == ";":
-                break
-            if header_token == "{":
-                opening = index
-                break
-            if header_token == owner:
-                owner_is_named = True
-        if opening is None or not owner_is_named:
-            continue
-        closing = _matching_token(tokens, opening, "{", "}")
-        if closing is None:
-            _fail(f"class {owner!r} has an unterminated body")
-        depth = 1
-        index = opening + 1
-        while index < closing:
-            body_token = tokens[index][0]
-            if body_token == "{":
-                depth += 1
-                index += 1
-                continue
-            if body_token == "}":
-                depth -= 1
-                index += 1
-                continue
-            if (
-                depth == 1
-                and body_token == member
-                and index + 1 < closing
-                and tokens[index + 1][0] == "("
-            ):
-                parameter_end = _matching_token(tokens, index + 1, "(", ")")
-                if parameter_end is None or parameter_end > closing:
-                    _fail(f"member declaration {owner}::{member} has unterminated parameters")
-                if _parameter_arity(tokens, index + 1, parameter_end) == argument_count:
-                    return_type = _return_type_before_member(tokens, index, opening + 1)
-                    if return_type is not None:
-                        discovered.add(return_type)
-                index = parameter_end + 1
-                continue
-            index += 1
-    return discovered
-
-
-def _member_probe_requests(document: Mapping[str, object]) -> list[tuple[tuple[str, ...], int]]:
-    overlay = _object(document, "overlay")
-    raw_outputs = _array(overlay.get("outputs"), "overlay.outputs", minimum=1, maximum=2000)
-    requests: list[tuple[tuple[str, ...], int]] = []
-    validation_dialect = ClassicOverlayDialect(qualified_member_probe_return_type="int")
-
-    def collect(raw_generator: object, context: str) -> None:
-        generator = _object(raw_generator, context)
-        kind = generator.get("k")
-        if kind == "member_probe":
-            qualified = tuple(
-                _string_array(
-                    generator.get("qualified_member"),
-                    f"{context}.qualified_member",
-                    minimum=2,
-                    maximum=16,
-                )
-            )
-            arguments = _array(
-                generator.get("arguments"),
-                f"{context}.arguments",
-                minimum=1,
-                maximum=1,
-            )
-            requests.append((qualified, len(arguments)))
-        elif kind == "seq":
-            for item_index, raw_item in enumerate(
-                _array(generator.get("items"), f"{context}.items", minimum=1, maximum=100_000)
-            ):
-                child = dict(_object(raw_item, f"{context}.items[{item_index}]"))
-                child.pop("line", None)
-                if child.get("k") != "fwd_run":
-                    collect(child, f"{context}.items[{item_index}]")
-
-    for output_index, raw_output in enumerate(raw_outputs):
-        output = _object(raw_output, f"overlay.outputs[{output_index}]")
-        for operation_index, raw_operation in enumerate(
-            _array(
-                output.get("ops"),
-                f"overlay.outputs[{output_index}].ops",
-                minimum=1,
-                maximum=100_000,
-            )
-        ):
-            operation = _object(
-                raw_operation,
-                f"overlay.outputs[{output_index}].ops[{operation_index}]",
-            )
-            generator_context = (
-                f"overlay.outputs[{output_index}].ops[{operation_index}].gen"
-            )
-            generator = operation.get("gen")
-            _render_generator(
-                generator,
-                generator_context,
-                validation_dialect,
-                allow_unresolved_relocation=True,
-            )
-            collect(generator, generator_context)
-    return requests
-
-
-def infer_classic_overlay_dialect(
-    document: Mapping[str, object],
-    clean_sources: Mapping[str, bytes],
-    *,
-    locked_dialect: ClassicOverlayDialect | None = None,
-    session: ClassicOverlayRenderSession | None = None,
-) -> ClassicOverlayDialect:
-    """Infer and optionally lock the one implicit legacy member-probe type.
-
-    The schema-v2 ``member_probe`` record names a qualified member but omitted
-    its return type.  This helper derives that type only from class-scope
-    declarations in caller-supplied clean C/C++ sources.  Every matching
-    declaration must agree, every probe must resolve, and all probes in the
-    document must share the single dialect binding the legacy schema exposes.
-    """
-
-    folded: dict[str, str] = {}
-    normalized_sources: dict[str, bytes] = {}
-    for raw_path, raw_data in clean_sources.items():
-        path = _relative_path(raw_path, "clean_sources path")
-        prior = folded.get(path.casefold())
-        if prior is not None:
-            _fail(f"clean_sources has a casefold collision: {prior} / {path}")
-        if type(raw_data) is not bytes:
-            _fail(f"clean_sources[{path!r}] must be immutable bytes")
-        folded[path.casefold()] = path
-        normalized_sources[path] = raw_data
-
-    requests = _member_probe_requests(document)
-    inferred_types: set[str] = set()
-    for qualified_member, argument_count in requests:
-        owner = qualified_member[-2]
-        member = qualified_member[-1]
-        matches: set[str] = set()
-        for data in normalized_sources.values():
-            if owner.encode() not in data or member.encode() not in data:
-                continue
-            matches.update(
-                _class_member_return_types(
-                    data,
-                    owner,
-                    member,
-                    argument_count,
-                    session=session,
-                )
-            )
-        if not matches:
-            _fail(
-                "member-probe declaration is absent from clean sources: "
-                + "::".join(qualified_member)
-            )
-        if len(matches) != 1:
-            _fail(
-                f"member-probe return type is ambiguous for "
-                f"{'::'.join(qualified_member)}: {sorted(matches)}"
-            )
-        inferred_types.update(matches)
-    if len(inferred_types) > 1:
-        _fail(f"member-probe dialect requires conflicting return types: {sorted(inferred_types)}")
-    inferred = ClassicOverlayDialect(
-        qualified_member_probe_return_type=(next(iter(inferred_types)) if inferred_types else None)
-    )
-    _parse_document(document, dialect=inferred)
-    if locked_dialect is not None:
-        if not isinstance(locked_dialect, ClassicOverlayDialect):
-            _fail("locked_dialect must be a ClassicOverlayDialect")
-        if locked_dialect != inferred:
-            _fail("locked classic overlay dialect differs from clean-source inference")
-    return inferred

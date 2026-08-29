@@ -11,7 +11,7 @@ artifact. From a ReproBit checkout, install the package, then provision and
 check the known MSVC 4.2 files. These commands use PowerShell:
 
 ```console
-python scripts/provision_archaic_msvc42.py --destination C:\toolchains\msvc42
+rbit toolchain provision --destination C:\toolchains\msvc42 --no-save
 rbit doctor --backend windows_native_v1 `
   --toolchain-profile msvc_4_2 `
   --toolchain-root C:\toolchains\msvc42 `

@@ -738,7 +738,6 @@ def _fixture_bundle(
                 build_target=target,
                 source="shared.cpp",
                 source_digest=Digest.from_bytes(source),
-                mode=f"mode-{target}",
             ),
             (),
             (),
@@ -761,7 +760,8 @@ def _fixture_bundle(
         producer_graph=graph,
         build_plan=SimpleNamespace(
             translation_units=tuple(unit.plan for unit in units),
-            terminal_producers={},
+            analysis_link_options=(),
+            project_sdk_libraries=(),
         ),
         toolchain_lock=SimpleNamespace(model_dump=lambda **_kwargs: {"lock": "fake"}),
         intervention_documents=documents,
@@ -791,7 +791,7 @@ def _enable_analysis_links(bundle: SimpleNamespace) -> None:
             )
         }
     )
-    bundle.build_plan.terminal_producers = {"link": {"analysis_added_options": ["/DEBUG"]}}
+    bundle.build_plan.analysis_link_options = ("/DEBUG",)
     bundle.source_manifest = SimpleNamespace(entries=(SimpleNamespace(path="shared.cpp"),))
     bundle.spec.state_dir = ".reprobit-state"
     bundle.spec.toolchain.lock_file = "reprobit/toolchain.lock.json"
@@ -843,11 +843,6 @@ def _patch_planner(
         ),
     )
     monkeypatch.setattr(incremental_planning, "ClassicMSVCToolchain", _FakeInstallation)
-    monkeypatch.setattr(
-        incremental_planning.ToolchainLock,
-        "from_schema_v3",
-        lambda _value: object(),
-    )
     relatives = {role: f"bin/{role.value}.exe" for role in ProducerRole}
     monkeypatch.setattr(
         incremental_planning,
@@ -870,7 +865,6 @@ def _patch_planner(
             "module_definition": None,
         },
     )
-    monkeypatch.setattr(incremental_planning, "_overlay_dialect", lambda *_args: object())
     monkeypatch.setattr(
         incremental_planning,
         "_graph_system_library_map",
@@ -1634,7 +1628,8 @@ def test_multiple_target_scoped_rdata_repacks_for_one_object_fail_before_cache(
     )
     bundle.build_plan = SimpleNamespace(
         translation_units=(next(unit.plan for unit in units if unit.plan.build_target == "app"),),
-        terminal_producers={},
+        analysis_link_options=(),
+        project_sdk_libraries=(),
     )
     object_value = compiler.outputs[0].removeprefix("build/")
     app = _project_recipe(
@@ -1717,7 +1712,8 @@ def test_rdata_authority_rejects_before_warm_setup(
     bundle.proof_documents = (SimpleNamespace(expected_observations=(receipt,)),)
     bundle.build_plan = SimpleNamespace(
         translation_units=tuple(unit.plan for unit in units) if planned_lane else (),
-        terminal_producers={},
+        analysis_link_options=(),
+        project_sdk_libraries=(),
     )
     monkeypatch.setattr(
         incremental_planning,
@@ -1750,24 +1746,6 @@ def test_donor_source_mirror_header_edit_invalidates_only_its_transform_closure(
     compiler = next(
         node for node in bundle.producer_graph.nodes if node.role is ProducerRole.COMPILER
     )
-    compiler = compiler.model_copy(
-        update={
-            "arguments": (
-                "/Zi",
-                "-DREPROBIT_DONOR",
-                "-I${SOURCE}",
-                *compiler.arguments[1:],
-            )
-        }
-    )
-    bundle.producer_graph = bundle.producer_graph.model_copy(
-        update={
-            "nodes": tuple(
-                compiler if node.role is ProducerRole.COMPILER else node
-                for node in bundle.producer_graph.nodes
-            )
-        }
-    )
     intervention = _project_recipe(
         "donor_recipe",
         ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
@@ -1784,7 +1762,6 @@ def test_donor_source_mirror_header_edit_invalidates_only_its_transform_closure(
     )
     request = DonorCompileRequest(
         intervention_id=intervention.id,
-        legacy_recipe_id="d_000000000000",
         family=intervention.family,
         build_target="app",
         logical_source="shared.cpp",
@@ -1792,7 +1769,6 @@ def test_donor_source_mirror_header_edit_invalidates_only_its_transform_closure(
         files=MappingProxyType({"s.cpp": b"rendered donor source\n"}),
         logical_outputs=MappingProxyType({}),
         compiler_additions=DonorCompilerAdditions(
-            "REPROBIT_DONOR",
             include_directories=("inc", "inc/source"),
             include_projection=DonorIncludeProjection.SOURCE_ROOT_MIRROR,
         ),
@@ -1812,7 +1788,7 @@ def test_donor_source_mirror_header_edit_invalidates_only_its_transform_closure(
     runtime_calls: list[_FakePrepared] = []
 
     def patch(header_payload: bytes, unrelated_payload: bytes) -> None:
-        arena = r"R:\donors\composed-app-shared.cpp-d_000000000000"
+        arena = r"R:\donors\composed-app-shared.cpp-donor_recipe"
         mirror_header = arena + r"\inc\source\donor-only.h"
         executor = _FakeWarmExecutor(sources)
         trace = MsvcSbrTrace(
@@ -1900,7 +1876,8 @@ def test_intervention_free_compiler_stays_raw_and_reaches_its_linker(
     bundle, all_units, sources = _fixture_bundle(root, targets=("app", "tool"))
     bundle.build_plan = SimpleNamespace(
         translation_units=(all_units[0].plan,),
-        terminal_producers={},
+        analysis_link_options=(),
+        project_sdk_libraries=(),
     )
 
     class MixedExecutor(_FakeWarmExecutor):
@@ -2384,7 +2361,6 @@ def test_generated_epoch_waits_for_all_ordinary_transforms_and_resources(
                 build_target="app",
                 source=source,
                 source_digest=Digest.from_bytes(payloads[source]),
-                mode="fixture",
             ),
             (),
             (),
@@ -2413,7 +2389,8 @@ def test_generated_epoch_waits_for_all_ordinary_transforms_and_resources(
         producer_graph=graph,
         build_plan=SimpleNamespace(
             translation_units=tuple(unit.plan for unit in units),
-            terminal_producers={},
+            analysis_link_options=(),
+            project_sdk_libraries=(),
         ),
         toolchain_lock=SimpleNamespace(model_dump=lambda **_kwargs: {"lock": "fake"}),
         intervention_documents=documents,

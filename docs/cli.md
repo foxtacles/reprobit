@@ -1,15 +1,33 @@
 # Command-line workflow
 
 `rbit` keeps project intent, local machine configuration, building, and
-certification separate. Commands write plain text by default. Put the global
-`--format ndjson` option before the subcommand for stable machine-readable
-events; an interactive terminal additionally gets elapsed-time progress. Long
-operations emit typed phase-start, heartbeat, unit-completion, and terminal
-events, so redirected logs and CI never go silent while a compiler or verifier
-is still working. Producer progress and workflow progress remain separate event
-types.
-Producer totals include declaration-counterfactual compiler work only for the sparse source
-owners selected by strict `source_overlay_graph` leaves.
+verification separate. Commands write plain text by default, and long work uses
+one live progress line in an interactive terminal. Put the global
+`--format ndjson` option before the subcommand when CI or another program needs
+stable machine-readable events.
+
+For an existing project, the everyday path is short:
+
+```console
+rbit status .
+rbit build .
+rbit verify . --report-dir build/reprobit-report
+```
+
+`status` names the next missing setup item. `build` is the fast incremental
+developer loop; `verify` always starts fresh and writes the trust report. The
+longer commands below are for first-time project onboarding and unusual hosts.
+
+<details>
+<summary>Advanced: progress events</summary>
+
+Redirected logs and CI receive phase starts, heartbeats, completed units, and a
+final event, so a compiler or verifier never goes silently idle. Producer work
+and overall workflow progress use separate event types. Discovery compiler
+totals include declaration experiments only for the source files selected by
+the committed overlay graph.
+
+</details>
 
 ## Create and inspect a project
 
@@ -40,6 +58,21 @@ not rewrite translation-unit, intervention, or proof pins. If effective TU bytes
 or a clean overlay input changed, it refuses the transaction and requires the
 adapter's reviewed regeneration workflow.
 
+### Complete project build authority
+
+Machine setup and project setup are separate. `rbit setup` can finish installing
+and checking the compiler while `rbit status` still lists missing project files.
+ReproBit deliberately does not guess compile commands, reference metadata, or
+interventions for a fresh codebase.
+
+For a schema-v2 project, the one-way `rbit manifest migrate` command creates the
+reviewable build plan, intervention, proof, and reference-metadata shards. For a
+new project, use the typed files in the [grind example](../examples/grind/README.md)
+as a small reference and the [project-format guide](project-format.md) for each
+file's role. This pre-release does not yet provide a generic build-plan scaffold.
+`rbit status .` keeps every missing item visible; do not treat successful compiler
+setup as a build-ready project.
+
 After adding the build plan, intervention, proof, and oracle documents, extract
 the migration-time producer graph described below. `validate` then loads every
 shard, rejects duplicate keys and IDs, checks
@@ -50,10 +83,22 @@ so they remain useful while source bytes are being edited; `validate` is the
 command that checks those bytes against committed authority. `explain` lists
 interventions and their fixed costs; pass `--intervention ID` to select one.
 
-## Admit a local toolchain
+## Prepare the local compiler
 
 ```console
-rbit doctor . --toolchain-root /opt/toolchains/msvc42
+rbit setup .
+# Or use an existing installation:
+rbit setup . --toolchain-root /opt/toolchains/msvc42
+```
+
+`setup` selects or downloads the compiler, authenticates it, remembers the local
+path, creates the project lock when absent, verifies an existing lock, and probes
+the host backend. That is the normal workflow on macOS, Linux, and Windows.
+
+The lower-level lock command remains available for CI images and unusual manual
+installations that need explicit runtime files:
+
+```console
 rbit toolchain lock --project . --root /opt/toolchains/msvc42 \
   --runtime-file wine/x86/cl \
   --runtime-file wine/x86/rc \
@@ -79,10 +124,7 @@ root itself remains local configuration. `rbit validate` rejects a registered
 profile whose locked profile paths are missing, disagree with these reviewed
 repository inputs, or assign an extra profile source to a wrapper path.
 
-The lock format is pre-release in `0.1.0.dev0`; regenerate existing development
-locks with `rbit toolchain lock` instead of expecting compatibility conversion.
-
-`doctor` checks the selected host backend and, when a project and toolchain root
+`doctor` is the read-only diagnostic underneath setup. It checks the selected host backend and, when a project and toolchain root
 are supplied, verifies the installation against the committed lock. Add
 `--execute-probe` to execute the bounded Wine probe on POSIX. On native Windows
 the opt-in probe creates a fresh, verified logon session and defines a temporary
@@ -124,8 +166,7 @@ publishes `reprobit/producer-graph.json`. Schema v2 binds the canonical admitted
 source path topology, toolchain lock, logical-path profile, exact target set,
 and terminal artifact paths; the source manifest and build plan separately bind
 current source contents. Certification reloads those documents and never
-executes CMake. Run `rbit graph upgrade --project .` to convert a still-valid v1
-graph without CMake. Re-extract only when source topology or other command/build
+executes CMake. Re-extract only when source topology or other command/build
 authority changes.
 Repeat `--directive-input TARGET=LIBRARY` for reviewed linker-only library
 edges discovered in COFF `.drectve` sections. The value must be a known target
@@ -195,13 +236,33 @@ override may only narrow acceptance; it cannot silently broaden a clean project
 to accept quarantine. Similarly, target and toolchain overrides are checked
 against committed project identities.
 
-## Preview compiler interventions
+## Find and admit compiler interventions
 
-`rbit discover` runs a bounded, resumable MSVC 4.2 declaration campaign outside
-the certification boundary. It reports whole-function, private-donor, and
-same-symbol mosaic candidates without editing source or applying them. See the
-[discovery guide](discovery.md) for the request format, incremental behavior,
-progress events, and reviewable artifact outputs.
+The normal workflow needs three short commands:
+
+```console
+rbit discover init . \
+  --source src/widget.cpp \
+  --symbol '?Transform@Widget@@QAEHH@Z' \
+  --reference reference/widget.obj
+rbit discover grind .
+rbit discover grind . --accept-exact
+```
+
+`init` finds the source file's committed compiler lane and creates a four-state
+project plan. The first `grind` is a read-only preview. It keeps a human report
+at `.reprobit-state/reports/grind/report.html` for both exact and unsuccessful
+bounded searches. Exact results link to the separate cold-verification report.
+The command only reports a solution after a cold, byte-exact build with passing
+logic checks. `--accept-exact` grants
+advance permission for another fresh proof run to publish the resulting
+intervention/proof authority atomically. Follow it with `rbit verify .` and
+review the changed authority shards in `git diff`.
+
+The advanced `rbit discover run REQUEST` command is a broader resumable campaign.
+It reports whole-function, private-donor, and same-symbol mosaic proposals but
+does not admit them. See the [discovery guide](discovery.md) for both workflows,
+incremental behavior, progress events, and reports.
 
 ## Schema-v2 migration
 
@@ -235,7 +296,8 @@ rbit cmake-module --file
 export the reviewed migration graph; normal `build` and `verify` runs do not
 load it.
 
-Discovery campaigns and automatic repinning are intentionally not accepted by
-the certification commands unless an adapter can regenerate and prove the
-affected evidence. Candidate exploration belongs in ignored state; committed
-expectations are published only by a successful transactional adapter workflow.
+Raw `discover run` proposals and automatic repinning are not accepted by the
+certification commands. Candidate exploration stays in ignored state. The
+narrow project-aware `discover grind --accept-exact` path is the explicit
+transactional adapter: it regenerates proof expectations, cold-verifies them,
+and publishes only a passing exact result.

@@ -25,7 +25,6 @@ from reprobit.schema import (
     ProjectBundle,
     SourceManifestDocument,
     SourceManifestEntry,
-    project_sdk_archive_authorities,
     source_manifest_digest,
 )
 from reprobit.source_lock import SourceLockError, receipt_source_input
@@ -196,12 +195,10 @@ def current_worktree_authority(
     )
     if not producer_graph_accepts_source(
         graph,
-        manifest_digest=source_manifest_digest(ephemeral_manifest),
         paths=(item.path for item in ephemeral_manifest.entries),
     ):
         raise IncrementalAuthorityError(
-            "committed producer graph does not admit current-worktree byte edits; "
-            "upgrade the graph to source-topology schema v2"
+            "committed producer graph does not admit the current source-path topology"
         )
 
     changed_folded = {item.casefold() for item in changed}
@@ -211,7 +208,7 @@ def current_worktree_authority(
     fixed_archives.update(
         {
             item.path.casefold(): f"project SDK archive {item.path!r}"
-            for item in project_sdk_archive_authorities(plan)
+            for item in plan.project_sdk_libraries
         }
     )
     for path in sorted(changed_folded.intersection(fixed_archives)):

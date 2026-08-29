@@ -20,6 +20,7 @@ from reprobit.model import Digest
 from reprobit.msvc_compile import DirectMsvcCompiler, render_msvc_declaration_state
 from reprobit.msvc_discovery import MsvcDiscoveryRequest
 from reprobit.toolchains import MSVC_42, ClassicMSVCToolchain
+from reprobit.user_config import resolve_toolchain_root
 
 SAMPLE_ROOT = Path(__file__).resolve().parent
 
@@ -35,9 +36,9 @@ def _parser() -> argparse.ArgumentParser:
         "--toolchain-root",
         type=Path,
         default=os.environ.get("REPROBIT_MSVC_4_2_ROOT"),
-        required="REPROBIT_MSVC_4_2_ROOT" not in os.environ,
         help=(
-            "MSVC 4.2 installation (default: REPROBIT_MSVC_4_2_ROOT when set)"
+            "MSVC 4.2 installation override (default: REPROBIT_MSVC_4_2_ROOT or the "
+            "location remembered by rbit setup/toolchain provision)"
         ),
     )
     parser.add_argument(
@@ -174,7 +175,10 @@ def _build_reference(args: argparse.Namespace) -> Path:
             print("use --replace after intentionally changing the source or campaign")
             return output
 
-    toolchain_root = cast(Path, args.toolchain_root).expanduser().resolve(strict=True)
+    toolchain_root = resolve_toolchain_root(
+        MSVC_42,
+        cast(Path | None, args.toolchain_root),
+    )
     ClassicMSVCToolchain(MSVC_42, toolchain_root).doctor().require_ok()
     driver = (
         toolchain_root / "wine" / "x86" / "cl"

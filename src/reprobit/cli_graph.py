@@ -17,7 +17,6 @@ from reprobit.cli_paths import (
 from reprobit.migration import validate_migration_files
 from reprobit.model import Digest
 from reprobit.producer_graph import (
-    ProducerGraphDocument,
     graph_reference,
     producer_graph_digest,
     source_topology_digest,
@@ -29,7 +28,6 @@ from reprobit.schema import (
     ProducerGraphBuildAdapter,
     ProjectSpec,
     SourceManifestDocument,
-    source_manifest_digest,
 )
 from reprobit.strict_json import canonical_json, strict_load
 from reprobit.transactions import CASTransaction
@@ -311,86 +309,5 @@ def command_graph_extract(args: argparse.Namespace, output: CLIOutput) -> int:
         graph_digest=producer_graph_digest(graph).value,
         transaction_id=result.transaction_id,
         certification_runtime="direct-locked-producers",
-    )
-    return 0
-
-
-def command_graph_upgrade(args: argparse.Namespace, output: CLIOutput) -> int:
-    """Transactionally replace a current v1 content binding with v2 topology."""
-
-    root = project_root(args.project)
-    with output.activity("validating producer graph upgrade", phase="validate"):
-        bundle = load_project_tree(root, include_producer_graph=False)
-        from reprobit.producer_graph import read_producer_graph
-
-        graph_path = safe_project_path(root, bundle.spec.layout.producer_graph)
-        if graph_path.is_symlink() or not graph_path.is_file():
-            raise CLIError("producer graph upgrade requires a real committed graph")
-        graph = read_producer_graph(graph_path)
-    manifest = bundle.source_manifest
-    if manifest is None:
-        raise CLIError("producer graph upgrade requires a complete project tree")
-    current_toolchain_digest = toolchain_document_digest(bundle.toolchain_lock)
-    if graph.toolchain_lock_digest != current_toolchain_digest:
-        raise CLIError(
-            "producer graph upgrade cannot repin a changed toolchain; run "
-            "`rbit graph configure` and `rbit graph extract` with the reviewed lock"
-        )
-    if graph.schema_version == 2:
-        output.emit(
-            "producer_graph_upgraded",
-            "producer graph is already schema v2",
-            changed=False,
-            graph_digest=producer_graph_digest(graph).value,
-        )
-        return 0
-    manifest_digest = source_manifest_digest(manifest)
-    if graph.source_manifest_digest != manifest_digest:
-        raise CLIError("v1 producer graph does not bind the current source manifest")
-    values = graph.model_dump(mode="json", exclude_none=True)
-    values.pop("source_manifest_digest", None)
-    values.update(
-        {
-            "schema_version": 2,
-            "source_topology_digest": source_topology_digest(
-                item.path for item in manifest.entries
-            ).model_dump(mode="json"),
-        }
-    )
-    upgraded = ProducerGraphDocument.model_validate_json(canonical_json(values))
-    graph_data = canonical_json(upgraded)
-    graph_relative = Path(*PurePosixPath(bundle.spec.layout.producer_graph).parts)
-    manifest_relative = Path(*PurePosixPath(bundle.spec.layout.source_manifest).parts)
-    before = safe_project_path(root, bundle.spec.layout.producer_graph).read_bytes()
-    manifest_before = safe_project_path(root, bundle.spec.layout.source_manifest).read_bytes()
-    transaction = CASTransaction(root)
-    transaction.assert_unchanged(
-        manifest_relative,
-        expected_sha256=Digest.from_bytes(manifest_before).value,
-    )
-    transaction.write(
-        graph_relative,
-        graph_data,
-        expected_sha256=Digest.from_bytes(before).value,
-    )
-    result = transaction.commit()
-    try:
-        load_project_tree(root)
-    except Exception:
-        rollback = CASTransaction(root)
-        rollback.write(
-            graph_relative,
-            before,
-            expected_sha256=Digest.from_bytes(graph_data).value,
-        )
-        rollback.commit()
-        raise
-    output.emit(
-        "producer_graph_upgraded",
-        "upgraded producer graph to schema v2 source-topology binding",
-        changed=True,
-        graph_digest=producer_graph_digest(upgraded).value,
-        source_topology_digest=upgraded.source_topology_digest,
-        transaction_id=result.transaction_id,
     )
     return 0

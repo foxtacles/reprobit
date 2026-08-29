@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import os
 import stat
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack
 from dataclasses import dataclass
 from hashlib import sha256
@@ -128,6 +129,9 @@ class ClassicDonorProbeOutput:
     object_payload: bytes
     pdb_payload: bytes
     step: StepExecutionReceipt
+
+
+ClassicDonorProbeProgress = Callable[[int, int, str], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -748,7 +752,7 @@ class ClassicDeveloperExecution:
     ) -> tuple[ClassicCompilerProbeOutput, ...]:
         """Run a bounded non-certifying exact-node compiler probe.
 
-        This migration diagnostic invokes only the selected committed compiler
+        This developer diagnostic invokes only the selected committed compiler
         nodes at the normal logical source/build/toolchain seats.  It holds the
         same complete readable-namespace leases as a cold run, returns the raw
         OBJ/PDB bytes, and always closes the backend lifetime before returning.
@@ -906,6 +910,8 @@ class ClassicDeveloperExecution:
     def probe_donor_compilers(
         self,
         donor_ids: Sequence[str],
+        *,
+        progress: ClassicDonorProbeProgress | None = None,
     ) -> tuple[ClassicDonorProbeOutput, ...]:
         """Run exact prepared private-donor compilers as a consumed diagnostic.
 
@@ -913,9 +919,11 @@ class ClassicDeveloperExecution:
         committed project plan.  Each request is invoked through its owning
         compiler node's command and the normal locked execution lane.  Raw
         products and immutable rendered inputs are returned solely for
-        migration diagnosis; no evidence, proof, cache entry, or report is
-        issued.  The prepared run is consumed and its backend is closed on
-        success and failure.
+        developer diagnosis; no evidence, proof, cache entry, or report is
+        issued.  ``progress`` runs on the coordinating thread after each
+        successful donor and receives ``(completed, total, donor_id)``.  The
+        prepared run is consumed and its backend is closed on success and
+        failure.
         """
 
         if not self.producer.is_open:
@@ -954,7 +962,6 @@ class ClassicDeveloperExecution:
                 label="donor compiler probe source epoch",
             )
 
-            outputs: list[ClassicDonorProbeOutput] = []
             with ExitStack() as stack, ProcessSupervisor() as supervisor:
                 authority = stack.enter_context(self.producer.authority_namespace_lease())
                 source = stack.enter_context(self.producer.source_namespace_lease())
@@ -970,7 +977,8 @@ class ClassicDeveloperExecution:
                     bool(self.overlay.generated_translation_units),
                 )
                 cancellation = CancellationToken()
-                for ordinal, donor_id in enumerate(requested):
+
+                def probe_one(ordinal: int, donor_id: str) -> ClassicDonorProbeOutput:
                     unit, donor_index = prepared[donor_id]
                     donor = unit.donors[donor_index]
                     invocation = self.donors.invoke_donor_compiler(
@@ -997,25 +1005,72 @@ class ClassicDeveloperExecution:
                         raise ClassicProjectError(
                             f"classic donor {donor_id!r} lacks logical rendered inputs"
                         )
-                    outputs.append(
-                        ClassicDonorProbeOutput(
-                            donor_id,
-                            unit.plan.id,
-                            donor.request.build_target,
-                            donor.request.logical_source,
-                            invocation.record.node_id,
-                            rendered_inputs,
-                            Digest.from_bytes(invocation.object_payload),
-                            Digest.from_bytes(invocation.pdb_payload),
-                            invocation.object_payload,
-                            invocation.pdb_payload,
-                            _step_receipt(
-                                invocation.step_id,
-                                invocation.result,
-                                invocation.spec,
-                            ),
-                        )
+                    return ClassicDonorProbeOutput(
+                        donor_id,
+                        unit.plan.id,
+                        donor.request.build_target,
+                        donor.request.logical_source,
+                        invocation.record.node_id,
+                        rendered_inputs,
+                        Digest.from_bytes(invocation.object_payload),
+                        Digest.from_bytes(invocation.pdb_payload),
+                        invocation.object_payload,
+                        invocation.pdb_payload,
+                        _step_receipt(
+                            invocation.step_id,
+                            invocation.result,
+                            invocation.spec,
+                        ),
                     )
+
+                # Keep only one bounded window submitted at a time.  A failed
+                # candidate therefore cancels active siblings without starting
+                # another donor merely because a worker became free first.
+                worker_count = min(self.producer.jobs, len(requested))
+                outputs_by_ordinal: dict[int, ClassicDonorProbeOutput] = {}
+                running: dict[Future[ClassicDonorProbeOutput], tuple[int, str]] = {}
+                next_ordinal = 0
+                completed = 0
+
+                def replenish(pool: ThreadPoolExecutor) -> None:
+                    nonlocal next_ordinal
+                    while len(running) < worker_count and next_ordinal < len(requested):
+                        ordinal = next_ordinal
+                        donor_id = requested[ordinal]
+                        next_ordinal += 1
+                        running[pool.submit(probe_one, ordinal, donor_id)] = (
+                            ordinal,
+                            donor_id,
+                        )
+
+                with ThreadPoolExecutor(
+                    max_workers=worker_count,
+                    thread_name_prefix="reprobit-donor-probe",
+                ) as pool:
+                    replenish(pool)
+                    try:
+                        while running:
+                            finished, _ = wait(tuple(running), return_when=FIRST_COMPLETED)
+                            for future in sorted(finished, key=lambda item: running[item][0]):
+                                ordinal, donor_id = running.pop(future)
+                                outputs_by_ordinal[ordinal] = future.result()
+                                completed += 1
+                                if progress is not None:
+                                    progress(completed, len(requested), donor_id)
+                            replenish(pool)
+                    except BaseException as original:
+                        cancellation.cancel("classic donor probe sibling failed")
+                        try:
+                            supervisor.cancel_all()
+                        except BaseException as cleanup_error:
+                            original.add_note(
+                                "classic donor probe process cancellation also failed: "
+                                f"{cleanup_error}"
+                            )
+                        for future in running:
+                            future.cancel()
+                        raise
+                outputs = tuple(outputs_by_ordinal[index] for index in range(len(requested)))
             _require_unchanged_tree(
                 source_seal,
                 root=self.effective_root,
@@ -1028,7 +1083,7 @@ class ClassicDeveloperExecution:
                 original.add_note(f"classic donor probe cleanup also failed: {cleanup_error}")
             raise
         self.close_all()
-        return tuple(outputs)
+        return outputs
 
 
 __all__ = [
@@ -1036,6 +1091,7 @@ __all__ = [
     "ClassicDeveloperExecution",
     "ClassicDonorProbeInput",
     "ClassicDonorProbeOutput",
+    "ClassicDonorProbeProgress",
     "ClassicWarmCompilerReplay",
     "ClassicWarmCompilerTransformResult",
 ]

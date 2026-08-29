@@ -633,9 +633,8 @@ class ProducerNode(StrictModel):
 class ProducerGraphDocument(StrictModel):
     """Portable authority for every byte-producing child process."""
 
-    schema_version: Literal[1, 2]
-    source_manifest_digest: Digest | None = None
-    source_topology_digest: Digest | None = None
+    schema_version: Literal[2]
+    source_topology_digest: Digest
     toolchain_lock_digest: Digest
     path_profile_id: Identifier
     extractor: Literal["cmake-unix-makefiles-v1"]
@@ -643,15 +642,6 @@ class ProducerGraphDocument(StrictModel):
 
     @model_validator(mode="after")
     def validate_graph(self) -> ProducerGraphDocument:
-        if self.schema_version == 1:
-            if self.source_manifest_digest is None or self.source_topology_digest is not None:
-                raise ValueError(
-                    "producer graph v1 requires only a source-manifest digest"
-                )
-        elif self.source_topology_digest is None or self.source_manifest_digest is not None:
-            raise ValueError(
-                "producer graph v2 requires only a source-topology digest"
-            )
         ids = [node.id for node in self.nodes]
         if ids != sorted(ids, key=str.casefold) or len(ids) != len(set(ids)):
             raise ValueError("producer nodes must be unique and canonically ordered")
@@ -741,13 +731,10 @@ def source_topology_digest(paths: Iterable[str]) -> Digest:
 def producer_graph_accepts_source(
     graph: ProducerGraphDocument,
     *,
-    manifest_digest: Digest,
     paths: Iterable[str],
 ) -> bool:
-    """Return whether current source authority satisfies a v1 or v2 graph."""
+    """Return whether current source paths satisfy the committed graph."""
 
-    if graph.schema_version == 1:
-        return graph.source_manifest_digest == manifest_digest
     return graph.source_topology_digest == source_topology_digest(paths)
 
 

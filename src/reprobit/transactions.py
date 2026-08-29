@@ -185,6 +185,12 @@ class _Operation:
 
 
 @dataclass(frozen=True, slots=True)
+class _JsonDirectoryAssertion:
+    relative_path: Path
+    expected_members: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class TransactionResult:
     transaction_id: str
     changed_paths: tuple[Path, ...]
@@ -212,6 +218,8 @@ class CASTransaction:
         self.transaction_id = uuid.uuid4().hex
         self._operations: list[_Operation] = []
         self._paths: set[Path] = set()
+        self._json_directories: list[_JsonDirectoryAssertion] = []
+        self._directory_paths: set[Path] = set()
         self._committed = False
         self._closed = False
 
@@ -272,6 +280,56 @@ class CASTransaction:
 
         self._add("check", relative_path, None, expected_sha256)
 
+    def assert_json_members(
+        self,
+        relative_path: Path | str,
+        *,
+        expected_members: tuple[str, ...],
+    ) -> None:
+        """Require an authority directory's recursive JSON membership to stay exact."""
+
+        if self._committed or self._closed:
+            raise TransactionError("transaction is already closed")
+        relative = _relative_path(relative_path)
+        if relative in self._directory_paths:
+            raise TransactionError(f"transaction directory is repeated: {relative}")
+        checked: list[str] = []
+        for value in expected_members:
+            member = _relative_path(value)
+            rendered = member.as_posix()
+            if member.suffix.casefold() != ".json":
+                raise ValueError("directory assertion members must be JSON paths")
+            checked.append(rendered)
+        canonical = tuple(sorted(checked, key=lambda item: (item.casefold(), item)))
+        unique = len({item.casefold() for item in checked}) == len(checked)
+        if tuple(checked) != canonical or not unique:
+            raise ValueError("directory assertion members must be canonical and unique")
+        self._json_directories.append(_JsonDirectoryAssertion(relative, canonical))
+        self._directory_paths.add(relative)
+
+    def _json_members(self, relative_path: Path) -> tuple[str, ...]:
+        directory = self._target(relative_path)
+        if not directory.is_dir() or directory.is_symlink():
+            raise TransactionConflict(
+                f"transaction authority directory changed: {relative_path.as_posix()}"
+            )
+        entries = tuple(directory.rglob("*"))
+        if any(path.is_symlink() for path in entries):
+            raise TransactionConflict(
+                f"transaction authority directory is redirected: {relative_path.as_posix()}"
+            )
+        members = tuple(
+            sorted(
+                (
+                    path.relative_to(directory).as_posix()
+                    for path in entries
+                    if path.suffix.casefold() == ".json" and path.is_file()
+                ),
+                key=lambda item: (item.casefold(), item),
+            )
+        )
+        return members
+
     def _journal_record(self, transaction_directory: Path, state: str) -> dict[str, Any]:
         return {
             "schema": self.JOURNAL_SCHEMA,
@@ -303,6 +361,19 @@ class CASTransaction:
                 )
         if conflicts:
             raise TransactionConflict("transaction preimage conflict: " + "; ".join(conflicts))
+        membership_conflicts: list[str] = []
+        for assertion in self._json_directories:
+            actual_members = self._json_members(assertion.relative_path)
+            if actual_members != assertion.expected_members:
+                membership_conflicts.append(
+                    f"{assertion.relative_path}: expected {assertion.expected_members}, "
+                    f"found {actual_members}"
+                )
+        if membership_conflicts:
+            raise TransactionConflict(
+                "transaction authority membership conflict: "
+                + "; ".join(membership_conflicts)
+            )
 
     @classmethod
     def _rollback_record(cls, root: Path, directory: Path, record: dict[str, Any]) -> None:
@@ -382,7 +453,7 @@ class CASTransaction:
     def commit(self) -> TransactionResult:
         if self._committed or self._closed:
             raise TransactionError("transaction is already closed")
-        if not self._operations:
+        if not self._operations and not self._json_directories:
             self._committed = True
             self._closed = True
             return TransactionResult(self.transaction_id, ())
@@ -391,6 +462,11 @@ class CASTransaction:
         with _ProjectLock(self.state_root / "project.lock") as lock:
             lock.acquire(nonblocking=self.nonblocking)
             self._recover_locked(self.root, self.state_root)
+            if not self._operations:
+                self._verify_preimages()
+                self._committed = True
+                self._closed = True
+                return TransactionResult(self.transaction_id, ())
             transaction_directory.mkdir(exist_ok=False)
             payloads = transaction_directory / "payloads"
             backups = transaction_directory / "backups"
@@ -451,6 +527,8 @@ class CASTransaction:
         self._closed = True
         self._operations.clear()
         self._paths.clear()
+        self._json_directories.clear()
+        self._directory_paths.clear()
 
     def __enter__(self) -> Self:
         return self

@@ -30,6 +30,8 @@ def test_fresh_init_reports_all_remaining_authority_at_once(
     assert readiness.items[0].ready
     assert "Compiler lock" in rendered
     assert "Build plan" in rendered
+    assert "machine setup can be complete" in rendered
+    assert "docs/cli.md#complete-project-build-authority" in rendered
     assert "Build graph" in rendered
     assert "Reference metadata" in rendered
     assert "Protected references" in rendered

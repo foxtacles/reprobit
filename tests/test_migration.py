@@ -133,6 +133,8 @@ def _tu_path(result: MigrationOutput, section: str) -> PurePosixPath:
 
 def test_convert_v2_manifest_splits_intent_and_expected_pins() -> None:
     manifest = _manifest()
+    manifest["translation_units"][0]["command_policy"] = {"ignored": True}
+    manifest["images"]["SAMPLE"]["completion"] = {"legacy": True}
     manifest["toolchain"].update(
         {
             "python_sha256": "9" * 64,
@@ -144,7 +146,18 @@ def test_convert_v2_manifest_splits_intent_and_expected_pins() -> None:
     assert PurePosixPath("reprobit.toml") in result.files
     assert result.intervention_count == 2
     build_plan = json.loads(result.files[PurePosixPath("reprobit/build-plan.json")])
-    assert build_plan["toolchain_policy"] == {"max_child_seconds": 240}
+    assert "toolchain_policy" not in build_plan
+    assert build_plan["analysis_link_options"] == []
+    assert build_plan["project_sdk_libraries"] == []
+    assert {
+        "migration_source_digest",
+        "phase",
+        "execution_backends",
+        "target_policies",
+        "terminal_producers",
+    }.isdisjoint(build_plan)
+    assert {"mode", "command_policy"}.isdisjoint(build_plan["translation_units"][0])
+    assert set(build_plan["target_gates"][0]) == {"target_id", "build_target"}
     shard = json.loads(result.files[_tu_path(result, "interventions")])
     function = next(item for item in shard["interventions"] if item["role"] == "function")
     assert all(item["name"] != "expected_body_length" for item in function["parameters"])
@@ -178,6 +191,61 @@ def test_convert_v2_manifest_splits_intent_and_expected_pins() -> None:
         "bin/msvcrt20.dll",
     }
     assert "source_revision" not in toolchain_lock
+
+
+@pytest.mark.parametrize(
+    ("legacy_mode", "operation"),
+    (
+        ("compose_equal_body_comdat", "restore_comdat_group_order"),
+        ("restore_comdat_group_order", "restore_comdat_group_order"),
+        ("swap_comdat_group_order", "swap_comdat_group_order"),
+    ),
+)
+def test_migration_replaces_tu_mode_with_explicit_group_order_operation(
+    legacy_mode: str,
+    operation: str,
+) -> None:
+    manifest = _manifest()
+    unit = manifest["translation_units"][0]
+    unit["mode"] = legacy_mode
+    unit["group_order"] = ["?first@@YAXXZ", "?second@@YAXXZ"]
+
+    result = convert_v2_manifest(manifest, "2" * 64)
+
+    build_plan = json.loads(result.files[PurePosixPath("reprobit/build-plan.json")])
+    migrated = build_plan["translation_units"][0]
+    assert "mode" not in migrated
+    assert migrated["group_order"] == {
+        "operation": operation,
+        "orders": [["?first@@YAXXZ", "?second@@YAXXZ"]],
+    }
+
+
+def test_migration_rejects_group_order_without_a_known_operation() -> None:
+    manifest = _manifest()
+    unit = manifest["translation_units"][0]
+    unit["mode"] = "unrelated"
+    unit["group_order"] = ["?first@@YAXXZ", "?second@@YAXXZ"]
+
+    with pytest.raises(MigrationError, match="no supported group-order operation"):
+        convert_v2_manifest(manifest, "2" * 64)
+
+
+def test_migration_drops_legacy_donor_selector_and_promotes_overlay_projection() -> None:
+    manifest = _manifest()
+    recipe = manifest["translation_units"][0]["donors"][0]["recipe"]
+    recipe["compile_lane"] = {
+        "required_define": "SAMPLE_BUILD",
+        "include_projection": "source_root_mirror_only_v1",
+    }
+
+    result = convert_v2_manifest(manifest, "2" * 64)
+
+    shard = json.loads(result.files[_tu_path(result, "interventions")])
+    donor = next(item for item in shard["interventions"] if item["role"] == "donor")
+    parameters = {item["name"]: item["value"] for item in donor["parameters"]}
+    assert "compile_lane" not in parameters
+    assert parameters["include_projection"] == "source_root_mirror_only_v1"
 
 
 def test_convert_v2_manifest_accepts_a_leading_digit_cmake_target() -> None:
@@ -432,7 +500,32 @@ def test_duplicate_donor_ids_are_canonicalized() -> None:
     donors = [item for item in shard["interventions"] if item["role"] == "donor"]
     assert len(donors) == 1
     fields = {item["name"]: item["value"] for item in donors[0]["parameters"]}
-    assert fields["legacy_recipe_id"] == "donor_a"
+    assert "legacy_recipe_id" not in fields
+
+
+def test_migration_rewrites_named_donor_selectors_to_intervention_ids() -> None:
+    manifest = _manifest()
+    function = manifest["translation_units"][0]["functions"][0]
+    function.update(
+        {
+            "target_donor": "donor_a",
+            "complete_donor": "donor_a",
+            "instruction_donor": "donor_a",
+            "donor_variants": [{"donor": "donor_a", "offsets": [0]}],
+        }
+    )
+
+    result = convert_v2_manifest(manifest, "2" * 64)
+    shard = json.loads(result.files[_tu_path(result, "interventions")])
+    donor = next(item for item in shard["interventions"] if item["role"] == "donor")
+    migrated = next(item for item in shard["interventions"] if item["role"] == "function")
+    fields = {item["name"]: item["value"] for item in migrated["parameters"]}
+
+    assert migrated["dependencies"] == [donor["id"]]
+    assert fields["target_donor"] == donor["id"]
+    assert fields["complete_donor"] == donor["id"]
+    assert fields["instruction_donor"] == donor["id"]
+    assert fields["donor_variants"] == [{"donor": donor["id"], "offsets": [0]}]
 
 
 def test_unknown_recipe_family_fails_closed() -> None:
@@ -471,10 +564,27 @@ def test_real_v2_manifest_round_trips_through_strict_v3(tmp_path: Path) -> None:
 
     result = migration_output(source, semantic_claims_path=claims_path)
     build_plan = json.loads(result.files[PurePosixPath("reprobit/build-plan.json")])
-    dialect = build_plan["toolchain_policy"]["classic_overlay_dialect"]
-    assert set(dialect) == {"qualified_member_probe_return_type"}
-    assert isinstance(dialect["qualified_member_probe_return_type"], str)
-    assert dialect["qualified_member_probe_return_type"]
+    assert "toolchain_policy" not in build_plan
+    member_probe_return_types: list[str] = []
+
+    def collect_member_probe_return_types(value: object) -> None:
+        if isinstance(value, dict):
+            if value.get("k") == "member_probe":
+                assert set(value) >= {"return_type"}
+                return_type = value["return_type"]
+                assert isinstance(return_type, str) and return_type
+                member_probe_return_types.append(return_type)
+            for child in value.values():
+                collect_member_probe_return_types(child)
+        elif isinstance(value, list):
+            for child in value:
+                collect_member_probe_return_types(child)
+
+    for relative, data in result.files.items():
+        if str(relative).startswith("reprobit/interventions/"):
+            collect_member_probe_return_types(json.loads(data))
+    assert member_probe_return_types
+    assert len(set(member_probe_return_types)) == 1
     for relative, data in result.files.items():
         destination = tmp_path / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -546,20 +656,3 @@ def test_real_v2_manifest_round_trips_through_strict_v3(tmp_path: Path) -> None:
     assert set(fields) == {"import_order"}
     assert fields["import_order"]["schema"] == "pe32_import_order_v1"
     assert fields["import_order"]["imports"]
-
-
-def test_real_v2_manifest_rejects_a_conflicting_overlay_dialect_lock() -> None:
-    source = _large_v2_manifest()
-    if source is None:
-        pytest.skip("large schema-v2 integration fixture is not present")
-    manifest, source_sha256 = load_legacy_manifest(source)
-    manifest["toolchain"]["classic_overlay_dialect"] = {
-        "qualified_member_probe_return_type": "long"
-    }
-
-    with pytest.raises(MigrationError, match="locked classic overlay dialect differs"):
-        convert_v2_manifest(
-            manifest,
-            source_sha256,
-            source_root=source.parent.parent,
-        )

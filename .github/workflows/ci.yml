@@ -123,8 +123,9 @@ jobs:
       - run: python -m pip install -e ".[test]"
       - name: Provision and authenticate the external compiler
         run: >-
-          python scripts/provision_archaic_msvc42.py
+          rbit toolchain provision
           --destination "$env:REPROBIT_MSVC_4_2_ROOT"
+          --no-save
       - name: Probe native isolation and toolchain
         run: >-
           rbit doctor
@@ -143,6 +144,11 @@ jobs:
           tests/test_backends.py
           tests/test_toolchains.py
           tests/test_msvc_discovery_integration.py
+      - name: Run the public grind sample end to end
+        run: >-
+          python -m pytest -q
+          --junitxml="$env:RUNNER_TEMP\grind-tests.xml"
+          tests/test_msvc_grind_integration.py
       - name: Upload native diagnostics only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -151,6 +157,7 @@ jobs:
           path: |
             ${{ runner.temp }}/native-runner.txt
             ${{ runner.temp }}/native-tests.xml
+            ${{ runner.temp }}/grind-tests.xml
             ${{ runner.temp }}/native-logs/*.log
           if-no-files-found: warn
           retention-days: 7

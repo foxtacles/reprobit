@@ -1350,11 +1350,12 @@ class _ClassicEvidenceAssembler:
             raise ClassicProjectError(
                 f"group-order unit {unit.plan.id!r} lacks its object transform receipt"
             )
-        expected_operation = (
-            "swap_comdat_group_order"
-            if unit.plan.mode == "swap_comdat_group_order"
-            else "restore_comdat_group_order"
-        )
+        group_order = unit.plan.group_order
+        if group_order is None:
+            raise ClassicProjectError(
+                f"group-order unit {unit.plan.id!r} lacks its transform authority"
+            )
+        expected_operation = group_order.operation
         if (
             receipt.object_reference.casefold() != object_reference.casefold()
             or receipt.step_id != f"compose.{unit.plan.id}"

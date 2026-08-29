@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import ntpath
 import os
 import re
@@ -15,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from pydantic import ValidationError
 
@@ -26,11 +25,13 @@ from reprobit.schema import (
     BuildPlanDocument,
     ClassicArchiveAuthority,
     ClassicField,
+    ClassicGroupOrderPlan,
     ClassicProofReceipt,
     ClassicProofRedaction,
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ClassicRecipeRole,
+    ClassicSdkArchiveAuthority,
     ClassicTargetGate,
     ClassicTranslationUnitPlan,
     Intervention,
@@ -486,6 +487,73 @@ def _recipe_fields(
     return tuple(fields)
 
 
+def _migrate_donor_compile_lane(
+    values: dict[str, Any],
+    family: ClassicRecipeFamily,
+    *,
+    context: str,
+) -> None:
+    """Discard the v2 lane marker and retain only real overlay authority.
+
+    The runtime has one current donor schema and never interprets the old
+    selector.  This one-way converter checks the historical shape so malformed
+    input cannot be silently normalized, then promotes the independently
+    meaningful include projection used by source-overlay donors.
+    """
+
+    raw = values.pop("compile_lane", None)
+    if raw is None:
+        return
+    if not isinstance(raw, dict) or set(raw) - {"required_define", "include_projection"}:
+        raise MigrationError(f"{context} compile_lane has an unsupported legacy shape")
+    required_define = raw.get("required_define")
+    if not isinstance(required_define, str) or not required_define:
+        raise MigrationError(f"{context} compile_lane lacks its historical required_define")
+    projection = raw.get("include_projection")
+    if projection is None:
+        return
+    if family is not ClassicRecipeFamily.DONOR_SOURCE_OVERLAY:
+        raise MigrationError(f"{context} attaches include_projection to a non-overlay donor")
+    existing = values.get("include_projection")
+    if existing is not None and existing != projection:
+        raise MigrationError(f"{context} has conflicting include_projection authority")
+    values["include_projection"] = projection
+
+
+def _migrate_donor_references(
+    values: dict[str, Any],
+    donor_ids: Mapping[str, str],
+    *,
+    context: str,
+) -> None:
+    """Replace every v2 donor selector with its current intervention ID."""
+
+    for name in ("target_donor", "complete_donor", "instruction_donor"):
+        legacy_id = values.get(name)
+        if legacy_id is None:
+            continue
+        if not isinstance(legacy_id, str) or legacy_id not in donor_ids:
+            raise MigrationError(f"{context} names unknown {name} {legacy_id!r}")
+        values[name] = donor_ids[legacy_id]
+
+    variants = values.get("donor_variants")
+    if variants is None:
+        return
+    if not isinstance(variants, list):
+        raise MigrationError(f"{context} donor_variants is not an array")
+    migrated: list[dict[str, Any]] = []
+    for index, raw in enumerate(variants):
+        if not isinstance(raw, dict):
+            raise MigrationError(f"{context} donor_variants[{index}] is not an object")
+        legacy_id = raw.get("donor")
+        if not isinstance(legacy_id, str) or legacy_id not in donor_ids:
+            raise MigrationError(
+                f"{context} donor_variants[{index}] names unknown donor {legacy_id!r}"
+            )
+        migrated.append({**raw, "donor": donor_ids[legacy_id]})
+    values["donor_variants"] = migrated
+
+
 def _family(value: Any, context: str) -> ClassicRecipeFamily:
     if not isinstance(value, str):
         raise MigrationError(f"{context} recipe family is missing")
@@ -799,36 +867,78 @@ def _toolchain_lock(manifest: Mapping[str, Any]) -> ToolchainLock:
     )
 
 
-def _toolchain_policy(manifest: Mapping[str, Any]) -> JsonValue:
-    """Keep only runtime policy that is not already sealed elsewhere.
+def _migrated_link_authority(
+    manifest: Mapping[str, Any],
+) -> tuple[tuple[Literal["/DEBUG"], ...], tuple[ClassicSdkArchiveAuthority, ...]]:
+    """Project only current analysis and SDK authority from the legacy link record."""
 
-    Schema v2 mixed host diagnostics, Python identity, compiler receipts,
-    logical paths, and execution policy into one large ``toolchain`` object.
-    Schema v3 owns those facts in the portable toolchain lock, project path
-    profile, and selected execution backend. Carrying the old object forward
-    would make a Python upgrade look output-relevant and would leave two
-    competing authorities for compiler identity.
+    terminal = manifest.get("terminal_producers")
+    if terminal is None:
+        return (), ()
+    if not isinstance(terminal, Mapping):
+        raise MigrationError("legacy terminal producers must be an object")
+    raw_link = terminal.get("link")
+    if raw_link is None:
+        return (), ()
+    if not isinstance(raw_link, Mapping):
+        raise MigrationError("legacy terminal link policy must be an object")
 
-    The child-process deadline is the sole generic policy value that survives
-    this boundary. Overlay dialect bindings, when required by a legacy
-    generator, are added by the converter after they have been inferred from
-    pinned source rather than copied from host configuration.
-    """
+    raw_options = raw_link.get("analysis_added_options", [])
+    if not isinstance(raw_options, list) or any(item != "/DEBUG" for item in raw_options):
+        raise MigrationError("legacy analysis link options must contain only /DEBUG")
+    options = tuple(cast(Literal["/DEBUG"], item) for item in raw_options)
+    raw_libraries = raw_link.get("project_sdk_libraries", [])
+    if not isinstance(raw_libraries, list):
+        raise MigrationError("legacy project SDK libraries must be an array")
+    libraries: list[ClassicSdkArchiveAuthority] = []
+    for index, item in enumerate(raw_libraries):
+        if not isinstance(item, Mapping):
+            raise MigrationError(f"legacy project SDK library {index} must be an object")
+        path = item.get("path")
+        sha256 = item.get("sha256")
+        if not isinstance(path, str) or not isinstance(sha256, str):
+            raise MigrationError(
+                f"legacy project SDK library {index} lacks a path or SHA-256"
+            )
+        libraries.append(
+            ClassicSdkArchiveAuthority(
+                path=path,
+                sha256=sha256,
+            )
+        )
+    return options, tuple(libraries)
 
-    legacy = manifest.get("toolchain")
-    if not isinstance(legacy, Mapping):
-        raise MigrationError("legacy toolchain must be an object")
-    timeout = legacy.get("max_child_seconds")
-    if timeout is None:
-        return {}
-    if (
-        isinstance(timeout, bool)
-        or not isinstance(timeout, (int, float))
-        or not math.isfinite(timeout)
-        or timeout <= 0
-    ):
-        raise MigrationError("legacy child-process timeout must be positive")
-    return {"max_child_seconds": timeout}
+
+def _migrated_group_order(
+    unit: Mapping[str, Any],
+    *,
+    source: str,
+) -> ClassicGroupOrderPlan | None:
+    """Translate a legacy TU mode only when it selects a real group-order operation."""
+
+    raw_order = unit.get("group_order")
+    if raw_order is None:
+        return None
+    if not isinstance(raw_order, list) or not raw_order:
+        raise MigrationError(f"translation unit {source!r} has malformed group order")
+    raw_orders = raw_order if isinstance(raw_order[0], list) else [raw_order]
+    mode = unit.get("mode")
+    operation: Literal["restore_comdat_group_order", "swap_comdat_group_order"]
+    if mode == "swap_comdat_group_order":
+        operation = "swap_comdat_group_order"
+    elif mode in {"restore_comdat_group_order", "compose_equal_body_comdat"}:
+        operation = "restore_comdat_group_order"
+    else:
+        raise MigrationError(
+            f"translation unit {source!r} has no supported group-order operation"
+        )
+    return ClassicGroupOrderPlan(
+        operation=operation,
+        orders=tuple(
+            tuple(order) if isinstance(order, list) else (order,)
+            for order in raw_orders
+        ),
+    )
 
 
 _CLASSIC_SOURCE_SUFFIXES = frozenset(
@@ -874,67 +984,36 @@ def _contains_generator_kind(value: object, kind: str) -> bool:
     return False
 
 
-def _inferred_overlay_toolchain_policy(
-    manifest: Mapping[str, Any],
+def _normalized_legacy_overlay(
     overlay: Mapping[str, object],
     source_manifest: SourceManifestDocument,
     *,
     source_root: Path | None,
-) -> JsonValue:
-    policy_value = _toolchain_policy(manifest)
-    if not isinstance(policy_value, dict):
-        raise MigrationError("migrated toolchain policy must be an object")
-    policy: dict[str, object] = dict(policy_value)
-    if not _contains_generator_kind(overlay, "member_probe"):
-        return _json_value(policy, "migrated toolchain policy")
-    if source_root is None or not source_manifest.complete:
+) -> dict[str, object]:
+    has_member_probe = _contains_generator_kind(overlay, "member_probe")
+    if not has_member_probe:
+        return dict(overlay)
+    if has_member_probe and (source_root is None or not source_manifest.complete):
         raise MigrationError(
             "member-probe overlay migration requires a complete physical source manifest"
         )
 
-    clean_sources = {
-        entry.path: _manifest_entry_bytes(source_root, entry)
-        for entry in source_manifest.entries
-        if PurePosixPath(entry.path).suffix.casefold() in _CLASSIC_SOURCE_SUFFIXES
-    }
-    from reprobit.classic_overlay import (
-        ClassicOverlayDialect,
-        infer_classic_overlay_dialect,
+    clean_sources = (
+        {
+            entry.path: _manifest_entry_bytes(source_root, entry)
+            for entry in source_manifest.entries
+            if PurePosixPath(entry.path).suffix.casefold() in _CLASSIC_SOURCE_SUFFIXES
+        }
+        if has_member_probe and source_root is not None
+        else {}
     )
-    from reprobit.source import SourceEditError
+    from reprobit.classic_overlay import SourceEditError
+    from reprobit.migration_overlay import normalize_legacy_member_probe_return_types
 
-    legacy_toolchain = manifest.get("toolchain")
-    raw_lock = (
-        legacy_toolchain.get("classic_overlay_dialect")
-        if isinstance(legacy_toolchain, Mapping)
-        else None
-    )
-    locked: ClassicOverlayDialect | None = None
-    if raw_lock is not None:
-        if (
-            not isinstance(raw_lock, Mapping)
-            or set(raw_lock) != {"qualified_member_probe_return_type"}
-            or not isinstance(raw_lock.get("qualified_member_probe_return_type"), str)
-        ):
-            raise MigrationError("legacy classic overlay dialect lock is malformed")
-        locked = ClassicOverlayDialect(
-            qualified_member_probe_return_type=cast(
-                str, raw_lock["qualified_member_probe_return_type"]
-            )
-        )
     try:
-        inferred = infer_classic_overlay_dialect(
-            overlay,
-            clean_sources,
-            locked_dialect=locked,
-        )
+        return normalize_legacy_member_probe_return_types(overlay, clean_sources)
     except SourceEditError as exc:
-        raise MigrationError(f"cannot infer classic overlay dialect: {exc}") from exc
-    return_type = inferred.qualified_member_probe_return_type
-    if return_type is None:
-        raise MigrationError("member-probe overlay produced no inferred return type")
-    policy["classic_overlay_dialect"] = {"qualified_member_probe_return_type": return_type}
-    return _json_value(policy, "inferred classic overlay toolchain policy")
+        raise MigrationError(f"cannot normalize legacy member probe: {exc}") from exc
 
 
 def _migration_generator_leaves(value: object, *, context: str) -> tuple[dict[str, object], ...]:
@@ -1358,7 +1437,6 @@ def _convert_v2_manifest(
 ) -> MigrationOutput:
     if manifest.get("schema") != 2:
         raise MigrationError("conversion input must be a schema-v2 object")
-    migration_source_digest = _digest(source_sha256, "migration source digest")
     source_manifest = _source_manifest(manifest, source_root=source_root)
     source_manifest_pin = source_manifest_digest(source_manifest)
     units = manifest.get("translation_units")
@@ -1387,9 +1465,6 @@ def _convert_v2_manifest(
         target_id = _final_target(build_target, source, target_by_build)
         tu_id = _stable_id("tu", {"target": build_target, "source": source})
         source_digest = _digest(unit.get("source_sha256"), f"{source} source digest")
-        mode = unit.get("mode")
-        if not isinstance(mode, str) or not mode:
-            raise MigrationError(f"translation unit {source!r} lacks mode")
         plan_units.append(
             ClassicTranslationUnitPlan(
                 id=tu_id,
@@ -1397,9 +1472,7 @@ def _convert_v2_manifest(
                 build_target=build_target,
                 source=source,
                 source_digest=source_digest,
-                mode=mode,
-                command_policy=_json_value(unit.get("command_policy", {})),
-                group_order=_json_value(unit.get("group_order")),
+                group_order=_migrated_group_order(unit, source=source),
             )
         )
         raw_donors = unit.get("donors", [])
@@ -1493,6 +1566,11 @@ def _convert_v2_manifest(
                     for key, value in function.items()
                     if key not in {"mangled", "splice_class", "donor"}
                 }
+                _migrate_donor_references(
+                    values,
+                    donor_ids,
+                    context=f"function {symbol!r}",
+                )
                 rationale = values.pop("rationale", "Migrated compiler-entropy intervention.")
                 if not isinstance(rationale, str) or not rationale:
                     rationale = "Migrated compiler-entropy intervention."
@@ -1528,7 +1606,11 @@ def _convert_v2_manifest(
                 raise MigrationError("oracle installation cannot be disguised as a donor recipe")
             pins = _ProofPins({}, {})
             values = {key: value for key, value in recipe.items() if key != "kind"}
-            values["legacy_recipe_id"] = legacy_id
+            _migrate_donor_compile_lane(
+                values,
+                family,
+                context=f"donor {legacy_id!r}",
+            )
             rationale = values.pop("authenticity_rationale", "Migrated compiler donor.")
             if not isinstance(rationale, str) or not rationale:
                 rationale = "Migrated compiler donor."
@@ -1632,16 +1714,15 @@ def _convert_v2_manifest(
             "source_overlay.semantic_claims and pass the one-off reviewed file with "
             "--semantic-claims"
         )
-    outputs = overlay.get("outputs")
-    graph = overlay.get("graph")
-    if not isinstance(outputs, list) or not isinstance(graph, dict):
-        raise MigrationError("legacy source_overlay has invalid shape")
-    overlay_toolchain_policy = _inferred_overlay_toolchain_policy(
-        manifest,
+    overlay = _normalized_legacy_overlay(
         cast(Mapping[str, object], overlay),
         source_manifest,
         source_root=source_root,
     )
+    outputs = overlay.get("outputs")
+    graph = overlay.get("graph")
+    if not isinstance(outputs, list) or not isinstance(graph, dict):
+        raise MigrationError("legacy source_overlay has invalid shape")
     claim_requirements = _overlay_claim_requirements(cast(list[object], outputs))
     overlay_groups: defaultdict[str, list[Any]] = defaultdict(list)
     overlay_operation_targets: dict[str, str] = {}
@@ -1795,9 +1876,6 @@ def _convert_v2_manifest(
             ClassicTargetGate(
                 target_id=target_id,
                 build_target=target["build_target"],
-                required_row_count=row_count,
-                row_identity_digest=row_digest,
-                completion=_json_value(image.get("completion", {})),
             )
         )
 
@@ -1807,19 +1885,16 @@ def _convert_v2_manifest(
     archive_authorities = tuple(
         ClassicArchiveAuthority.model_validate_json(canonical_json(item)) for item in raw_archives
     )
+    analysis_link_options, project_sdk_libraries = _migrated_link_authority(manifest)
     build_plan = BuildPlanDocument(
         schema_version=3,
         source_manifest_digest=source_manifest_pin,
-        migration_source_digest=migration_source_digest,
-        phase=_json_value(manifest.get("phase")),
         translation_units=tuple(sorted(plan_units, key=lambda item: item.id)),
         source_overlay_digest=Digest.from_bytes(_canonical(overlay)),
         source_overlay_interventions=tuple(sorted(overlay_intervention_ids)),
         archives=archive_authorities,
-        terminal_producers=_json_value(manifest.get("terminal_producers", {})),
-        execution_backends=_json_value(manifest.get("execution_backends", {})),
-        toolchain_policy=overlay_toolchain_policy,
-        target_policies=_json_value(manifest.get("target_policies", [])),
+        analysis_link_options=analysis_link_options,
+        project_sdk_libraries=project_sdk_libraries,
         target_gates=tuple(sorted(target_gates, key=lambda item: item.target_id)),
     )
     files[PurePosixPath("reprobit/build-plan.json")] = _model_bytes(build_plan)

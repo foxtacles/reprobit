@@ -36,42 +36,42 @@ python -m venv .venv
 Those last two paths are `.venv\Scripts\python.exe` and `.venv\Scripts\rbit.exe` in Windows
 PowerShell. Activate the environment instead if that is your usual workflow.
 
-ReproBit runs with Wine on macOS and Linux and natively on Windows. For a certified build, you
-also provide a supported compiler toolchain locally; ReproBit does not redistribute proprietary
-compilers or reference binaries. Start with [platform setup](docs/platforms.md) or the
-[native Windows guide](docs/windows.md).
+ReproBit runs with Wine on macOS and Linux and natively on Windows. It can fetch and authenticate
+the supported MSVC 4.2 files from the pinned archaic-msvc repositories, or use an existing local
+installation. Reference binaries remain project-owned and are never redistributed by ReproBit.
 
 ### Project setup outline
 
-This is the common sequence, not a complete project configuration. Each project still needs its
-own build plan, reference metadata, and any required interventions or proofs.
+Start a project and prepare the current machine with the human-first setup command:
 
 ```console
 rbit init . --project-id sample --profile msvc_4_2
-rbit source preview --project .
-rbit source lock --project .
-rbit toolchain lock --project . --root /path/to/msvc42
-rbit doctor . --toolchain-root /path/to/msvc42 --execute-probe
+rbit setup .
+rbit status .
 ```
 
-On macOS and Linux, use the complete five-file MSVC 4.2 lock command in the
-[CLI guide](docs/cli.md) in place of the shortened lock line above.
+`setup` downloads the compiler when needed, authenticates it, remembers its location, creates or
+checks the project lock, and tests the host backend. Pass `--toolchain-root /path/to/msvc42` to use
+an existing installation. `status` shows the next incomplete project step instead of requiring you
+to remember the setup sequence.
 
-Existing CMake projects use CMake once to import their direct compiler and linker commands;
-normal ReproBit builds do not invoke it. The [command-line workflow](docs/cli.md) explains the
-remaining project files and checks.
+Each project still needs its own source lock, build plan, reference metadata, and producer graph.
+Existing CMake projects use CMake once to import their direct compiler and linker commands; normal
+ReproBit builds do not invoke it. The [command-line workflow](docs/cli.md) explains those project
+files, while [platform setup](docs/platforms.md) and the
+[native Windows guide](docs/windows.md) cover unusual hosts.
 
-Once those files are committed, the native Windows form is:
+Once those files are committed, the everyday commands are:
 
 ```console
 rbit validate .
-rbit build . --toolchain-root C:\toolchains\msvc42
-rbit verify . --toolchain-root C:\toolchains\msvc42 --report-dir build\reprobit-report
+rbit build .
+rbit verify . --report-dir build/reprobit-report
 ```
 
-On macOS and Linux, `build` and `verify` also need the compiler-launcher options shown in the
-[CLI guide](docs/cli.md). ReproBit records and checks those launchers as part of the toolchain.
-Use `rbit build . --cold` for a non-certifying developer build with no cache reads or writes.
+ReproBit uses the remembered authenticated compiler and the locked host launchers. CI can still
+pass explicit machine paths and emit NDJSON. Use `rbit build . --cold` for a non-certifying
+developer build with no cache reads or writes.
 
 ## Why exact rebuilds are difficult
 

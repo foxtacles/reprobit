@@ -7,6 +7,7 @@ from reprobit.report import Report
 from reprobit.report_html_advanced import render_advanced
 from reprobit.report_html_components import (
     Bar,
+    Content,
     Markup,
     bar_chart,
     code,
@@ -14,6 +15,7 @@ from reprobit.report_html_components import (
     escape,
     format_integer,
     join_markup,
+    render_content,
     short_digest,
 )
 from reprobit.report_html_format import (
@@ -36,7 +38,23 @@ def _status_copy(report: Report) -> tuple[str, str, str]:
             "Every target matches its reference byte for byte. The evidence traces every "
             "output to this run's sources, locked toolchain, and reviewed interventions.",
         )
-    if report.verdict.byte_exact and report.verdict.quarantined:
+    if not report.verdict.byte_exact:
+        starting_point = (
+            "unresolved audit findings"
+            if report.proof.audit_issues
+            else "the target comparison records"
+        )
+        return (
+            "bad",
+            "Targets do not yet match",
+            "At least one rebuilt target differs from its reference. Start with the target "
+            f"cards and {starting_point} below.",
+        )
+    if (
+        report.verdict.cold
+        and report.verdict.logic_certified
+        and report.verdict.quarantined
+    ):
         return (
             "warn",
             "Exact match, with authenticity exceptions",
@@ -44,18 +62,33 @@ def _status_copy(report: Report) -> tuple[str, str, str]:
             "set of bytes still comes from the reference binaries rather than this run's "
             "compiler toolchain.",
         )
-    if report.verdict.byte_exact:
-        return (
-            "warn",
-            "Exact match, with evidence issues",
-            "Every target matches its reference byte for byte, but the evidence chain is "
-            "incomplete. ReproBit cannot yet confirm where every output byte came from.",
-        )
+    issues: list[str] = []
+    if not report.verdict.cold:
+        issues.append("the result did not come from a cold build")
+    if not report.verdict.logic_certified:
+        issues.append("the required logic checks did not pass")
+    if report.verdict.quarantined:
+        issues.append("some bytes came from disclosed reference data")
+    elif not report.verdict.toolchain_origin:
+        issues.append("fresh-output origin is not fully proven")
+    if len(issues) == 1:
+        heading = {
+            "the result did not come from a cold build": "Exact match, but not cold-verified",
+            "the required logic checks did not pass": "Exact match, with failed logic checks",
+            "fresh-output origin is not fully proven": "Exact match, with origin evidence issues",
+        }.get(issues[0], "Exact match, with authenticity exceptions")
+        issue_text = issues[0]
+    elif len(issues) == 2:
+        heading = "Exact match, with verification issues"
+        issue_text = f"{issues[0]} and {issues[1]}"
+    else:
+        heading = "Exact match, with verification issues"
+        issue_text = ", ".join(issues[:-1]) + f", and {issues[-1]}"
     return (
-        "bad",
-        "Targets do not yet match",
-        "At least one rebuilt target differs from its reference. Start with the target cards "
-        "and unresolved audit findings below.",
+        "warn",
+        heading,
+        "Every target matches its reference byte for byte. However, "
+        f"{issue_text}. This result is not yet clean.",
     )
 
 
@@ -97,7 +130,7 @@ def _render_overview(report: Report) -> str:
   <h2 id="quarantine-summary-title">Disclosed authenticity exceptions remain</h2>
   <p><strong>{escape(intervention_summary)} {escape(effect_verb)} {escape(range_summary)}
     ({escape(byte_summary)} total).</strong> Those bytes come from frozen reference data.
-    These exceptions explain why the result is exact but not yet clean.</p>
+    These exceptions are one reason why the result is exact but not yet clean.</p>
   <a href="#quarantine-details">Review the exact ranges and supporting evidence</a>
 </aside>"""
     return f"""
@@ -135,6 +168,11 @@ def _render_target_cards(report: Report) -> str:
             if digest is not None
             else '<span class="digest missing">SHA-256 not recorded</span>'
         )
+        comparison_link = (
+            ""
+            if target.byte_exact
+            else '<p><a href="#outcome-details">Open comparison records</a></p>'
+        )
         cards.append(
             f"""<article class="card">
   <p class="eyebrow"><code>{escape(target.id)}</code></p>
@@ -142,6 +180,7 @@ def _render_target_cards(report: Report) -> str:
   <div class="value">{escape(size)}</div>
   <p class="token"><code>{escape(target.artifact)}</code></p>
   {digest_line}
+  {comparison_link}
 </article>"""
         )
     return f"""
@@ -154,6 +193,15 @@ def _render_target_cards(report: Report) -> str:
 
 
 def _render_costs(report: Report) -> str:
+    if report.costs.project_total == 0:
+        return """
+<section class="section" id="costs" aria-labelledby="costs-title">
+  <div class="section-heading"><div><p class="eyebrow">Intervention effort</p>
+    <h2 id="costs-title">Cost overview</h2></div>
+    <p><strong>0</strong> relative points</p></div>
+  <div class="card"><h3>No interventions were needed</h3>
+    <p>This run reached its result without any ReproBit intervention cost.</p></div>
+</section>"""
     class_bars = tuple(
         Bar(
             label=cost_class_label(item.cost_class),
@@ -263,7 +311,7 @@ def _render_costs(report: Report) -> str:
   <div class="card-grid cost-reconciliation" aria-label="Function cost attribution">
     <div class="card"><h3>Project total</h3>
       <div class="value">{format_integer(report.costs.project_total)}</div>
-      <p>Every intervention, counted once</p></div>
+      <p>All typed work; intervention IDs deduplicated</p></div>
     <div class="card"><h3>Attributed to functions</h3>
       <div class="value">{format_integer(attributed)}</div>
       <p>Direct work plus allocated shares</p></div>
@@ -307,13 +355,23 @@ def _render_timings(report: Report) -> str:
 </section>"""
 
 
-def _next_steps(report: Report) -> tuple[tuple[str, str], ...]:
+def _next_steps(report: Report) -> tuple[tuple[str, Content], ...]:
     if not report.verdict.byte_exact:
-        mismatches = ", ".join(item.id for item in report.targets if not item.byte_exact)
+        mismatches = tuple(item.id for item in report.targets if not item.byte_exact)
+        mismatch_html = (
+            ", ".join(code(item).html for item in mismatches)
+            or "the target receipts"
+        )
+        mismatch_markup = Markup(
+            "Inspect " + mismatch_html + " before changing interventions.",
+            "Inspect "
+            + (", ".join(mismatches) or "the target receipts")
+            + " before changing interventions.",
+        )
         return (
             (
                 "Start with the mismatched targets",
-                f"Inspect {mismatches or 'the target receipts'} before changing interventions.",
+                mismatch_markup,
             ),
             (
                 "Use the highest-cost hotspot as a guide",
@@ -324,6 +382,46 @@ def _next_steps(report: Report) -> tuple[tuple[str, str], ...]:
                 "Confirm the next result from a fresh build before treating a match as stable.",
             ),
         )
+    if not report.verdict.cold or not report.verdict.logic_certified:
+        steps: list[tuple[str, Content]] = []
+        if not report.verdict.cold:
+            steps.append(
+                (
+                    "Confirm the match with a cold build",
+                    "Rebuild from a clean workspace before treating the byte match as stable.",
+                )
+            )
+        if not report.verdict.logic_certified:
+            steps.append(
+                (
+                    "Resolve the failed logic checks",
+                    "Review the proof details and fix every intervention whose required check "
+                    "did not pass.",
+                )
+            )
+        if report.verdict.quarantined:
+            steps.append(
+                (
+                    "Remove the disclosed reference-byte exceptions",
+                    "Replace those ranges with fresh compiler output while preserving the exact "
+                    "match.",
+                )
+            )
+        elif not report.verdict.toolchain_origin:
+            steps.append(
+                (
+                    "Restore fresh-output origin evidence",
+                    "Use the audit details below to trace every output back to this run.",
+                )
+            )
+        if len(steps) < 3:
+            steps.append(
+                (
+                    "Keep release blocked until every check passes",
+                    "Require a cold, exact, logic-certified, clean report in CI.",
+                )
+            )
+        return tuple(steps[:3])
     if report.verdict.quarantined:
         return (
             (
@@ -374,7 +472,7 @@ def _next_steps(report: Report) -> tuple[tuple[str, str], ...]:
 def _render_next_steps(report: Report) -> str:
     items = "".join(
         f'<li class="next-step"><strong>{escape(title)}</strong>'
-        f"<span>{escape(detail)}</span></li>"
+        f"<span>{render_content(detail)}</span></li>"
         for title, detail in _next_steps(report)
     )
     return f"""
@@ -417,7 +515,7 @@ def render_report_html(report: Report) -> str:
 <body>
 <a class="skip-link" href="#overview">Skip to report</a>
 <header class="topbar"><div class="topbar-inner">
-  <div class="brand">ReproBit · {escape(report.project_id)}</div>
+  <div class="brand">ReproBit · <code>{escape(report.project_id)}</code></div>
   <div class="run-label">Run <code>{escape(short_digest(report.run_id.value))}</code></div>
 </div></header>
 {_render_navigation(report)}

@@ -14,7 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 import reprobit.classic.composition as composition
 from reprobit.classic.compiler_identity import (
@@ -629,7 +629,6 @@ def prepare_classic_units(
     *,
     clean_sources: Mapping[str, bytes],
     effective_sources: Mapping[str, bytes],
-    overlay_dialect: object | None = None,
 ) -> tuple[ClassicPreparedUnit, ...]:
     """Close every TU shard and render all private donor compile requests."""
 
@@ -723,9 +722,6 @@ def prepare_classic_units(
                         )
                     selected[rendering_path] = payload
                 overlay_clean_inputs = selected
-            kwargs: dict[str, Any] = {}
-            if overlay_dialect is not None:
-                kwargs["overlay_dialect"] = overlay_dialect
             try:
                 request = prepare_donor_compile_request(
                     donor,
@@ -737,7 +733,6 @@ def prepare_classic_units(
                     canonical_overlay_operations=operation_replay
                     if _parameters(donor).get("canonical_overlay_replay") is not None
                     else None,
-                    **kwargs,
                 )
                 validate_donor_source_semantics(
                     donor,
@@ -772,28 +767,17 @@ def prepare_classic_units(
     return tuple(prepared)
 
 
-def _legacy_donor_index(unit: ClassicPreparedUnit) -> Mapping[str, str]:
-    result: dict[str, str] = {}
-    for donor in unit.donors:
-        legacy_id = _parameters(donor.intervention).get("legacy_recipe_id")
-        if isinstance(legacy_id, str):
-            if legacy_id in result:
-                raise ClassicProjectError(f"legacy donor identity repeats: {legacy_id!r}")
-            result[legacy_id] = donor.intervention.id
-    return MappingProxyType(result)
-
-
 def _named_donor_id(
     values: Mapping[str, object],
     name: str,
-    legacy_ids: Mapping[str, str],
+    donor_ids: frozenset[str],
 ) -> str | None:
-    legacy_id = values.get(name)
-    if legacy_id is None:
+    donor_id = values.get(name)
+    if donor_id is None:
         return None
-    if not isinstance(legacy_id, str) or legacy_id not in legacy_ids:
-        raise ClassicProjectError(f"function names an unknown {name}: {legacy_id!r}")
-    return legacy_ids[legacy_id]
+    if not isinstance(donor_id, str) or donor_id not in donor_ids:
+        raise ClassicProjectError(f"function names an unknown {name}: {donor_id!r}")
+    return donor_id
 
 
 def compose_classic_unit(
@@ -836,7 +820,7 @@ def compose_classic_unit(
         item.intervention.id: item.request.logical_outputs.get(unit.plan.source)
         for item in unit.donors
     }
-    legacy_ids = _legacy_donor_index(unit)
+    donor_ids = frozenset(expected_donors)
     output = seed_object
     witnesses: list[InterventionWitness] = []
     donor_uses: dict[str, list[DonorSemanticUse]] = {
@@ -891,10 +875,10 @@ def compose_classic_unit(
         values = matching_candidate_constraints(function, unit.receipts).materialize()
         primary_id = function.dependencies[0]
         primary = donor_objects[primary_id]
-        target_donor_id = _named_donor_id(values, "target_donor", legacy_ids)
-        complete_donor_id = _named_donor_id(values, "complete_donor", legacy_ids)
+        target_donor_id = _named_donor_id(values, "target_donor", donor_ids)
+        complete_donor_id = _named_donor_id(values, "complete_donor", donor_ids)
         instruction_donor_id = _named_donor_id(
-            values, "instruction_donor", legacy_ids
+            values, "instruction_donor", donor_ids
         )
         function_donor_inputs = {
             primary_id: f"dependency:{primary_id}",
@@ -912,13 +896,14 @@ def compose_classic_unit(
             for item in variants:
                 if not isinstance(item, dict) or not isinstance(item.get("donor"), str):
                     raise ClassicProjectError("donor variant declaration is malformed")
-                legacy_id = cast(str, item["donor"])
-                resolved_donor_id = legacy_ids.get(legacy_id)
-                if resolved_donor_id is None:
-                    raise ClassicProjectError(f"donor variant is unknown: {legacy_id!r}")
-                additional[legacy_id] = donor_objects[resolved_donor_id]
+                resolved_donor_id = cast(str, item["donor"])
+                if resolved_donor_id not in donor_ids:
+                    raise ClassicProjectError(
+                        f"donor variant is unknown: {resolved_donor_id!r}"
+                    )
+                additional[resolved_donor_id] = donor_objects[resolved_donor_id]
                 function_donor_inputs.setdefault(
-                    resolved_donor_id, f"additional_donor:{legacy_id}"
+                    resolved_donor_id, f"additional_donor:{resolved_donor_id}"
                 )
         request = next(
             item.request for item in unit.donors if item.intervention.id == primary_id
@@ -991,31 +976,19 @@ def compose_classic_unit(
     group_evidence: Digest | None = None
     group_input_digest: Digest | None = None
     group_input_size: int | None = None
-    if unit.plan.group_order is not None:
+    group_order = unit.plan.group_order
+    if group_order is not None:
         group_input_digest = Digest.from_bytes(output)
         group_input_size = len(output)
-        raw_orders = unit.plan.group_order
-        if not isinstance(raw_orders, list) or not raw_orders:
-            raise ClassicProjectError("group-order declaration is malformed")
-        orders = raw_orders if isinstance(raw_orders[0], list) else [raw_orders]
         proofs: list[Mapping[str, object]] = []
-        for order in orders:
-            if not isinstance(order, list):
-                raise ClassicProjectError("group-order list is malformed")
-            if unit.plan.mode == "swap_comdat_group_order":
+        for order in group_order.orders:
+            if group_order.operation == "swap_comdat_group_order":
                 output, proof = composition.compose_swap_comdat_group_order(
-                    output, {"group_order": order}
-                )
-            elif unit.plan.mode in {
-                "restore_comdat_group_order",
-                "compose_equal_body_comdat",
-            }:
-                output, proof = composition.compose_restore_comdat_group_order(
-                    output, {"group_order": order}
+                    output, {"group_order": list(order)}
                 )
             else:
-                raise ClassicProjectError(
-                    f"unsupported group-order mode: {unit.plan.mode!r}"
+                output, proof = composition.compose_restore_comdat_group_order(
+                    output, {"group_order": list(order)}
                 )
             proofs.append(proof)
         group_evidence = Digest.from_bytes(canonical_json(proofs))

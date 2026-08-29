@@ -28,9 +28,8 @@ from reprobit.build import BuildPlan, BuildStep
 from reprobit.cli_graph import (
     command_graph_configure,
     command_graph_extract,
-    command_graph_upgrade,
 )
-from reprobit.cli_output import CLIOutput
+from reprobit.cli_output import CLIOutput, human_command
 from reprobit.cli_paths import (
     CLIError,
     project_root,
@@ -40,6 +39,10 @@ from reprobit.cli_paths import (
 )
 from reprobit.costs import CostBreakdown, InterventionCost, calculate_cost
 from reprobit.discovery_cli import command_discover
+from reprobit.discovery_grind_cli import (
+    command_discover_grind,
+    command_discover_grind_init,
+)
 from reprobit.migration import validate_migration_files
 from reprobit.model import AuthenticityPolicy, Digest
 from reprobit.producer_graph import producer_graph_accepts_source
@@ -59,14 +62,10 @@ from reprobit.schema import (
     ToolchainRef,
     source_manifest_digest,
 )
+from reprobit.schema import ToolchainLock as ToolchainLockDocument
 from reprobit.state import KeepWorkspace, RunArena, StateStore, human_bytes
 from reprobit.strict_json import canonical_json, strict_load
-from reprobit.toolchains import (
-    MSVC_42,
-    TOOLCHAIN_PROFILES,
-    ClassicMSVCToolchain,
-    ToolchainLock,
-)
+from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES, ClassicMSVCToolchain
 from reprobit.transactions import CASTransaction
 
 if TYPE_CHECKING:
@@ -168,14 +167,15 @@ def _command_init(args: argparse.Namespace, output: CLIOutput) -> int:
         expected_sha256=None,
     )
     result = transaction.commit()
+    next_command = human_command(("rbit", "setup", root))
     output.emit(
         "initialized",
         f"Created ReproBit project {spec.project_id!r} at {root}\n"
-        f"Next: rbit setup {root}",
+        f"Next: {next_command}",
         project_root=root,
         project_id=spec.project_id,
         changed_paths=result.changed_paths,
-        next_command=f"rbit setup {root}",
+        next_command=next_command,
     )
     return 0
 
@@ -331,7 +331,6 @@ def _command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
 
         graph_invalidation_required = not producer_graph_accepts_source(
             read_producer_graph(producer_graph_path),
-            manifest_digest=document_digest,
             paths=(item.path for item in document.entries),
         )
 
@@ -414,7 +413,6 @@ def _command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         graph = read_producer_graph(producer_graph_path)
         if not producer_graph_accepts_source(
             graph,
-            manifest_digest=document_digest,
             paths=(item.path for item in document.entries),
         ):
             if not args.invalidate_producer_graph:
@@ -491,16 +489,13 @@ def _command_doctor(args: argparse.Namespace, output: CLIOutput) -> int:
                 spec.toolchain.profile,
                 Path(args.toolchain_root).expanduser().resolve(strict=True),
             )
-            runtime_lock = None
+            lock_document = None
             lock_path = safe_project_path(project, spec.toolchain.lock_file)
             if lock_path.is_file():
-                from reprobit.schema import ToolchainLock as SchemaToolchainLock
-
-                schema_lock = SchemaToolchainLock.model_validate_json(
+                lock_document = ToolchainLockDocument.model_validate_json(
                     canonical_json(strict_load(lock_path))
                 )
-                runtime_lock = ToolchainLock.from_schema_v3(schema_lock)
-            tool_report = installation.doctor(runtime_lock)
+            tool_report = installation.doctor(lock_document)
             okay = okay and tool_report.ok
             for tool_check in tool_report.checks:
                 output.emit(
@@ -555,11 +550,10 @@ def _command_toolchain_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         resolve_toolchain_root(identifier, args.root),
     )
     with output.activity("hashing toolchain producers and input trees"):
-        runtime_lock = installation.create_lock(
+        document = installation.create_lock(
             include_trees=True,
             runtime_paths=args.runtime_file,
         )
-    document = runtime_lock.to_schema_v3()
     data = canonical_json(document)
     default_output = (
         spec.toolchain.lock_file if spec is not None else "reprobit/toolchain.lock.json"
@@ -795,19 +789,27 @@ def _human_intervention_detail(item: Intervention, cost: InterventionCost) -> st
         f"{unit.kind.value}: {unit.count} x {unit.unit_cost} = {unit.cost}" for unit in cost.units
     )
     dependencies = ", ".join(item.dependencies) or "none"
+    beneficiaries = ", ".join(_scope_text(scope) for scope in item.beneficiaries) or "none"
     return "\n".join(
         (
             f"{item.id}: {item.kind}, cost={cost.cost}, scope={_scope_text(item.scope)}",
             f"  cost class: {cost.cost_class.value}",
             f"  typed units: {units}",
             f"  dependencies: {dependencies}",
+            f"  shared beneficiaries: {beneficiaries}",
             f"  rationale: {item.rationale}",
         )
     )
 
 
 def _human_cost_breakdown(result: CostBreakdown) -> str:
-    lines = [f"project cost: {result.project_total} (model v{result.model_version})"]
+    attributed = result.project_total - result.unallocated_shared_cost
+    lines = [
+        f"project intervention cost: {result.project_total} relative points "
+        f"(model v{result.model_version})",
+        f"function attribution: {attributed} attributed, "
+        f"{result.unallocated_shared_cost} unallocated project/TU shared",
+    ]
     if result.by_target:
         lines.append("targets:")
         lines.extend(
@@ -854,6 +856,7 @@ def _command_explain(args: argparse.Namespace, output: CLIOutput) -> int:
             scope=item.scope,
             rationale=item.rationale,
             dependencies=item.dependencies,
+            beneficiaries=item.beneficiaries,
         )
     return 0
 
@@ -866,7 +869,10 @@ def _command_cost(args: argparse.Namespace, output: CLIOutput) -> int:
         (
             _human_cost_breakdown(result)
             if output.output_format == "text"
-            else f"project cost: {result.project_total} (model v{result.model_version})"
+            else (
+                f"project intervention cost: {result.project_total} relative points "
+                f"(model v{result.model_version})"
+            )
         ),
         breakdown=result,
     )
@@ -1371,6 +1377,17 @@ def _command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
     return 0 if accepted else 1
 
 
+def _command_discover_grind(args: argparse.Namespace, output: CLIOutput) -> int:
+    """Delegate the bounded admission workflow without growing this CLI module."""
+
+    return command_discover_grind(
+        args,
+        output,
+        prepare_run=_prepare_producer_graph_run,
+        verify_command=_command_verify,
+    )
+
+
 def _command_report(args: argparse.Namespace, output: CLIOutput) -> int:
     from reprobit.report_io import read_report_json, write_report_html
 
@@ -1528,26 +1545,31 @@ def _add_execution_options(
     command: argparse.ArgumentParser,
     *,
     cold_option: bool,
+    keep_workspace_option: bool = True,
 ) -> None:
     command.add_argument(
         "--jobs",
         type=int,
         default=4,
         metavar="COUNT",
-        help="maximum direct producer workers (default: 4)",
+        help="maximum parallel build workers (default: 4)",
     )
     if cold_option:
         command.add_argument(
             "--cold",
             action="store_true",
-            help="require a fresh isolated execution with no incremental cache access",
+            help="build from scratch without using the incremental cache",
         )
-    command.add_argument(
-        "--keep-workspace",
-        choices=tuple(item.value for item in KeepWorkspace),
-        default=KeepWorkspace.ON_FAILURE.value,
-        help=("retain run-private diagnostics never, on failure, or always (default: on-failure)"),
-    )
+    if keep_workspace_option:
+        command.add_argument(
+            "--keep-workspace",
+            choices=tuple(item.value for item in KeepWorkspace),
+            default=KeepWorkspace.ON_FAILURE.value,
+            help=(
+                "retain run-private diagnostics never, on failure, or always "
+                "(default: on-failure)"
+            ),
+        )
     advanced = command.add_argument_group(
         "advanced execution options",
         "Defaults are suitable for people; these controls are mainly for CI and unusual hosts.",
@@ -1698,11 +1720,10 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--toolchain-root")
     doctor.set_defaults(handler=_command_doctor)
 
-    toolchain = subcommands.add_parser("toolchain", help="manage classic toolchain receipts")
+    toolchain = subcommands.add_parser("toolchain", help="install and lock compiler files")
     toolchain_commands = toolchain.add_subparsers(dest="toolchain_command", required=True)
     provision = toolchain_commands.add_parser(
         "provision",
-        aliases=("install",),
         help="download and authenticate a supported compiler",
     )
     provision.add_argument(
@@ -1770,7 +1791,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     source_lock.set_defaults(handler=_command_source_lock)
 
-    graph = subcommands.add_parser("graph", help="manage committed direct-producer authority")
+    graph = subcommands.add_parser("graph", help="create the committed build graph")
     graph_commands = graph.add_subparsers(dest="graph_command", required=True)
     graph_configure = graph_commands.add_parser(
         "configure",
@@ -1859,18 +1880,13 @@ def _parser() -> argparse.ArgumentParser:
         help=("commit one prelink-discovered DEFAULTLIB edge; repeat for each target/library"),
     )
     graph_extract.set_defaults(handler=command_graph_extract)
-    graph_upgrade = graph_commands.add_parser(
-        "upgrade",
-        help="upgrade a current v1 graph to v2 source-topology binding without CMake",
-    )
-    graph_upgrade.add_argument(
-        "--project", default=".", help="project containing reprobit.toml (default: .)"
-    )
-    graph_upgrade.set_defaults(handler=command_graph_upgrade)
 
-    manifest = subcommands.add_parser("manifest", help="manage manifest schema transitions")
+    manifest = subcommands.add_parser("manifest", help="run the one-time project conversion")
     manifest_commands = manifest.add_subparsers(dest="manifest_command", required=True)
-    migrate = manifest_commands.add_parser("migrate", help="preview or apply schema-v2 migration")
+    migrate = manifest_commands.add_parser(
+        "migrate",
+        help="preview or apply the one-time schema-2 conversion",
+    )
     migrate.add_argument("source")
     migrate.add_argument("--project-root", default=".")
     migrate.add_argument(
@@ -1882,8 +1898,8 @@ def _parser() -> argparse.ArgumentParser:
     migrate.set_defaults(handler=_command_manifest_migrate)
 
     for name, help_text, handler in (
-        ("validate", "strictly validate a complete schema-v3 tree", _command_validate),
-        ("cost", "calculate the stable intervention cost model", _command_cost),
+        ("validate", "check every committed project file", _command_validate),
+        ("cost", "show intervention cost totals", _command_cost),
     ):
         command = subcommands.add_parser(name, help=help_text)
         command.add_argument("project", nargs="?", default=".")
@@ -1915,7 +1931,8 @@ def _parser() -> argparse.ArgumentParser:
     build.set_defaults(handler=_command_build)
 
     verify = subcommands.add_parser(
-        "verify", help="cold-build every target and derive an authenticity verdict"
+        "verify",
+        help="build every target from scratch and check identity and authenticity",
     )
     verify.add_argument("project", nargs="?", default=".")
     _add_execution_options(verify, cold_option=False)
@@ -1943,52 +1960,52 @@ def _parser() -> argparse.ArgumentParser:
 
     discover = subcommands.add_parser(
         "discover",
-        help="preview declaration-state interventions with MSVC 4.2",
+        help="find and safely admit compiler-entropy interventions",
     )
-    discover.add_argument(
-        "request",
-        help="request JSON to run, or 'init' to create a small starter request",
+    discover_commands = discover.add_subparsers(
+        dest="discovery_command",
+        required=True,
     )
-    discover_init = discover.add_argument_group(
-        "starter request options",
-        "Use with `rbit discover init`; paths are relative to the request file.",
+    discover_init = discover_commands.add_parser(
+        "init",
+        help="create a small project-aware grind plan without compiling",
     )
-    discover_init.add_argument("--source", help="translation-unit source path")
+    discover_init.add_argument("project", nargs="?", default=".")
+    discover_init.add_argument(
+        "--source",
+        required=True,
+        help="project-relative source path used by the compiler lane",
+    )
     discover_init.add_argument(
         "--reference",
-        action="append",
-        default=[],
-        metavar="SYMBOL=OBJECT_PATH",
-        help="symbol and matching reference object (repeatable)",
+        required=True,
+        metavar="OBJECT_PATH",
+        help="project-relative COFF object containing the reference symbol",
     )
-    discover_init.add_argument(
-        "--target",
-        dest="discovery_target",
-        default="program",
-        help="target name (default: program)",
-    )
+    discover_init.add_argument("--symbol", required=True, help="decorated function symbol")
     discover_init.add_argument(
         "--translation-unit",
-        help="translation-unit name (default: derive it from --source)",
+        help="select a compiler lane only when the source is built more than once",
     )
     discover_init.add_argument(
-        "--request-file",
-        default="discovery-request.json",
-        metavar="PATH",
-        help="new request path (default: discovery-request.json)",
+        "--plan",
+        default="reprobit/discovery.json",
+        metavar="PROJECT_RELATIVE_PATH",
+        help="new plan path (default: reprobit/discovery.json)",
     )
-    discover_init.add_argument(
-        "--compiler-argument",
-        action="append",
-        metavar="OPTION",
-        help="replace the safe default compiler options (repeatable; advanced)",
+    discover_init.set_defaults(handler=command_discover_grind_init)
+
+    discover_run = discover_commands.add_parser(
+        "run",
+        help="run a bounded request file (advanced)",
     )
-    discover.add_argument(
+    discover_run.add_argument("request", help="request JSON to run")
+    discover_run.add_argument(
         "--toolchain-root",
         metavar="DIRECTORY",
         help="compiler installation override (normally remembered by `rbit setup`)",
     )
-    discover.add_argument(
+    discover_run.add_argument(
         "--report-json",
         metavar="PATH",
         help=(
@@ -1996,7 +2013,7 @@ def _parser() -> argparse.ArgumentParser:
             "(default: REQUEST_STEM.report.json)"
         ),
     )
-    discover.add_argument(
+    discover_run.add_argument(
         "--report-html",
         metavar="PATH",
         help=(
@@ -2004,46 +2021,74 @@ def _parser() -> argparse.ArgumentParser:
             "(default: REQUEST_STEM.report.html)"
         ),
     )
-    discover.add_argument(
+    discover_run.add_argument(
         "--state-directory",
         default=".reprobit-discovery",
         metavar="DIRECTORY",
         help="incremental cache and runtime state beside the request",
     )
-    discover.add_argument(
+    discover_run.add_argument(
         "--jobs",
         type=int,
         default=4,
         metavar="COUNT",
         help="maximum compiler workers (Wine is safely capped at 4; default: 4)",
     )
-    discover.add_argument(
+    discover_run.add_argument(
         "--compile-timeout",
         type=_positive_seconds,
         default=120.0,
         metavar="SECONDS",
         help="limit for each compiler cell (default: 120)",
     )
-    discover.add_argument(
+    discover_run.add_argument(
         "--wine",
         default="wine",
         metavar="PATH_OR_NAME",
         help="POSIX Wine executable (default: wine from PATH)",
     )
-    discover.add_argument(
+    discover_run.add_argument(
         "--wineserver",
         default="wineserver",
         metavar="PATH_OR_NAME",
         help="POSIX wineserver executable (default: wineserver from PATH)",
     )
-    discover.add_argument(
+    discover_run.add_argument(
         "--cleanup-timeout",
         type=_positive_seconds,
         default=10.0,
         metavar="SECONDS",
         help="limit for stopping and reaping the private wineserver (default: 10)",
     )
-    discover.set_defaults(handler=command_discover)
+    discover_run.set_defaults(handler=command_discover)
+
+    discover_grind = discover_commands.add_parser(
+        "grind",
+        help="try low-cost interventions and keep only a cold exact solution",
+    )
+    discover_grind.add_argument(
+        "project",
+        nargs="?",
+        default=".",
+        help="project containing reprobit/discovery.json (default: .)",
+    )
+    discover_grind.add_argument(
+        "--accept-exact",
+        action="store_true",
+        help="rerun the proof and save an exact solution if it still passes",
+    )
+    discover_grind.add_argument(
+        "--plan",
+        default="reprobit/discovery.json",
+        metavar="PROJECT_RELATIVE_PATH",
+        help="project discovery plan (default: reprobit/discovery.json)",
+    )
+    _add_execution_options(
+        discover_grind,
+        cold_option=False,
+        keep_workspace_option=False,
+    )
+    discover_grind.set_defaults(handler=_command_discover_grind)
 
     state = subcommands.add_parser(
         "state", help="inspect or garbage-collect local run and cache state"
@@ -2073,8 +2118,12 @@ def _parser() -> argparse.ArgumentParser:
     state_gc.set_defaults(handler=_command_state_gc)
 
     report = subcommands.add_parser("report", help="validate JSON and render self-contained HTML")
-    report.add_argument("input")
-    report.add_argument("--html")
+    report.add_argument("input", help="canonical report.json to validate and render")
+    report.add_argument(
+        "--html",
+        metavar="PATH",
+        help="HTML output path (default: replace the input suffix with .html)",
+    )
     report.set_defaults(handler=_command_report)
 
     module = subcommands.add_parser("cmake-module", help="print the packaged CMake module path")

@@ -32,7 +32,7 @@ from reprobit.classic_orchestration import (
     classic_rdata_repack_graph_authority,
     prepare_classic_units,
 )
-from reprobit.classic_project import ClassicProjectError, _overlay_dialect
+from reprobit.classic_project import ClassicProjectError
 from reprobit.classic_runtime_environment import (
     _classic_producer_environment,
     _toolchain_tree_files,
@@ -56,12 +56,11 @@ from reprobit.schema import (
     ClassicRecipeIntervention,
     ProducerGraphBuildAdapter,
     ProjectBundle,
-    classic_analysis_link_options,
     classic_analysis_pdb_paths,
 )
 from reprobit.secure_paths import SecureFileSnapshot
 from reprobit.strict_json import JsonValue
-from reprobit.toolchains import ClassicMSVCToolchain, ToolchainLock
+from reprobit.toolchains import ClassicMSVCToolchain
 
 
 def _runtime_material(
@@ -179,7 +178,6 @@ def _render_sources(
             rendered = render_classic_overlay(
                 {"schema": schema, "outputs": outputs, "graph": graph},
                 clean_inputs,
-                dialect=_overlay_dialect(bundle),  # type: ignore[arg-type]
             )
             for raw in outputs:
                 assert isinstance(raw, dict)
@@ -400,6 +398,11 @@ def _projected_donor_resolution_contexts(
     contexts: list[DonorDependencyResolutionContext] = []
     for donor in projected:
         request = donor.request
+        if request.build_target != unit.plan.build_target:
+            raise ClassicIncrementalError(
+                f"projected donor {donor.intervention.id!r} target differs from its "
+                f"owning TU: {request.build_target!r} != {unit.plan.build_target!r}"
+            )
         if request.family is not ClassicRecipeFamily.DONOR_SOURCE_OVERLAY:
             raise ClassicIncrementalError(
                 f"projected donor {donor.intervention.id!r} is not a source overlay"
@@ -413,18 +416,13 @@ def _projected_donor_resolution_contexts(
             raise ClassicIncrementalError(
                 f"projected donor {donor.intervention.id!r} source path is unsafe"
             )
-        legacy_path = PurePosixPath(request.legacy_recipe_id)
-        if (
-            legacy_path.is_absolute()
-            or len(legacy_path.parts) != 1
-            or any(part in {"", ".", ".."} for part in legacy_path.parts)
-        ):
-            raise ClassicIncrementalError(
-                f"projected donor {donor.intervention.id!r} legacy ID is unsafe"
-            )
         matches: list[tuple[ProducerNode, dict[str, object]]] = []
         for node_id, node in compiler_nodes.items():
-            if compiler_sources[node_id].casefold() != request.logical_source.casefold():
+            if (
+                compiler_sources[node_id].casefold()
+                != request.logical_source.casefold()
+                or node.owner != request.build_target
+            ):
                 continue
             try:
                 parsed = validate_compile_arguments(list(node_arguments(node)))
@@ -432,16 +430,12 @@ def _projected_donor_resolution_contexts(
                 raise ClassicIncrementalError(
                     f"projected donor compiler lane {node_id!r} is invalid: {exc}"
                 ) from exc
-            definitions = {
-                cast(tuple[int, str, bool], item)[1]
-                for item in cast(Sequence[object], parsed["definitions"])
-            }
-            if request.compiler_additions.required_define in definitions:
-                matches.append((node, parsed))
+            matches.append((node, parsed))
         if len(matches) != 1:
             raise ClassicIncrementalError(
                 f"projected donor {donor.intervention.id!r} has {len(matches)} "
-                "committed compiler lanes"
+                "committed compiler lanes for its target/source identity: "
+                f"{request.build_target}/{request.logical_source}"
             )
         _record_node, parsed = matches[0]
         parent = source_path.parent.as_posix()
@@ -466,7 +460,7 @@ def _projected_donor_resolution_contexts(
         marker_stem = f"composed-{unit.plan.build_target}-{unit.plan.source.replace('/', '_')}"
         donor_root = PureWindowsPath(normalized_build_root).parent / "donors"
         arena = normalize_logical_path(
-            str(donor_root / f"{marker_stem}-{request.legacy_recipe_id}")
+            str(donor_root / f"{marker_stem}-{request.intervention_id}")
         )
         record_source = logical_join(normalized_source_root, request.logical_source)
         private_includes = [
@@ -588,10 +582,7 @@ def prepare_classic_incremental_plan(
     if bundle.build_plan is None:
         analysis_link_options: tuple[str, ...] = ()
     else:
-        try:
-            analysis_link_options = classic_analysis_link_options(bundle.build_plan)
-        except ValueError as exc:
-            raise ClassicIncrementalError(f"warm analysis-link policy is malformed: {exc}") from exc
+        analysis_link_options = bundle.build_plan.analysis_link_options
     if analysis_link_options not in {(), ("/DEBUG",)}:
         raise ClassicIncrementalError("warm analysis-link options are not closed")
     try:
@@ -630,8 +621,8 @@ def prepare_classic_incremental_plan(
     installation = ClassicMSVCToolchain(
         bundle.spec.toolchain.profile, toolchain_root, logical_root=bundle.spec.paths.toolchain
     )
-    runtime_lock = ToolchainLock.from_schema_v3(bundle.toolchain_lock)
-    installation.doctor(runtime_lock).require_ok()
+    toolchain_lock = bundle.toolchain_lock
+    installation.doctor(toolchain_lock).require_ok()
     _role_tool_ids, role_relatives = _graph_role_bindings(bundle, installation)
     role_logical = {
         role: installation.logical_path(relative) for role, relative in role_relatives.items()
@@ -666,7 +657,6 @@ def prepare_classic_incremental_plan(
         bundle,
         clean_sources=clean_sources,
         effective_sources=effective_sources,
-        overlay_dialect=_overlay_dialect(bundle),
     )
     units_by_id: dict[str, ClassicPreparedUnit] = {}
     for unit in units:

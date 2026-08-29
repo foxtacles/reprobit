@@ -64,21 +64,6 @@ def _parameter_map(intervention: ClassicRecipeIntervention) -> dict[str, Any]:
     return {item.name: item.value for item in intervention.parameters}
 
 
-def _overlay_dialect(bundle: ProjectBundle) -> object:
-    from reprobit.classic_overlay import ClassicOverlayDialect
-
-    policy = bundle.build_plan.toolchain_policy if bundle.build_plan is not None else None
-    raw = policy.get("classic_overlay_dialect") if isinstance(policy, dict) else None
-    if raw is None:
-        return ClassicOverlayDialect()
-    if not isinstance(raw, dict) or set(raw) != {"qualified_member_probe_return_type"}:
-        raise SourceAuthorityError("classic overlay dialect policy is malformed")
-    return_type = raw["qualified_member_probe_return_type"]
-    if not isinstance(return_type, str) or not return_type:
-        raise SourceAuthorityError("classic overlay dialect return type is invalid")
-    return ClassicOverlayDialect(qualified_member_probe_return_type=return_type)
-
-
 def inspect_source_authority(
     bundle: ProjectBundle,
     project_root: Path,
@@ -145,7 +130,6 @@ def inspect_source_authority(
         if data is not None:
             effective[entry.path] = data
 
-    dialect = _overlay_dialect(bundle)
     overlay_outputs: list[str] = []
     from reprobit.classic_overlay import (
         ClassicOverlayRenderSession,
@@ -173,7 +157,6 @@ def inspect_source_authority(
                 rendered = render_classic_overlay(
                     {"schema": schema, "outputs": outputs, "graph": graph},
                     clean_inputs,
-                    dialect=dialect,  # type: ignore[arg-type]
                     session=active_render_session,
                 )
             except ValueError as exc:

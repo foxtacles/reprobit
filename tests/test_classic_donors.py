@@ -69,10 +69,8 @@ def _receipt(
 def _carrier_parameters(generated: bytes, **values: Any) -> dict[str, Any]:
     digest = _digest(generated)
     return {
-        "compile_lane": {"required_define": "SAMPLE_BUILD"},
         "emission_policy": "non_emitting_declarations_only",
         "generated_header_sha256": digest,
-        "legacy_recipe_id": f"d_{digest[:12]}",
         **values,
     }
 
@@ -205,7 +203,7 @@ def test_all_declaration_carrier_families_produce_closed_requests() -> None:
         ClassicRecipeFamily.DONOR_SOURCE_OVERLAY
     }
     assert all(request.staged_source == "s.cpp" for request in requests)
-    assert all(request.legacy_recipe_id.startswith("d_") for request in requests)
+    assert all(request.intervention_id == "donor_sample" for request in requests)
     assert all("s.cpp" in request.files for request in requests)
     assert all("source.cpp" not in request.files for request in requests)
     assert all(request.receipt.output_digests for request in requests)
@@ -225,6 +223,10 @@ def test_all_declaration_carrier_families_produce_closed_requests() -> None:
     )
     assert all(isinstance(request.carrier_identifiers, frozenset) for request in requests)
     assert all(request.carrier_identifiers for request in requests)
+    assert all(
+        not hasattr(request.compiler_additions, "required_define")
+        for request in requests
+    )
     force_include_families = {
         ClassicRecipeFamily.DECLARATION_SHAPE,
         ClassicRecipeFamily.PAD_SHAPE,
@@ -238,6 +240,38 @@ def test_all_declaration_carrier_families_produce_closed_requests() -> None:
         for request in requests
         if request.family in force_include_families
     )
+
+
+def test_donor_authority_rejects_the_removed_define_lane_selector() -> None:
+    generated = generate_declaration_shape(1, 1)
+    parameters = _carrier_parameters(generated, classes=1, functions=1)
+    parameters["compile_lane"] = {"required_define": "SAMPLE_BUILD"}
+    intervention = _intervention(ClassicRecipeFamily.DECLARATION_SHAPE, parameters)
+
+    with pytest.raises(DonorSourceError, match="unknown=\\['compile_lane'\\]"):
+        validate_donor_recipe(
+            intervention,
+            matching_candidate_constraints(
+                intervention,
+                [_receipt(intervention.family)],
+            ),
+        )
+
+
+def test_donor_authority_rejects_the_removed_legacy_recipe_identity() -> None:
+    generated = generate_declaration_shape(1, 1)
+    parameters = _carrier_parameters(generated, classes=1, functions=1)
+    parameters["legacy_recipe_id"] = "d_obsolete"
+    intervention = _intervention(ClassicRecipeFamily.DECLARATION_SHAPE, parameters)
+
+    with pytest.raises(DonorSourceError, match="unknown=\\['legacy_recipe_id'\\]"):
+        validate_donor_recipe(
+            intervention,
+            matching_candidate_constraints(
+                intervention,
+                [_receipt(intervention.family)],
+            ),
+        )
 
 
 def _seat_digest(tokens: list[str]) -> str:
@@ -297,12 +331,8 @@ def test_donor_private_overlay_uses_the_shared_typed_renderer() -> None:
     intervention = _intervention(
         ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
         {
-            "compile_lane": {
-                "required_define": "SAMPLE_BUILD",
-                "include_projection": "source_root_mirror_only_v1",
-            },
             "emission_policy": "donor_private_rendering_only",
-            "legacy_recipe_id": f"d_{identity[:12]}",
+            "include_projection": "source_root_mirror_only_v1",
             "rendering_identity_sha256": identity,
             "renderings": renderings,
         },
@@ -366,10 +396,8 @@ def _overlay_carrier_request(carrier: dict[str, Any]) -> DonorCompileRequest:
     intervention = _intervention(
         ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
         {
-            "compile_lane": {"required_define": "SAMPLE_BUILD"},
             "compiler_state_carrier": carrier,
             "emission_policy": "donor_private_rendering_only",
-            "legacy_recipe_id": f"d_{identity[:12]}",
             "rendering_identity_sha256": identity,
             "renderings": [{"path": "src/unit.cpp", "operations": operations}],
         },

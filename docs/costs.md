@@ -31,7 +31,12 @@ Every beneficiary must be a unique, canonically ordered function scope in the in
 target (and in the same translation unit for a unit-scoped intervention). Project loading also
 requires that scope to exist in the authoritative function universe established by direct
 function interventions or oracle identities. Unknown “ghost” labels are rejected, so adding
-fictional beneficiaries cannot dilute a shared function allocation.
+an unanchored beneficiary label alone cannot dilute a shared function allocation.
+
+A shared donor is charged once. Reusing the same donor for another function widens its
+beneficiary list but does not charge the donor again; only newly added intervention work changes
+the project total. Each beneficiary's exposure still shows the donor's full cost, and remains a
+non-additive diagnostic.
 
 ## Runtime work is not intervention cost
 

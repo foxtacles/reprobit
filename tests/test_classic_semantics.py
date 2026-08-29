@@ -115,6 +115,7 @@ from reprobit.producer_graph import (
     ProducerGraphDocument,
     ProducerNode,
     ProducerRole,
+    source_topology_digest,
     toolchain_document_digest,
 )
 from reprobit.schema import (
@@ -4289,7 +4290,6 @@ def _base_authority(
             build_target="app",
             source="src/unit.cpp",
             source_digest=Digest.from_bytes(effective),
-            mode="semantic-fixture",
         )
         if donor is not None
         else None
@@ -4350,22 +4350,16 @@ def _base_authority(
         build_plan=BuildPlanDocument(
             schema_version=3,
             source_manifest_digest=source_manifest_digest(manifest),
-            phase=None,
             translation_units=(unit_plan,) if unit_plan is not None else (),
             source_overlay_digest=Digest.from_bytes(
                 canonical_json(overlay.model_dump(mode="json"))
             ),
             source_overlay_interventions=(overlay.id,),
             archives=(),
-            terminal_producers={},
-            execution_backends={},
-            toolchain_policy={},
-            target_policies=[],
             target_gates=(
                 ClassicTargetGate(
                     target_id="program",
                     build_target="app",
-                    completion={},
                 ),
             ),
         ),
@@ -4409,8 +4403,10 @@ def _base_authority(
         )
     )
     graph = ProducerGraphDocument(
-        schema_version=1,
-        source_manifest_digest=source_manifest_digest(manifest),
+        schema_version=2,
+        source_topology_digest=source_topology_digest(
+            item.path for item in manifest.entries
+        ),
         toolchain_lock_digest=toolchain_document_digest(toolchain),
         path_profile_id=paths.id,
         extractor="cmake-unix-makefiles-v1",
@@ -4647,7 +4643,13 @@ def _certified_project_overlay_authority(
             ),
         }
     )
-    graph = graph.model_copy(update={"source_manifest_digest": source_manifest_digest(manifest)})
+    graph = graph.model_copy(
+        update={
+            "source_topology_digest": source_topology_digest(
+                item.path for item in manifest.entries
+            )
+        }
+    )
     clean_object = clean_object_payload or _coff_object("_main")
     effective_object = effective_object_payload or clean_object
     compiler_node = next(node for node in graph.nodes if node.role is ProducerRole.COMPILER)
@@ -4797,7 +4799,7 @@ def test_record_header_owns_its_canonical_guard_definition(tmp_path: Path) -> No
     assert result.proofs[overlay.id].family == ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
 
 
-def test_overlay_dialect_ignores_non_code_source_authority(tmp_path: Path) -> None:
+def test_overlay_semantics_ignore_non_code_source_authority(tmp_path: Path) -> None:
     bundle, graph, _overlay, snapshot = _certified_project_overlay_authority(tmp_path)
     assert bundle.source_manifest is not None
     assert bundle.build_plan is not None
@@ -4822,7 +4824,13 @@ def test_overlay_dialect_ignores_non_code_source_authority(tmp_path: Path) -> No
             ),
         }
     )
-    graph = graph.model_copy(update={"source_manifest_digest": source_manifest_digest(manifest)})
+    graph = graph.model_copy(
+        update={
+            "source_topology_digest": source_topology_digest(
+                item.path for item in manifest.entries
+            )
+        }
+    )
 
     plan = plan_project_overlay_compiler_epochs(
         bundle,
@@ -5552,7 +5560,9 @@ def _with_secondary_compiler_reader(
     )
     graph = ProducerGraphDocument(
         schema_version=graph.schema_version,
-        source_manifest_digest=source_manifest_digest(manifest),
+        source_topology_digest=source_topology_digest(
+            item.path for item in manifest.entries
+        ),
         toolchain_lock_digest=graph.toolchain_lock_digest,
         path_profile_id=graph.path_profile_id,
         extractor=graph.extractor,
@@ -5714,7 +5724,7 @@ def test_resource_reader_closure_rejects_an_overlaid_header_read(tmp_path: Path)
     )
     graph = ProducerGraphDocument(
         schema_version=graph.schema_version,
-        source_manifest_digest=graph.source_manifest_digest,
+        source_topology_digest=graph.source_topology_digest,
         toolchain_lock_digest=graph.toolchain_lock_digest,
         path_profile_id=graph.path_profile_id,
         extractor=graph.extractor,
@@ -5856,7 +5866,13 @@ def test_unreachable_helper_generator_in_a_header_fails_planning(tmp_path: Path)
             ),
         }
     )
-    graph = graph.model_copy(update={"source_manifest_digest": source_manifest_digest(manifest)})
+    graph = graph.model_copy(
+        update={
+            "source_topology_digest": source_topology_digest(
+                item.path for item in manifest.entries
+            )
+        }
+    )
 
     with pytest.raises(ClassicSemanticError, match="header helpers are unsupported"):
         plan_project_overlay_compiler_epochs(
@@ -7039,7 +7055,6 @@ def test_certified_ordinary_overlay_feeds_a_cross_target_donor_lane_and_binds_it
                         ClassicTargetGate(
                             target_id="config",
                             build_target="config",
-                            completion={},
                         ),
                     ),
                 }
@@ -7297,12 +7312,12 @@ def test_candidate_and_donor_proofs_bind_exact_downstream_object_lineage(
 @pytest.mark.parametrize(
     ("input_name", "constraints"),
     (
-        ("target_donor_object", {"target_donor": "d_auxiliary"}),
-        ("complete_donor_object", {"complete_donor": "d_auxiliary"}),
-        ("instruction_donor_object", {"instruction_donor": "d_auxiliary"}),
+        ("target_donor_object", {"target_donor": "donor.auxiliary"}),
+        ("complete_donor_object", {"complete_donor": "donor.auxiliary"}),
+        ("instruction_donor_object", {"instruction_donor": "donor.auxiliary"}),
         (
-            "additional_donor:d_auxiliary",
-            {"donor_variants": [{"donor": "d_auxiliary"}]},
+            "additional_donor:donor.auxiliary",
+            {"donor_variants": [{"donor": "donor.auxiliary"}]},
         ),
     ),
 )
@@ -7317,7 +7332,6 @@ def test_named_auxiliary_donor_proofs_bind_their_exact_candidate_seat(
         family=ClassicRecipeFamily.DECLARATION_SHAPE,
         role=ClassicRecipeRole.DONOR,
         build_target="app",
-        parameters=(ClassicField(name="legacy_recipe_id", value="d_auxiliary"),),
     )
     consumer = ClassicRecipeIntervention(
         id="function.target",

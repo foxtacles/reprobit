@@ -74,7 +74,7 @@ from reprobit.strict_json import canonical_json
 @pytest.mark.parametrize(
     ("cost_class", "label"),
     (
-        (CostClass.CROSS_TU_OR_OVERLAY, "Cross-TU or overlay"),
+        (CostClass.CROSS_TU_OR_OVERLAY, "Cross TU or Overlay"),
         (CostClass.EQUAL_BODY_DONOR, "Equal-body donor"),
         (CostClass.BINARY_SURGERY, "Binary surgery"),
     ),
@@ -633,6 +633,7 @@ def test_html_is_self_contained_escaped_and_warns_for_quarantine(tmp_path: Path)
     assert "complete machine-readable record" in rendered
     assert "Raw function-cost table" in rendered
     assert "Raw intervention table" in rendered
+    assert "Shared beneficiaries" in rendered
     assert "Filter by target, TU, or function" in rendered
     assert "Filter by ID, class, target, TU, or function" in rendered
     assert '<details class="advanced"' in rendered
@@ -668,15 +669,51 @@ def test_report_identity_rejects_public_verdict_and_timing_tampering() -> None:
         timings=(StageTiming(stage="build", seconds=1.0),),
     )
     rendered = render_report_html(report)
-    assert 'id="cost-class-chart-title"' in rendered
-    assert 'id="cost-target-chart-title"' in rendered
-    assert 'id="cost-hotspot-chart-title"' in rendered
+    assert "No interventions were needed" in rendered
+    assert 'id="cost-class-chart-title"' not in rendered
+    assert 'id="cost-target-chart-title"' not in rendered
+    assert 'id="cost-hotspot-chart-title"' not in rendered
     assert 'id="timing-chart-title"' in rendered
     assert "Stage timing" in rendered
     assert "1.00 s" in rendered
-    assert "Cost ranks interventions; it is not elapsed time." in rendered
+    assert "Cost ranks interventions; it is not elapsed time." not in rendered
     assert '<nav class="section-nav" aria-label="Report sections">' in rendered
     assert 'href="#advanced"' in rendered
+    assert '<div class="brand">ReproBit · <code>sample</code></div>' in rendered
+
+    mismatched = report.model_copy(
+        update={
+            "targets": (
+                report.targets[0].model_copy(update={"byte_exact": False}),
+            ),
+            "verdict": report.verdict.model_copy(update={"byte_exact": False}),
+        }
+    )
+    mismatched_html = render_report_html(mismatched)
+    assert "Inspect <code>program</code> before changing interventions." in mismatched_html
+    assert "target comparison records" in mismatched_html
+    assert '<a href="#outcome-details">Open comparison records</a>' in mismatched_html
+
+    logic_failed = report.model_copy(
+        update={
+            "verdict": report.verdict.model_copy(update={"logic_certified": False}),
+        }
+    )
+    logic_failed_html = render_report_html(logic_failed)
+    assert "Exact match, with failed logic checks" in logic_failed_html
+    assert "Resolve the failed logic checks" in logic_failed_html
+    assert "already satisfies identity and authenticity" not in logic_failed_html
+
+    not_cold = report.model_copy(
+        update={
+            "verdict": report.verdict.model_copy(update={"cold": False}),
+        }
+    )
+    not_cold_html = render_report_html(not_cold)
+    assert "Exact match, but not cold-verified" in not_cold_html
+    assert "Confirm the match with a cold build" in not_cold_html
+    assert "already satisfies identity and authenticity" not in not_cold_html
+
     for field, value in (("toolchain_origin", False), ("logic_certified", False)):
         payload = report.model_dump(mode="json", exclude_computed_fields=True)
         payload["verdict"][field] = value

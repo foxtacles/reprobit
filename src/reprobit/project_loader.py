@@ -109,12 +109,12 @@ def load_project_tree(
     from reprobit.toolchains import (
         TOOLCHAIN_PROFILES,
         ToolchainError,
-        validate_toolchain_profile_sources,
+        validate_toolchain_lock,
     )
 
     if toolchain_lock.profile in TOOLCHAIN_PROFILES:
         try:
-            validate_toolchain_profile_sources(toolchain_lock)
+            validate_toolchain_lock(toolchain_lock)
         except ToolchainError as exc:
             raise SchemaError(f"invalid {lock_path}: {exc}") from exc
     source_manifest_path = _safe_child(project_root, spec.layout.source_manifest)

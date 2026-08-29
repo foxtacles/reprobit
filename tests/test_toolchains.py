@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import os
 import shutil
 from pathlib import Path
@@ -26,9 +25,8 @@ from reprobit.toolchains import (
     TOOLCHAIN_PROFILES,
     ClassicMSVCToolchain,
     ToolchainError,
-    ToolchainLock,
     ToolchainSourcePin,
-    profile_source_pins_for_paths,
+    validate_toolchain_lock,
 )
 
 _INTEGRATION_ROOTS = {
@@ -101,17 +99,14 @@ def test_toolchain_lock_detects_producer_drift(tmp_path: Path) -> None:
     assert any(check.detail == "digest differs" for check in report.checks)
 
 
-def test_runtime_lock_has_an_authenticated_v2_receipt_and_schema_v3_conversion(
+def test_create_lock_returns_the_sole_schema_v3_document(
     tmp_path: Path,
 ) -> None:
     toolchain = fake_installation(tmp_path, MSVC_42)
-    runtime_lock = toolchain.create_lock(include_trees=True)
+    schema_lock = toolchain.create_lock(include_trees=True)
+    decoded = SchemaToolchainLock.model_validate_json(schema_lock.model_dump_json())
 
-    encoded = runtime_lock.to_dict()
-    decoded = ToolchainLock.from_dict(json.loads(json.dumps(encoded)))
-    schema_lock = decoded.to_schema_v3()
-
-    assert decoded == runtime_lock
+    assert decoded == schema_lock
     assert schema_lock.schema_version == 3
     assert tuple(
         (source.repository, source.revision, source.paths)
@@ -131,16 +126,12 @@ def test_runtime_lock_has_an_authenticated_v2_receipt_and_schema_v3_conversion(
         *toolchain.profile.library_roots,
     }
     assert {item.algorithm for item in schema_lock.input_trees} == {"portable-tree-v1"}
-    assert ToolchainLock.from_schema_v3(schema_lock) == runtime_lock
-
-    encoded["sha256"] = "0" * 64
-    with pytest.raises(ToolchainError, match="digest differs"):
-        ToolchainLock.from_dict(encoded)
+    validate_toolchain_lock(schema_lock)
 
 
-def test_schema_v3_conversion_rejects_profile_source_drift(tmp_path: Path) -> None:
+def test_toolchain_lock_rejects_profile_source_drift(tmp_path: Path) -> None:
     toolchain = fake_installation(tmp_path, MSVC_42)
-    schema_lock = toolchain.create_lock().to_schema_v3()
+    schema_lock = toolchain.create_lock()
     first = schema_lock.profile_sources[0]
     mismatched = schema_lock.model_copy(
         update={
@@ -152,12 +143,12 @@ def test_schema_v3_conversion_rejects_profile_source_drift(tmp_path: Path) -> No
     )
 
     with pytest.raises(ToolchainError, match="profile-source mapping differs"):
-        ToolchainLock.from_schema_v3(mismatched)
+        validate_toolchain_lock(mismatched)
 
 
 def test_schema_profile_source_cannot_name_an_unlocked_path(tmp_path: Path) -> None:
     toolchain = fake_installation(tmp_path, MSVC_42)
-    document = toolchain.create_lock().to_schema_v3().model_dump()
+    document = toolchain.create_lock().model_dump()
     sources = list(document["profile_sources"])
     first = dict(sources[0])
     first["paths"] = tuple(
@@ -175,7 +166,7 @@ def test_schema_v3_rejects_pre_release_source_fields(
     tmp_path: Path, legacy_field: str
 ) -> None:
     toolchain = fake_installation(tmp_path, MSVC_42)
-    document = toolchain.create_lock().to_schema_v3().model_dump()
+    document = toolchain.create_lock().model_dump()
     profile_sources = document.pop("profile_sources")
     document[legacy_field] = (
         "0" * 40 if legacy_field == "source_revision" else profile_sources
@@ -185,15 +176,14 @@ def test_schema_v3_rejects_pre_release_source_fields(
         SchemaToolchainLock.model_validate(document)
 
 
-def test_schema_v3_conversion_admits_and_verifies_extra_runtime_files(
+def test_toolchain_lock_rejects_runtime_files_in_the_tools_bucket(
     tmp_path: Path,
 ) -> None:
     toolchain = fake_installation(tmp_path, MSVC_42)
     wrapper = toolchain.host_path("wine/x86/cl")
     wrapper.parent.mkdir(parents=True)
     wrapper.write_bytes(b"pinned wrapper")
-    runtime_lock = toolchain.create_lock(runtime_paths=("wine/x86/cl",))
-    schema_lock = runtime_lock.to_schema_v3()
+    schema_lock = toolchain.create_lock(runtime_paths=("wine/x86/cl",))
     assigned_paths = {
         path.casefold()
         for source in schema_lock.profile_sources
@@ -201,9 +191,6 @@ def test_schema_v3_conversion_admits_and_verifies_extra_runtime_files(
     }
     assert "wine/x86/cl" not in assigned_paths
 
-    # Older migrations sometimes placed support files in ``tools``.  Runtime
-    # projection canonicalizes by profile membership instead of trusting that
-    # historical bucket choice.
     extra = schema_lock.runtime_files[-1]
     mixed_schema = schema_lock.model_copy(
         update={
@@ -211,21 +198,8 @@ def test_schema_v3_conversion_admits_and_verifies_extra_runtime_files(
             "runtime_files": schema_lock.runtime_files[:-1],
         }
     )
-    projected = ToolchainLock.from_schema_v3(mixed_schema)
-
-    assert {item.path for item in projected.files} == set(
-        toolchain.profile.required_producers
-    )
-    assert "wine/x86/cl" in {item.path for item in projected.runtime_files}
-    assert toolchain.doctor(projected).ok
-
-    wrapper.write_bytes(b"changed wrapper")
-    report = toolchain.doctor(projected)
-    assert not report.ok
-    assert any(
-        check.path == "wine/x86/cl" and check.detail == "runtime digest differs"
-        for check in report.checks
-    )
+    with pytest.raises(ToolchainError, match="tools contain non-producer"):
+        validate_toolchain_lock(mixed_schema)
 
 
 def test_locked_wrapper_cannot_claim_an_extra_profile_source(tmp_path: Path) -> None:
@@ -233,24 +207,13 @@ def test_locked_wrapper_cannot_claim_an_extra_profile_source(tmp_path: Path) -> 
     wrapper = toolchain.host_path("wine/x86/cl")
     wrapper.parent.mkdir(parents=True)
     wrapper.write_bytes(b"pinned wrapper")
-    runtime_lock = toolchain.create_lock(runtime_paths=("wine/x86/cl",))
+    schema_lock = toolchain.create_lock(runtime_paths=("wine/x86/cl",))
     extra_source = ToolchainSourcePin(
         "https://example.invalid/unreviewed-wrapper.git",
         "f" * 40,
         ("wine/x86/cl",),
     )
 
-    with pytest.raises(ValueError, match="profile-source assignment set differs"):
-        ToolchainLock(
-            runtime_lock.schema,
-            runtime_lock.profile,
-            (*runtime_lock.profile_sources, extra_source),
-            runtime_lock.files,
-            runtime_lock.tree_digests,
-            runtime_lock.runtime_files,
-        )
-
-    schema_lock = runtime_lock.to_schema_v3()
     overclaimed = schema_lock.model_copy(
         update={
             "profile_sources": (
@@ -264,12 +227,12 @@ def test_locked_wrapper_cannot_claim_an_extra_profile_source(tmp_path: Path) -> 
         }
     )
     with pytest.raises(ToolchainError, match="profile-source assignment set differs"):
-        ToolchainLock.from_schema_v3(overclaimed)
+        validate_toolchain_lock(overclaimed)
 
 
-def test_schema_v3_conversion_rejects_missing_required_producer(tmp_path: Path) -> None:
+def test_toolchain_lock_rejects_missing_required_producer(tmp_path: Path) -> None:
     toolchain = fake_installation(tmp_path, MSVC_42)
-    schema_lock = toolchain.create_lock().to_schema_v3()
+    schema_lock = toolchain.create_lock()
     omitted_path = schema_lock.tools[0].path.casefold()
     incomplete = schema_lock.model_copy(
         update={
@@ -290,14 +253,14 @@ def test_schema_v3_conversion_rejects_missing_required_producer(tmp_path: Path) 
     )
 
     with pytest.raises(ToolchainError, match="omits required producers"):
-        ToolchainLock.from_schema_v3(incomplete)
+        validate_toolchain_lock(incomplete)
 
 
-def test_schema_v3_conversion_rejects_missing_required_runtime_file(
+def test_toolchain_lock_rejects_missing_required_runtime_file(
     tmp_path: Path,
 ) -> None:
     toolchain = fake_installation(tmp_path, MSVC_42)
-    schema_lock = toolchain.create_lock().to_schema_v3()
+    schema_lock = toolchain.create_lock()
     omitted_path = schema_lock.runtime_files[0].path.casefold()
     incomplete = schema_lock.model_copy(
         update={
@@ -318,16 +281,16 @@ def test_schema_v3_conversion_rejects_missing_required_runtime_file(
     )
 
     with pytest.raises(ToolchainError, match="omits required runtime files"):
-        ToolchainLock.from_schema_v3(incomplete)
+        validate_toolchain_lock(incomplete)
 
 
-def test_schema_v3_conversion_rejects_profile_release_disagreement(tmp_path: Path) -> None:
+def test_toolchain_lock_rejects_profile_release_disagreement(tmp_path: Path) -> None:
     toolchain = fake_installation(tmp_path, MSVC_42)
-    schema_lock = toolchain.create_lock().to_schema_v3()
+    schema_lock = toolchain.create_lock()
     mismatched = schema_lock.model_copy(update={"release": MsvcRelease.V5_RTM})
 
     with pytest.raises(ToolchainError, match="release differs"):
-        ToolchainLock.from_schema_v3(mismatched)
+        validate_toolchain_lock(mismatched)
 
 
 def test_create_lock_requires_declared_runtime_file_to_exist(tmp_path: Path) -> None:
@@ -341,7 +304,7 @@ def test_runtime_receipt_with_unknown_tool_is_still_separately_pinned(
     tmp_path: Path,
 ) -> None:
     toolchain = fake_installation(tmp_path, MSVC_42)
-    schema_lock = toolchain.create_lock().to_schema_v3()
+    schema_lock = toolchain.create_lock()
     support = toolchain.host_path("bin/CL.ERR")
     support.write_bytes(b"diagnostic catalog")
     extra = LockedTool(
@@ -355,27 +318,34 @@ def test_runtime_receipt_with_unknown_tool_is_still_separately_pinned(
         update={"runtime_files": (*schema_lock.runtime_files, extra)}
     )
 
-    runtime_lock = ToolchainLock.from_schema_v3(schema_lock)
-
-    assert toolchain.doctor(runtime_lock).ok
+    validate_toolchain_lock(schema_lock)
+    assert toolchain.doctor(schema_lock).ok
 
 
 def test_doctor_rejects_a_lock_with_an_unpinned_producer(tmp_path: Path) -> None:
     toolchain = fake_installation(tmp_path, MSVC_42)
     original = toolchain.create_lock()
-    incomplete = ToolchainLock(
-        original.schema,
-        original.profile,
-        profile_source_pins_for_paths(
-            toolchain.profile, (item.path for item in original.files[:-1])
-        ),
-        original.files[:-1],
+    omitted_path = original.tools[0].path.casefold()
+    incomplete = original.model_copy(
+        update={
+            "tools": original.tools[1:],
+            "profile_sources": tuple(
+                source.model_copy(
+                    update={
+                        "paths": tuple(
+                            path for path in source.paths if path.casefold() != omitted_path
+                        )
+                    }
+                )
+                for source in original.profile_sources
+            ),
+        }
     )
 
     report = toolchain.doctor(incomplete)
 
     assert not report.ok
-    assert any(check.path == "lock.files" and not check.passed for check in report.checks)
+    assert any(check.path == "lock.tools" and not check.passed for check in report.checks)
 
 
 def test_portable_tree_receipts_ignore_physical_roots_and_host_modes(
@@ -389,8 +359,8 @@ def test_portable_tree_receipts_ignore_physical_roots_and_host_modes(
         second.host_path("include").chmod(0o755)
         second.host_path("include/fixture.dat").chmod(0o600)
 
-    first_receipts = first.create_lock().tree_digests
-    second_receipts = second.create_lock().tree_digests
+    first_receipts = first.create_lock().input_trees
+    second_receipts = second.create_lock().input_trees
 
     assert first_receipts == second_receipts
     assert {item.algorithm for item in first_receipts} == {"portable-tree-v1"}
@@ -434,7 +404,7 @@ def test_portable_tree_receipt_does_not_use_cached_scandir_identity(
         lambda directory: IncompleteIdentityScan(Path(directory)),
     )
 
-    assert toolchain.create_lock().tree_digests
+    assert toolchain.create_lock().input_trees
 
 
 def test_portable_tree_receipt_rejects_windows_reparse_metadata(

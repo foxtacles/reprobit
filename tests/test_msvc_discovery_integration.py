@@ -56,6 +56,7 @@ def test_msvc42_discovery_cold_resume_and_one_cell_extension(
         "--format",
         "ndjson",
         "discover",
+        "run",
         os.fspath(tmp_path / "campaign.json"),
         "--toolchain-root",
         os.fspath(root),
@@ -92,8 +93,8 @@ def test_msvc42_discovery_cold_resume_and_one_cell_extension(
         (tmp_path / "campaign.report.json").read_bytes()
     )
     extended_command = list(base_command)
-    extended_command[3] = os.fspath(tmp_path / "campaign-extended.json")
-    extended_command[9] = "campaign-extended.report.json"
+    extended_command[4] = os.fspath(tmp_path / "campaign-extended.json")
+    extended_command[10] = "campaign-extended.report.json"
     assert main(extended_command) == 0
     capsys.readouterr()
     extended = DiscoveryCampaignReport.model_validate_json(

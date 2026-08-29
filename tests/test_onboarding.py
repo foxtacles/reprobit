@@ -65,12 +65,10 @@ def test_setup_requires_init_first(
     assert "rbit init" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("command_name", ("provision", "install"))
 def test_toolchain_provision_has_a_short_human_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
-    command_name: str,
 ) -> None:
     destination = tmp_path / "installed"
 
@@ -84,7 +82,7 @@ def test_toolchain_provision_has_a_short_human_command(
         main(
             [
                 "toolchain",
-                command_name,
+                "provision",
                 "--destination",
                 str(destination),
                 "--no-save",
@@ -95,4 +93,3 @@ def test_toolchain_provision_has_a_short_human_command(
     rendered = capsys.readouterr().out
     assert f"Compiler ready at {destination}" in rendered
     assert "Next: rbit setup" in rendered
-

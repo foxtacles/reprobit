@@ -55,15 +55,10 @@ def _bundle(project_root: Path) -> ProjectBundle:
     build_plan = BuildPlanDocument(
         schema_version=3,
         source_manifest_digest=Digest.from_bytes(b"source"),
-        phase=None,
         translation_units=(),
         source_overlay_digest=Digest.from_bytes(b"overlay"),
         source_overlay_interventions=(),
         archives=(),
-        terminal_producers={},
-        execution_backends={},
-        toolchain_policy={},
-        target_policies=[],
         target_gates=(),
     )
     return ProjectBundle.model_construct(

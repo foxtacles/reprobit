@@ -30,6 +30,19 @@ to guess. It canonicalizes stable IDs, separates interventions from committed
 expectations, shards translation-unit records, and validates the resulting tree
 in a temporary directory.
 
+The new build plan keeps only authority used by the current runtime. Legacy
+phase labels, backend sketches, target-policy summaries, per-TU command policy,
+and completion receipts are not copied. Reccmp row pins remain in the typed
+oracle documents. A TU mode survives only as an explicit `group_order.operation`
+when that TU actually declares a COMDAT group-order transform. From the old link
+record, only analysis link options and digest-pinned project SDK libraries enter
+the build plan.
+
+Old `member_probe` generators omitted their C++ return type. During conversion,
+ReproBit derives that type from the pinned clean declarations and writes an
+explicit `return_type` into every migrated generator. Current builds read only
+that self-contained record; they do not carry a project-wide overlay dialect.
+
 Legacy fields named as bytes, payloads, oracle/reference paths, scripts,
 callables, Python, or templates cannot enter a clean recipe. The converter
 stores only a digest redaction in the expectation receipt. A fresh adapter must
@@ -78,10 +91,6 @@ Those five files are the complete portable MSVC 4.2 runtime set on POSIX.
 `wine/x86/msvcenv.sh` helps CMake configure the one-time migration tree, but
 normal ReproBit builds do not execute it. The provisioner authenticates that
 helper; the portable runtime lock deliberately does not include it.
-
-The lock format is pre-release in `0.1.0.dev0`; regenerate existing development
-locks with `rbit toolchain lock`. The command replaces an old lock without first
-loading it as a valid project tree.
 
 The migrated project uses a committed direct producer graph. Materialize the
 reviewed effective source tree, configure one ignored CMake Unix Makefiles tree

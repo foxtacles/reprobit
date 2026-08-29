@@ -22,7 +22,7 @@ def cost_class_label(value: CostClass) -> str:
         CostClass.LINK_ORDERING: "Link ordering",
         CostClass.EQUAL_BODY_DONOR: "Equal-body donor",
         CostClass.STRUCTURAL_DONOR: "Structural donor",
-        CostClass.CROSS_TU_OR_OVERLAY: "Cross-TU or overlay",
+        CostClass.CROSS_TU_OR_OVERLAY: "Cross TU or Overlay",
         CostClass.SEMANTIC_REWRITE: "Semantic rewrite",
         CostClass.BINARY_SURGERY: "Binary surgery",
         CostClass.ORACLE_INSTALL: "Oracle install",

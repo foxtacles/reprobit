@@ -11,7 +11,7 @@ from contextlib import ExitStack, nullcontext
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path, PureWindowsPath
-from threading import Lock
+from threading import Barrier, Event, Lock
 from types import MappingProxyType, SimpleNamespace
 from typing import cast
 
@@ -81,6 +81,7 @@ from reprobit.schema import (
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ClassicRecipeRole,
+    ClassicSdkArchiveAuthority,
     ClassicTranslationUnitPlan,
     InterventionDocument,
     LegacyOracleInstallIntervention,
@@ -177,15 +178,10 @@ def _prepare_bundle(project_root: Path) -> ProjectBundle:
     build_plan = BuildPlanDocument(
         schema_version=3,
         source_manifest_digest=Digest.from_bytes(b"source"),
-        phase=None,
         translation_units=(),
         source_overlay_digest=Digest.from_bytes(b"overlay"),
         source_overlay_interventions=(),
         archives=(),
-        terminal_producers={},
-        execution_backends={},
-        toolchain_policy={},
-        target_policies=[],
         target_gates=(),
     )
     return ProjectBundle.model_construct(
@@ -210,7 +206,6 @@ def test_prepared_unit_binds_only_the_exact_msvc42_win32_i386_target(
         build_target="program",
         source="unit.cpp",
         source_digest=Digest.from_bytes(source),
-        mode="fixture",
     )
     document = InterventionDocument(
         schema_version=3,
@@ -550,7 +545,6 @@ def test_compiler_translation_unit_authority_rejects_wrong_or_shared_target(
         build_target="lib",
         source="shared.cpp",
         source_digest=Digest.from_bytes(b"shared source"),
-        mode="fixture",
     )
     base = _prepare_bundle(tmp_path)
     assert base.build_plan is not None
@@ -623,7 +617,6 @@ def test_compiler_and_rdata_authorities_stop_at_upstream_linker_boundary(
         build_target="lib",
         source="shared.cpp",
         source_digest=Digest.from_bytes(b"shared source"),
-        mode="fixture",
     )
     base = _prepare_bundle(tmp_path)
     assert base.build_plan is not None
@@ -725,7 +718,6 @@ def test_prepare_classic_units_rejects_invalid_temporary_legacy_shape(
         build_target="program",
         source="unit.cpp",
         source_digest=Digest.from_bytes(b"unit source"),
-        mode="fixture",
     )
     donor = ClassicRecipeIntervention(
         id="donor.legacy",
@@ -853,7 +845,6 @@ def test_cold_rdata_authority_rejects_before_runtime_setup(
                 build_target="app",
                 source="shared.cpp",
                 source_digest=Digest.from_bytes(b"source"),
-                mode="fixture",
             ),
         )
         if planned_lane
@@ -997,7 +988,6 @@ def test_shared_rdata_authority_closes_canonical_object_dataflow(
             build_target="app",
             source=source,
             source_digest=Digest.from_bytes(source.encode()),
-            mode="fixture",
         )
         for index, source in enumerate(("app.cpp",))
     )
@@ -1164,8 +1154,8 @@ def test_prepare_failure_releases_logical_drive_and_uses_stable_temporary(
     toolchain_root = tmp_path / "toolchain"
     toolchain_root.mkdir()
     graph = ProducerGraphDocument(
-        schema_version=1,
-        source_manifest_digest=Digest.from_bytes(b"source"),
+        schema_version=2,
+        source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-unix-makefiles-v1",
@@ -1229,11 +1219,6 @@ def test_prepare_failure_releases_logical_drive_and_uses_stable_temporary(
         def require_ok() -> None:
             return None
 
-    class RuntimeLock:
-        @staticmethod
-        def from_schema_v3(lock: object) -> object:
-            return lock
-
     class Installation:
         def __init__(self, profile: str, root: Path, *, logical_root: str) -> None:
             del profile
@@ -1278,7 +1263,6 @@ def test_prepare_failure_releases_logical_drive_and_uses_stable_temporary(
         "reprobit.classic_runtime_environment.shutil.which",
         lambda name: pytest.fail(f"runtime attempted build-system discovery: {name}"),
     )
-    monkeypatch.setattr(classic_runtime_preparation, "ToolchainLock", RuntimeLock)
     monkeypatch.setattr(classic_runtime_preparation, "materialize_effective_workspace", materialize)
 
     def project_toolchain(*args: object, **kwargs: object) -> tuple[()]:
@@ -1406,33 +1390,29 @@ def _source_sdk_library_fixture(
         outputs=("build/APP.EXE",),
     )
     graph = ProducerGraphDocument(
-        schema_version=1,
-        source_manifest_digest=Digest.from_bytes(b"source"),
+        schema_version=2,
+        source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-unix-makefiles-v1",
         nodes=(node,),
     )
     bundle = _prepare_bundle(tmp_path)
-    terminal_producers: object = (
-        {
-            "link": {
-                "project_sdk_libraries": [
-                    {
-                        "path": "sdk/ddraw.lib",
-                        "sha256": Digest.from_bytes(sdk_payload).value,
-                    }
-                ]
-            }
-        }
+    project_sdk_libraries = (
+        (
+            ClassicSdkArchiveAuthority(
+                path="sdk/ddraw.lib",
+                sha256=Digest.from_bytes(sdk_payload).value,
+            ),
+        )
         if authorize
-        else {}
+        else ()
     )
     assert bundle.build_plan is not None
     bundle = bundle.model_copy(
         update={
             "build_plan": bundle.build_plan.model_copy(
-                update={"terminal_producers": terminal_producers}
+                update={"project_sdk_libraries": project_sdk_libraries}
             ),
             "source_manifest": SourceManifestDocument(
                 schema_version=3,
@@ -1942,8 +1922,8 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
         outputs=("build/obj/Unit.obj", "build/obj/Unit.pdb"),
     )
     graph = ProducerGraphDocument(
-        schema_version=1,
-        source_manifest_digest=Digest.from_bytes(b"source"),
+        schema_version=2,
+        source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-unix-makefiles-v1",
@@ -2115,8 +2095,8 @@ def test_counterfactual_compiler_audit_rejects_a_plan_mismatch(tmp_path: Path) -
     )
     executor = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     executor.graph = ProducerGraphDocument(
-        schema_version=1,
-        source_manifest_digest=Digest.from_bytes(b"source"),
+        schema_version=2,
+        source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-unix-makefiles-v1",
@@ -2225,8 +2205,8 @@ def test_effective_compiler_capture_freezes_raw_products_and_epoch_visibility(
         outputs=("build/carrier.obj", "build/carrier.pdb"),
     )
     graph = ProducerGraphDocument(
-        schema_version=1,
-        source_manifest_digest=Digest.from_bytes(b"source"),
+        schema_version=2,
+        source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-unix-makefiles-v1",
@@ -2385,8 +2365,8 @@ def _link_control_executor(
     )
     executor = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     executor.graph = ProducerGraphDocument(
-        schema_version=1,
-        source_manifest_digest=Digest.from_bytes(b"source"),
+        schema_version=2,
+        source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-unix-makefiles-v1",
@@ -2740,8 +2720,8 @@ def _dependent_link_control_executor(
     linkers = (app_linker, library_linker, tool_linker)
     overlay = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     overlay.graph = ProducerGraphDocument(
-        schema_version=1,
-        source_manifest_digest=Digest.from_bytes(b"source"),
+        schema_version=2,
+        source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-unix-makefiles-v1",
@@ -2882,7 +2862,6 @@ def test_link_control_audit_does_not_borrow_upstream_default_library_edge(
         by_id = {node.id: node for node in replacements}
         return ProducerGraphDocument(
             schema_version=executor.graph.schema_version,
-            source_manifest_digest=executor.graph.source_manifest_digest,
             source_topology_digest=executor.graph.source_topology_digest,
             toolchain_lock_digest=executor.graph.toolchain_lock_digest,
             path_profile_id=executor.graph.path_profile_id,
@@ -2933,8 +2912,8 @@ def test_link_control_audit_requires_final_compiler_ancestry(tmp_path: Path) -> 
         update={"depends_on": tuple(sorted((*app_linker.depends_on, orphan.id), key=str.casefold))}
     )
     executor.graph = ProducerGraphDocument(
-        schema_version=1,
-        source_manifest_digest=executor.graph.source_manifest_digest,
+        schema_version=2,
+        source_topology_digest=executor.graph.source_topology_digest,
         toolchain_lock_digest=executor.graph.toolchain_lock_digest,
         path_profile_id=executor.graph.path_profile_id,
         extractor=executor.graph.extractor,
@@ -3764,7 +3743,6 @@ def _runtime_donor_request(
         files["run.h"] = b"class DonorCarrier {};\n"
     return DonorCompileRequest(
         intervention_id="donor_modern_identity",
-        legacy_recipe_id="d_0123456789ab",
         family=family,
         build_target="program",
         logical_source=source,
@@ -3772,10 +3750,9 @@ def _runtime_donor_request(
         files=MappingProxyType(files),
         logical_outputs=MappingProxyType({source: b"rendered source\n"}),
         compiler_additions=DonorCompilerAdditions(
-            "REQUIRED",
-            ("run.h",) if force_include else (),
-            include_directories,
-            projection,
+            force_includes=("run.h",) if force_include else (),
+            include_directories=include_directories,
+            include_projection=projection,
         ),
         carrier_identifiers=(frozenset({"DonorCarrier"}) if force_include else frozenset()),
         receipt=DonorCompileReceipt(
@@ -3790,7 +3767,7 @@ def _runtime_donor_request(
     )
 
 
-def test_donor_compile_record_selects_declared_cross_target_lane(tmp_path: Path) -> None:
+def test_donor_compile_record_binds_exact_target_source_identity(tmp_path: Path) -> None:
     effective_root = tmp_path / "source"
     source = effective_root / "src/unit.cpp"
     source.parent.mkdir(parents=True)
@@ -3798,7 +3775,7 @@ def test_donor_compile_record_selects_declared_cross_target_lane(tmp_path: Path)
     build_root = tmp_path / "build"
     build_root.mkdir()
 
-    def record(owner: str, define: str) -> classic_runtime_graph.ClassicCompileRecord:
+    def record(owner: str, *options: str) -> classic_runtime_graph.ClassicCompileRecord:
         return classic_runtime_graph.ClassicCompileRecord(
             f"compiler.{owner}.0000",
             build_root,
@@ -3808,7 +3785,7 @@ def test_donor_compile_record_selects_declared_cross_target_lane(tmp_path: Path)
             (
                 "/nologo",
                 "/Zi",
-                f"-D{define}",
+                *options,
                 f"/Fo{build_root / f'{owner}.obj'}",
                 f"/Fd{build_root / f'{owner}.pdb'}",
                 "-c",
@@ -3826,32 +3803,66 @@ def test_donor_compile_record_selects_declared_cross_target_lane(tmp_path: Path)
         intervention=SimpleNamespace(id=request.intervention_id),
         request=request,
     )
-    unit = SimpleNamespace(donors=(donor,))
-    owner_record = record("program", "OWNER_LANE")
-    declared_lane = record("config", "REQUIRED")
+    unit = SimpleNamespace(
+        plan=SimpleNamespace(build_target="program"),
+        donors=(donor,),
+    )
+    owner_record = record("program")
+    other_target = record("config", "-DUNRELATED_MARKER")
     executor = object.__new__(classic_runtime_donor.ClassicDonorComposition)
     executor.effective_root = effective_root
-    executor.compile_records = (owner_record, declared_lane)
+    executor.compile_records = (owner_record, other_target)
 
     selected = executor.record_for_donor(unit, 0)
 
-    assert selected is declared_lane
-    assert selected.node_id == "compiler.config.0000"
-    assert "-DREQUIRED" in selected.arguments
-    assert "-DOWNER_LANE" not in selected.arguments
+    assert selected is owner_record
+    assert selected.node_id == "compiler.program.0000"
+    assert all(not argument.startswith("-D") for argument in selected.arguments)
+
+
+def test_donor_compile_record_rejects_target_outside_its_owning_tu(
+    tmp_path: Path,
+) -> None:
+    effective_root = tmp_path / "source"
+    source = effective_root / "unit.cpp"
+    effective_root.mkdir()
+    source.write_bytes(b"int fixture;\n")
+    request = replace(
+        _runtime_donor_request(
+            source="unit.cpp",
+            projection=DonorIncludeProjection.NONE,
+            force_include=True,
+        ),
+        build_target="other-target",
+    )
+    unit = SimpleNamespace(
+        plan=SimpleNamespace(build_target="program"),
+        donors=(
+            SimpleNamespace(
+                intervention=SimpleNamespace(id=request.intervention_id),
+                request=request,
+            ),
+        ),
+    )
+    executor = object.__new__(classic_runtime_donor.ClassicDonorComposition)
+    executor.effective_root = effective_root
+    executor.compile_records = ()
+
+    with pytest.raises(ClassicProjectError, match="target differs from its owning TU"):
+        executor.record_for_donor(unit, 0)
 
 
 @pytest.mark.parametrize(
-    ("defines", "expected_count"),
+    ("owners", "expected_count"),
     (
-        (("REQUIRED", "REQUIRED"), 2),
-        (("OWNER_LANE",), 0),
+        (("program", "program"), 2),
+        (("config",), 0),
     ),
     ids=("ambiguous", "missing"),
 )
-def test_donor_compile_record_rejects_non_unique_declared_lane(
+def test_donor_compile_record_rejects_non_unique_target_source_identity(
     tmp_path: Path,
-    defines: tuple[str, ...],
+    owners: tuple[str, ...],
     expected_count: int,
 ) -> None:
     effective_root = tmp_path / "source"
@@ -3862,7 +3873,7 @@ def test_donor_compile_record_rejects_non_unique_declared_lane(
     build_root.mkdir()
     records = tuple(
         classic_runtime_graph.ClassicCompileRecord(
-            f"compiler.lane{index}.0000",
+            f"compiler.{owner}.{index:04d}",
             build_root,
             source,
             build_root / f"lane{index}.obj",
@@ -3870,15 +3881,14 @@ def test_donor_compile_record_rejects_non_unique_declared_lane(
             (
                 "/nologo",
                 "/Zi",
-                f"-D{define}",
                 f"/Fo{build_root / f'lane{index}.obj'}",
                 f"/Fd{build_root / f'lane{index}.pdb'}",
                 "-c",
                 str(source),
             ),
-            f"lane{index}",
+            owner,
         )
-        for index, define in enumerate(defines)
+        for index, owner in enumerate(owners)
     )
     request = _runtime_donor_request(
         source="unit.cpp",
@@ -3886,6 +3896,7 @@ def test_donor_compile_record_rejects_non_unique_declared_lane(
         force_include=True,
     )
     unit = SimpleNamespace(
+        plan=SimpleNamespace(build_target="program"),
         donors=(
             SimpleNamespace(
                 intervention=SimpleNamespace(id=request.intervention_id),
@@ -3899,7 +3910,10 @@ def test_donor_compile_record_rejects_non_unique_declared_lane(
 
     with pytest.raises(
         ClassicProjectError,
-        match=rf"{expected_count} committed compile lanes for required define 'REQUIRED'",
+        match=(
+            rf"{expected_count} committed compile lanes for its target/source identity: "
+            r"program/unit.cpp"
+        ),
     ):
         executor.record_for_donor(unit, 0)
 
@@ -3921,7 +3935,7 @@ def test_donor_compile_record_rejects_non_unique_declared_lane(
         "mirror-only-carrier",
     ),
 )
-def test_donor_compiler_command_preserves_legacy_visible_path_contract(
+def test_donor_compiler_command_preserves_committed_visible_path_contract(
     tmp_path: Path,
     source: str,
     projection: DonorIncludeProjection,
@@ -3954,7 +3968,6 @@ def test_donor_compiler_command_preserves_legacy_visible_path_contract(
         (
             "cl",
             "/Zi",
-            "-DREQUIRED",
             r"-IZ:\Users\project\source\include",
             "/I",
             r"Z:\Users\project\source\shared",
@@ -4012,7 +4025,7 @@ def test_donor_compiler_command_preserves_legacy_visible_path_contract(
     assert command[-len(expected_tail) :] == expected_tail
 
 
-def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
+def test_donor_invocation_uses_private_arena_layout_and_relative_outputs(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4044,7 +4057,6 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
         (
             "cl",
             "/Zi",
-            "-DREQUIRED",
             r"-IZ:\Users\project\source\include",
             r"-IZ:\Toolchain\include",
             r"/FoZ:\Users\project\build\unit.obj",
@@ -4060,7 +4072,6 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
         owner="program",
         arguments=(
             "/Zi",
-            "-DREQUIRED",
             "-I${SOURCE}/include",
             "-I${TOOLCHAIN}/include",
             "/Fo${BUILD}/unit.obj",
@@ -4101,8 +4112,8 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
     executor.session_root = session_root
     executor.compile_records = (record,)
     executor.graph = ProducerGraphDocument(
-        schema_version=1,
-        source_manifest_digest=Digest.from_bytes(b"source"),
+        schema_version=2,
+        source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-unix-makefiles-v1",
@@ -4152,7 +4163,7 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
         del timeout, log, cancellation
         assert windows_lineage_planner is None
         captured.append((argv, cwd))
-        assert cwd.name.endswith("-d_0123456789ab")
+        assert cwd.name.endswith("-donor_modern_identity")
         assert (cwd / "s.cpp").read_bytes() == b"rendered source\n"
         assert (cwd / "run.h").read_bytes() == b"class DonorCarrier {};\n"
         assert (cwd / "inc/source/src/unit.cpp").read_bytes() == b"effective source\n"
@@ -4195,7 +4206,7 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
 
     assert len(captured) == 2
     assert captured[0][1] == build_root.parent / "donors" / (
-        "composed-program-owner_unit.cpp-d_0123456789ab"
+        "composed-program-owner_unit.cpp-donor_modern_identity"
     )
     assert captured[0][0][-5:] == (
         "/FIrun.h",
@@ -4331,8 +4342,8 @@ def test_exact_compiler_probe_returns_raw_outputs_and_closes_runtime(
         outputs=("build/unit.obj", "build/unit.pdb"),
     )
     graph = ProducerGraphDocument(
-        schema_version=1,
-        source_manifest_digest=Digest.from_bytes(b"source"),
+        schema_version=2,
+        source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-unix-makefiles-v1",
@@ -4410,9 +4421,28 @@ def test_exact_compiler_probe_returns_raw_outputs_and_closes_runtime(
     assert producer._runtime_open is False
 
 
-def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
+class _DonorProbePool:
+    created_count = 0
+
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _donor_probe_executor(
     tmp_path: Path,
-) -> None:
+    *,
+    donors: tuple[tuple[str, bytes], ...],
+    jobs: int,
+) -> tuple[
+    classic_runtime_developer.ClassicDeveloperExecution,
+    _DonorProbePool,
+    SimpleNamespace,
+    SealedNamespaceSnapshot,
+    Path,
+]:
     source_root = tmp_path / "source"
     source_root.mkdir()
     source = source_root / "unit.cpp"
@@ -4428,21 +4458,13 @@ def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
             ),
         )
 
-    first = prepared_donor("donor.first", b"rendered first\n")
-    second = prepared_donor("donor.second", b"rendered second\n")
+    prepared_donors = tuple(prepared_donor(donor_id, payload) for donor_id, payload in donors)
     unit = SimpleNamespace(
         plan=SimpleNamespace(id="tu.program.unit"),
-        donors=(first, second),
+        donors=prepared_donors,
     )
 
-    class Pool:
-        created_count = 0
-        closed = False
-
-        def close(self) -> None:
-            self.closed = True
-
-    pool = Pool()
+    pool = _DonorProbePool()
     executor = object.__new__(classic_runtime_developer.ClassicDeveloperExecution)
     executor._warm_stack = None
     executor.units = cast(tuple[classic_orchestration.ClassicPreparedUnit, ...], (unit,))
@@ -4455,6 +4477,7 @@ def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
     producer._runtime_open = True
     producer._mode = None
     producer._lane_pool = cast(classic_runtime_environment._LazyExecutionLanePool, pool)
+    producer.jobs = jobs
     executor.producer = producer
     empty_snapshot = SealedNamespaceSnapshot(())
     producer.authority_namespace_lease = lambda: nullcontext(  # type: ignore[method-assign]
@@ -4470,7 +4493,24 @@ def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
     )
     producer.include_authority = lambda: object()  # type: ignore[method-assign]
 
+    return executor, pool, unit, empty_snapshot, source
+
+
+def test_exact_donor_probe_runs_in_parallel_with_stable_output_and_progress(
+    tmp_path: Path,
+) -> None:
+    executor, pool, _unit, empty_snapshot, source = _donor_probe_executor(
+        tmp_path,
+        donors=(
+            ("donor.first", b"rendered first\n"),
+            ("donor.second", b"rendered second\n"),
+        ),
+        jobs=2,
+    )
+
     invoked: list[str] = []
+    invocation_lock = Lock()
+    both_started = Barrier(2)
 
     def invoke(
         supervisor: ProcessSupervisor,
@@ -4483,7 +4523,9 @@ def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
     ) -> classic_runtime_donor._DonorCompilerInvocation:
         del supervisor, cancellation, compiler_epoch
         donor = unit_arg.donors[donor_index]
-        invoked.append(donor.intervention.id)
+        with invocation_lock:
+            invoked.append(donor.intervention.id)
+        both_started.wait(timeout=5)
         object_payload = f"object:{donor.intervention.id}".encode()
         pdb_payload = f"pdb:{donor.intervention.id}".encode()
         record = classic_runtime_graph.ClassicCompileRecord(
@@ -4509,11 +4551,23 @@ def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
         )
 
     executor.donors = SimpleNamespace(invoke_donor_compiler=invoke)
+    progress: list[tuple[int, int, str]] = []
 
-    outputs = executor.probe_donor_compilers(("donor.second", "donor.first"))
+    outputs = executor.probe_donor_compilers(
+        ("donor.second", "donor.first"),
+        progress=lambda completed, total, donor_id: progress.append((completed, total, donor_id)),
+    )
 
-    assert invoked == ["donor.second", "donor.first"]
+    assert set(invoked) == {"donor.first", "donor.second"}
     assert [item.donor_id for item in outputs] == ["donor.second", "donor.first"]
+    assert [(completed, total) for completed, total, _donor_id in progress] == [
+        (1, 2),
+        (2, 2),
+    ]
+    assert {donor_id for _completed, _total, donor_id in progress} == {
+        "donor.first",
+        "donor.second",
+    }
     assert outputs[0].translation_unit_id == "tu.program.unit"
     assert outputs[0].source_reference == "unit.cpp"
     assert outputs[0].producer_node_id == "compiler.program.0000"
@@ -4530,7 +4584,59 @@ def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
     assert outputs[0].object_digest == Digest.from_bytes(outputs[0].object_payload)
     assert outputs[0].pdb_digest == Digest.from_bytes(outputs[0].pdb_payload)
     assert pool.closed is True
-    assert producer._runtime_open is False
+    assert executor.producer._runtime_open is False
+
+
+def test_donor_probe_failure_cancels_active_sibling_without_replenishing(
+    tmp_path: Path,
+) -> None:
+    executor, pool, _unit, _empty_snapshot, _source = _donor_probe_executor(
+        tmp_path,
+        donors=(
+            ("donor.waiting", b"waiting\n"),
+            ("donor.failure", b"failure\n"),
+            ("donor.unstarted", b"unstarted\n"),
+        ),
+        jobs=2,
+    )
+    invoked: list[str] = []
+    invocation_lock = Lock()
+    both_started = Barrier(2)
+    cancellation_observed = Event()
+
+    def invoke(
+        supervisor: ProcessSupervisor,
+        unit_arg: SimpleNamespace,
+        donor_index: int,
+        cancellation: CancellationToken,
+        *,
+        step_id: str,
+        compiler_epoch: classic_runtime_overlay.ClassicActiveCompilerEpoch,
+    ) -> classic_runtime_donor._DonorCompilerInvocation:
+        del supervisor, step_id, compiler_epoch
+        donor_id = unit_arg.donors[donor_index].intervention.id
+        with invocation_lock:
+            invoked.append(donor_id)
+        both_started.wait(timeout=5)
+        if donor_id == "donor.failure":
+            raise RuntimeError("deliberate donor failure")
+        assert donor_id == "donor.waiting"
+        for _ in range(500):
+            if cancellation.cancelled:
+                cancellation_observed.set()
+                cancellation.raise_if_cancelled()
+            cancellation_observed.wait(0.01)
+        raise AssertionError("probe sibling did not observe cancellation")
+
+    executor.donors = SimpleNamespace(invoke_donor_compiler=invoke)
+
+    with pytest.raises(RuntimeError, match="deliberate donor failure"):
+        executor.probe_donor_compilers(("donor.waiting", "donor.failure", "donor.unstarted"))
+
+    assert cancellation_observed.is_set()
+    assert set(invoked) == {"donor.waiting", "donor.failure"}
+    assert pool.closed is True
+    assert executor.producer._runtime_open is False
 
 
 def test_donor_probe_rejects_unprepared_id_and_still_closes_runtime(tmp_path: Path) -> None:

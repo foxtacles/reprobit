@@ -68,9 +68,8 @@ If only the manifest binding changed, run `rbit source lock --project .`; add
 `rbit graph extract` with the configured build, effective source, and toolchain
 roots described in [CMake migration integration](cmake.md). With a graph-v2
 document, ordinary byte edits at existing admitted paths do not require that
-invalidation; additions and removals do. Convert a current valid v1 graph once
-with `rbit graph upgrade --project .`. If preview says authority regeneration is
-required, do
+invalidation; additions and removals do. If preview says authority regeneration
+is required, do
 not edit the old digest or rerun lock to bless it. Regenerate the affected TU,
 intervention, and proof documents with the adapter and publish them only after
 their zero-loss and literal gates pass together.

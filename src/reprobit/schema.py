@@ -475,21 +475,6 @@ class CrossTuDonorIntervention(InterventionBase):
     donor_symbol: Annotated[str, Field(min_length=1, max_length=2048)]
 
 
-class OverlayOperation(StrEnum):
-    INSERT = "insert"
-    DELETE = "delete"
-    REPLACE = "replace"
-    APPEND = "append"
-
-
-class SourceOverlayIntervention(InterventionBase):
-    kind: Literal["source_overlay"] = "source_overlay"
-    generator: OverlayOperation
-    anchor: Identifier
-    operation_count: Annotated[int, Field(gt=0)]
-    operation_digest: Digest
-
-
 class SemanticRewriteMethod(StrEnum):
     REGISTER_BIJECTION = "register_bijection"
     SCHEDULING = "scheduling"
@@ -773,7 +758,6 @@ Intervention: TypeAlias = Annotated[
     | EqualBodyDonorIntervention
     | StructuralDonorIntervention
     | CrossTuDonorIntervention
-    | SourceOverlayIntervention
     | SemanticRewriteIntervention
     | BinarySurgeryIntervention
     | ClassicRecipeIntervention
@@ -857,6 +841,31 @@ class ClassicProofReceipt(StrictModel):
         return self
 
 
+ClassicGroupOrderSymbol: TypeAlias = Annotated[
+    str,
+    Field(min_length=1, max_length=2048, pattern=r"^[^\x00]+$"),
+]
+ClassicGroupOrder: TypeAlias = Annotated[
+    tuple[ClassicGroupOrderSymbol, ...],
+    Field(min_length=2, max_length=512),
+]
+
+
+class ClassicGroupOrderPlan(StrictModel):
+    """One explicit COMDAT group-order transform applied after composition."""
+
+    operation: Literal["restore_comdat_group_order", "swap_comdat_group_order"]
+    orders: Annotated[tuple[ClassicGroupOrder, ...], Field(min_length=1, max_length=512)]
+
+    @field_validator("orders")
+    @classmethod
+    def validate_orders(cls, value: tuple[tuple[str, ...], ...]) -> tuple[tuple[str, ...], ...]:
+        for order in value:
+            if len(order) != len(set(order)):
+                raise ValueError("COMDAT group-order symbols must be unique within each order")
+        return value
+
+
 class ClassicTranslationUnitPlan(StrictModel):
     """Reviewed translation-unit binding whose source digest pins effective bytes."""
 
@@ -865,9 +874,7 @@ class ClassicTranslationUnitPlan(StrictModel):
     build_target: BuildTarget
     source: RelativePath
     source_digest: Digest
-    mode: Annotated[str, Field(min_length=1, max_length=128)]
-    command_policy: NativeJsonValue = None
-    group_order: NativeJsonValue = None
+    group_order: ClassicGroupOrderPlan | None = None
 
     @field_validator("source")
     @classmethod
@@ -878,9 +885,6 @@ class ClassicTranslationUnitPlan(StrictModel):
 class ClassicTargetGate(StrictModel):
     target_id: Identifier
     build_target: BuildTarget
-    required_row_count: Annotated[int, Field(ge=0)] | None = None
-    row_identity_digest: Digest | None = None
-    completion: NativeJsonValue
 
 
 class ClassicArchiveCompletion(StrictModel):
@@ -975,17 +979,8 @@ class ClassicSdkArchiveAuthority(StrictModel):
         return checked
 
 
-class ClassicAnalysisLinkPolicy(StrictModel):
-    """Closed options admitted only for a non-certifying analysis relink."""
-
-    analysis_added_options: Annotated[
-        list[Literal["/DEBUG"]],
-        Field(min_length=1, max_length=1),
-    ]
-
-
 class BuildPlanDocument(StrictModel):
-    """Typed migration carrier for build inputs not owned by recipe shards.
+    """Declarative build authority not owned by intervention or proof shards.
 
     ``source_overlay_interventions`` names project-level ``source_overlay_graph``
     authority.  It does not admit donor-private ``donor_source_overlay`` recipes to
@@ -994,16 +989,12 @@ class BuildPlanDocument(StrictModel):
 
     schema_version: Literal[3]
     source_manifest_digest: Digest
-    migration_source_digest: Digest | None = None
-    phase: NativeJsonValue
     translation_units: tuple[ClassicTranslationUnitPlan, ...]
     source_overlay_digest: Digest
     source_overlay_interventions: tuple[Identifier, ...]
     archives: tuple[ClassicArchiveAuthority, ...]
-    terminal_producers: NativeJsonValue
-    execution_backends: NativeJsonValue
-    toolchain_policy: NativeJsonValue
-    target_policies: NativeJsonValue
+    analysis_link_options: Annotated[tuple[Literal["/DEBUG"], ...], Field(max_length=1)] = ()
+    project_sdk_libraries: tuple[ClassicSdkArchiveAuthority, ...] = ()
     target_gates: tuple[ClassicTargetGate, ...]
 
     @model_validator(mode="after")
@@ -1016,67 +1007,21 @@ class BuildPlanDocument(StrictModel):
         _require_unique(archive_identities, "archive identity")
         _require_unique(archive_targets, "archive imported target")
         _require_unique(archive_sources, "archive source")
-        sdk_sources = {
-            item.path.casefold() for item in project_sdk_archive_authorities(self)
-        }
-        overlap = sdk_sources & set(archive_sources)
+        sdk_source_list = [item.path.casefold() for item in self.project_sdk_libraries]
+        _require_unique(sdk_source_list, "project SDK archive path")
+        overlap = set(sdk_source_list) & set(archive_sources)
         if overlap:
             raise ValueError(
                 f"archive paths cannot hold two authority classes: {sorted(overlap)}"
             )
         return self
 
-
-def project_sdk_archive_authorities(
-    plan: BuildPlanDocument,
-) -> tuple[ClassicSdkArchiveAuthority, ...]:
-    """Parse the only terminal-producer field that grants source archive authority."""
-
-    terminal = plan.terminal_producers
-    if not isinstance(terminal, dict):
-        raise ValueError("build-plan terminal producers must be an object")
-    raw_link = terminal.get("link")
-    if raw_link is None:
-        return ()
-    if not isinstance(raw_link, dict):
-        raise ValueError("build-plan terminal link policy must be an object")
-    raw_archives = raw_link.get("project_sdk_libraries", [])
-    if not isinstance(raw_archives, list):
-        raise ValueError("project SDK library authority must be an array")
-    authorities = tuple(
-        ClassicSdkArchiveAuthority.model_validate_json(canonical_json(item))
-        for item in raw_archives
-    )
-    folded = [item.path.casefold() for item in authorities]
-    _require_unique(folded, "project SDK archive path")
-    return authorities
-
-
-def classic_analysis_link_options(plan: BuildPlanDocument) -> tuple[str, ...]:
-    """Return the explicitly authorized, closed analysis-only linker options."""
-
-    terminal = plan.terminal_producers
-    if not isinstance(terminal, dict):
-        raise ValueError("build-plan terminal producers must be an object")
-    raw_link = terminal.get("link")
-    if raw_link is None:
-        return ()
-    if not isinstance(raw_link, dict):
-        raise ValueError("build-plan terminal link policy must be an object")
-    if "analysis_added_options" not in raw_link:
-        return ()
-    policy = ClassicAnalysisLinkPolicy.model_validate(
-        {"analysis_added_options": raw_link["analysis_added_options"]}
-    )
-    return tuple(policy.analysis_added_options)
-
-
 def classic_analysis_pdb_paths(bundle: ProjectBundle) -> tuple[tuple[str, str], ...]:
     """Derive analysis PDB outputs without admitting protected project paths."""
 
     if bundle.build_plan is None:
         return ()
-    if not classic_analysis_link_options(bundle.build_plan):
+    if not bundle.build_plan.analysis_link_options:
         return ()
     if bundle.source_manifest is None:
         raise ValueError("analysis PDB outputs require a complete source manifest")
@@ -1326,7 +1271,7 @@ class ProjectBundle(StrictModel):
                         f"quarantine archive digest differs from source authority: "
                         f"{archive.source!r}"
                     )
-            for sdk_archive in project_sdk_archive_authorities(self.build_plan):
+            for sdk_archive in self.build_plan.project_sdk_libraries:
                 source_entry = manifest_entries.get(sdk_archive.path.casefold())
                 if source_entry is None:
                     raise ValueError(
@@ -1343,7 +1288,6 @@ class ProjectBundle(StrictModel):
                 raise ValueError("producer graph requires a portable source manifest")
             if not producer_graph_accepts_source(
                 self.producer_graph,
-                manifest_digest=source_manifest_digest(self.source_manifest),
                 paths=(item.path for item in self.source_manifest.entries),
             ):
                 raise ValueError("producer graph source-authority binding differs")
@@ -1786,11 +1730,13 @@ __all__ = [
     "BinarySurgeryMethod",
     "BuildPlanDocument",
     "ClassicField",
+    "ClassicGroupOrderPlan",
     "ClassicProofReceipt",
     "ClassicProofRedaction",
     "ClassicRecipeFamily",
     "ClassicRecipeIntervention",
     "ClassicRecipeRole",
+    "ClassicSdkArchiveAuthority",
     "ClassicTargetGate",
     "ClassicTranslationUnitPlan",
     "CommandBuildAdapter",
@@ -1813,7 +1759,6 @@ __all__ = [
     "OracleDocument",
     "OracleFunction",
     "OracleInstallRange",
-    "OverlayOperation",
     "ProducerGraphBuildAdapter",
     "ProjectBundle",
     "ProjectSpec",
@@ -1824,7 +1769,6 @@ __all__ = [
     "SemanticRewriteMethod",
     "SourceManifestDocument",
     "SourceManifestEntry",
-    "SourceOverlayIntervention",
     "StateCarrierIntervention",
     "StructuralDonorIntervention",
     "StructuralMode",
@@ -1833,7 +1777,6 @@ __all__ = [
     "ToolchainProfileSource",
     "ToolchainRef",
     "VerifierSpec",
-    "classic_analysis_link_options",
     "classic_analysis_pdb_paths",
     "legacy_allowlist_digest",
     "project_document_schemas",

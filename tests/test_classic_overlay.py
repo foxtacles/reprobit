@@ -11,16 +11,15 @@ import pytest
 
 from reprobit.artifacts import digest_bytes
 from reprobit.classic_overlay import (
-    ClassicOverlayDialect,
     ClassicOverlayRenderSession,
-    infer_classic_overlay_dialect,
+    SourceEditError,
     render_classic_overlay,
     render_classic_overlay_declarations,
     render_classic_overlay_generator,
     render_classic_overlay_leaf_subset,
     render_classic_overlay_subset,
 )
-from reprobit.source import SourceEditError
+from reprobit.migration_overlay import normalize_legacy_member_probe_return_types
 
 
 def _seat_digest(tokens: list[str]) -> str:
@@ -291,7 +290,7 @@ def test_path_casefold_collisions_are_rejected() -> None:
         )
 
 
-def test_legacy_implicit_probe_type_requires_an_explicit_dialect() -> None:
+def test_member_probe_requires_an_explicit_return_type() -> None:
     generator: dict[str, object] = {
         "k": "member_probe",
         "arguments": [{"kind": "integer", "value": 0}],
@@ -301,12 +300,10 @@ def test_legacy_implicit_probe_type_requires_an_explicit_dialect() -> None:
         "receiver_type": "Bitmap",
     }
 
-    with pytest.raises(SourceEditError, match="ClassicOverlayDialect"):
+    with pytest.raises(SourceEditError, match="fields differ"):
         render_classic_overlay_generator(generator)
-    rendered = render_classic_overlay_generator(
-        generator,
-        dialect=ClassicOverlayDialect(qualified_member_probe_return_type="long"),
-    )
+    generator["return_type"] = "long"
+    rendered = render_classic_overlay_generator(generator)
     assert b"long Probe(Bitmap* p_bitmap)" in rendered
 
 
@@ -345,23 +342,17 @@ def _probe_document() -> dict[str, object]:
     }
 
 
-def test_member_probe_dialect_is_inferred_and_locked_from_clean_declarations() -> None:
+def test_legacy_member_probe_type_is_normalized_from_clean_declarations() -> None:
     document = _probe_document()
     sources = {"include/widget.h": b"class Widget { public: virtual int Probe(int); };\n"}
 
-    inferred = infer_classic_overlay_dialect(document, sources)
+    normalized = normalize_legacy_member_probe_return_types(document, sources)
 
-    assert inferred == ClassicOverlayDialect(qualified_member_probe_return_type="int")
-    assert infer_classic_overlay_dialect(document, sources, locked_dialect=inferred) == inferred
-    with pytest.raises(SourceEditError, match="locked classic overlay dialect differs"):
-        infer_classic_overlay_dialect(
-            document,
-            sources,
-            locked_dialect=ClassicOverlayDialect(qualified_member_probe_return_type="long"),
-        )
+    generator = normalized["outputs"][0]["ops"][0]["gen"]  # type: ignore[index]
+    assert generator["return_type"] == "int"
 
 
-def test_member_probe_dialect_inference_rejects_ambiguous_declarations() -> None:
+def test_legacy_member_probe_normalization_rejects_ambiguous_declarations() -> None:
     document = _probe_document()
     sources = {
         "include/first.h": b"class Widget { public: virtual int Probe(int); };\n",
@@ -369,7 +360,7 @@ def test_member_probe_dialect_inference_rejects_ambiguous_declarations() -> None
     }
 
     with pytest.raises(SourceEditError, match="return type is ambiguous"):
-        infer_classic_overlay_dialect(document, sources)
+        normalize_legacy_member_probe_return_types(document, sources)
 
 
 @pytest.mark.parametrize(
@@ -604,17 +595,12 @@ def test_authenticated_relocation_requires_one_producer_and_consumer() -> None:
         render_classic_overlay_declarations(declarations[:1], {"include/widget.h": held})
 
 
-def _fixture_environment() -> tuple[Path, Path, ClassicOverlayDialect] | None:
+def _fixture_environment() -> tuple[Path, Path] | None:
     stage = os.environ.get("REPROBIT_CLASSIC_OVERLAY_STAGE")
     source = os.environ.get("REPROBIT_CLASSIC_OVERLAY_SOURCE")
-    return_type = os.environ.get("REPROBIT_CLASSIC_MEMBER_PROBE_RETURN_TYPE")
-    if not stage or not source or not return_type:
+    if not stage or not source:
         return None
-    return (
-        Path(stage),
-        Path(source),
-        ClassicOverlayDialect(qualified_member_probe_return_type=return_type),
-    )
+    return Path(stage), Path(source)
 
 
 def _overlay_document(intervention_file: Path) -> Mapping[str, object]:
@@ -638,7 +624,7 @@ def _overlay_document(intervention_file: Path) -> Mapping[str, object]:
 def test_all_migrated_overlay_shards_render_to_their_declared_identities() -> None:
     fixture = _fixture_environment()
     assert fixture is not None
-    stage, source_root, dialect = fixture
+    stage, source_root = fixture
     shards = sorted((stage / "reprobit" / "interventions").glob("shared-*.json"))
     documents = [_overlay_document(path) for path in shards]
     assert len(documents) == 3
@@ -653,7 +639,7 @@ def test_all_migrated_overlay_shards_render_to_their_declared_identities() -> No
             for output in outputs
             if "clean" in output
         }
-        result = render_classic_overlay(document, clean_inputs, dialect=dialect)
+        result = render_classic_overlay(document, clean_inputs)
         rendered_count += len(result.outputs)
         operation_count += sum(len(receipt.operations) for receipt in result.receipts)
         for output in outputs:
@@ -672,7 +658,7 @@ def test_all_migrated_overlay_shards_render_to_their_declared_identities() -> No
 def test_all_migrated_donor_overlays_render_to_their_declared_identities() -> None:
     fixture = _fixture_environment()
     assert fixture is not None
-    stage, source_root, dialect = fixture
+    stage, source_root = fixture
     canonical_outputs: dict[str, Mapping[str, object]] = {}
     for shard in sorted((stage / "reprobit" / "interventions").glob("shared-*.json")):
         document = _overlay_document(shard)
@@ -716,9 +702,7 @@ def test_all_migrated_donor_overlays_render_to_their_declared_identities() -> No
                 )
                 clean_inputs[path] = (source_root / path).read_bytes()
 
-            result = render_classic_overlay_declarations(
-                declarations, clean_inputs, dialect=dialect
-            )
+            result = render_classic_overlay_declarations(declarations, clean_inputs)
             intervention_count += 1
             rendering_count += len(result.outputs)
             operation_count += sum(len(receipt.operations) for receipt in result.receipts)
@@ -732,10 +716,10 @@ def test_all_migrated_donor_overlays_render_to_their_declared_identities() -> No
     _fixture_environment() is None,
     reason="external migrated-overlay regression fixture is not configured",
 )
-def test_migrated_member_probe_dialect_is_inferred_from_the_clean_tree() -> None:
+def test_migrated_member_probes_carry_explicit_return_types() -> None:
     fixture = _fixture_environment()
     assert fixture is not None
-    stage, source_root, expected_dialect = fixture
+    stage, _source_root = fixture
     documents = [
         _overlay_document(path)
         for path in sorted((stage / "reprobit" / "interventions").glob("shared-*.json"))
@@ -744,13 +728,14 @@ def test_migrated_member_probe_dialect_is_inferred_from_the_clean_tree() -> None
     assert len(probe_documents) == 1
     document = probe_documents[0]
 
-    probes: list[tuple[bytes, bytes]] = []
+    return_types: list[str] = []
 
     def collect(value: object) -> None:
         if isinstance(value, dict):
             if value.get("k") == "member_probe":
-                qualified = value["qualified_member"]
-                probes.append((qualified[-2].encode(), qualified[-1].encode()))
+                return_type = value.get("return_type")
+                assert isinstance(return_type, str)
+                return_types.append(return_type)
             for child in value.values():
                 collect(child)
         elif isinstance(value, list):
@@ -758,25 +743,5 @@ def test_migrated_member_probe_dialect_is_inferred_from_the_clean_tree() -> None
                 collect(child)
 
     collect(document)
-    clean_declarations: dict[str, bytes] = {}
-    source_suffixes = {".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inc", ".inl"}
-    ignored_parts = {".git", ".venv", "CMakeFiles"}
-    for path in source_root.rglob("*"):
-        relative = path.relative_to(source_root)
-        if (
-            not path.is_file()
-            or path.suffix.casefold() not in source_suffixes
-            or any(part in ignored_parts or part.startswith("build-") for part in relative.parts)
-        ):
-            continue
-        data = path.read_bytes()
-        if any(owner in data and member in data for owner, member in probes):
-            clean_declarations[relative.as_posix()] = data
-
-    inferred = infer_classic_overlay_dialect(
-        document,
-        clean_declarations,
-        locked_dialect=expected_dialect,
-    )
-
-    assert inferred == expected_dialect
+    assert return_types
+    assert len(set(return_types)) == 1

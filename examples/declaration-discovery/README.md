@@ -13,21 +13,20 @@ from this directory:
 
 ```console
 cd examples/declaration-discovery
-export REPROBIT_MSVC_4_2_ROOT=/path/to/msvc42
+rbit toolchain provision msvc_4_2
 python prepare_reference.py
 ```
 
 `prepare_reference.py` compiles `transform.cpp` with the campaign state that
 contains three generated classes and ten generated function declarations, then
 writes the untracked `reference.obj`. It accepts
-`--toolchain-root` instead of the environment variable; run
+`--toolchain-root` to override the compiler location remembered by ReproBit; run
 `python prepare_reference.py --help` for all options.
 
 ## 1. Cold campaign
 
 ```console
-rbit discover campaign.json \
-  --toolchain-root "$REPROBIT_MSVC_4_2_ROOT" \
+rbit discover run campaign.json \
   --state-directory .sample-state \
   --report-json campaign.report.json \
   --jobs 4
@@ -50,7 +49,7 @@ no apply or accept operation.
 
 ## 2. Resume unchanged work
 
-Run the same `rbit discover campaign.json ...` command again, followed by the
+Run the same `rbit discover run campaign.json ...` command again, followed by the
 review command. The new report should say that nothing was rebuilt and all
 four results were reused. Analysis still runs against the sealed reference.
 
@@ -60,8 +59,7 @@ The extended request changes only the inclusive class-count limit and
 `max_cells`:
 
 ```console
-rbit discover campaign-extended.json \
-  --toolchain-root "$REPROBIT_MSVC_4_2_ROOT" \
+rbit discover run campaign-extended.json \
   --state-directory .sample-state \
   --report-json campaign-extended.report.json \
   --jobs 4

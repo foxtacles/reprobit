@@ -333,7 +333,7 @@ def _function_observation(
     )
 
 
-def _require_structural_pair(
+def _require_primary_structural_pair(
     left: CoffObject,
     left_record: _FunctionRecord,
     right: CoffObject,
@@ -364,6 +364,27 @@ def _require_structural_pair(
         )
     except ByteIdentityError as exc:
         raise DiscoveryError(f"{context} has incompatible relocations: {exc}") from exc
+
+
+def _require_structural_pair(
+    left: CoffObject,
+    left_record: _FunctionRecord,
+    right: CoffObject,
+    right_record: _FunctionRecord,
+    context: str,
+    *,
+    left_index: CoffMetadataIndex | None = None,
+    right_index: CoffMetadataIndex | None = None,
+) -> None:
+    _require_primary_structural_pair(
+        left,
+        left_record,
+        right,
+        right_record,
+        context,
+        left_index=left_index,
+        right_index=right_index,
+    )
     try:
         require_associated_comdat_compatibility(
             left,
@@ -453,6 +474,55 @@ def _compare_reference(
         ):
             reference_body[start:end] = b"\0" * (end - start)
     return candidate_body, bytes(reference_body)
+
+
+def qualify_msvc_reference_object(
+    *,
+    reference_object: bytes,
+    candidate_object: bytes,
+    symbol: str,
+) -> None:
+    """Require a candidate's normalized primary COMDAT to match a reference.
+
+    This is the small project-authoring boundary used after an exact compiler-lane
+    probe.  It deliberately accepts only full COFF objects: relocated functions
+    cannot be qualified from body bytes alone.  Associated COMDAT payloads
+    are not compared because equal-body composition retains those bytes from the
+    seed object rather than copying them from the donor or reference.  The strict
+    composer validates that retained closure, and cold target verification remains
+    the publication boundary.
+    """
+
+    reference = _resolve_reference(MsvcFunctionReference.from_object(reference_object, symbol))
+    candidate = _parse_coff(candidate_object, f"candidate {symbol}")
+    candidate_index = CoffMetadataIndex(candidate)
+    candidate_record = _unique_isolated_function(
+        candidate,
+        symbol,
+        f"candidate {symbol}",
+        candidate_index,
+    )
+    if candidate_record is None:
+        raise DiscoveryError(f"candidate object omits isolated COMDAT {symbol!r}")
+    if reference.coff is None or reference.record is None:
+        raise AssertionError("full reference COFF unexpectedly lost its parsed semantics")
+    _require_primary_structural_pair(
+        reference.coff,
+        reference.record,
+        candidate,
+        candidate_record,
+        f"candidate {symbol}",
+        left_index=reference.index,
+        right_index=candidate_index,
+    )
+    candidate_body = _normalized_body(candidate, candidate_record, candidate_index)
+    reference_body = _normalized_body(
+        reference.coff,
+        reference.record,
+        reference.index,
+    )
+    if candidate_body != reference_body:
+        raise DiscoveryError(f"candidate body does not match reference for {symbol!r}")
 
 
 def _instruction_boundaries(body: bytes, context: str) -> tuple[int, ...]:
@@ -1365,4 +1435,5 @@ __all__ = [
     "msvc_analysis_authority_digest",
     "msvc_discovery_analysis_implementation_digest",
     "observe_msvc_discovery_object",
+    "qualify_msvc_reference_object",
 ]

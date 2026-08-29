@@ -7,7 +7,6 @@ from pathlib import Path
 import pytest
 
 from reprobit import msvc42_provision as provisioner
-from scripts import provision_archaic_msvc42 as provisioner_script
 
 
 def _sha256(path: Path) -> str:
@@ -94,11 +93,6 @@ def test_provision_rejects_redirected_destination(tmp_path: Path) -> None:
 
     with pytest.raises(provisioner.ProvisionError, match="redirected path"):
         provisioner.provision_msvc42(redirected)
-
-
-def test_original_script_is_a_thin_compatible_wrapper() -> None:
-    assert provisioner_script.provision is provisioner.provision_msvc42
-    assert provisioner_script.verify is provisioner.verify_msvc42
 
 
 def test_existing_exact_destination_reports_progress_and_returns_root(

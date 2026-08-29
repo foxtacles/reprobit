@@ -21,7 +21,7 @@ from reprobit.producer_graph import (
     materialize_argument,
     materialize_reference,
 )
-from reprobit.schema import ProjectBundle, project_sdk_archive_authorities
+from reprobit.schema import ProjectBundle
 from reprobit.toolchains import ClassicMSVCToolchain
 
 
@@ -310,7 +310,7 @@ def _graph_system_library_map(
             "system-library resolution requires source and build-plan authority"
         )
     sdk_authorities = {
-        item.path.casefold(): item for item in project_sdk_archive_authorities(bundle.build_plan)
+        item.path.casefold(): item for item in bundle.build_plan.project_sdk_libraries
     }
     manifest_entries = {item.path.casefold(): item for item in bundle.source_manifest.entries}
     result: dict[str, Path] = {}

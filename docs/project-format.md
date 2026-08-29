@@ -26,8 +26,9 @@ convenience and is rejected by `verify`. CMake is a graph-extraction input selec
 `rbit graph configure`, not a project build-adapter kind. The current schema-v3 certification path
 is the built-in classic-MSVC adapter. Physical host paths must not be embedded in JSON shards.
 `reprobit/build-plan.json` is declarative authority for translation units,
-source-overlay IDs, terminal producers, and target gates; it cannot name Python callables or shell
-fragments. `reprobit/producer-graph.json` separately records the complete direct compiler,
+source-overlay IDs, explicit COMDAT group-order transforms, analysis-only link options, pinned
+project SDK libraries, archive exceptions, and target gates; it cannot name Python callables or
+shell fragments. `reprobit/producer-graph.json` separately records the complete direct compiler,
 resource-compiler, librarian, and linker DAG. Schema v2 binds it to the canonical source path
 topology, toolchain lock, logical-path profile, target set, and exact terminal artifact paths.
 The toolchain lock keeps content and profile configuration deliberately separate: file/tree receipts
@@ -50,7 +51,7 @@ are rejected rather than guessed to be harmless.
 
 Bare `system-library/` identities normally resolve only through locked toolchain library roots.
 If an earlier project `LIBPATH` selects an external SDK archive, that path and SHA-256 must also
-appear in the build plan's typed SDK-authority view and match the source manifest. A source-root
+appear in `project_sdk_libraries` and match the source manifest. A source-root
 library that lacks that independent pin is rejected even when its basename was declared as a
 system library.
 
@@ -69,10 +70,9 @@ self-contained Draft 2020-12 root with a stable `urn:reprobit:schema:...` identi
 - `project-v3.schema.json` validates the `reprobit.toml` model.
 - `toolchain-lock-v3.schema.json`, `source-manifest-v3.schema.json`, and
   `build-plan-v3.schema.json` validate their corresponding committed documents.
-- `producer-graph-v2.schema.json` validates direct producer authority. It can
-  read conservative v1 graphs, while v2 separates the stable source path
-  topology from independently locked source contents so ordinary edits do not
-  force command-graph extraction.
+- `producer-graph-v2.schema.json` validates direct producer authority. It
+  separates the stable source path topology from independently locked source
+  contents so ordinary edits do not force command-graph extraction.
 - `intervention-document-v3.schema.json`, `proof-document-v3.schema.json`, and
   `oracle-document-v3.schema.json` validate individual shards.
 - `catalog-v3.schema.json` is the synthetic aggregate for tooling that needs every definition.

@@ -8,17 +8,25 @@ state stay untracked.
 
 - Python 3.11 or newer;
 - ReproBit installed from this checkout (`python -m pip install -e .`);
-- an [archaic-msvc](https://github.com/archaic-msvc) MSVC 4.2 installation;
+- an authenticated [archaic-msvc](https://github.com/archaic-msvc) MSVC 4.2
+  installation;
 - Wine and `wineserver` on `PATH` when running on macOS or Linux.
 
-Set `REPROBIT_MSVC_4_2_ROOT` to your authenticated compiler installation before
-running an example. No example depends on a machine-specific path.
+The full [grind project](grind/README.md) can prepare and remember the compiler
+with `rbit setup .`. The standalone declaration campaign is not a ReproBit
+project; run `rbit toolchain provision msvc_4_2` once if no compiler location is
+remembered yet, as shown in that example.
 
-## Available example
+## Available examples
 
 - [Declaration discovery](declaration-discovery/README.md) — prepare a local
   reference, run a bounded declaration search, reuse completed work, extend it
   by one cell, and review the resulting proposals.
+- [Accepted grind](grind/README.md) — start with one unsolved compiler-entropy
+  byte, find the lowest-cost matching declaration state, publish its two small
+  interventions, and confirm the result with a separate cold build.
 
-Discovery is deliberately noncertifying. It suggests evidence to review; it
-does not edit a project or approve an intervention.
+The general discovery example is deliberately noncertifying: it suggests
+evidence to review and does not edit a project. The narrower grind example
+accepts only a project-owned, semantically checked result that also passes an
+independent cold byte-for-byte verification.

@@ -245,7 +245,9 @@ def test_action_summary_writes_outputs(tmp_path: Path, monkeypatch: object) -> N
     assert "clean=false" in received
     assert "byte-exact=true" in received
     assert "toolchain-origin=false" in received
-    assert "not clean" in summary.read_text(encoding="utf-8")
+    summary_text = summary.read_text(encoding="utf-8")
+    assert "not clean" in summary_text
+    assert "| Intervention cost | 0 relative points |" in summary_text
 
 
 def test_action_summary_rejects_output_path_line_breaks(tmp_path: Path) -> None:

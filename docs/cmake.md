@@ -113,8 +113,7 @@ command DAG reusable, while the source manifest and build plan still bind those
 new bytes independently. Adding or removing an admitted path, or changing the
 toolchain lock, logical-path profile, target set, terminal artifact path, or
 producer commands invalidates the graph and requires a new migration
-extraction. `rbit graph upgrade --project .` transactionally converts a current
-valid v1 graph to this topology binding without rerunning CMake.
+extraction.
 
 Warm `build` stores non-certifying node artifacts in the leased project-local
 CAS. The first run normally misses; an unchanged second run should be all-hit

@@ -142,17 +142,12 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/sources.txt" "${{final_sources}}\n")
         build_plan=BuildPlanDocument(
             schema_version=3,
             source_manifest_digest=source_pin,
-            phase=None,
             translation_units=(),
             source_overlay_digest=_digest(canonical_json(graph)),
             source_overlay_interventions=(intervention.id,),
             archives=(),
-            terminal_producers={},
-            execution_backends={},
-            toolchain_policy={},
-            target_policies=[],
             target_gates=(
-                ClassicTargetGate(target_id="program", build_target="app", completion={}),
+                ClassicTargetGate(target_id="program", build_target="app"),
             ),
         ),
         intervention_documents=(

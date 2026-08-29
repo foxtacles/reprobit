@@ -1,0 +1,9 @@
+{
+  "schema_version": 1,
+  "reference_object": "reference/reference.obj",
+  "target": "program",
+  "translation_unit": "tu.transform",
+  "symbol": "_transform",
+  "classes": {"start": 1, "stop": 4},
+  "functions": {"start": 10, "stop": 10}
+}

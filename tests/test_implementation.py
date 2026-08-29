@@ -77,7 +77,6 @@ def test_classic_implementation_import_closure_has_exact_architecture_boundary()
     assert not any(
         path.startswith(
             (
-                "classic_identity_migration",
                 "classic_incremental",
                 "classic_migration",
                 "cli",
