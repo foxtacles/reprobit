@@ -531,6 +531,7 @@ def _parse_legacy_absolute_path(value: str) -> PurePosixPath | PureWindowsPath |
     if (
         posix.is_absolute()
         and posix.root == "/"
+        and "\\" not in value
         and posix.as_posix() == value
         and all(part not in {"", ".", ".."} for part in posix.parts[1:])
     ):

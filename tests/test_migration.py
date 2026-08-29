@@ -618,6 +618,7 @@ def test_migration_rejects_noncanonical_windows_path_contract(build_root: str) -
     (
         ("source_root", r"D:\workspace/sample"),
         ("compiler", r"D:\opt/compiler\wine\x86\cl"),
+        ("source_root", "/workspace/sample\\alias"),
     ),
 )
 def test_migration_rejects_mixed_windows_path_spellings(field: str, value: str) -> None:
