@@ -174,13 +174,21 @@ and one bare library name; paths, duplicate declarations, and implicit runtime
 authorization are rejected. When an edge is missing, the direct runtime emits
 copy/paste-ready flags for a new explicit extraction.
 
-## Build and certify
+## Build and verify
 
 ```console
-rbit build . \
-  --toolchain-root /opt/toolchains/msvc42 \
-  --compiler-transport /opt/toolchains/msvc42/wine/x86/cl \
-  --resource-transport /opt/toolchains/msvc42/wine/x86/rc
+rbit build .
+rbit verify . --report-dir build/reprobit-report
+```
+
+Both commands use the compiler location remembered by `rbit setup`. `build` is
+the fast incremental loop; `verify` always builds from scratch and writes the
+trust report.
+
+<details>
+<summary>Advanced: override machine paths and timeouts for one run</summary>
+
+```console
 rbit verify . \
   --toolchain-root /opt/toolchains/msvc42 \
   --compiler-transport /opt/toolchains/msvc42/wine/x86/cl \
@@ -192,7 +200,18 @@ rbit verify . \
   --report-dir build/reprobit-report
 ```
 
-The built-in classic adapter requires a toolchain root. Plain `build` is a
+The two transport options are supplied together on macOS and Linux. Native
+Windows rejects those POSIX selectors. The initialization, compile/resource,
+librarian/linker, and cleanup deadlines are independently bounded; their
+defaults are 600, 600, 900, and 10 seconds.
+
+</details>
+
+<details>
+<summary>Advanced: incremental cache, build isolation, and proof details</summary>
+
+The built-in classic adapter requires a valid local compiler installation, but
+normal human runs resolve it from `rbit setup`. Plain `build` is a
 non-certifying incremental developer build: the first run populates an
 immutable project-local CAS, while an unchanged second run restores all nodes
 without preparing the logical workspace or starting a Wine lane. It emits
@@ -203,12 +222,10 @@ has no warm/cache mode, and never opens the cache. It seals each
 reference oracle before execution, builds in a new run directory,
 audits current-run producer and intervention evidence, performs literal
 comparison, and writes canonical JSON plus self-contained HTML. The two
-transport options are supplied together on POSIX. Native Windows rejects those
-POSIX selectors. Before preparing a native producer arena it reruns the bounded
+transport options are only needed for an explicit POSIX override. Before
+preparing a native producer arena it reruns the bounded
 fresh-LUID lineage-drive probe and fails closed unless the host can admit a
 suspended producer and preserve its drive through all producer descendants.
-The initialization, compile/resource, librarian/linker, and cleanup deadlines
-are independently bounded; their defaults are 600, 600, 900, and 10 seconds.
 For a project-level `source_overlay_graph`, ReproBit derives a declaration
 counterfactual before admitting effective primary products. Declaration-only
 leaves require no extra compile. Strict semantic-delta leaves audit their exact
@@ -224,19 +241,28 @@ is inspectable and reclaimable without racing active runs:
 
 ```console
 rbit state status .
-rbit state gc . --dry-run --older-than-hours 24
-rbit state gc . --older-than-hours 24
+rbit clean . --preview
+rbit clean .
+rbit clean . --cache --preview
 ```
 
-Garbage collection only removes inactive retained run arenas at least as old as
-the requested cutoff. It never treats cache state as certified build input.
+`clean` removes inactive build workspaces while preserving the reusable
+incremental cache. Add `--cache` when you also want to remove eligible cache
+records and blobs. It never removes an active build, cache data in use, or a
+saved report. Add `--older-than-hours 24` to either scope when you want to keep
+the most recent day. `--preview` performs the same safety checks, shows how much
+space can be freed, and prints the exact cleanup command without deleting
+anything. Cold verification never uses the incremental cache as trusted build
+input.
 
 The project authenticity policy is authoritative. A command-line policy
 override may only narrow acceptance; it cannot silently broaden a clean project
 to accept quarantine. Similarly, target and toolchain overrides are checked
 against committed project identities.
 
-## Find and admit compiler interventions
+</details>
+
+## Find and save compiler adjustments
 
 The normal workflow needs three short commands:
 
@@ -249,19 +275,19 @@ rbit discover grind .
 rbit discover grind . --accept-exact
 ```
 
-`init` finds the source file's committed compiler lane and creates a four-state
-project plan. The first `grind` is a read-only preview. It keeps a human report
+`init` finds the matching compile step and creates a four-state project plan.
+The first `grind` is a read-only preview. It keeps a human report
 at `.reprobit-state/reports/grind/report.html` for both exact and unsuccessful
 bounded searches. Exact results link to the separate cold-verification report.
 The command only reports a solution after a cold, byte-exact build with passing
 logic checks. `--accept-exact` grants
-advance permission for another fresh proof run to publish the resulting
-intervention/proof authority atomically. Follow it with `rbit verify .` and
-review the changed authority shards in `git diff`.
+advance permission for another fresh proof run to save the resulting
+intervention and proof records together. Follow it with `rbit verify .` and
+review the changed project files in `git diff`.
 
 The advanced `rbit discover run REQUEST` command is a broader resumable campaign.
 It reports whole-function, private-donor, and same-symbol mosaic proposals but
-does not admit them. See the [discovery guide](discovery.md) for both workflows,
+does not save them. See the [discovery guide](discovery.md) for both workflows,
 incremental behavior, progress events, and reports.
 
 ## Schema-v2 migration

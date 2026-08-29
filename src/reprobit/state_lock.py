@@ -28,7 +28,15 @@ class AdvisoryFileLock:
         if create:
             flags |= os.O_CREAT
         descriptor = os.open(path, flags, 0o600)
-        self.stream = os.fdopen(descriptor, "r+b", buffering=0)
+        try:
+            held = os.fstat(descriptor)
+            named = os.stat(path, follow_symlinks=False)
+            if not stat.S_ISREG(named.st_mode) or not os.path.samestat(held, named):
+                raise StateError(f"state lock path is not a real file: {path}")
+            self.stream = os.fdopen(descriptor, "r+b", buffering=0)
+        except BaseException:
+            os.close(descriptor)
+            raise
         if self.stream.seek(0, os.SEEK_END) == 0:
             if not create:
                 self.stream.close()

@@ -206,7 +206,7 @@ def _build_source_document(
     from reprobit.source_lock import build_source_manifest, git_tracked_paths
 
     paths = _explicit_source_paths(root, values) if values else git_tracked_paths(root)
-    with output.activity("hashing the complete project source read set"):
+    with output.activity("checking the project source files"):
         return build_source_manifest(root, paths, spec=spec, complete=True)
 
 
@@ -289,8 +289,8 @@ def _source_preview_message(
     stale_units: Sequence[Mapping[str, Any]],
 ) -> str:
     lines = [
-        f"source preview: +{len(added)} -{len(removed)} ~{len(changed)}; "
-        f"{entries} admitted input(s)"
+        f"Source preview: +{len(added)} -{len(removed)} ~{len(changed)}; "
+        f"{entries} selected input(s)"
     ]
     if added:
         lines.append("  add: " + ", ".join(added))
@@ -299,18 +299,18 @@ def _source_preview_message(
     if changed:
         lines.append("  change: " + ", ".join(str(item["path"]) for item in changed))
     if graph_invalidation_required:
-        lines.append("  producer graph: invalidation and re-extraction required")
+        lines.append("  build graph: update required after locking these source changes")
     if authority_error is not None:
-        lines.append("  authority regeneration required: " + authority_error)
+        lines.append("  project records need regeneration: " + authority_error)
     elif stale_units:
         rendered = ", ".join(
             f"{item['translation_unit_id']} ({item['source']})" for item in stale_units
         )
-        lines.append("  authority regeneration required for: " + rendered)
+        lines.append("  project records need regeneration for: " + rendered)
     elif not authority_checked:
-        lines.append("  no build plan; no TU or source-overlay pins were checked")
+        lines.append("  no build plan; no TU or source-overlay records were checked")
     else:
-        lines.append("  reviewed TU and source-overlay pins remain valid")
+        lines.append("  reviewed TU and source-overlay records remain valid")
     return "\n".join(lines)
 
 
@@ -548,7 +548,7 @@ def _command_toolchain_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         identifier,
         resolve_toolchain_root(identifier, args.root),
     )
-    with output.activity("hashing toolchain producers and input trees"):
+    with output.activity("checking compiler files, headers, and libraries"):
         document = installation.create_lock(
             include_trees=True,
             runtime_paths=args.runtime_file,
@@ -1017,7 +1017,7 @@ def _command_build(args: argparse.Namespace, output: CLIOutput) -> int:
     from reprobit.engine import BuildPlanExecutor
 
     root = project_root(args.project)
-    with output.activity("loading and validating project authority", phase="validate"):
+    with output.activity("checking the project files", phase="validate"):
         if args.cold:
             # Cold developer builds retain the exact committed source pins and
             # stay wholly outside the incremental cache implementation.
@@ -1049,7 +1049,7 @@ def _command_build(args: argparse.Namespace, output: CLIOutput) -> int:
             run_root = arena.path
             if isinstance(bundle.spec.build, ProducerGraphBuildAdapter):
                 if args.cold:
-                    with output.producer_activity("executing cold producer graph") as progress:
+                    with output.producer_activity("building from scratch") as progress:
                         prepared = _prepare_producer_graph_run(
                             args,
                             bundle,
@@ -1098,7 +1098,7 @@ def _command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                     )
 
                     with output.producer_activity(
-                        "executing incremental producer graph"
+                        "rebuilding changed steps and reusing unchanged work"
                     ) as progress:
 
                         def incremental_progress(
@@ -1157,7 +1157,7 @@ def _command_build(args: argparse.Namespace, output: CLIOutput) -> int:
             )
             output.emit(
                 "workspace_gc_hint",
-                f"preview retained-workspace cleanup: rbit state gc {root} --dry-run",
+                f"remove retained workspaces when finished: rbit clean {root}",
                 project=root,
                 diagnostic=True,
             )
@@ -1173,8 +1173,8 @@ def _command_build(args: argparse.Namespace, output: CLIOutput) -> int:
     if incremental_summary is not None:
         output.incremental_summary(incremental_summary)
         completion_message = (
-            "incremental build completed: "
-            f"{incremental_summary.hits + incremental_summary.misses} node(s), "
+            "Build complete: "
+            f"{incremental_summary.hits + incremental_summary.misses} step(s), "
             f"{len(receipt.outputs)} output(s)"
         )
         completion_fields: dict[str, Any] = {
@@ -1184,7 +1184,7 @@ def _command_build(args: argparse.Namespace, output: CLIOutput) -> int:
         }
     else:
         completion_message = (
-            f"build completed: {len(receipt.steps)} step(s), {len(receipt.outputs)} output(s)"
+            f"Build complete: {len(receipt.steps)} step(s), {len(receipt.outputs)} output(s)"
         )
         completion_fields = {"steps": len(receipt.steps)}
     output.emit(
@@ -1210,7 +1210,7 @@ def _command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
     from reprobit.verify import seal_file_oracle
 
     root = project_root(args.project)
-    with output.activity("loading and validating project authority", phase="validate"):
+    with output.activity("checking the project files", phase="validate"):
         bundle = load_project_tree(root)
     requested_policy = (
         AuthenticityPolicy(args.policy)
@@ -1252,7 +1252,7 @@ def _command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
         with arena:
             run_root = arena.path
             with output.producer_activity(
-                "building, verifying, and auditing direct producers"
+                "building from scratch and checking the exact output"
             ) as progress:
                 prepared = _prepare_producer_graph_run(
                     args,
@@ -1316,7 +1316,7 @@ def _command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
             )
             output.emit(
                 "workspace_gc_hint",
-                f"preview retained-workspace cleanup: rbit state gc {root} --dry-run",
+                f"remove retained workspaces when finished: rbit clean {root}",
                 project=root,
                 diagnostic=True,
             )
@@ -1455,55 +1455,93 @@ def _command_state_status(args: argparse.Namespace, output: CLIOutput) -> int:
     return 0
 
 
-def _command_state_gc(args: argparse.Namespace, output: CLIOutput) -> int:
+def _command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
     root = project_root(args.project)
     spec = load_project(root)
     state = _state_path(root, spec)
-    age_seconds = args.older_than_hours * 3600.0
+    age_hours = args.older_than_hours if args.older_than_hours is not None else 0.0
+    age_seconds = age_hours * 3600.0
     store = StateStore(state, create=False)
     description = (
-        "previewing local state cleanup"
-        if args.dry_run
-        else "garbage-collecting retained runs and incremental cache"
+        "checking how much local build state can be removed"
+        if args.preview
+        else (
+            "removing inactive build workspaces and selected cache data"
+            if args.cache
+            else "removing inactive build workspaces"
+        )
     )
     with output.activity(description, phase="cleanup"):
         result = store.gc(
             older_than_seconds=age_seconds,
-            dry_run=args.dry_run,
+            dry_run=args.preview,
+            include_cache=args.cache,
         )
-    if args.dry_run:
+    if args.preview:
+        next_argv: list[str | Path] = ["rbit", "clean", root]
+        if args.older_than_hours is not None:
+            next_argv.extend(("--older-than-hours", f"{age_hours:g}"))
+        if args.cache:
+            next_argv.append("--cache")
+        next_command = human_command(next_argv)
+        if not args.cache:
+            cache_summary = "The reusable incremental cache will be kept."
+        elif result.cache_active_leases:
+            cache_summary = (
+                "Cache cleanup is currently skipped because "
+                f"{result.cache_active_leases} active build(s) are using it."
+            )
+        else:
+            cache_summary = (
+                f"The selection includes {result.cache_removed_records} cache record(s) "
+                f"and {result.cache_removed_blobs} unreferenced blob(s); "
+                f"{result.cache_skipped_recent_records} recent cache record(s) will be kept."
+            )
         output.emit(
-            "state_gc_preview",
-            f"would remove {len(result.removed)} retained run(s), "
-            f"{result.cache_removed_records} cache record(s), and "
-            f"{result.cache_removed_blobs} unreferenced blob(s); reclaimable "
-            f"{human_bytes(result.reclaimed_bytes)}",
+            "cleanup_preview",
+            f"Clean preview: {human_bytes(result.reclaimed_bytes)} can be freed. "
+            f"Selected {len(result.removed)} inactive workspace(s). {cache_summary} "
+            f"Run {next_command} to perform this cleanup.",
             candidates=result.removed,
+            cache_requested=args.cache,
             cache_records=result.cache_removed_records,
             cache_blobs=result.cache_removed_blobs,
             active_cache_leases=result.cache_active_leases,
             reclaimable_bytes=result.reclaimed_bytes,
-            older_than_hours=args.older_than_hours,
+            older_than_hours=age_hours,
+            next_command=next_command,
+            next_argv=next_argv,
         )
         return 0
+    if not args.cache:
+        cache_summary = "The reusable incremental cache was kept."
+    elif result.cache_active_leases:
+        cache_summary = (
+            "Cache cleanup was skipped because "
+            f"{result.cache_active_leases} active build(s) are using it."
+        )
+    else:
+        cache_summary = (
+            f"Removed {result.cache_removed_records} cache record(s) and "
+            f"{result.cache_removed_blobs} unreferenced blob(s); kept "
+            f"{result.cache_skipped_recent_records} recent cache record(s)."
+        )
     output.emit(
-        "state_gc",
-        f"removed {len(result.removed)} retained run(s), "
-        f"{result.cache_removed_records} cache record(s), and "
-        f"{result.cache_removed_blobs} blob(s); reclaimed "
-        f"{human_bytes(result.reclaimed_bytes)}; "
-        f"skipped {len(result.skipped_active)} active and "
-        f"{len(result.skipped_recent)} recent run(s), plus "
-        f"{result.cache_active_leases} active cache lease(s)",
+        "cleanup",
+        f"Freed {human_bytes(result.reclaimed_bytes)}. "
+        f"Removed {len(result.removed)} inactive workspace(s). {cache_summary} "
+        f"Kept {len(result.skipped_active)} active and "
+        f"{len(result.skipped_recent)} recent workspace(s).",
         removed=result.removed,
         reclaimed_bytes=result.reclaimed_bytes,
         skipped_active=result.skipped_active,
         skipped_recent=result.skipped_recent,
+        cache_requested=args.cache,
         cache_records=result.cache_removed_records,
         cache_blobs=result.cache_removed_blobs,
         active_cache_leases=result.cache_active_leases,
         skipped_recent_cache_records=result.cache_skipped_recent_records,
-        older_than_hours=args.older_than_hours,
+        older_than_hours=age_hours,
     )
     return 0
 
@@ -1662,7 +1700,7 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument(
         "--oracle",
         default="reference/program.exe",
-        help="protected reference path (default: reference/program.exe)",
+        help="original/reference binary path (default: reference/program.exe)",
     )
     init_advanced = init.add_argument_group("advanced logical path options")
     init_advanced.add_argument("--logical-source", default=r"R:\source")
@@ -1705,7 +1743,9 @@ def _parser() -> argparse.ArgumentParser:
     setup_advanced.add_argument("--wineserver", default="wineserver")
     setup.set_defaults(handler=_command_setup)
 
-    doctor = subcommands.add_parser("doctor", help="inspect backend and toolchain capabilities")
+    doctor = subcommands.add_parser(
+        "doctor", help="check whether the compiler can run correctly on this machine"
+    )
     doctor.add_argument("project", nargs="?", default=".")
     doctor.add_argument(
         "--backend",
@@ -1719,7 +1759,9 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--toolchain-root")
     doctor.set_defaults(handler=_command_doctor)
 
-    toolchain = subcommands.add_parser("toolchain", help="install and lock compiler files")
+    toolchain = subcommands.add_parser(
+        "toolchain", help="install and record exact compiler files"
+    )
     toolchain_commands = toolchain.add_subparsers(dest="toolchain_command", required=True)
     provision = toolchain_commands.add_parser(
         "provision",
@@ -1743,7 +1785,9 @@ def _parser() -> argparse.ArgumentParser:
         help="do not remember the installed compiler location",
     )
     provision.set_defaults(handler=_command_toolchain_provision)
-    lock = toolchain_commands.add_parser("lock", help="write the canonical schema-v3 lock")
+    lock = toolchain_commands.add_parser(
+        "lock", help="record the exact compiler files this project expects"
+    )
     lock.add_argument("--project", default=".")
     lock.add_argument("--profile", choices=tuple(TOOLCHAIN_PROFILES))
     lock.add_argument(
@@ -1760,10 +1804,12 @@ def _parser() -> argparse.ArgumentParser:
     lock.add_argument("--output")
     lock.set_defaults(handler=_command_toolchain_lock)
 
-    source = subcommands.add_parser("source", help="manage the portable project read set")
+    source = subcommands.add_parser(
+        "source", help="review and lock the source files a build may read"
+    )
     source_commands = source.add_subparsers(dest="source_command", required=True)
     source_preview = source_commands.add_parser(
-        "preview", help="show source changes and stale reviewed authority without writing"
+        "preview", help="show source changes and records that need review without writing"
     )
     source_preview.add_argument("--project", default=".")
     source_preview.add_argument(
@@ -1774,7 +1820,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     source_preview.set_defaults(handler=_command_source_preview)
     source_lock = source_commands.add_parser(
-        "lock", help="transactionally lock tracked or explicitly named source inputs"
+        "lock", help="safely record tracked or explicitly named source inputs"
     )
     source_lock.add_argument("--project", default=".")
     source_lock.add_argument(
@@ -1790,7 +1836,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     source_lock.set_defaults(handler=_command_source_lock)
 
-    graph = subcommands.add_parser("graph", help="create the committed build graph")
+    graph = subcommands.add_parser(
+        "graph", help="record the compiler and linker steps used by direct builds"
+    )
     graph_commands = graph.add_subparsers(dest="graph_command", required=True)
     graph_configure = graph_commands.add_parser(
         "configure",
@@ -1844,7 +1892,7 @@ def _parser() -> argparse.ArgumentParser:
     graph_configure.set_defaults(handler=command_graph_configure)
     graph_extract = graph_commands.add_parser(
         "extract",
-        help="commit a closed producer graph from a migration-only Unix Makefiles tree",
+        help="record direct compiler and linker steps from that CMake tree",
     )
     graph_extract.add_argument(
         "--project", default=".", help="project containing reprobit.toml (default: .)"
@@ -1897,7 +1945,7 @@ def _parser() -> argparse.ArgumentParser:
     migrate.set_defaults(handler=_command_manifest_migrate)
 
     for name, help_text, handler in (
-        ("validate", "check every committed project file", _command_validate),
+        ("validate", "check every saved project file", _command_validate),
         ("cost", "show intervention cost totals", _command_cost),
     ):
         command = subcommands.add_parser(name, help=help_text)
@@ -1916,14 +1964,38 @@ def _parser() -> argparse.ArgumentParser:
     )
     status.set_defaults(handler=_command_status)
 
-    explain = subcommands.add_parser("explain", help="explain committed interventions")
+    clean = subcommands.add_parser(
+        "clean",
+        help="remove inactive ReproBit workspaces while keeping the reusable cache",
+    )
+    clean.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
+    clean.add_argument(
+        "--preview",
+        action="store_true",
+        help="show how much space can be freed without removing anything",
+    )
+    clean.add_argument(
+        "--older-than-hours",
+        type=_nonnegative_hours,
+        default=None,
+        metavar="HOURS",
+        help="keep selected workspace and cache entries newer than this age (default: 0)",
+    )
+    clean.add_argument(
+        "--cache",
+        action="store_true",
+        help="also remove cache records and blobs old enough for the selected age",
+    )
+    clean.set_defaults(handler=_command_clean)
+
+    explain = subcommands.add_parser("explain", help="explain saved interventions")
     explain.add_argument("project", nargs="?", default=".")
     explain.add_argument("--intervention")
     explain.set_defaults(handler=_command_explain)
 
     build = subcommands.add_parser(
         "build",
-        help="incrementally build the committed producer graph without invoking CMake",
+        help="incrementally rebuild changed compiler and linker steps without CMake",
     )
     build.add_argument("project", nargs="?", default=".")
     _add_execution_options(build, cold_option=True)
@@ -1931,7 +2003,7 @@ def _parser() -> argparse.ArgumentParser:
 
     verify = subcommands.add_parser(
         "verify",
-        help="build every target from scratch and check identity and authenticity",
+        help="build every target from scratch and check exact bytes and trust evidence",
     )
     verify.add_argument("project", nargs="?", default=".")
     _add_execution_options(verify, cold_option=False)
@@ -1959,7 +2031,7 @@ def _parser() -> argparse.ArgumentParser:
 
     discover = subcommands.add_parser(
         "discover",
-        help="find and safely admit compiler-entropy interventions",
+        help="find low-cost compiler adjustments and save only proven results",
     )
     discover_commands = discover.add_subparsers(
         dest="discovery_command",
@@ -1967,24 +2039,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     discover_init = discover_commands.add_parser(
         "init",
-        help="create a small project-aware grind plan without compiling",
+        help="create a small automatic search plan without compiling",
     )
     discover_init.add_argument("project", nargs="?", default=".")
     discover_init.add_argument(
         "--source",
         required=True,
-        help="project-relative source path used by the compiler lane",
+        help="project-relative source file to explore",
     )
     discover_init.add_argument(
         "--reference",
         required=True,
         metavar="OBJECT_PATH",
-        help="project-relative COFF object containing the reference symbol",
+        help="project-relative .obj file containing the reference function",
     )
     discover_init.add_argument("--symbol", required=True, help="decorated function symbol")
     discover_init.add_argument(
         "--translation-unit",
-        help="select a compiler lane only when the source is built more than once",
+        help="select one build of the source only when it is compiled more than once",
     )
     discover_init.add_argument(
         "--plan",
@@ -2063,7 +2135,7 @@ def _parser() -> argparse.ArgumentParser:
 
     discover_grind = discover_commands.add_parser(
         "grind",
-        help="try low-cost interventions and keep only a cold exact solution",
+        help="try low-cost adjustments and keep only a freshly verified exact match",
     )
     discover_grind.add_argument(
         "project",
@@ -2089,33 +2161,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     discover_grind.set_defaults(handler=_command_discover_grind)
 
-    state = subcommands.add_parser(
-        "state", help="inspect or garbage-collect local run and cache state"
-    )
+    state = subcommands.add_parser("state", help="inspect local run and cache files")
     state_commands = state.add_subparsers(dest="state_command", required=True)
     state_status = state_commands.add_parser(
         "status", help="show retained runs, active leases, cache size, and disk usage"
     )
     state_status.add_argument("project", nargs="?", default=".")
     state_status.set_defaults(handler=_command_state_status)
-    state_gc = state_commands.add_parser(
-        "gc", help="remove old retained runs and cache records without racing leases"
-    )
-    state_gc.add_argument("project", nargs="?", default=".")
-    state_gc.add_argument(
-        "--older-than-hours",
-        type=_nonnegative_hours,
-        default=168.0,
-        metavar="HOURS",
-        help="remove runs/cache records at least this old (default: 168; 0 for all)",
-    )
-    state_gc.add_argument(
-        "--dry-run",
-        action="store_true",
-        help="report reclaimable inactive runs and cache entries without removing them",
-    )
-    state_gc.set_defaults(handler=_command_state_gc)
-
     report = subcommands.add_parser("report", help="validate JSON and render self-contained HTML")
     report.add_argument("input", help="canonical report.json to validate and render")
     report.add_argument(

@@ -83,23 +83,23 @@ _FRIENDLY_PHASES = {
     "discovery-compile": "Trying declaration states",
     "discovery-enumerate": "Planning the search",
     "discovery-finalize": "Writing discovery results",
-    "grind-donors": "Compiling bounded donor candidates",
-    "grind-finalize": "Finishing the exact-search run",
+    "grind-donors": "Trying donor candidates",
+    "grind-finalize": "Finishing the search",
     "grind-publish": "Saving proven project files",
     "grind-qualify": "Checking candidate compatibility",
     "grind-seed": "Compiling the current translation unit",
     "grind-skip": "Skipping incompatible candidates",
-    "grind-verify": "Cold-verifying the best candidate",
+    "grind-verify": "Verifying the best candidate from scratch",
     "donor-compile": "Building donor candidates",
-    "evidence": "Checking authenticity evidence",
-    "input-namespace": "Sealing compiler inputs",
+    "evidence": "Checking trust evidence",
+    "input-namespace": "Preparing compiler inputs",
     "link": "Linking targets",
     "link-controls": "Checking linker inputs",
     "object-transform": "Stabilizing object layout",
     "resource": "Compiling resources",
     "source-epoch": "Preparing source inputs",
-    "terminal": "Publishing verified targets",
-    "validate": "Validating build receipts",
+    "terminal": "Saving verified targets",
+    "validate": "Checking project files",
     "validation": "Validating final output",
 }
 
@@ -233,9 +233,11 @@ class CLIOutput:
     def incremental_summary(self, summary: IncrementalBuildSummary) -> None:
         """Emit one compact warm-build cache/runtime outcome."""
 
+        start_unit = "time" if summary.runtime_init_count == 1 else "times"
         message = (
-            f"incremental build: {summary.hits} hit, {summary.misses} miss "
-            f"({summary.hit_rate:.1%}); {summary.runtime_init_count} runtime lane(s); "
+            f"Incremental build: {summary.hits} reused, {summary.misses} rebuilt "
+            f"({summary.hit_rate:.1%} reused); compiler environment started "
+            f"{summary.runtime_init_count} {start_unit}; "
             f"{summary.elapsed_seconds:.2f}s"
         )
         if summary.published_targets or summary.unchanged_targets:
@@ -245,7 +247,7 @@ class CLIOutput:
             )
         if self.output_format == "text" and summary.invalidations:
             visible = summary.invalidations[:8]
-            lines = [message, "cache invalidations:"]
+            lines = [message, "Why steps were rebuilt:"]
             lines.extend(f"  {node_id}: {reason}" for node_id, reason in visible)
             remaining = len(summary.invalidations) - len(visible)
             if remaining:

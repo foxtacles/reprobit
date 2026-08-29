@@ -12,8 +12,11 @@ import json
 import os
 import re
 import shutil
+import stat
 import time
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -93,6 +96,7 @@ class GCResult:
 _RUN_KIND = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
 _OUTCOME_FILE = ".outcome.json"
 _LEASE_FILE = ".lease"
+_MAINTENANCE_FILE = ".maintenance.lock"
 
 
 def _require_real_directory(path: Path, label: str) -> Path:
@@ -127,12 +131,43 @@ def _atomic_json(path: Path, value: object) -> None:
         temporary.unlink(missing_ok=True)
 
 
+@contextmanager
+def _maintenance_gate(state_root: Path, *, create: bool = True) -> Iterator[None]:
+    """Serialize short arena lifecycle transitions and state GC."""
+
+    if state_root.is_symlink() or not state_root.is_dir():
+        raise _StateError(f"state root is not a real directory: {state_root}")
+    lock_path = state_root / _MAINTENANCE_FILE
+    if not create and not os.path.lexists(lock_path):
+        yield
+        return
+    lock = _AdvisoryFileLock(lock_path, create=create)
+    try:
+        if not lock.acquire(nonblocking=False):  # pragma: no cover - blocking lock
+            raise AssertionError("blocking maintenance lock unexpectedly failed")
+        lock.read_locked(maximum=1)
+        yield
+    finally:
+        lock.close()
+
+
+def _require_runs_root(runs_root: Path) -> None:
+    if os.path.lexists(runs_root):
+        if runs_root.is_symlink() or not runs_root.is_dir():
+            raise _StateError(f"runs root is not a real directory: {runs_root}")
+    else:
+        runs_root.mkdir()
+
+
 def _tree_usage(root: Path) -> tuple[int, int, int]:
     """Return bytes, regular-file count, and newest mtime without following links."""
 
     total_bytes = 0
     files = 0
-    newest = root.stat(follow_symlinks=False).st_mtime_ns
+    root_stat = root.stat(follow_symlinks=False)
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise _StateError(f"state run is not a real directory: {root}")
+    newest = root_stat.st_mtime_ns
     pending = [root]
     while pending:
         directory = pending.pop()
@@ -181,11 +216,10 @@ class RunArena:
             raise _StateError(f"invalid run kind: {kind!r}")
         self.state_root = _require_real_directory(state_root, "state root")
         self.runs_root = self.state_root / "runs"
-        if os.path.lexists(self.runs_root):
-            if self.runs_root.is_symlink() or not self.runs_root.is_dir():
-                raise _StateError(f"runs root is not a real directory: {self.runs_root}")
-        else:
-            self.runs_root.mkdir()
+        if os.path.lexists(self.runs_root) and (
+            self.runs_root.is_symlink() or not self.runs_root.is_dir()
+        ):
+            raise _StateError(f"runs root is not a real directory: {self.runs_root}")
         identifier = run_id or uuid.uuid4().hex
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,95}", identifier):
             raise _StateError(f"invalid run id: {identifier!r}")
@@ -199,29 +233,31 @@ class RunArena:
         if self._entered:
             raise _StateError("run arena is single-use")
         self._entered = True
-        try:
-            self.path.mkdir(exist_ok=False)
-        except FileExistsError as exc:
-            raise _StateError(f"run arena already exists: {self.path}") from exc
-        lease = _AdvisoryFileLock(self.path / _LEASE_FILE)
-        try:
-            if not lease.acquire(nonblocking=True):  # freshly-created path
-                raise _StateError(f"cannot lease fresh run arena: {self.path}")
-            self._lease = lease
-            _atomic_json(
-                self.path / _OUTCOME_FILE,
-                {
-                    "kind": self.path.name.split("-", 1)[0],
-                    "outcome": "interrupted",
-                    "pid": os.getpid(),
-                    "started_ns": time.time_ns(),
-                },
-            )
-        except BaseException:
-            self._lease = None
-            lease.close()
-            shutil.rmtree(self.path)
-            raise
+        with _maintenance_gate(self.state_root):
+            _require_runs_root(self.runs_root)
+            try:
+                self.path.mkdir(exist_ok=False)
+            except FileExistsError as exc:
+                raise _StateError(f"run arena already exists: {self.path}") from exc
+            lease = _AdvisoryFileLock(self.path / _LEASE_FILE)
+            try:
+                if not lease.acquire(nonblocking=True):  # freshly-created path
+                    raise _StateError(f"cannot lease fresh run arena: {self.path}")
+                self._lease = lease
+                _atomic_json(
+                    self.path / _OUTCOME_FILE,
+                    {
+                        "kind": self.path.name.split("-", 1)[0],
+                        "outcome": "interrupted",
+                        "pid": os.getpid(),
+                        "started_ns": time.time_ns(),
+                    },
+                )
+            except BaseException:
+                self._lease = None
+                lease.close()
+                shutil.rmtree(self.path)
+                raise
         return self
 
     def finish(self, *, succeeded: bool) -> None:
@@ -243,10 +279,11 @@ class RunArena:
         )
         lease = self._lease
         self._lease = None
-        if lease is not None:
-            lease.close()
-        if not should_keep:
-            self._remove()
+        with _maintenance_gate(self.state_root):
+            if lease is not None:
+                lease.close()
+            if not should_keep:
+                self._remove()
 
     def _remove(self) -> None:
         if self.path.is_symlink() or not self.path.is_dir():
@@ -301,24 +338,47 @@ class StateStore:
         lease_path = path / _LEASE_FILE
         if lease_path.is_symlink():
             return True
-        if not lease_path.is_file():
+        if not os.path.lexists(lease_path):
             return False
-        lock = _AdvisoryFileLock(lease_path)
+        if not lease_path.is_file():
+            raise _StateError(f"run lease is not a real file: {lease_path}")
         try:
-            return not lock.acquire(nonblocking=True)
+            lock = _AdvisoryFileLock(lease_path, create=False)
+        except FileNotFoundError:
+            return False
+        try:
+            if not lock.acquire(nonblocking=True):
+                return True
+            lock.read_locked(maximum=1)
+            return False
         finally:
             lock.close()
 
     def status(self) -> StateStatus:
         runs: list[RunState] = []
-        for path in self._run_paths():
-            size, files, modified_ns = _tree_usage(path)
+        if os.path.lexists(self.root):
+            with _maintenance_gate(self.root, create=False):
+                run_activity = tuple(
+                    (path, self._active(path)) for path in self._run_paths()
+                )
+        else:
+            run_activity = ()
+        for path, active in run_activity:
+            try:
+                size, files, modified_ns = _tree_usage(path)
+                outcome = _outcome(path)
+            except (FileNotFoundError, _StateError):
+                if not os.path.lexists(path):
+                    continue
+                raise
+            if not os.path.lexists(path):
+                continue
             runs.append(
                 RunState(
                     path=path,
                     kind=path.name.split("-", 1)[0],
-                    active=self._active(path),
-                    outcome=_outcome(path),
+                    active=active,
+                    outcome=outcome,
                     bytes=size,
                     files=files,
                     modified_ns=modified_ns,
@@ -359,7 +419,10 @@ class StateStore:
         *,
         older_than_seconds: float = 0.0,
         dry_run: bool = False,
+        include_cache: bool = False,
     ) -> GCResult:
+        """Remove inactive run arenas and, when requested, reusable cache data."""
+
         if older_than_seconds < 0:
             raise _StateError("GC age cannot be negative")
         cutoff_ns = time.time_ns() - int(older_than_seconds * 1_000_000_000)
@@ -367,40 +430,70 @@ class StateStore:
         skipped_active: list[Path] = []
         skipped_recent: list[Path] = []
         reclaimed = 0
-        for path in self._run_paths():
-            size, _, modified_ns = _tree_usage(path)
-            lease_path = path / _LEASE_FILE
-            if lease_path.is_symlink():
-                skipped_active.append(path)
-                continue
-            lease = _AdvisoryFileLock(lease_path)
-            if not lease.acquire(nonblocking=True):
-                lease.close()
-                skipped_active.append(path)
-                continue
-            try:
-                # Recheck under the lease; a completed arena cannot become active
-                # without replacing the directory, which is rejected below.
-                _, _, modified_ns = _tree_usage(path)
-                if modified_ns > cutoff_ns:
-                    skipped_recent.append(path)
-                    continue
-                if path.is_symlink() or path.parent.resolve(strict=True) != self.runs_root:
-                    raise _StateError(f"run escaped state root during GC: {path}")
-                # Windows cannot remove the held lease file. Close only after
-                # ownership has been established and immediately remove it.
-                lease.close()
-                if not dry_run:
-                    shutil.rmtree(path)
-                removed.append(path)
-                reclaimed += size
-            finally:
-                lease.close()
         cache_removed_records = 0
         cache_removed_blobs = 0
         cache_active_leases = 0
         cache_skipped_recent_records = 0
-        if os.path.lexists(self.cache_root):
+        if os.path.lexists(self.root):
+            with _maintenance_gate(self.root):
+                for path in self._run_paths():
+                    lease_path = path / _LEASE_FILE
+                    if lease_path.is_symlink():
+                        skipped_active.append(path)
+                        continue
+                    lease: _AdvisoryFileLock | None = None
+                    if os.path.lexists(lease_path):
+                        if not lease_path.is_file():
+                            raise _StateError(
+                                f"run lease is not a real file: {lease_path}"
+                            )
+                        try:
+                            lease = _AdvisoryFileLock(lease_path, create=False)
+                        except FileNotFoundError:
+                            lease = None
+                        if lease is not None:
+                            try:
+                                acquired = lease.acquire(nonblocking=True)
+                                if acquired:
+                                    lease.read_locked(maximum=1)
+                            except BaseException:
+                                lease.close()
+                                raise
+                            if not acquired:
+                                lease.close()
+                                skipped_active.append(path)
+                                continue
+                    try:
+                        # Scan only after an existing lease is owned. A missing
+                        # lease denotes an abandoned pre-lease arena; the state
+                        # maintenance gate prevents a creator from entering it.
+                        size, _, modified_ns = _tree_usage(path)
+                        if modified_ns > cutoff_ns:
+                            skipped_recent.append(path)
+                            continue
+                        if (
+                            path.is_symlink()
+                            or path.parent.resolve(strict=True) != self.runs_root
+                        ):
+                            raise _StateError(f"run escaped state root during GC: {path}")
+                        # Windows cannot remove a held lease file. The state-wide
+                        # gate keeps the close-to-remove window exclusive.
+                        if lease is not None:
+                            lease.close()
+                            lease = None
+                        if not dry_run:
+                            shutil.rmtree(path)
+                        removed.append(path)
+                        reclaimed += size
+                    except (FileNotFoundError, _StateError):
+                        if not os.path.lexists(path):
+                            continue
+                        raise
+                    finally:
+                        if lease is not None:
+                            lease.close()
+
+        if include_cache and os.path.lexists(self.cache_root):
             if self.cache_root.is_symlink() or not self.cache_root.is_dir():
                 raise _StateError(f"cache root is not a real directory: {self.cache_root}")
             from reprobit.cache import IncrementalCache

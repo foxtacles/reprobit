@@ -11,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from reprobit.cache import IncrementalCache, cache_key
 from reprobit.classic_project import ClassicProjectError
 from reprobit.cli import (
     _human_intervention_detail,
@@ -18,7 +19,7 @@ from reprobit.cli import (
     _positive_seconds,
     main,
 )
-from reprobit.cli_output import CLIOutput
+from reprobit.cli_output import CLIOutput, human_command
 from reprobit.cli_paths import CLIError
 from reprobit.costs import calculate_cost
 from reprobit.discovery_cli import (
@@ -1514,11 +1515,11 @@ def test_incremental_summary_is_complete_in_text_and_ndjson() -> None:
     human = StringIO()
     CLIOutput("text", human, StringIO()).incremental_summary(summary)
     rendered = human.getvalue()
-    assert "99 hit, 1 miss (99.0%)" in rendered
-    assert "1 runtime lane(s)" in rendered
+    assert "99 reused, 1 rebuilt (99.0% reused)" in rendered
+    assert "compiler environment started 1 time" in rendered
     assert "1.25s" in rendered
     assert "targets: 1 unchanged, 0 updated" in rendered
-    assert "cache invalidations:" in rendered
+    assert "Why steps were rebuilt:" in rendered
     assert "compile.unit: recursive header changed" in rendered
 
     machine = StringIO()
@@ -1557,11 +1558,11 @@ def test_incremental_text_summary_bounds_invalidation_details() -> None:
     assert "... and 2 more" in rendered
 
 
-def test_state_status_and_gc_expose_retained_workspace_lifecycle(
+def test_state_status_and_clean_expose_retained_workspace_lifecycle(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    project = tmp_path / "project"
+    project = tmp_path / "project with spaces"
     _complete_project(project)
     capsys.readouterr()
     state = project / ".reprobit-state"
@@ -1575,32 +1576,67 @@ def test_state_status_and_gc_expose_retained_workspace_lifecycle(
         retained = arena.path
         (arena.path / "payload.bin").write_bytes(b"x" * 2048)
 
-    assert main(["--format", "ndjson", "state", "status", str(project)]) == 0
-    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
-    status = events[-1]
-    assert status["event"] == "state_status"
-    assert status["run_bytes"] >= 2048
-    assert status["runs"][0]["outcome"] == "succeeded"
+    cached_output = tmp_path / "cached-output.obj"
+    cached_output.write_bytes(b"cached output")
+    cache = IncrementalCache(state, implementation="cli-clean-test-v1")
+    key = cache_key(
+        "producer",
+        {"node": "compile"},
+        implementation="cli-clean-test-v1",
+    )
+    with cache.lease() as lease:
+        lease.store("producer", key, {"build/output.obj": cached_output})
+
+        assert main(["--format", "ndjson", "state", "status", str(project)]) == 0
+        events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        status = events[-1]
+        assert status["event"] == "state_status"
+        assert status["run_bytes"] >= 2048
+        assert status["runs"][0]["outcome"] == "succeeded"
+
+        assert main(["clean", str(project), "--preview"]) == 0
+        assert retained.is_dir()
+        preview = capsys.readouterr().out
+        assert "Clean preview:" in preview
+        assert "1 inactive workspace" in preview
+        assert "reusable incremental cache will be kept" in preview
+
+        assert main(["clean", str(project)]) == 0
+        assert not retained.exists()
+        assert cache.status().records == 1
+        cleaned = capsys.readouterr().out
+        assert "Freed " in cleaned
+        assert "1 inactive workspace" in cleaned
+        assert "reusable incremental cache was kept" in cleaned
+
+        assert main(["clean", str(project), "--cache"]) == 0
+        skipped = capsys.readouterr().out
+        assert "Cache cleanup was skipped because 1 active build" in skipped
+        assert cache.status().records == 1
 
     assert (
         main(
             [
-                "state",
-                "gc",
+                "clean",
                 str(project),
                 "--older-than-hours",
-                "0",
-                "--dry-run",
+                "24",
+                "--cache",
+                "--preview",
             ]
         )
         == 0
     )
-    assert retained.is_dir()
-    assert "would remove 1 retained run" in capsys.readouterr().out
+    preview = capsys.readouterr().out
+    expected = human_command(("rbit", "clean", project, "--older-than-hours", "24", "--cache"))
+    assert f"Run {expected} to perform this cleanup." in preview
+    assert "1 recent cache record" in preview
+    assert cache.status().records == 1
 
-    assert main(["state", "gc", str(project), "--older-than-hours", "0"]) == 0
-    assert not retained.exists()
-    assert "removed 1 retained run" in capsys.readouterr().out
+    assert main(["clean", str(project), "--cache"]) == 0
+    cleaned = capsys.readouterr().out
+    assert "Removed 1 cache record" in cleaned
+    assert cache.status().records == 0
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "not-a-number"])
@@ -2097,6 +2133,21 @@ def test_report_help_explains_the_input_and_output_paths(
     help_text = capsys.readouterr().out
     assert "canonical report.json to validate and render" in help_text
     assert "replace the input suffix with .html" in help_text
+
+
+def test_primary_help_uses_human_terms_for_common_workflows(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        main(["--help"])
+
+    assert stopped.value.code == 0
+    top_level = " ".join(capsys.readouterr().out.split())
+    assert "review and lock the source files a build may read" in top_level
+    assert "check exact bytes and trust evidence" in top_level
+    assert "save only proven results" in top_level
+    assert "portable project read set" not in top_level
+    assert "cold exact solution" not in top_level
 
 
 def test_report_and_cmake_module_commands(

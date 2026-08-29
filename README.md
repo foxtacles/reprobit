@@ -42,7 +42,7 @@ installation. Reference binaries remain project-owned and are never redistribute
 
 ### Project setup outline
 
-Start a project and prepare the current machine with the human-first setup command:
+Create the project shell and prepare the current machine with the human-first setup command:
 
 ```console
 rbit init . --project-id sample --profile msvc_4_2
@@ -50,15 +50,18 @@ rbit setup .
 rbit status .
 ```
 
-`setup` downloads the compiler when needed, authenticates it, remembers its location, creates or
-checks the project lock, and tests the host backend. Pass `--toolchain-root /path/to/msvc42` to use
-an existing installation. `status` shows the next incomplete project step instead of requiring you
-to remember the setup sequence.
+`init` creates the entry point and an initial source lock; it does not guess how an unreleased
+project should compile. `setup` downloads the compiler when needed, authenticates it, remembers
+its location, creates or checks the project lock, and tests the host. Pass
+`--toolchain-root /path/to/msvc42` to use an existing installation. `status` shows the next
+incomplete project step instead of requiring you to remember the setup sequence.
 
 Each project still needs its own source lock, build plan, reference metadata, and producer graph.
-Existing CMake projects use CMake once to import their direct compiler and linker commands; normal
-ReproBit builds do not invoke it. The [command-line workflow](docs/cli.md) explains those project
-files, while [platform setup](docs/platforms.md) and the
+After the reviewed build plan and project records exist, a CMake-based project can use CMake once
+to import its direct compiler and linker commands; normal ReproBit builds do not invoke it. This
+pre-release does not yet generate that build plan for a fresh project. The
+[command-line workflow](docs/cli.md) explains those project files, while
+[platform setup](docs/platforms.md) and the
 [native Windows guide](docs/windows.md) cover unusual hosts.
 
 Once those files are committed, the everyday commands are:
@@ -68,6 +71,11 @@ rbit validate .
 rbit build .
 rbit verify . --report-dir build/reprobit-report
 ```
+
+Failed builds keep a private workspace so problems can be inspected. Reclaim
+those workspaces with `rbit clean .`; the reusable build cache is kept by
+default. Use `rbit clean . --cache` when you also want to reclaim cache space,
+and add `--preview` to either command to see exactly what would be removed.
 
 ReproBit uses the remembered authenticated compiler and the locked host launchers. CI can still
 pass explicit machine paths and emit NDJSON. Use `rbit build . --cold` for a non-certifying
@@ -275,19 +283,24 @@ can be split into small reviewable documents.
 
 ## Documentation
 
+Start here:
+
 - [Runnable examples](examples/README.md)
 - [Command-line workflow](docs/cli.md)
 - [Find possible compiler interventions](docs/discovery.md)
+- [GitHub Action](docs/action.md)
+- [Troubleshooting](docs/troubleshooting.md)
+
+Detailed references:
+
 - [Authenticity and threat model](docs/authenticity.md)
-- [Architecture](docs/architecture.md)
 - [Project format](docs/project-format.md)
 - [Cost model](docs/costs.md)
 - [Platforms and logical paths](docs/platforms.md)
 - [Native Windows and external MSVC setup](docs/windows.md)
 - [One-time CMake import](docs/cmake.md)
-- [GitHub Action](docs/action.md)
 - [Migration](docs/migration.md)
-- [Troubleshooting](docs/troubleshooting.md)
+- [Architecture](docs/architecture.md)
 
 ## Development
 

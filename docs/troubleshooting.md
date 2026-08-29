@@ -19,7 +19,10 @@ still rejected.
 Successful arenas are removed by default. A failed arena is retained and its
 path is printed; pass `--keep-workspace never` to discard it or `always` to keep
 successful runs too. Use `rbit state status` to inspect disk use and
-`rbit state gc --dry-run` before reclaiming old inactive arenas.
+`rbit clean --preview` to see how much inactive state can be removed. Run
+`rbit clean` when you are finished diagnosing retained failures. The reusable
+build cache is kept unless you explicitly add `--cache`; preview that broader
+cleanup with `rbit clean --cache --preview` first.
 
 ## Toolchain doctor reports a digest or tree mismatch
 
