@@ -1,8 +1,8 @@
 """Schema-v3 adapter for the finite classic simulated-elision quarantine.
 
-Importing the normal :mod:`reprobit.classic` facade never loads this module.
-It is an explicit bridge between a frozen legacy intervention, its committed
-proof receipt, fresh compiler objects, and a VA-only sealed-oracle capability.
+This module is imported only by the explicit legacy execution path. It bridges
+a frozen legacy intervention, its committed proof receipt, fresh compiler
+objects, and a VA-only sealed-oracle capability.
 """
 
 from __future__ import annotations
@@ -15,7 +15,7 @@ from hashlib import sha256
 from types import MappingProxyType
 from typing import Any
 
-from reprobit.classic.foundation import ByteIdentityError
+from reprobit.binary import ByteIdentityError
 from reprobit.classic.legacy_elision import (
     SIMULATED_ELISION_CLASS,
     SIMULATED_ELISION_KIND,
@@ -328,7 +328,20 @@ def compose_legacy_simulated_elision(
         "installed_byte_count": intervention.byte_count,
         "oracle_payload_bytes_read": payload_bytes,
         "maximum_oracle_payload_bytes": intervention.maximum_oracle_payload_bytes,
+        "seed_object": {
+            "digest": Digest.from_bytes(seed_object).model_dump(mode="json"),
+            "size": len(seed_object),
+        },
+        "donor_object": {
+            "digest": Digest.from_bytes(donor_object).model_dump(mode="json"),
+            "size": len(donor_object),
+        },
         "output_sha256": sha256(output).hexdigest(),
+        "output_size": len(output),
+        "candidate": {
+            "digest": Digest.from_bytes(output).model_dump(mode="json"),
+            "size": len(output),
+        },
         "proof_digest": proof_digest.value,
         "legacy_oracle_install": True,
         "clean": False,

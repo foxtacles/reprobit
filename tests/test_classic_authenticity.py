@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from reprobit import classic
+import reprobit.classic.composition as composition_algorithms
+import reprobit.classic.foundation as foundation_algorithms
+import reprobit.classic.ia32 as ia32_algorithms
+import reprobit.classic.registers as register_algorithms
+import reprobit.classic.relational as relational_algorithms
+import reprobit.classic.rewriting as rewriting_algorithms
+import reprobit.classic.scheduling as schedule_algorithms
+from reprobit.binary import ByteIdentityError
 from reprobit.legacy import LegacyOracleInstallGate
 
 FORBIDDEN_PAYLOAD_PARAMETERS = {
@@ -22,11 +29,23 @@ FORBIDDEN_PAYLOAD_PARAMETERS = {
     "target_payload",
 }
 QUARANTINED_ORACLE_MODULE = "legacy_elision.py"
+CANDIDATE_MODULES = (
+    composition_algorithms,
+    register_algorithms,
+    relational_algorithms,
+    rewriting_algorithms,
+    schedule_algorithms,
+)
 
 
 def test_clean_candidate_entry_points_have_no_oracle_payload_parameter() -> None:
     producers = {
-        name: getattr(classic, name) for name in classic.__all__ if name.startswith("produce_")
+        f"{module.__name__}.{name}": value
+        for module in CANDIDATE_MODULES
+        for name, value in vars(module).items()
+        if name.startswith("produce_")
+        and inspect.isfunction(value)
+        and value.__module__ == module.__name__
     }
     assert producers
     for name, producer in producers.items():
@@ -36,7 +55,7 @@ def test_clean_candidate_entry_points_have_no_oracle_payload_parameter() -> None
 
 def test_clean_primitive_rejects_an_oracle_keyword() -> None:
     with pytest.raises(TypeError):
-        classic.apply_simulated_region_rewrite(
+        rewriting_algorithms.apply_simulated_region_rewrite(
             b"\xc3",
             [],
             frozenset(),
@@ -46,8 +65,8 @@ def test_clean_primitive_rejects_an_oracle_keyword() -> None:
 
 
 def test_clean_primitive_rejects_a_nested_oracle_payload() -> None:
-    with pytest.raises(classic.ByteIdentityError, match="embedded payload"):
-        classic.apply_simulated_region_rewrite(
+    with pytest.raises(ByteIdentityError, match="embedded payload"):
+        rewriting_algorithms.apply_simulated_region_rewrite(
             b"\xc3",
             [{"oracle_payload": b"retail bytes"}],
             frozenset(),
@@ -56,8 +75,8 @@ def test_clean_primitive_rejects_a_nested_oracle_payload() -> None:
 
 
 def test_clean_producer_rejects_bytes_hidden_under_an_ignored_key() -> None:
-    with pytest.raises(classic.ByteIdentityError, match="embeds a byte payload"):
-        classic.produce_reloc_divergent_candidate(
+    with pytest.raises(ByteIdentityError, match="embeds a byte payload"):
+        composition_algorithms.produce_reloc_divergent_candidate(
             b"not parsed",
             b"not parsed",
             {"notes": {"opaque": b"retail bytes"}},
@@ -67,8 +86,6 @@ def test_clean_producer_rejects_bytes_hidden_under_an_ignored_key() -> None:
 def test_source_refactor_candidate_authenticates_source_before_composition(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from reprobit.classic import composition
-
     calls: list[tuple[bytes, bytes, object, str]] = []
 
     def authenticate(
@@ -92,10 +109,12 @@ def test_source_refactor_candidate_authenticates_source_before_composition(
         return b"candidate", {"object_authenticated": True}
 
     monkeypatch.setattr(
-        composition, "require_target_source_refactor_identity", authenticate
+        composition_algorithms,
+        "require_target_source_refactor_identity",
+        authenticate,
     )
-    monkeypatch.setattr(composition, "compose_same_slot_resize", compose)
-    output, proof = classic.produce_source_refactor_candidate(
+    monkeypatch.setattr(composition_algorithms, "compose_same_slot_resize", compose)
+    output, proof = composition_algorithms.produce_source_refactor_candidate(
         b"seed object",
         b"donor object",
         {
@@ -133,27 +152,28 @@ def test_mosaic_declarations_reject_legacy_literal_instruction_fields() -> None:
             "donor_sha256": "1" * 64,
         }
     ]
-    with pytest.raises(classic.ByteIdentityError, match="schema differs"):
-        classic.validate_instruction_mosaic_ranges(declaration, "adversarial", 1)
+    with pytest.raises(ByteIdentityError, match="schema differs"):
+        ia32_algorithms.validate_instruction_mosaic_ranges(declaration, "adversarial", 1)
 
 
 def test_mosaic_trace_labels_a_migrated_primary_donor_without_legacy_identity() -> None:
-    from reprobit.classic import composition
-
-    label = composition._instruction_mosaic_range_donor_label
-    primary = composition._instruction_mosaic_primary_donor_label
+    label = composition_algorithms._instruction_mosaic_range_donor_label
+    primary = composition_algorithms._instruction_mosaic_primary_donor_label
     assert primary({}) == "primary"
     assert primary({"donor": "legacy-primary"}) == "legacy-primary"
-    assert primary(
-        {
-            "donor_variants": [{"donor": "variant"}],
-            "instruction_ranges": [
-                {"donor": "migrated-primary"},
-                {"donor": "variant"},
-            ],
-        }
-    ) == "migrated-primary"
-    with pytest.raises(classic.ByteIdentityError, match="primary donor is ambiguous"):
+    assert (
+        primary(
+            {
+                "donor_variants": [{"donor": "variant"}],
+                "instruction_ranges": [
+                    {"donor": "migrated-primary"},
+                    {"donor": "variant"},
+                ],
+            }
+        )
+        == "migrated-primary"
+    )
+    with pytest.raises(ByteIdentityError, match="primary donor is ambiguous"):
         primary(
             {
                 "instruction_ranges": [
@@ -168,7 +188,7 @@ def test_mosaic_trace_labels_a_migrated_primary_donor_without_legacy_identity() 
 
 
 def test_classic_package_has_no_oracle_capability_import_or_raw_body_api() -> None:
-    package = Path(inspect.getfile(classic)).parent
+    package = Path(inspect.getfile(foundation_algorithms)).parent
     for path in package.glob("*.py"):
         if path.name == QUARANTINED_ORACLE_MODULE:
             continue
@@ -197,11 +217,11 @@ def test_classic_package_has_no_oracle_capability_import_or_raw_body_api() -> No
         assert "reprobit.legacy" not in imported
 
 
-def test_clean_classic_import_surface_does_not_load_legacy_elision() -> None:
+def test_clean_canonical_imports_do_not_load_legacy_elision() -> None:
     script = """
 import sys
 
-import reprobit.classic
+import reprobit.classic.composition
 import reprobit.classic_project
 
 module = "reprobit.classic.legacy_elision"
@@ -218,13 +238,16 @@ if module in sys.modules:
 
 
 def test_oracle_discovery_producer_was_removed() -> None:
-    assert not hasattr(classic, "restore_adjacent_thunk_pair_order")
-    assert not hasattr(classic, "compose_retail_exact_simulated_elision")
-    assert not any("simulated_elision" in name for name in classic.__all__)
-    assert "apply_replacements" not in classic.__all__
-    assert not hasattr(classic, "apply_replacements")
+    forbidden = {
+        "restore_adjacent_thunk_pair_order",
+        "compose_retail_exact_simulated_elision",
+        "apply_replacements",
+    }
+    for module in CANDIDATE_MODULES:
+        assert forbidden.isdisjoint(vars(module))
+        assert not any("simulated_elision" in name for name in vars(module))
 
 
 def test_direct_oracle_install_gate_lives_only_in_quarantine_module() -> None:
     assert LegacyOracleInstallGate.__module__ == "reprobit.legacy"
-    assert not hasattr(classic, "LegacyOracleInstallGate")
+    assert all(not hasattr(module, "LegacyOracleInstallGate") for module in CANDIDATE_MODULES)

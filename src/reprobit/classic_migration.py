@@ -65,6 +65,7 @@ def _transport_sibling(directory: Path, name: str) -> Path:
         item
         for item in directory.iterdir()
         if item.name.casefold() in {name.casefold(), f"{name}.exe".casefold()}
+        and not item.is_symlink()
     )
     if len(matches) != 1:
         raise ClassicMigrationError(
@@ -214,6 +215,7 @@ def configure_classic_producer_graph(
         f"-DREPROBIT_CMAKE_MODULE={module}",
         f"-DREPROBIT_PROJECT_PLAN={project_plan}",
         f"-DREPROBIT_TARGET_PLAN={target_plan}",
+        f"-DREPROBIT_EFFECTIVE_SOURCE_ROOT={effective_root}",
         "-DREPROBIT_TERMINAL=ON",
     )
     specification = CommandSpec.create(

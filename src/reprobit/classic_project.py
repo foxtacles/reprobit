@@ -17,10 +17,21 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
-from reprobit.classic_semantics import (
-    ClassicSemanticError,
+import reprobit.classic.composition as composition
+import reprobit.classic.pe_imports as pe_imports
+import reprobit.classic.pe_metadata as pe_metadata
+import reprobit.classic.pe_rdata as pe_rdata
+import reprobit.classic.pe_text as pe_text
+import reprobit.classic.registers as registers
+import reprobit.classic.rewriting as rewriting
+import reprobit.classic.scheduling as scheduling
+from reprobit.classic.compiler_identity import Msvc420CompilerIdentity
+from reprobit.classic.semantic_contracts import (
+    _CLASSIC_SEMANTIC_ISSUER,
+    _ClassicCandidateSemanticMaterial,
     issue_classic_candidate_semantics,
 )
+from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.model import Digest, SemanticProof
 from reprobit.schema import (
     ClassicRecipeFamily,
@@ -103,7 +114,7 @@ def _coverage() -> Mapping[ClassicRecipeFamily, FamilyCoverage]:
             result[family] = FamilyCoverage(
                 FamilyExecutionMode.CLEAN_CANDIDATE,
                 True,
-                "oracle-free classic facade producer is dispatchable",
+                "oracle-free classic candidate producer is dispatchable",
             )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION:
             result[family] = FamilyCoverage(
@@ -151,6 +162,7 @@ class ClassicDispatchMaterials:
     additional_donor_objects: Mapping[str, bytes] = field(default_factory=dict)
     shape_identifiers: frozenset[str] = frozenset()
     candidate_constraints: Mapping[str, object] | None = None
+    compiler_identity: Msvc420CompilerIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,7 +186,7 @@ def _present_bytes(**values: bytes | None) -> dict[str, bytes]:
 
 
 class ClassicFamilyDispatcher:
-    """Lazy facade-only dispatcher; no verifier or oracle object crosses this seam."""
+    """Typed dispatcher; no verifier or oracle object crosses this seam."""
 
     def dispatch(
         self,
@@ -189,8 +201,6 @@ class ClassicFamilyDispatcher:
                 f"classic family {intervention.family.value!r} is not a clean candidate: "
                 f"{coverage.detail}"
             )
-        from reprobit import classic
-
         function: dict[str, Any] = (
             dict(materials.candidate_constraints)
             if materials.candidate_constraints is not None
@@ -224,12 +234,12 @@ class ClassicFamilyDispatcher:
             ClassicRecipeFamily.EQUAL_BODY_EH_STRUCTURAL_LOCAL,
             ClassicRecipeFamily.EQUAL_BODY_EH_RELOC_LAYOUT,
         }:
-            output, proof = classic.compose_equal_body_comdat(seed, donor, function)
+            output, proof = composition.compose_equal_body_comdat(seed, donor, function)
         elif family is ClassicRecipeFamily.SAME_SLOT_RESIZE:
-            output, proof = classic.compose_same_slot_resize(seed, donor, function)
+            output, proof = composition.compose_same_slot_resize(seed, donor, function)
         elif family is ClassicRecipeFamily.RETAIL_EXACT_RELOC_DIVERGENT:
             if "target_source_refactor" in function:
-                output, proof = classic.produce_source_refactor_candidate(
+                output, proof = composition.produce_source_refactor_candidate(
                     seed,
                     donor,
                     function,
@@ -237,14 +247,16 @@ class ClassicFamilyDispatcher:
                     _required_bytes(materials.donor_source, "donor source"),
                 )
             else:
-                output, proof = classic.produce_reloc_divergent_candidate(
+                output, proof = composition.produce_reloc_divergent_candidate(
                     seed, donor, function
                 )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING:
-            output, proof = classic.produce_donor_rewriting_candidate(seed, donor, function)
+            output, proof = rewriting.produce_donor_rewriting_candidate(
+                seed, donor, function, compiler_identity=materials.compiler_identity
+            )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC:
             if "target_source_refactor" in function:
-                output, proof = classic.produce_source_instruction_mosaic_candidate(
+                output, proof = composition.produce_source_instruction_mosaic_candidate(
                     seed,
                     donor,
                     function,
@@ -253,13 +265,15 @@ class ClassicFamilyDispatcher:
                     dict(materials.additional_donor_objects),
                 )
             else:
-                output, proof = classic.produce_instruction_mosaic_candidate(
+                output, proof = composition.produce_instruction_mosaic_candidate(
                     seed, donor, function, dict(materials.additional_donor_objects)
                 )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION:
-            output, proof = classic.produce_register_bijection_candidate(seed, donor, function)
+            output, proof = registers.produce_register_bijection_candidate(
+                seed, donor, function
+            )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_SOURCE_EQUAL_BODY:
-            output, proof = classic.produce_source_equal_body_candidate(
+            output, proof = composition.produce_source_equal_body_candidate(
                 seed,
                 donor,
                 function,
@@ -267,22 +281,26 @@ class ClassicFamilyDispatcher:
                 _required_bytes(materials.donor_source, "donor source"),
             )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_COMPOSED_REWRITING:
-            output, proof = classic.produce_composed_rewriting_candidate(seed, donor, function)
+            output, proof = rewriting.produce_composed_rewriting_candidate(
+                seed, donor, function, compiler_identity=materials.compiler_identity
+            )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_WEB_RECOLOUR:
-            output, proof = classic.produce_web_recolour_candidate(seed, donor, function)
+            output, proof = scheduling.produce_web_recolour_candidate(
+                seed, donor, function, compiler_identity=materials.compiler_identity
+            )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_CROSS_TU_COMPLETE_TARGET_RESIZE:
-            output, proof = classic.produce_cross_tu_complete_target_resize_candidate(
+            output, proof = composition.produce_cross_tu_complete_target_resize_candidate(
                 seed,
                 _required_bytes(materials.target_donor_object, "target donor object"),
                 _required_bytes(materials.complete_donor_object, "complete donor object"),
                 function,
             )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION_REENCODING:
-            output, proof = classic.produce_register_bijection_reencoding_candidate(
+            output, proof = registers.produce_register_bijection_reencoding_candidate(
                 seed, donor, function
             )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_SAME_TU_INSTRUCTION_HYBRID_RESIZE:
-            output, proof = classic.produce_same_tu_instruction_hybrid_resize_candidate(
+            output, proof = composition.produce_same_tu_instruction_hybrid_resize_candidate(
                 seed,
                 _required_bytes(materials.target_donor_object, "target donor object"),
                 _required_bytes(materials.instruction_donor_object, "instruction donor object"),
@@ -294,7 +312,7 @@ class ClassicFamilyDispatcher:
                 ),
             )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_SOURCE_TARGET_CLOSURE:
-            output, proof = classic.produce_source_target_closure_candidate(
+            output, proof = composition.produce_source_target_closure_candidate(
                 seed,
                 donor,
                 function,
@@ -327,12 +345,16 @@ class ClassicFamilyDispatcher:
         try:
             semantics = issue_classic_candidate_semantics(
                 intervention,
-                seed_input=seed,
-                binary_inputs=binary_inputs,
-                source_inputs=source_inputs,
-                candidate_constraints=function,
-                output=output,
-                validator_trace=proof_value,
+                material=_ClassicCandidateSemanticMaterial(
+                    intervention=intervention,
+                    seed_input=seed,
+                    binary_inputs=binary_inputs,
+                    source_inputs=source_inputs,
+                    candidate_constraints=function,
+                    output=output,
+                    validator_trace=proof_value,
+                    _issuer=_CLASSIC_SEMANTIC_ISSUER,
+                ),
             )
         except ClassicSemanticError as exc:
             raise ClassicProjectError(
@@ -366,9 +388,7 @@ class ClassicFamilyDispatcher:
         if intervention.family is ClassicRecipeFamily.IMAGE_METADATA:
             if set(values) != {"link_time", "resource_time"}:
                 raise ClassicProjectError("image metadata declaration is not closed")
-            from reprobit import classic
-
-            output, proof = classic.apply_pe_metadata_candidate(candidate, values)
+            output, proof = pe_metadata.apply_pe_metadata_candidate(candidate, values)
         elif intervention.family is ClassicRecipeFamily.IMAGE_LINK_ORDER:
             declaration: object = values.get("import_order")
             if not isinstance(declaration, dict) or declaration.get("schema") != (
@@ -377,9 +397,7 @@ class ClassicFamilyDispatcher:
                 raise ClassicProjectError(
                     "image link-order recipe requires a closed pe32_import_order_v1 declaration"
                 )
-            from reprobit import classic
-
-            output, proof = classic.apply_pe_import_order_candidate(
+            output, proof = pe_imports.apply_pe_import_order_candidate(
                 candidate, declaration
             )
         elif (
@@ -390,9 +408,7 @@ class ClassicFamilyDispatcher:
             declaration = values["text_repack"]
             if declaration.get("schema") != "comdat_tail_thunk_repack_v1":
                 raise ClassicProjectError("unsupported text repack schema")
-            from reprobit import classic
-
-            output, proof = classic.apply_text_repack_candidate(candidate, declaration)
+            output, proof = pe_text.apply_text_repack_candidate(candidate, declaration)
         elif (
             intervention.family is ClassicRecipeFamily.IMAGE_BINARY_REPACK
             and set(values) == {"rdata_pool_repack"}
@@ -401,9 +417,9 @@ class ClassicFamilyDispatcher:
             declaration = values["rdata_pool_repack"]
             if declaration.get("schema") != "rdata_pool_repack_v1":
                 raise ClassicProjectError("unsupported rdata repack schema")
-            from reprobit import classic
-
-            output, proof = classic.apply_rdata_pool_repack_candidate(candidate, declaration)
+            output, proof = pe_rdata.apply_rdata_pool_repack_candidate(
+                candidate, declaration
+            )
         else:
             raise ClassicProjectError("image repack declaration is not closed or unambiguous")
         if not isinstance(output, bytes) or not isinstance(proof, Mapping):
@@ -416,12 +432,16 @@ class ClassicFamilyDispatcher:
         try:
             semantics = issue_classic_candidate_semantics(
                 intervention,
-                seed_input=candidate,
-                binary_inputs={},
-                source_inputs={},
-                candidate_constraints=values,
-                output=output,
-                validator_trace=proof_value,
+                material=_ClassicCandidateSemanticMaterial(
+                    intervention=intervention,
+                    seed_input=candidate,
+                    binary_inputs={},
+                    source_inputs={},
+                    candidate_constraints=values,
+                    output=output,
+                    validator_trace=proof_value,
+                    _issuer=_CLASSIC_SEMANTIC_ISSUER,
+                ),
             )
         except ClassicSemanticError as exc:
             raise ClassicProjectError(
@@ -446,6 +466,8 @@ class InterventionWitness:
     semantic_proof: SemanticProof | None = None
     semantic_input_statement: Mapping[str, object] | None = None
     semantic_output_statement: Mapping[str, object] | None = None
+    output_digest: Digest | None = None
+    output_size: int | None = None
 
 
 def _relative_path(value: str) -> str:

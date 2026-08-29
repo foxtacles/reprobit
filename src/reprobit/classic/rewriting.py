@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from .coff import CoffObject, _coff_table_bytes, _comdat_child, _comdat_child_closure, coff_body, comdat_primary_identity_multiset, detailed_relocations, function_multiset, section_definitions
+from reprobit.binary import ByteIdentityError, require
+from reprobit.coff import CoffObject, coff_body, detailed_relocations, section_definitions
+from reprobit.ia32 import supported_ia32_instruction_length
+
+from .coff import _coff_table_bytes, _comdat_child, _comdat_child_closure, comdat_primary_identity_multiset, function_multiset
+from .commutative import apply_commutative_operand_form
 from .composition import compose_equal_body_comdat, compose_same_slot_resize, instruction_mosaic_metadata_sha256
+from .compiler_identity import Msvc420CompilerIdentity
 from .debug import parse_codeview_symbol_stream
 from .floating import apply_fp_sum_reassociation, apply_x87_squared_addend_exchange
-from .foundation import ByteIdentityError, exact_audit_keys, require, require_exact_int, require_payload_free_declaration, require_sha, sha256_bytes
-from .ia32 import require_declared_relocation_semantics, supported_ia32_instruction_length
+from .foundation import exact_audit_keys, require_exact_int, require_payload_free_declaration, require_sha, sha256_bytes
+from .ia32 import require_declared_relocation_semantics
 from .registers import CODEVIEW_REGISTER_RECORD_TYPE, IA32_GENERAL_REGISTER_NAMES, REGISTER_BIJECTION_FPO_CLOSURE, _IA32_ATOMS_OF, _IA32_REGISTER_NUMBERS, _IA32_STRUCTURAL_REGISTERS, _codeview_register_field, _codeview_register_name, _register_bijection_live_sets, apply_codeview_register_bijection, apply_register_bijection, apply_slot_bijection, decode_ia32_bijection_body, decode_ia32_bijection_instruction
 from .relational import IA32_RELATIONAL_MIRROR, apply_relational_form, ia32_relational_flag_liveness, ia32_relational_flow_walk, relational_form_external_entries
 from .scheduling import INSTRUCTION_SCHEDULE_EH_CLOSURE, INSTRUCTION_SCHEDULE_FPO_CLOSURE, _validate_schedule_windows, apply_instruction_schedule, require_instruction_schedule_debug_fidelity
@@ -293,7 +299,7 @@ def validate_composed_rewriting(value: object, context: str, body_length: int, l
         normalized['expected_internal_relocation_targets'] = list(targets)
     return normalized
 
-def produce_composed_rewriting_candidate(seed_bytes: bytes, donor_bytes: bytes, function: dict) -> tuple[bytes, dict]:
+def produce_composed_rewriting_candidate(seed_bytes: bytes, donor_bytes: bytes, function: dict, *, compiler_identity: Msvc420CompilerIdentity | None=None) -> tuple[bytes, dict]:
     """Apply a reordering, then regional bijections, then reversed compares.
 
     See the class comment above.  Each primitive is the LANDED one, called
@@ -335,14 +341,14 @@ def produce_composed_rewriting_candidate(seed_bytes: bytes, donor_bytes: bytes, 
         require(sorted(internal_targets) == declared_targets, 'composed-rewriting in-body relocated target set changed')
     code_length = spec.get('expected_code_length')
     image = seed_body
+    external_entries = relational_form_external_entries(seed, sp, 'composed-rewriting external entries')
+    require(sorted(external_entries) == spec['expected_external_entries'], 'composed-rewriting external entry set differs from its declaration')
     schedule_detail = []
     windows = spec.get('windows') or []
     if windows:
-        image, schedule_proof = apply_instruction_schedule(image, windows, relocation_offsets, 'composed-rewriting schedule', relocation_symbols, code_length, internal_targets)
+        image, schedule_proof = apply_instruction_schedule(image, windows, relocation_offsets, 'composed-rewriting schedule', relocation_symbols, code_length, internal_targets, frozenset(external_entries), compiler_identity)
         require(not schedule_proof['relocation_reseat'], 'composed-rewriting refuses to move a relocation')
         schedule_detail = schedule_proof['windows']
-    external_entries = relational_form_external_entries(seed, sp, 'composed-rewriting external entries')
-    require(sorted(external_entries) == spec['expected_external_entries'], 'composed-rewriting external entry set differs from its declaration')
     fp_detail = []
     if spec.get('fp_sum_rotations'):
         image, fp_proof = apply_fp_sum_reassociation(image, spec['fp_sum_rotations'], relocation_offsets, 'composed-rewriting fp-sum', relocation_symbols, code_length, frozenset(external_entries), internal_targets)
@@ -726,7 +732,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         normalized['expected_internal_relocation_targets'] = list(targets)
     return normalized
 
-def produce_donor_rewriting_candidate(seed_bytes: bytes, donor_bytes: bytes, function: dict) -> tuple[bytes, dict]:
+def produce_donor_rewriting_candidate(seed_bytes: bytes, donor_bytes: bytes, function: dict, *, compiler_identity: Msvc420CompilerIdentity | None=None) -> tuple[bytes, dict]:
     """Produce REWRITE(donor body) from a fresh compiler artifact."""
     require_payload_free_declaration(function, 'donor-rewriting declaration')
     require(function.get('splice_class') == DONOR_REWRITING_CLASS, 'splice class is not retail_exact_donor_rewriting')
@@ -854,7 +860,7 @@ def produce_donor_rewriting_candidate(seed_bytes: bytes, donor_bytes: bytes, fun
     schedule_detail = []
     windows = spec.get('windows') or []
     if windows:
-        image, schedule_proof = apply_instruction_schedule(image, windows, relocation_offsets, 'donor-rewriting schedule', relocation_symbols, code_length, internal_targets)
+        image, schedule_proof = apply_instruction_schedule(image, windows, relocation_offsets, 'donor-rewriting schedule', relocation_symbols, code_length, internal_targets, frozenset(external_entries), compiler_identity)
         require(not schedule_proof['relocation_reseat'], 'donor-rewriting refuses to move a relocation inside a window')
         schedule_detail = schedule_proof['windows']
     relational_detail = []
@@ -939,21 +945,6 @@ def produce_donor_rewriting_candidate(seed_bytes: bytes, donor_bytes: bytes, fun
     require(coff_body(checked, cp) == image, 'donor-rewriting composed body differs from the image')
     require([_relocation_identity(row) for row in detailed_relocations(checked, cp)] == [_relocation_identity(row) for row in installed_rows], 'donor-rewriting composed relocation table is not the proved reseat')
     return (composed, {**detail, 'splice_class': DONOR_REWRITING_CLASS, 'instruction_schedule': schedule_detail, 'fp_sum_reassociation': fp_detail, 'fp_pointer_exchanges': exchange_detail, 'commutative_operand_forms': form_detail, 'simulated_region_rewrites': rewrite_detail, 'x87_squared_addend_exchanges': x87_detail, 'register_bijections': bijection_detail, 'slot_bijections': slot_detail, 'relational_form': relational_detail, 'instruction_count': len(image_instructions), 'changed_offsets': changed, 'debug_fidelity': debug_detail, 'external_entries': sorted(external_entries), 'candidate_only': True, **semantic_detail})
-COMMUTATIVE_OPERAND_FORM_KIND = 'commutative_operand_form_v1'
-_COMMUTATIVE_LOAD_WIDTH = {217: 'm32', 221: 'm64'}
-_COMMUTATIVE_OPERATOR_WIDTH = {216: 'm32', 220: 'm64'}
-_COMMUTATIVE_DIGIT = {0: 'fadd', 1: 'fmul'}
-
-def _commutative_memory_operand(body, item, context):
-    """(modrm_at, end, rm_bytes) for a pure-memory x87 operand, or refuse."""
-    encoding = item['encoding']
-    require(encoding is not None, f"{context}: the instruction at {item['offset']} has no ModRM operand")
-    require(encoding['mode'] != 3, f"{context}: the operand at {item['offset']} is a register, not memory")
-    require(not encoding['absolute'], f"{context}: the operand at {item['offset']} is an absolute address")
-    modrm_at = encoding['modrm_at']
-    end = item['offset'] + item['length']
-    return (modrm_at, end, bytes(body[modrm_at:end]))
-
 def apply_esp_argument_exchange(body: bytes, exchanges: list, relocation_offsets: frozenset, context: str, relocations: dict | None=None, code_length: int | None=None) -> tuple[bytes, dict]:
     """Exchange two incoming pointer arguments' roles, or refuse.
 
@@ -1085,73 +1076,6 @@ def apply_esp_argument_exchange(body: bytes, exchanges: list, relocation_offsets
     sites = [{'first_offset': first, 'second_offset': second, 'registers': [IA32_GENERAL_REGISTER_NAMES[first_register], IA32_GENERAL_REGISTER_NAMES[second_register]], 'rewritten_offsets': rewritten}]
     return (image, {'sites': sites})
 
-def apply_commutative_operand_form(body: bytes, sites: list, relocation_offsets: frozenset, context: str, relocations: dict | None=None, code_length: int | None=None, external_entries: frozenset | None=None, internal_targets: frozenset | None=None) -> tuple[bytes, dict]:
-    """Exchange the two memory operands of each declared x87 pair, or refuse."""
-    require_payload_free_declaration(sites, f'{context} commutative operand declaration')
-    require(isinstance(body, (bytes, bytearray)) and body, f'{context}: body is empty')
-    body = bytes(body)
-    require(isinstance(sites, list) and sites, f'{context}: no site is declared')
-    items, successors, entries = ia32_relational_flow_walk(body, relocations, context, code_length, external_entries)
-    branch_targets = {item['target'] for item in items if item.get('target') is not None}
-    entry_offsets = {items[entry]['offset'] for entry in entries[1:]}
-    decoded = decode_ia32_bijection_body(body, f'{context} decode', relocations, code_length)
-    index_of = {item['offset']: index for index, item in enumerate(decoded)}
-    image = bytearray(body)
-    proved = []
-    previous_end = 0
-    for ordinal, site in enumerate(sites):
-        site_context = f'{context} site {ordinal}'
-        at = site['pair_offset']
-        require(type(at) is int and 0 <= at < len(body), f'{site_context}: the pair offset is out of range')
-        require(previous_end <= at, f'{site_context}: sites are unsorted or overlapping')
-        require(at in index_of, f'{site_context}: the pair offset is not an instruction boundary')
-        load = decoded[index_of[at]]
-        require(index_of[at] + 1 < len(decoded), f'{site_context}: the pair runs past the body')
-        operator = decoded[index_of[at] + 1]
-        require(operator['offset'] == at + load['length'], f'{site_context}: the two instructions are not adjacent')
-        end = operator['offset'] + operator['length']
-        previous_end = end
-        width = _COMMUTATIVE_LOAD_WIDTH.get(load['opcode'])
-        require(width is not None, f"{site_context}: {load['opcode']:#x} is not an fld m32/m64")
-        require(load['encoding'] is not None and load['encoding']['reg'] == 0, f'{site_context}: the first instruction is not fld (/0)')
-        require(_COMMUTATIVE_OPERATOR_WIDTH.get(operator['opcode']) == width, f"{site_context}: the operator at {operator['offset']} is not a {width} x87 memory binary operation")
-        digit = (operator['encoding'] or {}).get('reg')
-        operation = _COMMUTATIVE_DIGIT.get(digit)
-        require(operation is not None, f'{site_context}: /{digit} is not a COMMUTATIVE x87 binary operation')
-        require(site.get('operation') == operation, f'{site_context}: the declared operation differs')
-        load_modrm, load_end, load_rm = _commutative_memory_operand(body, load, site_context)
-        oper_modrm, oper_end, oper_rm = _commutative_memory_operand(body, operator, site_context)
-        require(load['length'] == operator['length'], f'{site_context}: the two instructions differ in length; the interior boundary would move')
-        require(not any((at <= offset < end for offset in relocation_offsets)), f'{site_context}: a relocation lies inside the pair')
-        require(operator['offset'] not in branch_targets, f'{site_context}: a branch targets the operator, so the pair can be entered without its fld')
-        require(operator['offset'] not in entry_offsets, f'{site_context}: an external entry lies inside the pair')
-        require(not any((at < target < end for target in internal_targets or frozenset())), f'{site_context}: a relocated target lies inside the pair')
-
-        def splice(rm_bytes, digit_value):
-            head = bytearray(rm_bytes)
-            head[0] = head[0] & 199 | digit_value << 3
-            return bytes(head)
-        require(splice(load_rm, 0) != splice(oper_rm, 0), f'{site_context}: the two operands are already equal')
-        new_load = bytes([load['opcode']]) + splice(oper_rm, 0)
-        new_operator = bytes([operator['opcode']]) + splice(load_rm, digit)
-        require(len(new_load) == load['length'] and len(new_operator) == operator['length'], f'{site_context}: the exchange changed an instruction length')
-        image[at:end] = new_load + new_operator
-        check = decode_ia32_bijection_body(bytes(image[at:end]), f'{site_context} image', None, None)
-        require(len(check) == 2 and check[0]['opcode'] == load['opcode'] and (check[1]['opcode'] == operator['opcode']) and (check[0]['length'] == load['length']) and (check[1]['length'] == operator['length']), f'{site_context}: the image pair does not re-decode')
-        require(_commutative_memory_operand(bytes(image[at:end]), check[0], f'{site_context} image')[2] == splice(oper_rm, 0), f"{site_context}: the image fld does not carry the operator's operand")
-        require(_commutative_memory_operand(bytes(image[at:end]), check[1], f'{site_context} image')[2] == splice(load_rm, digit), f"{site_context}: the image operator does not carry the fld's operand")
-        rewritten = sorted((offset for offset in range(at, end) if body[offset] != image[offset]))
-        declared = site.get('expected_rewritten_offsets')
-        require(list(declared or []) == rewritten, f'{site_context}: the rewritten offsets {rewritten} are not the declared {list(declared or [])}')
-        proved.append({'pair_offset': at, 'pair_end': end, 'operation': operation, 'width': width, 'expected_rewritten_offsets': rewritten})
-    image = bytes(image)
-    require(image != body, f'{context}: the image does not move the body')
-    changed = {offset for offset in range(len(body)) if body[offset] != image[offset]}
-    declared = {offset for site in proved for offset in site['expected_rewritten_offsets']}
-    require(changed <= declared, f'{context}: the image changed a byte outside the declared sites')
-    image_items, _successors, image_entries = ia32_relational_flow_walk(image, relocations, f'{context} image', code_length, external_entries)
-    require([item['offset'] for item in image_items] == [item['offset'] for item in items] and {item['target'] for item in image_items if item.get('target') is not None} == branch_targets and (image_entries == entries), f'{context}: the image moved a boundary, a branch target or an entry')
-    return (image, {'kind': COMMUTATIVE_OPERAND_FORM_KIND, 'sites': proved, 'instruction_count': len(image_items)})
 FP_POINTER_EXCHANGE_KIND = 'fp_pointer_addend_exchange_v1'
 
 def apply_imul_operand_exchange(body: bytes, sites: list, relocation_offsets: frozenset, context: str, relocations: dict | None=None, code_length: int | None=None, external_entries: frozenset | None=None, internal_targets: frozenset | None=None) -> tuple[bytes, dict]:

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import re
-from .foundation import FORBIDDEN_CONVENIENCE_OPTIONS, require
+
+from reprobit.binary import require
+
+from .foundation import FORBIDDEN_CONVENIENCE_OPTIONS
 
 """Classic compiler algorithms: arguments."""
 

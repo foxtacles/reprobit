@@ -11,9 +11,10 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from types import MappingProxyType
 
-from reprobit.classic_semantics import (
+from reprobit.classic.coff_evidence import (
     ClassicImportObjectReceipt,
     CoffDirectiveReceipt,
     parse_classic_archive_member_directives,
@@ -22,6 +23,7 @@ from reprobit.classic_semantics import (
 )
 from reprobit.formats import FormatError, parse_coff_archive
 from reprobit.model import Digest
+from reprobit.producer_graph import ProducerNode, ProducerRole
 
 
 class ClassicLinkClosureError(ValueError):
@@ -33,8 +35,7 @@ class MissingDirectiveInputsError(ClassicLinkClosureError):
 
     def __init__(self, libraries: tuple[str, ...]) -> None:
         super().__init__(
-            "DEFAULTLIB controls lack committed directive inputs: "
-            + ", ".join(libraries)
+            "DEFAULTLIB controls lack committed directive inputs: " + ", ".join(libraries)
         )
         self.libraries = libraries
 
@@ -95,6 +96,50 @@ class ModuleDefinitionReceipt:
     exports: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class TerminalLinkControlReferences:
+    """The direct file controls visible to one terminal LINK invocation."""
+
+    objects: tuple[str, ...]
+    archives: tuple[str, ...]
+    definitions: tuple[str, ...]
+
+
+def direct_terminal_link_control_references(
+    linker: ProducerNode,
+) -> TerminalLinkControlReferences:
+    """Classify only files consumed by ``linker``, stopping at linked targets."""
+
+    if linker.role is not ProducerRole.LINKER or linker.target_id is None:
+        raise ClassicLinkClosureError(
+            "terminal link-control references require one terminal linker node"
+        )
+
+    def suffix(reference: str) -> str:
+        return PurePosixPath(reference.split("/", 1)[-1]).suffix.casefold()
+
+    objects = tuple(
+        sorted(
+            (reference for reference in linker.inputs if suffix(reference) == ".obj"),
+            key=str.casefold,
+        )
+    )
+    archives = tuple(
+        sorted(
+            (
+                reference
+                for reference in (*linker.inputs, *linker.directive_inputs)
+                if suffix(reference) in {".a", ".lib"}
+            ),
+            key=str.casefold,
+        )
+    )
+    definitions = tuple(reference for reference in linker.inputs if suffix(reference) == ".def")
+    if len(definitions) > 1:
+        raise ClassicLinkClosureError(f"target {linker.target_id!r} names more than one DEF input")
+    return TerminalLinkControlReferences(objects, archives, definitions)
+
+
 def link_directive_closure_material(closure: ClassicLinkDirectiveClosure) -> object:
     """Return the one canonical JSON-shaped cold/warm closure identity."""
 
@@ -137,8 +182,7 @@ def link_directive_closure_material(closure: ClassicLinkDirectiveClosure) -> obj
             for archive in closure.archives
         ],
         "default_libraries": [
-            {"name": item.name, "reference": item.reference}
-            for item in closure.default_libraries
+            {"name": item.name, "reference": item.reference} for item in closure.default_libraries
         ],
         "include_symbols": list(closure.include_symbols),
         "export_symbols": list(closure.export_symbols),
@@ -162,9 +206,7 @@ def module_definition_material(receipt: ModuleDefinitionReceipt | None) -> objec
     }
 
 
-_LIBRARY_NAME = re.compile(
-    r"(?i)^(?:library|name)(?:\s+([^\s]+))?(?:\s+base=(?:0x)?[0-9a-f]+)?$"
-)
+_LIBRARY_NAME = re.compile(r"(?i)^(?:library|name)(?:\s+([^\s]+))?(?:\s+base=(?:0x)?[0-9a-f]+)?$")
 _EXPORT_SYMBOL = re.compile(r"^[A-Za-z0-9_?$@.]+$")
 _EXPORT_ORDINAL = re.compile(r"^@[0-9]+$")
 
@@ -223,9 +265,7 @@ def _def_export(line: str, *, label: str, line_number: int) -> str:
     return names[-1]
 
 
-def parse_classic_module_definition(
-    payload: bytes, *, label: str
-) -> ModuleDefinitionReceipt:
+def parse_classic_module_definition(payload: bytes, *, label: str) -> ModuleDefinitionReceipt:
     """Parse the closed, read-free subset of the classic DEF grammar.
 
     ``STUB`` is rejected wherever it appears because its operand is a nested
@@ -285,9 +325,7 @@ def parse_classic_module_definition(
             in_exports = True
             inline = tail.strip()
             if inline:
-                exports.append(
-                    _def_export(inline, label=label, line_number=line_number)
-                )
+                exports.append(_def_export(inline, label=label, line_number=line_number))
             continue
         if folded in {
             "code",
@@ -323,14 +361,10 @@ def _directive_input(payload: bytes, *, label: str) -> CoffDirectiveInputReceipt
         directives = parse_classic_coff_directives(payload, label=label)
     except Exception as exc:
         raise ClassicLinkClosureError(f"cannot close directives for {label}: {exc}") from exc
-    return CoffDirectiveInputReceipt(
-        label, Digest.from_bytes(payload), len(payload), directives
-    )
+    return CoffDirectiveInputReceipt(label, Digest.from_bytes(payload), len(payload), directives)
 
 
-def _archive_directives(
-    payload: bytes, *, reference: str
-) -> CoffArchiveDirectiveReceipt:
+def _archive_directives(payload: bytes, *, reference: str) -> CoffArchiveDirectiveReceipt:
     try:
         parsed = parse_coff_archive(payload)
     except FormatError as exc:
@@ -348,13 +382,9 @@ def _archive_directives(
             if imported is not None:
                 imports.append(imported)
                 continue
-            directives = parse_classic_archive_member_directives(
-                member.data, label=label
-            )
+            directives = parse_classic_archive_member_directives(member.data, label=label)
         except Exception as exc:
-            raise ClassicLinkClosureError(
-                f"cannot classify archive member {label}: {exc}"
-            ) from exc
+            raise ClassicLinkClosureError(f"cannot classify archive member {label}: {exc}") from exc
         ordinary.append(
             CoffDirectiveInputReceipt(
                 label,
@@ -392,9 +422,7 @@ def _node_default_suppression(arguments: Sequence[str]) -> tuple[bool, frozenset
         if folded.startswith(("/nodefaultlib:", "-nodefaultlib:")):
             raw = argument.split(":", 1)[1]
             if not raw or re.fullmatch(r"[A-Za-z0-9_.+@-]+", raw) is None:
-                raise ClassicLinkClosureError(
-                    f"malformed NODEFAULTLIB declaration {argument!r}"
-                )
+                raise ClassicLinkClosureError(f"malformed NODEFAULTLIB declaration {argument!r}")
             names.add(_normalized_library_name(raw))
     return suppress_all, frozenset(names)
 
@@ -419,9 +447,7 @@ def audit_classic_link_directives(
         return MappingProxyType(
             {
                 name: payload
-                for name, payload in sorted(
-                    values.items(), key=lambda item: item[0].casefold()
-                )
+                for name, payload in sorted(values.items(), key=lambda item: item[0].casefold())
             }
         )
 
@@ -457,8 +483,7 @@ def audit_classic_link_directives(
     forbidden_edges = sorted(disallowed.intersection(by_basename))
     if forbidden_edges:
         raise ClassicLinkClosureError(
-            "DISALLOWLIB conflicts with declared archive edges: "
-            + ", ".join(forbidden_edges)
+            "DISALLOWLIB conflicts with declared archive edges: " + ", ".join(forbidden_edges)
         )
     resolutions: dict[str, DefaultLibraryResolution] = {}
     missing_libraries: set[str] = set()
@@ -468,9 +493,7 @@ def audit_classic_link_directives(
             if suppress_all or name in suppressed_names:
                 continue
             if name in disallowed:
-                raise ClassicLinkClosureError(
-                    f"DEFAULTLIB {raw_name!r} conflicts with DISALLOWLIB"
-                )
+                raise ClassicLinkClosureError(f"DEFAULTLIB {raw_name!r} conflicts with DISALLOWLIB")
             matches = by_basename.get(name, [])
             if not matches:
                 missing_libraries.add(name)
@@ -479,9 +502,7 @@ def audit_classic_link_directives(
                 raise ClassicLinkClosureError(
                     f"DEFAULTLIB {raw_name!r} has {len(matches)} declared archive edges"
                 )
-            previous = resolutions.setdefault(
-                name, DefaultLibraryResolution(name, matches[0])
-            )
+            previous = resolutions.setdefault(name, DefaultLibraryResolution(name, matches[0]))
             if previous.reference.casefold() != matches[0].casefold():
                 raise ClassicLinkClosureError(
                     f"DEFAULTLIB {raw_name!r} has inconsistent graph authority"
@@ -503,9 +524,7 @@ def audit_classic_link_directives(
     merge_map: dict[str, tuple[str, str]] = {}
     for receipt in directive_receipts:
         for source, destination in receipt.merge_sections:
-            merge_previous = merge_map.setdefault(
-                source.casefold(), (source, destination)
-            )
+            merge_previous = merge_map.setdefault(source.casefold(), (source, destination))
             if merge_previous[1].casefold() != destination.casefold():
                 raise ClassicLinkClosureError(
                     f"MERGE section {source!r} has conflicting destinations"
@@ -529,7 +548,9 @@ __all__ = [
     "DefaultLibraryResolution",
     "MissingDirectiveInputsError",
     "ModuleDefinitionReceipt",
+    "TerminalLinkControlReferences",
     "audit_classic_link_directives",
+    "direct_terminal_link_control_references",
     "link_directive_closure_material",
     "module_definition_material",
     "parse_classic_module_definition",

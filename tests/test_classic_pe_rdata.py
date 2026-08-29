@@ -4,7 +4,10 @@ import struct
 
 import pytest
 
-from reprobit import classic
+import reprobit.classic.foundation as foundation_algorithms
+import reprobit.classic.pe_rdata as pe_rdata_algorithms
+import reprobit.coff as coff_format
+from reprobit.binary import ByteIdentityError
 
 POOL_CHARACTERISTICS = 0x40400040
 TEXT_CHARACTERISTICS = 0x60500020
@@ -160,10 +163,10 @@ def _declaration() -> dict[str, object]:
         "pad_fill": "00",
         "pre_image": {
             "size": len(POOL),
-            "sha256": classic.sha256_bytes(POOL),
+            "sha256": foundation_algorithms.sha256_bytes(POOL),
             "fixed_prefix": {
                 "size": len(PREFIX),
-                "sha256": classic.sha256_bytes(PREFIX),
+                "sha256": foundation_algorithms.sha256_bytes(PREFIX),
                 "symbols": [{"symbol": "_prefix$S1", "offset": 0, "size": len(PREFIX)}],
             },
         },
@@ -171,14 +174,19 @@ def _declaration() -> dict[str, object]:
             {"symbol": "$T2", "old_offset": 16, "new_offset": 8, "size": 8, "references": 1},
             {"symbol": "$T1", "old_offset": 8, "new_offset": 16, "size": 4, "references": 1},
         ],
-        "post_image": {"size": len(PACKED_POOL), "sha256": classic.sha256_bytes(PACKED_POOL)},
+        "post_image": {
+            "size": len(PACKED_POOL),
+            "sha256": foundation_algorithms.sha256_bytes(PACKED_POOL),
+        },
     }
 
 
 def test_rdata_repack_moves_only_candidate_pool_literals() -> None:
     candidate = _object()
-    output, receipt = classic.apply_rdata_pool_repack_candidate(candidate, _declaration())
-    parsed = classic.CoffObject(output)
+    output, receipt = pe_rdata_algorithms.apply_rdata_pool_repack_candidate(
+        candidate, _declaration()
+    )
+    parsed = coff_format.CoffObject(output)
     pool_section = parsed.sections[1]
 
     assert output[pool_section["raw_offset"] : pool_section["raw_offset"] + 20] == PACKED_POOL
@@ -192,19 +200,21 @@ def test_rdata_repack_refuses_a_reference_count_mismatch() -> None:
     permutation = declaration["permutation"]
     assert isinstance(permutation, list)
     permutation[0]["references"] = 2
-    with pytest.raises(classic.ByteIdentityError, match="reference count differs"):
-        classic.apply_rdata_pool_repack_candidate(_object(), declaration)
+    with pytest.raises(ByteIdentityError, match="reference count differs"):
+        pe_rdata_algorithms.apply_rdata_pool_repack_candidate(_object(), declaration)
 
 
 def test_rdata_repack_refuses_a_drifted_compiler_pool() -> None:
     drifted = bytearray(POOL)
     drifted[9] ^= 1
-    with pytest.raises(classic.ByteIdentityError, match="pre-image digest differs"):
-        classic.apply_rdata_pool_repack_candidate(_object(pool=bytes(drifted)), _declaration())
+    with pytest.raises(ByteIdentityError, match="pre-image digest differs"):
+        pe_rdata_algorithms.apply_rdata_pool_repack_candidate(
+            _object(pool=bytes(drifted)), _declaration()
+        )
 
 
 def test_rdata_repack_declaration_cannot_carry_target_payload() -> None:
     declaration = _declaration()
     declaration["retail_body"] = PACKED_POOL
-    with pytest.raises(classic.ByteIdentityError, match="embedded payload"):
-        classic.apply_rdata_pool_repack_candidate(_object(), declaration)
+    with pytest.raises(ByteIdentityError, match="embedded payload"):
+        pe_rdata_algorithms.apply_rdata_pool_repack_candidate(_object(), declaration)

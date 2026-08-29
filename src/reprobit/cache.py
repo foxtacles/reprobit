@@ -35,7 +35,7 @@ from reprobit.secure_paths import (
     remove_regular_relative,
     stat_relative_file,
 )
-from reprobit.state import AdvisoryFileLock, StateError
+from reprobit.state_lock import AdvisoryFileLock, StateError
 from reprobit.strict_json import JsonValue, canonical_json, strict_loads
 
 

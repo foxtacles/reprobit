@@ -14,7 +14,7 @@ from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
 
 from reprobit.cache import cache_key
-from reprobit.implementation import package_implementation_digest
+from reprobit.implementation import scoped_package_import_closure_digest
 from reprobit.model import Digest
 from reprobit.paths import normalize_logical_path
 from reprobit.producer_graph import producer_graph_accepts_source
@@ -31,13 +31,31 @@ from reprobit.schema import (
 from reprobit.source_lock import SourceLockError, receipt_source_input
 from reprobit.strict_json import JsonValue
 
+_PRODUCER_IMPLEMENTATION_ROOTS = ("reprobit.classic_incremental",)
+
+
+def producer_implementation_digest() -> Digest:
+    """Identify only code that can affect warm producer outputs and receipts."""
+
+    return scoped_package_import_closure_digest(_PRODUCER_IMPLEMENTATION_ROOTS)
+
+
+def revalidate_producer_implementation(expected: Digest) -> None:
+    """Fail if output-affecting warm-build code changes during an invocation."""
+
+    if producer_implementation_digest() != expected:
+        raise RuntimeError(
+            "ReproBit incremental producer implementation changed during execution; "
+            "rerun the build"
+        )
+
 
 def producer_cache_implementation(
     implementation_digest: Digest | None = None,
 ) -> str:
-    """Bind the cache namespace to every installed implementation byte."""
+    """Bind the cache namespace to output-affecting warm-build code."""
 
-    digest = implementation_digest or package_implementation_digest()
+    digest = implementation_digest or producer_implementation_digest()
     return f"classic-producer-graph-v1-{digest.value}"
 
 
@@ -370,5 +388,7 @@ __all__ = [
     "current_worktree_authority",
     "producer_cache_implementation",
     "producer_cache_key",
+    "producer_implementation_digest",
     "require_fresh_protected_recursive_inputs",
+    "revalidate_producer_implementation",
 ]

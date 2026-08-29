@@ -17,9 +17,61 @@ The result is more than a matching checksum. ReproBit checks three separate clai
 3. the rebuilt program came from the declared source and toolchain, not bytes copied from the
    original executable.
 
-ReproBit is pre-release software. Its current certification support covers the older Microsoft
-Visual C++ 4.2 and 5.0 family. The shared build, verification, reporting, and incremental pieces
-are designed to support more compiler families through reviewed library releases.
+ReproBit is pre-release software. It recognizes profiles for Microsoft Visual C++ 4.2 and the
+5.0 releases. Current end-to-end evidence with the real compiler and native Windows CI covers
+4.2; the 5.0 profiles are modeled, but do not yet carry equivalent end-to-end proof. The shared
+build, verification, reporting, and incremental pieces are designed to support more compiler
+families through reviewed library releases.
+
+## Install and set up the pre-release
+
+Python 3.11 or newer is required.
+
+```console
+python -m venv .venv
+.venv/bin/python -m pip install /path/to/reprobit
+.venv/bin/rbit --version
+```
+
+Those last two paths are `.venv\Scripts\python.exe` and `.venv\Scripts\rbit.exe` in Windows
+PowerShell. Activate the environment instead if that is your usual workflow.
+
+ReproBit runs with Wine on macOS and Linux and natively on Windows. For a certified build, you
+also provide a supported compiler toolchain locally; ReproBit does not redistribute proprietary
+compilers or reference binaries. Start with [platform setup](docs/platforms.md) or the
+[native Windows guide](docs/windows.md).
+
+### Project setup outline
+
+This is the common sequence, not a complete project configuration. Each project still needs its
+own build plan, reference metadata, and any required interventions or proofs.
+
+```console
+rbit init . --project-id sample --profile msvc_4_2
+rbit source preview --project .
+rbit source lock --project .
+rbit toolchain lock --project . --root /path/to/msvc42
+rbit doctor . --toolchain-root /path/to/msvc42 --execute-probe
+```
+
+On macOS and Linux, use the complete five-file MSVC 4.2 lock command in the
+[CLI guide](docs/cli.md) in place of the shortened lock line above.
+
+Existing CMake projects use CMake once to import their direct compiler and linker commands;
+normal ReproBit builds do not invoke it. The [command-line workflow](docs/cli.md) explains the
+remaining project files and checks.
+
+Once those files are committed, the native Windows form is:
+
+```console
+rbit validate .
+rbit build . --toolchain-root C:\toolchains\msvc42
+rbit verify . --toolchain-root C:\toolchains\msvc42 --report-dir build\reprobit-report
+```
+
+On macOS and Linux, `build` and `verify` also need the compiler-launcher options shown in the
+[CLI guide](docs/cli.md). ReproBit records and checks those launchers as part of the toolchain.
+Use `rbit build . --cold` for a non-certifying developer build with no cache reads or writes.
 
 ## Why exact rebuilds are difficult
 
@@ -185,54 +237,6 @@ heartbeats, and `rbit --format ndjson ...` emits stable machine-readable progres
 and other tools. The [GitHub Action](docs/action.md) runs the cold verification workflow and
 exports the individual authenticity results.
 
-## Install
-
-Python 3.11 or newer is required.
-
-```console
-python -m venv .venv
-.venv/bin/python -m pip install /path/to/reprobit
-.venv/bin/rbit --version
-```
-
-Those last two paths are `.venv\Scripts\python.exe` and `.venv\Scripts\rbit.exe` in Windows
-PowerShell. Activate the environment instead if that is your usual workflow.
-
-ReproBit runs with Wine on macOS and Linux and natively on Windows. For a certified build, you
-also provide a supported compiler toolchain locally; ReproBit does not redistribute proprietary
-compilers or reference binaries. Start with [platform setup](docs/platforms.md) or the
-[native Windows guide](docs/windows.md).
-
-## Workflow at a glance
-
-Create the small project entry point, review which source files will be admitted, and lock the
-local compiler installation:
-
-```console
-rbit init . --project-id sample --profile msvc_4_2
-rbit source preview --project .
-rbit source lock --project .
-rbit toolchain lock --project . --root /path/to/msvc42
-rbit doctor . --toolchain-root /path/to/msvc42 --execute-probe
-```
-
-Add the project's build plan, reference metadata, and any interventions or proofs. Existing CMake
-projects use CMake once to import their direct compiler and linker commands; normal ReproBit builds
-do not invoke it. The [command-line workflow](docs/cli.md) walks through that setup.
-
-Once the project data is committed, the native Windows form is:
-
-```console
-rbit validate .
-rbit build . --toolchain-root C:\toolchains\msvc42
-rbit verify . --toolchain-root C:\toolchains\msvc42 --report-dir build\reprobit-report
-```
-
-On macOS and Linux, `build` and `verify` also need the compiler-launcher options shown in the
-[CLI guide](docs/cli.md); ReproBit records and checks those launchers as part of the toolchain. Use
-`rbit build . --cold` when you want a non-certifying developer build with no cache reads or
-writes.
-
 ## Measure how much help the build needs
 
 ReproBit assigns a **cost** to each entropy intervention. The score measures distance from an
@@ -271,7 +275,9 @@ can be split into small reviewable documents.
 
 ## Documentation
 
+- [Runnable examples](examples/README.md)
 - [Command-line workflow](docs/cli.md)
+- [Find possible compiler interventions](docs/discovery.md)
 - [Authenticity and threat model](docs/authenticity.md)
 - [Architecture](docs/architecture.md)
 - [Project format](docs/project-format.md)

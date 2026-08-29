@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 import struct
-from .coff import CoffObject, _coff_table_bytes, _comdat_child, _comdat_child_closure, coff_body, coff_table, comdat_primary_identity_multiset, detailed_relocations, function_multiset, section_definitions
+
+from reprobit.binary import require
+from reprobit.coff import CoffObject, coff_body, coff_table, detailed_relocations, section_definitions
+from reprobit.ia32 import supported_ia32_instruction_length
+
+from .coff import _coff_table_bytes, _comdat_child, _comdat_child_closure, comdat_primary_identity_multiset, function_multiset
 from .composition import compose_equal_body_comdat, instruction_mosaic_metadata_sha256, require_instruction_mosaic_semantic_relocations
-from .foundation import exact_audit_keys, require, require_exact_int, require_payload_free_declaration, require_sha, sha256_bytes
-from .ia32 import require_declared_relocation_semantics, supported_ia32_instruction_length
+from .foundation import exact_audit_keys, require_exact_int, require_payload_free_declaration, require_sha, sha256_bytes
+from .ia32 import require_declared_relocation_semantics
 from .registers import _ia32_backward_liveness, decode_ia32_bijection_instruction
 
 """Classic compiler algorithms: relational."""
@@ -282,7 +287,12 @@ def apply_relational_form(body: bytes, sites: list, relocation_offsets: frozense
             image[compare_byte] = IA32_RELATIONAL_COMPARE_PAIRS[compare['opcode']]
             image[branch_byte] = image[branch_byte] & 240 | IA32_CONDITION_CODES[image_name]
             rewritten.extend([compare_byte, branch_byte])
-        proved.append({'compare_offset': compare_at, 'branch_offset': branch_at, 'seed_condition': seed_name, 'image_condition': image_name, 'seed_compare_opcode': compare['opcode'], 'image_compare_opcode': IA32_RELATIONAL_COMPARE_PAIRS[compare['opcode']], 'changed_flags': sorted(IA32_RELATIONAL_CHANGED_FLAGS), 'flags_live_out': sorted(out)})
+        image_compare_opcode = (
+            compare['opcode']
+            if site.get('reencode')
+            else IA32_RELATIONAL_COMPARE_PAIRS[compare['opcode']]
+        )
+        proved.append({'compare_offset': compare_at, 'branch_offset': branch_at, 'seed_condition': seed_name, 'image_condition': image_name, 'seed_compare_opcode': compare['opcode'], 'image_compare_opcode': image_compare_opcode, 'changed_flags': sorted(IA32_RELATIONAL_CHANGED_FLAGS), 'flags_live_out': sorted(out)})
     for entry in entries[1:]:
         offending = sorted(live[entry] & IA32_RELATIONAL_CHANGED_FLAGS)
         require(not offending, f"{context}: the external entry at {items[entry]['offset']} has {offending} live, and the reversal changes it")
@@ -294,8 +304,10 @@ def apply_relational_form(body: bytes, sites: list, relocation_offsets: frozense
     image_items, image_successors, image_entries = ia32_relational_flow_walk(image, relocations, f'{context} image', code_length, external_entries)
     require(len(image_items) == len(items) and all((left['offset'] == right['offset'] and left['length'] == right['length'] and (left['flow'] == right['flow']) and (left['target'] == right['target']) for left, right in zip(items, image_items))) and (image_successors == successors) and (image_entries == entries), f'{context}: the image does not re-decode to the same boundaries, flow and branch targets')
     for site in proved:
-        item = image_items[index_of[site['branch_offset']]]
-        require(IA32_CONDITION_NAMES[item['condition']] == site['image_condition'], f'{context}: the image branch is not the mirrored condition')
+        compare_item = image_items[index_of[site['compare_offset']]]
+        require(compare_item['opcode'] == site['image_compare_opcode'], f'{context}: the image compare opcode differs from its certificate')
+        branch_item = image_items[index_of[site['branch_offset']]]
+        require(IA32_CONDITION_NAMES[branch_item['condition']] == site['image_condition'], f'{context}: the image branch is not the mirrored condition')
     image_live = ia32_relational_flag_liveness(image_items, image_successors, f'{context} image')
     for site in proved:
         branch_index = index_of[site['branch_offset']]

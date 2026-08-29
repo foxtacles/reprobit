@@ -5,18 +5,29 @@ import stat
 import struct
 import subprocess
 import sys
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, nullcontext
 from dataclasses import replace
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from threading import Lock
 from types import MappingProxyType, SimpleNamespace
 from typing import cast
 
 import pytest
 
+import reprobit.classic_evidence as classic_evidence
+import reprobit.classic_includes as classic_includes
+import reprobit.classic_orchestration as classic_orchestration
 import reprobit.classic_runtime as classic_runtime
+import reprobit.classic_runtime_developer as classic_runtime_developer
+import reprobit.classic_runtime_donor as classic_runtime_donor
+import reprobit.classic_runtime_environment as classic_runtime_environment
+import reprobit.classic_runtime_graph as classic_runtime_graph
+import reprobit.classic_runtime_overlay as classic_runtime_overlay
+import reprobit.classic_runtime_preparation as classic_runtime_preparation
+import reprobit.classic_runtime_producer as classic_runtime_producer
 from reprobit.backends import (
     BackendCapabilities,
     BackendError,
@@ -26,6 +37,20 @@ from reprobit.backends import (
     WorkerSandbox,
 )
 from reprobit.build import BuildPlan
+from reprobit.classic.compiler_epoch import compiler_namespace_evidence_digest
+from reprobit.classic.compiler_identity import (
+    MSVC420_WIN32_I386_TARGET,
+    Msvc420CompilerIdentity,
+)
+from reprobit.classic.semantic_contracts import (
+    CleanSourceInput,
+    CompilerEpochInvocation,
+    CompilerNamespaceEvidence,
+    CompilerProduct,
+    ProjectOverlayCompilerEpochPlan,
+    ProjectOverlayCounterfactualAudit,
+    ProjectOverlaySourcePair,
+)
 from reprobit.classic_donors import (
     DonorCompilerAdditions,
     DonorCompileReceipt,
@@ -35,20 +60,11 @@ from reprobit.classic_donors import (
 from reprobit.classic_includes import IncludeOrigin
 from reprobit.classic_orchestration import (
     classic_compiler_translation_unit_authority,
+    classic_rdata_repack_graph_authority,
     prepare_classic_units,
 )
 from reprobit.classic_project import ClassicProjectError, InterventionWitness
-from reprobit.classic_semantics import (
-    CleanSourceInput,
-    CompilerEpochInvocation,
-    CompilerNamespaceEvidence,
-    CompilerProduct,
-    ProjectOverlayCompilerEpochPlan,
-    ProjectOverlayCounterfactualAudit,
-    ProjectOverlaySourcePair,
-    compiler_namespace_evidence_digest,
-)
-from reprobit.engine import StepExecutionReceipt
+from reprobit.execution import StepExecutionReceipt
 from reprobit.model import ByteRange, Digest, Scope
 from reprobit.paths import MaterializedSkeleton
 from reprobit.process import (
@@ -80,20 +96,35 @@ from reprobit.schema import (
     SourceManifestEntry,
     TargetSpec,
     ToolchainLock,
+    ToolchainProfileSource,
     ToolchainRef,
 )
-from reprobit.sealed_namespace import NamespaceFile, NamespaceTree, SealedNamespaceLease
+from reprobit.sealed_namespace import (
+    NamespaceFile,
+    NamespaceTree,
+    SealedNamespaceLease,
+    SealedNamespaceSnapshot,
+)
 from reprobit.secure_paths import atomic_publish_relative
 from reprobit.toolchains import ClassicMSVCToolchain
 
 
 def _directive_object(body: bytes) -> bytes:
-    def symbol(name: str, *, section: int, symbol_type: int, storage: int) -> bytes:
+    def symbol(
+        name: str,
+        *,
+        section: int,
+        symbol_type: int,
+        storage: int,
+        auxiliary_count: int = 0,
+    ) -> bytes:
         encoded = name.encode("ascii")
-        return encoded.ljust(8, b"\0") + struct.pack("<IhHBB", 0, section, symbol_type, storage, 0)
+        return encoded.ljust(8, b"\0") + struct.pack(
+            "<IhHBB", 0, section, symbol_type, storage, auxiliary_count
+        )
 
     symbols = (
-        symbol(".drectve", section=1, symbol_type=0, storage=3)
+        symbol(".drectve", section=1, symbol_type=0, storage=3, auxiliary_count=1)
         + struct.pack("<IHHIhBBH", len(body), 0, 0, 0, 0, 2, 0, 0)
         + symbol("_fixture", section=1, symbol_type=32, storage=2)
     )
@@ -169,6 +200,99 @@ def _prepare_bundle(project_root: Path) -> ProjectBundle:
     )
 
 
+def test_prepared_unit_binds_only_the_exact_msvc42_win32_i386_target(
+    tmp_path: Path,
+) -> None:
+    source = b"int fixture(void) { return 0; }\n"
+    plan = ClassicTranslationUnitPlan(
+        id="unit.fixture",
+        target_id="program",
+        build_target="program",
+        source="unit.cpp",
+        source_digest=Digest.from_bytes(source),
+        mode="fixture",
+    )
+    document = InterventionDocument(
+        schema_version=3,
+        target_id="program",
+        translation_unit_id=plan.id,
+        source=plan.source,
+        source_digest=plan.source_digest,
+        build_target=plan.build_target,
+        interventions=(),
+    )
+    base = _prepare_bundle(tmp_path)
+    assert base.build_plan is not None
+    canonical_lock = ToolchainLock(
+        schema_version=3,
+        adapter="classic-msvc",
+        profile="msvc_4_2",
+        release=MsvcRelease.V4_2,
+        profile_sources=(
+            ToolchainProfileSource(
+                repository="https://github.com/archaic-msvc/msvc420.git",
+                revision="b42c244f0a83ba15ba2ffb62b0dc240d7b2dea50",
+                paths=("bin/C1XX.EXE", "bin/C2.EXE", "bin/CL.EXE"),
+            ),
+        ),
+        tools=(
+            LockedTool(
+                id="compiler",
+                path="bin/CL.EXE",
+                size=37_888,
+                digest=Digest(
+                    value="c5bf7ad84482e8a54d5753fcbd3e648d8a1192f5ca8b8cf1f5d23b651750585f"
+                ),
+                roles=("compiler",),
+            ),
+            LockedTool(
+                id="c1xx",
+                path="bin/C1XX.EXE",
+                size=793_088,
+                digest=Digest(
+                    value="9e0782ec157b30a387ca855374bc4c1b8a605dfb12364425497ba431541a5bf9"
+                ),
+                roles=("runtime",),
+            ),
+            LockedTool(
+                id="c2",
+                path="bin/C2.EXE",
+                size=549_888,
+                digest=Digest(
+                    value="2aa1fcace0779531b3ec80b730663acd98f181aed3cdff51366440c602b724b5"
+                ),
+                roles=("runtime",),
+            ),
+        ),
+    )
+    bundle = base.model_copy(
+        update={
+            "toolchain_lock": canonical_lock,
+            "build_plan": base.build_plan.model_copy(update={"translation_units": (plan,)}),
+            "intervention_documents": (document,),
+        }
+    )
+    units = prepare_classic_units(
+        bundle,
+        clean_sources={"unit.cpp": source},
+        effective_sources={"unit.cpp": source},
+    )
+    assert isinstance(units[0].compiler_identity, Msvc420CompilerIdentity)
+    assert units[0].compiler_identity.target == MSVC420_WIN32_I386_TARGET
+
+    wrong = bundle.model_copy(
+        update={
+            "spec": bundle.spec.model_copy(
+                update={"toolchain": ToolchainRef(profile="msvc_5_0_rtm")}
+            ),
+            "toolchain_lock": bundle.toolchain_lock.model_copy(
+                update={"profile": "msvc_5_0_rtm", "release": MsvcRelease.V5_RTM}
+            ),
+        }
+    )
+    assert classic_orchestration._classic_compiler_identity(wrong) is None
+
+
 @pytest.mark.skipif(os.name == "nt", reason="non-Windows host capability path")
 def test_native_direct_runtime_fails_closed_off_windows(
     tmp_path: Path,
@@ -177,7 +301,7 @@ def test_native_direct_runtime_fails_closed_off_windows(
         ClassicProjectError,
         match="native Windows backend is unavailable",
     ):
-        classic_runtime.prepare_classic_producer_graph_run(
+        classic_runtime_preparation.prepare_classic_producer_graph_run(
             _prepare_bundle(tmp_path),
             project_root=tmp_path,
             session_root=tmp_path / "session",
@@ -318,7 +442,7 @@ def test_cold_prepare_rejects_cross_target_rdata_before_runtime(
         }
     )
     monkeypatch.setattr(
-        classic_runtime,
+        classic_runtime_preparation,
         "ClassicMSVCToolchain",
         lambda *_args, **_kwargs: pytest.fail("cold validation constructed a toolchain"),
     )
@@ -328,7 +452,7 @@ def test_cold_prepare_rejects_cross_target_rdata_before_runtime(
         ClassicProjectError,
         match=message,
     ):
-        classic_runtime.prepare_classic_producer_graph_run(
+        classic_runtime_preparation.prepare_classic_producer_graph_run(
             bundle,
             project_root=tmp_path,
             session_root=session,
@@ -382,14 +506,10 @@ def test_compiler_translation_unit_authority_rejects_wrong_or_shared_target(
         outputs=("build/shared.obj", "build/shared.pdb"),
     )
     app_inputs = (
-        ("build/app.obj", "build/shared.obj")
-        if app_consumes_shared
-        else ("build/app.obj",)
+        ("build/app.obj", "build/shared.obj") if app_consumes_shared else ("build/app.obj",)
     )
     app_dependencies = (
-        (app_compiler.id, shared_compiler.id)
-        if app_consumes_shared
-        else (app_compiler.id,)
+        (app_compiler.id, shared_compiler.id) if app_consumes_shared else (app_compiler.id,)
     )
     linkers = (
         ProducerNode(
@@ -398,10 +518,7 @@ def test_compiler_translation_unit_authority_rejects_wrong_or_shared_target(
             owner="app",
             target_id="app",
             arguments=(
-                *(
-                    f"${{BUILD}}/{reference.removeprefix('build/')}"
-                    for reference in app_inputs
-                ),
+                *(f"${{BUILD}}/{reference.removeprefix('build/')}" for reference in app_inputs),
                 "/out:${BUILD}/app.exe",
             ),
             inputs=app_inputs,
@@ -438,11 +555,7 @@ def test_compiler_translation_unit_authority_rejects_wrong_or_shared_target(
     base = _prepare_bundle(tmp_path)
     assert base.build_plan is not None
     bundle = base.model_copy(
-        update={
-            "build_plan": base.build_plan.model_copy(
-                update={"translation_units": (unit,)}
-            )
-        }
+        update={"build_plan": base.build_plan.model_copy(update={"translation_units": (unit,)})}
     )
 
     with pytest.raises(
@@ -515,16 +628,10 @@ def test_compiler_and_rdata_authorities_stop_at_upstream_linker_boundary(
     base = _prepare_bundle(tmp_path)
     assert base.build_plan is not None
     bundle = base.model_copy(
-        update={
-            "build_plan": base.build_plan.model_copy(
-                update={"translation_units": (unit,)}
-            )
-        }
+        update={"build_plan": base.build_plan.model_copy(update={"translation_units": (unit,)})}
     )
 
-    assert classic_compiler_translation_unit_authority(bundle, graph) == {
-        compiler.id: unit
-    }
+    assert classic_compiler_translation_unit_authority(bundle, graph) == {compiler.id: unit}
 
     declaration = {"schema": "rdata_pool_repack_v1", "object": "shared.obj"}
     intervention = ClassicRecipeIntervention(
@@ -560,9 +667,7 @@ def test_compiler_and_rdata_authorities_stop_at_upstream_linker_boundary(
         }
     )
 
-    assert set(classic_runtime.classic_rdata_repack_graph_authority(bundle, graph)) == {
-        "shared.obj"
-    }
+    assert set(classic_rdata_repack_graph_authority(bundle, graph)) == {"shared.obj"}
 
 
 @pytest.mark.parametrize(
@@ -663,9 +768,7 @@ def test_prepare_classic_units_rejects_invalid_temporary_legacy_shape(
     assert base.build_plan is not None
     bundle = base.model_copy(
         update={
-            "build_plan": base.build_plan.model_copy(
-                update={"translation_units": (unit,)}
-            ),
+            "build_plan": base.build_plan.model_copy(update={"translation_units": (unit,)}),
             "intervention_documents": (document,),
         }
     )
@@ -740,9 +843,7 @@ def test_cold_rdata_authority_rejects_before_runtime_setup(
         id="proof_rdata_preflight",
         intervention_id=intervention.id,
         family=intervention.family,
-        expected_values={"rdata_pool_repack": declaration}
-        if receipt_introduces_selector
-        else {},
+        expected_values={"rdata_pool_repack": declaration} if receipt_introduces_selector else {},
     )
     translation_units = (
         (
@@ -783,14 +884,14 @@ def test_cold_rdata_authority_rejects_before_runtime_setup(
         }
     )
     monkeypatch.setattr(
-        classic_runtime,
+        classic_runtime_preparation,
         "ClassicMSVCToolchain",
         lambda *_args, **_kwargs: pytest.fail("cold preflight constructed a toolchain"),
     )
     session = tmp_path / "cold-rdata-session"
 
     with pytest.raises(ClassicProjectError, match=message):
-        classic_runtime.prepare_classic_producer_graph_run(
+        classic_runtime_preparation.prepare_classic_producer_graph_run(
             bundle,
             project_root=tmp_path,
             session_root=session,
@@ -905,9 +1006,7 @@ def test_shared_rdata_authority_closes_canonical_object_dataflow(
     bundle = base.model_copy(
         update={
             "producer_graph": graph,
-            "build_plan": base.build_plan.model_copy(
-                update={"translation_units": units}
-            ),
+            "build_plan": base.build_plan.model_copy(update={"translation_units": units}),
             "intervention_documents": (
                 InterventionDocument(
                     schema_version=3,
@@ -926,7 +1025,7 @@ def test_shared_rdata_authority_closes_canonical_object_dataflow(
     )
 
     with pytest.raises(ClassicProjectError, match=message):
-        classic_runtime.classic_rdata_repack_graph_authority(bundle, graph)
+        classic_rdata_repack_graph_authority(bundle, graph)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="the POSIX proxy is a Bash program")
@@ -960,7 +1059,7 @@ def test_path_proxy_rewrites_cross_session_argv_without_run_tokens(
     for index, token in enumerate(tokens):
         session = tmp_path / f"run-{token}"
         session.mkdir()
-        proxies, _ = classic_runtime._install_path_proxies(session)
+        proxies, _ = classic_runtime_environment._install_path_proxies(session)
         physical_drive = session / "logical-drive"
         physical_build = physical_drive / "build"
         physical_build.mkdir(parents=True)
@@ -1022,7 +1121,7 @@ def test_path_proxy_leaves_z_drive_paths_for_one_transport_normalization(
     recorder.chmod(stat.S_IRUSR | stat.S_IXUSR)
     session = tmp_path / "run"
     session.mkdir()
-    proxies, _ = classic_runtime._install_path_proxies(session)
+    proxies, _ = classic_runtime_environment._install_path_proxies(session)
     physical_drive = session / "logical-drive"
     physical_drive.mkdir()
     physical_toolchain = tmp_path / "toolchain"
@@ -1174,27 +1273,27 @@ def test_prepare_failure_releases_logical_drive_and_uses_stable_temporary(
         effective_root.mkdir(parents=True, exist_ok=True)
         return ()
 
-    monkeypatch.setattr(classic_runtime, "ClassicMSVCToolchain", Installation)
+    monkeypatch.setattr(classic_runtime_preparation, "ClassicMSVCToolchain", Installation)
     monkeypatch.setattr(
-        "reprobit.classic_runtime.shutil.which",
+        "reprobit.classic_runtime_environment.shutil.which",
         lambda name: pytest.fail(f"runtime attempted build-system discovery: {name}"),
     )
-    monkeypatch.setattr(classic_runtime, "ToolchainLock", RuntimeLock)
-    monkeypatch.setattr(classic_runtime, "materialize_effective_workspace", materialize)
+    monkeypatch.setattr(classic_runtime_preparation, "ToolchainLock", RuntimeLock)
+    monkeypatch.setattr(classic_runtime_preparation, "materialize_effective_workspace", materialize)
 
     def project_toolchain(*args: object, **kwargs: object) -> tuple[()]:
         del args
         cast(Path, kwargs["destination"]).mkdir(parents=True)
         return ()
 
-    monkeypatch.setattr(classic_runtime, "_project_locked_toolchain", project_toolchain)
+    monkeypatch.setattr(classic_runtime_preparation, "_project_locked_toolchain", project_toolchain)
     monkeypatch.setattr(
-        classic_runtime,
+        classic_runtime_preparation,
         "read_producer_graph",
         lambda path: graph,
     )
     monkeypatch.setattr(
-        classic_runtime,
+        classic_runtime_preparation,
         "_graph_role_bindings",
         lambda *args, **kwargs: (
             {role: role.value for role in ProducerRole},
@@ -1206,13 +1305,13 @@ def test_prepare_failure_releases_logical_drive_and_uses_stable_temporary(
             },
         ),
     )
-    monkeypatch.setattr(classic_runtime, "prepare_classic_units", lambda *a, **k: ())
-    monkeypatch.setattr(classic_runtime, "_graph_compile_records", lambda *a, **k: ())
+    monkeypatch.setattr(classic_runtime_preparation, "prepare_classic_units", lambda *a, **k: ())
+    monkeypatch.setattr(classic_runtime_preparation, "_graph_compile_records", lambda *a, **k: ())
     monkeypatch.setattr(
-        classic_runtime,
+        classic_runtime_preparation,
         "_graph_targets",
         lambda *args, **kwargs: (
-            classic_runtime.ClassicProducerTarget(
+            classic_runtime_graph.ClassicProducerTarget(
                 "program",
                 "program",
                 kwargs["build_root"] / "program.exe",
@@ -1221,17 +1320,23 @@ def test_prepare_failure_releases_logical_drive_and_uses_stable_temporary(
             ),
         ),
     )
-    monkeypatch.setattr(classic_runtime, "_graph_system_library_inputs", lambda *a, **k: ())
+    monkeypatch.setattr(
+        classic_runtime_preparation, "_graph_system_library_map", lambda *a, **k: {}
+    )
     if failure_site == "executor":
 
-        def fail_executor(**kwargs: object) -> None:
+        def fail_runtime(**kwargs: object) -> None:
             del kwargs
             raise RuntimeError("injected executor failure")
 
-        monkeypatch.setattr(classic_runtime, "ClassicProducerGraphBuildExecutor", fail_executor)
+        monkeypatch.setattr(
+            classic_runtime_preparation,
+            "ClassicProducerExecution",
+            fail_runtime,
+        )
 
     with pytest.raises(RuntimeError, match=f"injected {failure_site} failure"):
-        classic_runtime.prepare_classic_producer_graph_run(
+        classic_runtime_preparation.prepare_classic_producer_graph_run(
             bundle,
             project_root=project_root,
             session_root=project_root / f"session-{sha256(failure_site.encode()).hexdigest()}",
@@ -1252,10 +1357,10 @@ def test_prepare_failure_releases_logical_drive_and_uses_stable_temporary(
 def test_producer_write_closure_rejects_undeclared_file(tmp_path: Path) -> None:
     build_root = tmp_path / "build"
     build_root.mkdir()
-    before = classic_runtime._tree_file_seal(build_root)
+    before = classic_runtime_producer._tree_file_seal(build_root)
     declared = build_root / "unit.obj"
     declared.write_bytes(b"object")
-    classic_runtime._require_declared_tree_writes(
+    classic_runtime_producer._require_declared_tree_writes(
         before,
         root=build_root,
         allowed_outputs=(declared,),
@@ -1264,7 +1369,7 @@ def test_producer_write_closure_rejects_undeclared_file(tmp_path: Path) -> None:
     unexpected = build_root / "unit.idb"
     unexpected.write_bytes(b"undeclared")
     with pytest.raises(ClassicProjectError, match=r"unit\.idb"):
-        classic_runtime._require_declared_tree_writes(
+        classic_runtime_producer._require_declared_tree_writes(
             before,
             root=build_root,
             allowed_outputs=(declared,),
@@ -1352,7 +1457,7 @@ def test_source_resolved_system_library_requires_exact_sdk_authority(
     bundle, graph, installation, source_root, build_root = _source_sdk_library_fixture(
         tmp_path, authorize=True
     )
-    result = classic_runtime._graph_system_library_map(
+    result = classic_runtime_graph._graph_system_library_map(
         bundle,
         graph,
         installation,
@@ -1369,7 +1474,7 @@ def test_source_resolved_system_library_rejects_missing_or_changed_sdk_pin(
         tmp_path, authorize=False
     )
     with pytest.raises(ClassicProjectError, match="lacks exact project SDK authority"):
-        classic_runtime._graph_system_library_map(
+        classic_runtime_graph._graph_system_library_map(
             bundle,
             graph,
             installation,
@@ -1382,7 +1487,7 @@ def test_source_resolved_system_library_rejects_missing_or_changed_sdk_pin(
     )
     (source_root / "sdk" / "ddraw.lib").write_bytes(b"changed after source seal")
     with pytest.raises(ClassicProjectError, match="differs from its project SDK"):
-        classic_runtime._graph_system_library_map(
+        classic_runtime_graph._graph_system_library_map(
             bundle,
             graph,
             installation,
@@ -1397,9 +1502,9 @@ def test_published_target_reseal_detects_same_inode_mutation(tmp_path: Path) -> 
     executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
     executor.bundle = bundle
     executor.project_root = tmp_path
-    executor.record = classic_runtime.ClassicProducerGraphExecutionRecord(
+    executor.record = classic_evidence.ClassicProducerGraphExecutionRecord(
         images=(
-            classic_runtime.ClassicProducedImage(
+            classic_evidence.ClassicProducedImage(
                 "program",
                 tmp_path / "private/APP.EXE",
                 snapshot.path,
@@ -1418,6 +1523,45 @@ def test_published_target_reseal_detects_same_inode_mutation(tmp_path: Path) -> 
         executor.reseal_published_targets()
 
 
+def test_semantic_statement_receipts_are_collected_once_by_content() -> None:
+    first = Digest.from_bytes(b"first")
+    second = Digest.from_bytes(b"second")
+    statement = {
+        "seed": {"digest": first.model_dump(mode="json"), "size": 5},
+        "nested": [
+            {"candidate": {"digest": second.model_dump(mode="json"), "size": 6}},
+            {"digest": "not-a-digest", "size": 7},
+            {"digest": first.model_dump(mode="json"), "size": "5"},
+        ],
+    }
+
+    assert classic_evidence._statement_receipt_keys(statement) == frozenset(
+        {(first.value, 5), (second.value, 6)}
+    )
+
+
+def test_only_the_final_terminal_stage_owns_the_public_target_path() -> None:
+    first = classic_evidence._terminal_stage_logical_path(
+        target_id="config",
+        public_path="build/CONFIG.EXE",
+        intervention_id="project_metadata",
+        index=0,
+        count=2,
+    )
+    final = classic_evidence._terminal_stage_logical_path(
+        target_id="config",
+        public_path="build/CONFIG.EXE",
+        intervention_id="project_link_order",
+        index=1,
+        count=2,
+    )
+
+    assert first == (
+        ".reprobit/stages/terminal/config/0000-project_metadata.EXE"
+    )
+    assert final == "build/CONFIG.EXE"
+
+
 def test_compiler_pdb_companion_resolves_only_the_declared_dos_path(
     tmp_path: Path,
 ) -> None:
@@ -1427,15 +1571,13 @@ def test_compiler_pdb_companion_resolves_only_the_declared_dos_path(
     actual.write_bytes(b"pdb")
     declared = directory / "ConfigCommandLineInfo.cpp.obj.pdb"
 
-    resolved = classic_runtime.ClassicProducerGraphBuildExecutor._compiler_companion_output(
-        declared
-    )
+    resolved = classic_runtime_producer.ClassicProducerExecution.compiler_companion_output(declared)
 
     assert resolved == actual.resolve(strict=True)
     unrelated = directory / "configcommandlineinfo.cpp.obj.idb"
     unrelated.write_bytes(b"not a declared companion")
     with pytest.raises(ClassicProjectError, match="0 physical aliases"):
-        classic_runtime.ClassicProducerGraphBuildExecutor._compiler_companion_output(
+        classic_runtime_producer.ClassicProducerExecution.compiler_companion_output(
             directory / "Different.cpp.obj.pdb"
         )
 
@@ -1461,7 +1603,7 @@ def test_compiler_node_rejects_preexisting_lowercase_pdb_alias(
         inputs=("source/Unit.cpp",),
         outputs=("build/obj/Unit.cpp.obj", "build/obj/Unit.cpp.obj.pdb"),
     )
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_producer.ClassicProducerExecution)
     executor.effective_root = source_root
     executor.build_root = build_root
     executor.toolchain_root = toolchain_root
@@ -1472,7 +1614,7 @@ def test_compiler_node_rejects_preexisting_lowercase_pdb_alias(
         ProcessSupervisor() as supervisor,
         pytest.raises(ClassicProjectError, match="output already exists"),
     ):
-        executor._run_node(supervisor, node, CancellationToken())
+        executor.run_node(supervisor, node, CancellationToken())
 
 
 def test_compiler_pdb_companion_rejects_casefold_aliases_when_supported(
@@ -1488,7 +1630,7 @@ def test_compiler_pdb_companion_rejects_casefold_aliases_when_supported(
         pytest.skip("fixture filesystem is case-insensitive")
 
     with pytest.raises(ClassicProjectError, match="2 physical aliases"):
-        classic_runtime.ClassicProducerGraphBuildExecutor._compiler_companion_output(
+        classic_runtime_producer.ClassicProducerExecution.compiler_companion_output(
             directory / "Unit.Pdb"
         )
 
@@ -1552,7 +1694,7 @@ def test_generated_overlay_inputs_are_absent_until_the_sealed_epoch(
         SimpleNamespace(interventions=(overlay,)),
     )
 
-    epoch = classic_runtime._capture_and_restore_overlay_outputs(
+    epoch = classic_runtime_preparation._capture_and_restore_overlay_outputs(
         bundle,
         project_root=project_root,
         effective_root=effective_root,
@@ -1565,7 +1707,7 @@ def test_generated_overlay_inputs_are_absent_until_the_sealed_epoch(
     assert epoch.carrier_input_seals == {"src/carrier.cpp": ("src/carrier.cpp", "src/carrier.h")}
 
     events: list[tuple[int, int, str, str]] = []
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     executor.effective_root = effective_root
     executor.overlay_witnesses = (
         InterventionWitness("overlay.program", "program", Digest.from_bytes(b"overlay")),
@@ -1576,12 +1718,17 @@ def test_generated_overlay_inputs_are_absent_until_the_sealed_epoch(
     executor.ordinary_generated_inputs = ("src/carrier.h",)
     executor.overlay_effective_outputs = MappingProxyType(dict(epoch.effective_outputs))
     executor.carrier_input_seals = MappingProxyType(dict(epoch.carrier_input_seals))
-    executor._progress = classic_runtime._ProgressReporter(
-        2,
-        lambda completed, total, phase, node_id: events.append((completed, total, phase, node_id)),
+    executor.producer = SimpleNamespace(
+        require_regular=classic_runtime_producer.ClassicProducerExecution.require_regular
     )
-    ordinary_seal = classic_runtime._tree_file_seal(effective_root)
-    effective_receipt, effective_seal = executor._materialize_certified_project_overlay_epoch(
+    executor._progress = classic_runtime_producer.ClassicProgressReporter(
+        2,
+        lambda completed, total, phase, node_id, _kind, _reason: events.append(
+            (completed, total, phase, node_id)
+        ),
+    )
+    ordinary_seal = classic_runtime_producer._tree_file_seal(effective_root)
+    effective_receipt, effective_seal = executor.materialize_certified_project_overlay_epoch(
         ordinary_seal
     )
 
@@ -1590,12 +1737,12 @@ def test_generated_overlay_inputs_are_absent_until_the_sealed_epoch(
     assert (effective_root / "src/carrier.h").read_bytes() == header
     assert not os.path.lexists(effective_root / "src/carrier.cpp")
 
-    receipt, final_seal = executor._materialize_generated_input_epoch(effective_seal)
+    receipt, final_seal = executor.materialize_generated_input_epoch(effective_seal)
 
     assert receipt.step_id == "source.generated-input-epoch"
     assert (effective_root / "src/carrier.cpp").read_bytes() == carrier
     assert (effective_root / "src/carrier.h").read_bytes() == header
-    classic_runtime._require_unchanged_tree(
+    classic_runtime_producer._require_unchanged_tree(
         final_seal,
         root=effective_root,
         label="fixture final source epoch",
@@ -1622,7 +1769,7 @@ def test_compiler_namespace_census_covers_every_source_and_toolchain_file(
     asset.write_bytes(b"BMasset")
     forced.write_bytes(b"#define SEALED 1\n")
 
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_producer.ClassicProducerExecution)
     executor._logical_drive_root = logical_root
     executor._logical_drive_letter = "R"
     executor.effective_root = source_root
@@ -1648,7 +1795,7 @@ def test_compiler_namespace_census_covers_every_source_and_toolchain_file(
             retain_payload_labels=("toolchain",),
         ) as authority,
     ):
-        namespace = executor._capture_compiler_namespace(
+        namespace = executor.capture_compiler_namespace(
             "fixture-epoch",
             source=source.snapshot,
             authority=authority.snapshot,
@@ -1682,7 +1829,7 @@ def test_compiler_namespace_payload_census_is_shared_across_nodes(
     (source_root / "unit.h").write_bytes(b"#define VALUE 1\n")
     (toolchain_root / "stddef.h").write_bytes(b"typedef unsigned size_t;\n")
 
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_producer.ClassicProducerExecution)
     executor._logical_drive_root = logical_root
     executor._logical_drive_letter = "R"
     executor.effective_root = source_root
@@ -1719,7 +1866,7 @@ def test_compiler_namespace_payload_census_is_shared_across_nodes(
         return original_digest(cast(CompilerNamespaceEvidence, value))
 
     monkeypatch.setattr(
-        classic_runtime,
+        classic_runtime_producer,
         "compiler_namespace_evidence_digest",
         counted_digest,
     )
@@ -1733,7 +1880,7 @@ def test_compiler_namespace_payload_census_is_shared_across_nodes(
             retain_payload_labels=("toolchain",),
         ) as authority,
     ):
-        namespace = executor._capture_compiler_namespace(
+        namespace = executor.capture_compiler_namespace(
             "effective-project-epoch",
             source=source.snapshot,
             authority=authority.snapshot,
@@ -1751,7 +1898,7 @@ def test_compiler_namespace_payload_census_is_shared_across_nodes(
         for index in range(64)
     )
     executor._producer_reads.extend(
-        classic_runtime.ClassicProducerReadReceipt(
+        classic_evidence.ClassicProducerReadReceipt(
             node.id,
             node.id,
             ProducerRole.COMPILER,
@@ -1766,7 +1913,7 @@ def test_compiler_namespace_payload_census_is_shared_across_nodes(
     )
 
     invocations = tuple(
-        executor._compiler_epoch_invocation(node, epoch="effective") for node in nodes
+        executor.compiler_epoch_invocation(node, epoch="effective") for node in nodes
     )
 
     assert digest_calls == 1
@@ -1803,7 +1950,7 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
         nodes=(node,),
     )
     events: list[tuple[int, int, str, str]] = []
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     executor.graph = graph
     executor.bundle = cast(
         ProjectBundle,
@@ -1833,15 +1980,23 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
     executor.overlay_witnesses = (
         InterventionWitness("overlay.program", "program", Digest.from_bytes(b"overlay")),
     )
-    executor._output_lock = Lock()
-    executor._physical_outputs = {}
-    executor._progress = classic_runtime._ProgressReporter(
+    producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    producer.effective_root = source_root
+    producer.build_root = build_root
+    producer.toolchain_root = toolchain_root
+    producer._output_lock = Lock()
+    producer._physical_outputs = {}
+    executor.producer = producer
+    executor._progress = classic_runtime_producer.ClassicProgressReporter(
         3,
-        lambda completed, total, phase, node_id: events.append((completed, total, phase, node_id)),
+        lambda completed, total, phase, node_id, _kind, _reason: events.append(
+            (completed, total, phase, node_id)
+        ),
     )
+    producer._progress = executor._progress
 
     def run_nodes(
-        self: classic_runtime.ClassicProducerGraphBuildExecutor,
+        self: classic_runtime_producer.ClassicProducerExecution,
         supervisor: ProcessSupervisor,
         nodes: tuple[ProducerNode, ...],
         *,
@@ -1860,7 +2015,7 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
         assert include_trace_epoch == "declaration-counterfactual"
         assert compiler_namespace_id == "fixture-counterfactual"
         assert nodes == (node,)
-        declared = self._declared_node_outputs(node)
+        declared = self.declared_outputs(node)
         declared[0].parent.mkdir(parents=True)
         declared[0].write_bytes(b"clean-object")
         physical_pdb = declared[1].with_name("unit.pdb")
@@ -1876,16 +2031,16 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
         )
         step_id = f"{step_id_prefix}{node.id}"
         self._progress.emit(progress_phase or "compile", step_id)
-        return [classic_runtime._internal_step(step_id, {"ran": node.id}, 0.0)]
+        return [classic_runtime_producer._internal_step(step_id, {"ran": node.id}, 0.0)]
 
     monkeypatch.setattr(
-        classic_runtime.ClassicProducerGraphBuildExecutor,
-        "_run_graph_nodes",
+        classic_runtime_producer.ClassicProducerExecution,
+        "run_graph_nodes",
         run_nodes,
     )
     monkeypatch.setattr(
-        executor,
-        "_include_authority",
+        producer,
+        "include_authority",
         lambda: object(),
     )
     invocation = CompilerEpochInvocation(
@@ -1901,14 +2056,14 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
         1,
     )
     monkeypatch.setattr(
-        executor,
-        "_compiler_epoch_invocation",
+        producer,
+        "compiler_epoch_invocation",
         lambda current, *, epoch: invocation,
     )
-    source_seal = classic_runtime._tree_file_seal(source_root)
-    clean_receipt = executor._capture_clean_source_inputs(source_seal)
+    source_seal = classic_runtime_producer._tree_file_seal(source_root)
+    clean_receipt = executor.capture_clean_source_inputs(source_seal)
     with ProcessSupervisor() as supervisor:
-        receipts = executor._run_counterfactual_compiler_audit(
+        receipts = executor.run_counterfactual_compiler_audit(
             supervisor,
             (node,),
             source_seal=source_seal,
@@ -1931,8 +2086,8 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
         ),
     )
     assert executor._clean_source_inputs == (CleanSourceInput("Unit.cpp", b"int unit();\n"),)
-    assert executor._physical_outputs == {}
-    assert classic_runtime._tree_file_seal(build_root) == {}
+    assert producer._physical_outputs == {}
+    assert classic_runtime_producer._tree_file_seal(build_root) == {}
     assert events == [
         (1, 3, "source-epoch", "source.clean-authority-capture"),
         (
@@ -1958,7 +2113,7 @@ def test_counterfactual_compiler_audit_rejects_a_plan_mismatch(tmp_path: Path) -
         inputs=("source/Unit.cpp",),
         outputs=("build/Unit.obj", "build/Unit.pdb"),
     )
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     executor.graph = ProducerGraphDocument(
         schema_version=1,
         source_manifest_digest=Digest.from_bytes(b"source"),
@@ -1983,10 +2138,10 @@ def test_counterfactual_compiler_audit_rejects_a_plan_mismatch(tmp_path: Path) -
         ProcessSupervisor() as supervisor,
         pytest.raises(ClassicProjectError, match="derived sparse plan"),
     ):
-        executor._run_counterfactual_compiler_audit(
+        executor.run_counterfactual_compiler_audit(
             supervisor,
             (),
-            source_seal=classic_runtime._tree_file_seal(source_root),
+            source_seal=classic_runtime_producer._tree_file_seal(source_root),
             cancellation=CancellationToken(),
             compiler_namespace_id="fixture-counterfactual",
         )
@@ -1997,7 +2152,7 @@ def test_certified_overlay_epoch_rejects_tampered_clean_source(tmp_path: Path) -
     source_root.mkdir()
     path = source_root / "Unit.cpp"
     path.write_bytes(b"tampered")
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     executor.effective_root = source_root
     executor.overlay_witnesses = (
         InterventionWitness("overlay.program", "program", Digest.from_bytes(b"overlay")),
@@ -2005,11 +2160,14 @@ def test_certified_overlay_epoch_rejects_tampered_clean_source(tmp_path: Path) -
     executor.project_source_pairs = (ProjectOverlaySourcePair("Unit.cpp", b"clean", b"effective"),)
     executor.generated_translation_units = frozenset()
     executor.ordinary_generated_inputs = ()
-    executor._progress = classic_runtime._ProgressReporter(1, None)
+    executor.producer = SimpleNamespace(
+        require_regular=classic_runtime_producer.ClassicProducerExecution.require_regular
+    )
+    executor._progress = classic_runtime_producer.ClassicProgressReporter(1, None)
 
     with pytest.raises(ClassicProjectError, match="source preimage changed"):
-        executor._materialize_certified_project_overlay_epoch(
-            classic_runtime._tree_file_seal(source_root)
+        executor.materialize_certified_project_overlay_epoch(
+            classic_runtime_producer._tree_file_seal(source_root)
         )
 
 
@@ -2019,7 +2177,7 @@ def test_certified_overlay_epoch_rejects_preexisting_no_clean_input(
     source_root = tmp_path / "source"
     source_root.mkdir()
     (source_root / "generated.h").write_bytes(b"stale")
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     executor.effective_root = source_root
     executor.overlay_witnesses = (
         InterventionWitness("overlay.program", "program", Digest.from_bytes(b"overlay")),
@@ -2029,11 +2187,14 @@ def test_certified_overlay_epoch_rejects_preexisting_no_clean_input(
     )
     executor.generated_translation_units = frozenset()
     executor.ordinary_generated_inputs = ("generated.h",)
-    executor._progress = classic_runtime._ProgressReporter(1, None)
+    executor.producer = SimpleNamespace(
+        require_regular=classic_runtime_producer.ClassicProducerExecution.require_regular
+    )
+    executor._progress = classic_runtime_producer.ClassicProgressReporter(1, None)
 
     with pytest.raises(ClassicProjectError, match="already exists"):
-        executor._materialize_certified_project_overlay_epoch(
-            classic_runtime._tree_file_seal(source_root)
+        executor.materialize_certified_project_overlay_epoch(
+            classic_runtime_producer._tree_file_seal(source_root)
         )
 
 
@@ -2080,7 +2241,7 @@ def test_effective_compiler_capture_freezes_raw_products_and_epoch_visibility(
     ordinary_pdb.write_bytes(b"ordinary-pdb")
     carrier_pdb.write_bytes(b"carrier-pdb")
     events: list[tuple[int, int, str, str]] = []
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     executor.graph = graph
     executor.bundle = cast(
         ProjectBundle,
@@ -2091,19 +2252,26 @@ def test_effective_compiler_capture_freezes_raw_products_and_epoch_visibility(
     executor.toolchain_root = toolchain_root
     executor.generated_node_inputs = MappingProxyType({carrier.id: ("carrier.cpp", "generated.h")})
     executor.ordinary_generated_inputs = ("generated.h",)
-    executor._output_lock = Lock()
-    executor._physical_outputs = {
+    producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    producer.effective_root = source_root
+    producer.build_root = build_root
+    producer.toolchain_root = toolchain_root
+    producer._output_lock = Lock()
+    producer._physical_outputs = {
         ordinary_object: ordinary_object,
         ordinary_pdb: ordinary_pdb,
         carrier_object: carrier_object,
         carrier_pdb: carrier_pdb,
     }
+    executor.producer = producer
     executor._effective_compiler_products = ()
     executor._captured_compiler_outputs = ()
     executor._counterfactual_compiler_audits = ()
-    executor._progress = classic_runtime._ProgressReporter(
+    executor._progress = classic_runtime_producer.ClassicProgressReporter(
         1,
-        lambda completed, total, phase, node_id: events.append((completed, total, phase, node_id)),
+        lambda completed, total, phase, node_id, _kind, _reason: events.append(
+            (completed, total, phase, node_id)
+        ),
     )
     generated_invocation = CompilerEpochInvocation(
         "compiler",
@@ -2123,14 +2291,14 @@ def test_effective_compiler_capture_freezes_raw_products_and_epoch_visibility(
         namespace_id="effective-project-epoch",
     )
     monkeypatch.setattr(
-        classic_runtime.ClassicProducerGraphBuildExecutor,
-        "_compiler_epoch_invocation",
+        classic_runtime_producer.ClassicProducerExecution,
+        "compiler_epoch_invocation",
         lambda self, node, *, epoch: (
             generated_invocation if epoch == "generated" else effective_invocation
         ),
     )
 
-    receipt = executor._capture_effective_compiler_products()
+    receipt = executor.capture_effective_compiler_products()
     ordinary_object.write_bytes(b"composed-ordinary")
     carrier_object.write_bytes(b"mutated-carrier")
     products = executor._compiler_products()
@@ -2154,7 +2322,7 @@ def test_effective_compiler_capture_freezes_raw_products_and_epoch_visibility(
             generated_invocation,
         ),
     )
-    captured: tuple[classic_runtime.ClassicCapturedProducerOutput, ...] = (
+    captured: tuple[classic_evidence.ClassicCapturedProducerOutput, ...] = (
         executor._captured_compiler_outputs
     )
     assert [item.reference for item in captured] == [
@@ -2174,9 +2342,12 @@ def test_effective_compiler_capture_freezes_raw_products_and_epoch_visibility(
 
 
 def _link_control_executor(
-    tmp_path: Path, *, definition: bytes
+    tmp_path: Path,
+    *,
+    definition: bytes,
+    linker_controls: tuple[str, ...] = (),
 ) -> tuple[
-    classic_runtime.ClassicProducerGraphBuildExecutor,
+    classic_runtime_overlay.ClassicOverlayEpochs,
     ProducerNode,
 ]:
     source_root = tmp_path / "source"
@@ -2205,13 +2376,14 @@ def _link_control_executor(
         arguments=(
             "${BUILD}/unit.obj",
             "/DEF:${SOURCE}/app.def",
+            *linker_controls,
             "/out:${BUILD}/APP.EXE",
         ),
         inputs=("build/unit.obj", "source/app.def"),
         outputs=("build/APP.EXE",),
         depends_on=(compiler.id,),
     )
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     executor.graph = ProducerGraphDocument(
         schema_version=1,
         source_manifest_digest=Digest.from_bytes(b"source"),
@@ -2221,7 +2393,7 @@ def _link_control_executor(
         nodes=(compiler, linker),
     )
     executor.targets = (
-        classic_runtime.ClassicProducerTarget(
+        classic_runtime_graph.ClassicProducerTarget(
             "program", "program", build_root / "APP.EXE", None, linker.id
         ),
     )
@@ -2231,14 +2403,278 @@ def _link_control_executor(
     executor.system_libraries = MappingProxyType({})
     executor._link_directive_closures = MappingProxyType({})
     executor._module_definition_receipts = MappingProxyType({})
-    executor._progress = classic_runtime._ProgressReporter(1, None)
+    executor._progress = classic_runtime_producer.ClassicProgressReporter(1, None)
+    producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    producer.graph = executor.graph
+    producer.effective_root = source_root
+    producer.build_root = build_root
+    producer.toolchain_root = toolchain_root
+    producer._output_lock = Lock()
+    producer._physical_outputs = {}
+    executor.producer = producer
     return executor, linker
+
+
+def _analysis_link_executor(
+    tmp_path: Path,
+    *,
+    arguments: tuple[str, ...] | None = None,
+) -> tuple[
+    classic_runtime.ClassicProducerGraphBuildExecutor,
+    classic_runtime_producer.ClassicProducerExecution,
+    classic_runtime_graph.ClassicProducerTarget,
+    ProducerNode,
+    Path,
+    Path,
+]:
+    project_root = tmp_path / "project"
+    drive_root = tmp_path / "drive"
+    build_root = drive_root / "build"
+    project_root.mkdir()
+    build_root.mkdir(parents=True)
+    bundle = _prepare_bundle(project_root)
+    target = classic_runtime_graph.ClassicProducerTarget(
+        "program",
+        "program",
+        build_root / "APP.EXE",
+        None,
+        "linker.program.0000",
+    )
+    node = ProducerNode(
+        id=target.link_node_id,
+        role=ProducerRole.LINKER,
+        owner="program",
+        target_id="program",
+        arguments=(
+            ("${BUILD}/unit.obj", *arguments)
+            if arguments is not None
+            else (
+                "${BUILD}/unit.obj",
+                "/out:${BUILD}/APP.EXE",
+                "/implib:${BUILD}/APP.lib",
+                "/pdb:${BUILD}/APP.pdb",
+                "/incremental:no",
+            )
+        ),
+        inputs=("build/unit.obj",),
+        outputs=("build/APP.EXE",),
+    )
+    producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    producer.bundle = bundle
+    producer.session_root = tmp_path / "session"
+    producer.build_root = build_root
+    producer._logical_drive_root = drive_root.resolve(strict=True)
+    producer._logical_drive_letter = "R"
+    producer.analysis_link_options = ("/DEBUG",)
+    producer.role_commands = MappingProxyType({ProducerRole.LINKER: tmp_path / "LINK.EXE"})
+    producer.link_timeout = 30.0
+    producer._progress = classic_runtime_producer.ClassicProgressReporter(2, None)
+    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor.producer = producer
+    executor.analysis_pdb_paths = MappingProxyType({"program": "state/program.PDB"})
+    executor._progress = producer._progress
+    return executor, producer, target, node, project_root, drive_root
+
+
+def test_analysis_link_plan_isolates_every_linker_output(tmp_path: Path) -> None:
+    _executor, producer, target, node, _project_root, _drive_root = _analysis_link_executor(
+        tmp_path
+    )
+    plan = producer._analysis_link_plan(target, node)
+
+    assert plan.arguments[-1] == "/DEBUG"
+    assert sum(argument.casefold() == "/debug" for argument in plan.arguments) == 1
+    for prefix in ("/out:", "/implib:", "/pdb:"):
+        values = [
+            argument.split(":", 1)[1]
+            for argument in plan.arguments
+            if argument.casefold().startswith(prefix)
+        ]
+        assert len(values) == 1
+        assert ".reprobit-analysis" in values[0]
+    assert {path.suffix.casefold() for path in plan.allowed_outputs} == {
+        ".exe",
+        ".pdb",
+        ".lib",
+        ".exp",
+    }
+
+
+@pytest.mark.parametrize(
+    ("arguments", "message"),
+    (
+        (
+            ("/out:${BUILD}/APP.EXE", "/incremental:no"),
+            "exactly one /OUT and one /PDB",
+        ),
+        (
+            (
+                "/out:${BUILD}/APP.EXE",
+                "/pdb:${BUILD}/APP.pdb",
+                "/DEBUG",
+            ),
+            "already contains an analysis-only debug option",
+        ),
+        (
+            (
+                "/out:${BUILD}/APP.EXE",
+                "/pdb:${BUILD}/APP.pdb",
+                "/incremental:yes",
+            ),
+            "does not admit incremental linker state",
+        ),
+        (
+            (
+                "/out:${BUILD}/APP.EXE",
+                "/pdb:${BUILD}/APP.pdb",
+            ),
+            "requires exactly one /INCREMENTAL:NO",
+        ),
+    ),
+)
+def test_analysis_link_plan_rejects_widened_or_ambiguous_commands(
+    tmp_path: Path,
+    arguments: tuple[str, ...],
+    message: str,
+) -> None:
+    _executor, producer, target, node, _project_root, _drive_root = _analysis_link_executor(
+        tmp_path,
+        arguments=arguments,
+    )
+    with pytest.raises(ClassicProjectError, match=message):
+        producer._analysis_link_plan(target, node)
+
+
+def test_analysis_link_stages_private_pair_without_publishing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor, producer, target, node, project_root, drive_root = _analysis_link_executor(tmp_path)
+    target.output.write_bytes(b"exact raw image")
+    (producer.build_root / "unit.obj").write_bytes(b"object")
+    exact_snapshot = atomic_publish_relative(
+        project_root,
+        "state/program.exe",
+        b"certified exact image",
+    )
+    lane = SimpleNamespace(environment={}, windows_lineage_planner=None)
+    producer._lane_pool = SimpleNamespace(acquire=lambda: lane, release=lambda _lane: None)
+    captured: list[tuple[str, ...]] = []
+
+    def fake_run(
+        _supervisor: object,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: Mapping[str, str],
+        timeout: float,
+        log: Path,
+        **_kwargs: object,
+    ) -> tuple[ProcessResult, CommandSpec]:
+        captured.append(tuple(argv))
+
+        def output_path(prefix: str) -> Path:
+            value = next(
+                argument.split(":", 1)[1]
+                for argument in argv
+                if argument.casefold().startswith(prefix)
+            )
+            windows = PureWindowsPath(value)
+            assert windows.drive.casefold() == "r:"
+            return drive_root.joinpath(*windows.parts[1:])
+
+        image = output_path("/out:")
+        pdb = output_path("/pdb:")
+        image.parent.mkdir(parents=True, exist_ok=True)
+        image.write_bytes(b"analysis image -- deliberately not certified")
+        pdb.with_name(pdb.name.lower()).write_bytes(b"analysis pdb")
+        spec = CommandSpec.create(
+            argv,
+            cwd=cwd,
+            environment=environment,
+            timeout_seconds=timeout,
+            log_path=log,
+        )
+        return ProcessResult(tuple(argv), 0, b"linked", 1, 0.01), spec
+
+    monkeypatch.setattr(classic_runtime_producer, "_run", fake_run)
+    pending = executor._run_analysis_link(
+        cast(ProcessSupervisor, object()),
+        target,
+        node,
+        CancellationToken(),
+    )
+
+    assert captured and captured[0][-1] == "/DEBUG"
+    assert exact_snapshot.path.read_bytes() == b"certified exact image"
+    assert target.output.read_bytes() == b"exact raw image"
+    assert pending.logical_path == "state/program.PDB"
+    assert pending.execution.pdb.read_bytes() == b"analysis pdb"
+    assert pending.execution.image != target.output
+    assert pending.link_receipt.step_id == "analysis-link.program"
+    assert not (project_root / "state/program.PDB").exists()
+    assert executor._progress.completed == 1
+
+
+def test_analysis_link_rejects_mutation_of_exact_build_outputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor, producer, target, node, _project_root, drive_root = _analysis_link_executor(tmp_path)
+    target.output.write_bytes(b"exact raw image")
+    (producer.build_root / "unit.obj").write_bytes(b"object")
+    lane = SimpleNamespace(environment={}, windows_lineage_planner=None)
+    producer._lane_pool = SimpleNamespace(acquire=lambda: lane, release=lambda _lane: None)
+
+    def mutating_run(
+        _supervisor: object,
+        argv: tuple[str, ...],
+        *,
+        cwd: Path,
+        environment: object,
+        timeout: float,
+        log: Path,
+        **_kwargs: object,
+    ) -> tuple[ProcessResult, CommandSpec]:
+        controls = {
+            prefix: next(
+                argument.split(":", 1)[1]
+                for argument in argv
+                if argument.casefold().startswith(prefix)
+            )
+            for prefix in ("/out:", "/pdb:")
+        }
+        for prefix, payload in (("/out:", b"analysis"), ("/pdb:", b"pdb")):
+            windows = PureWindowsPath(controls[prefix])
+            path = drive_root.joinpath(*windows.parts[1:])
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(payload)
+        target.output.write_bytes(b"mutated")
+        spec = CommandSpec.create(
+            argv,
+            cwd=cwd,
+            environment={},
+            timeout_seconds=timeout,
+            log_path=log,
+        )
+        return ProcessResult(tuple(argv), 0, b"linked", 1, 0.01), spec
+
+    monkeypatch.setattr(classic_runtime_producer, "_run", mutating_run)
+    with pytest.raises(ClassicProjectError, match="wrote undeclared build-tree files"):
+        executor._run_analysis_link(
+            cast(ProcessSupervisor, object()),
+            target,
+            node,
+            CancellationToken(),
+        )
 
 
 def _dependent_link_control_executor(
     tmp_path: Path,
 ) -> tuple[
     classic_runtime.ClassicProducerGraphBuildExecutor,
+    classic_runtime_overlay.ClassicOverlayEpochs,
+    classic_runtime_producer.ClassicProducerExecution,
     tuple[ProducerNode, ...],
 ]:
     source_root = tmp_path / "source"
@@ -2302,8 +2738,8 @@ def _dependent_link_control_executor(
         depends_on=(compilers[2].id,),
     )
     linkers = (app_linker, library_linker, tool_linker)
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
-    executor.graph = ProducerGraphDocument(
+    overlay = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
+    overlay.graph = ProducerGraphDocument(
         schema_version=1,
         source_manifest_digest=Digest.from_bytes(b"source"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
@@ -2311,27 +2747,38 @@ def _dependent_link_control_executor(
         extractor="cmake-unix-makefiles-v1",
         nodes=(*compilers, *linkers),
     )
-    executor.targets = (
-        classic_runtime.ClassicProducerTarget(
+    overlay.targets = (
+        classic_runtime_graph.ClassicProducerTarget(
             "app", "app", build_root / "APP.EXE", None, app_linker.id
         ),
-        classic_runtime.ClassicProducerTarget(
+        classic_runtime_graph.ClassicProducerTarget(
             "library", "library", build_root / "LIBRARY.DLL", None, library_linker.id
         ),
-        classic_runtime.ClassicProducerTarget(
+        classic_runtime_graph.ClassicProducerTarget(
             "tool", "tool", build_root / "TOOL.EXE", None, tool_linker.id
         ),
     )
-    executor.effective_root = source_root
+    overlay.effective_root = source_root
+    overlay.build_root = build_root
+    overlay.toolchain_root = toolchain_root
+    overlay.system_libraries = MappingProxyType({})
+    overlay._link_directive_closures = MappingProxyType({})
+    overlay._module_definition_receipts = MappingProxyType({})
+    overlay._progress = classic_runtime_producer.ClassicProgressReporter(3, None)
+    producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    producer.graph = overlay.graph
+    producer.effective_root = source_root
+    producer.build_root = build_root
+    producer.toolchain_root = toolchain_root
+    producer._output_lock = Lock()
+    producer._physical_outputs = {}
+    overlay.producer = producer
+    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor.targets = overlay.targets
     executor.build_root = build_root
-    executor.toolchain_root = toolchain_root
-    executor.system_libraries = MappingProxyType({})
-    executor._link_directive_closures = MappingProxyType({})
-    executor._module_definition_receipts = MappingProxyType({})
-    executor._progress = classic_runtime._ProgressReporter(3, None)
-    executor._output_lock = Lock()
-    executor._physical_outputs = {}
-    return executor, linkers
+    executor.overlay = overlay
+    executor.producer = producer
+    return executor, overlay, producer, linkers
 
 
 def test_link_control_audit_binds_directive_and_def_roots(
@@ -2340,14 +2787,18 @@ def test_link_control_audit_binds_directive_and_def_roots(
     executor, linker = _link_control_executor(
         tmp_path,
         definition=b"LIBRARY app.exe\nEXPORTS\n_public=_internal\n",
+        linker_controls=("/INCLUDE:_command_line_forced",),
     )
 
-    receipts = executor._audit_link_controls()
+    receipts = executor.audit_link_controls()
 
     assert [item.step_id for item in receipts] == ["link-controls.program"]
-    assert set(executor._link_root_symbols(linker)).issuperset(
-        {"_forced", "_directive_export", "_internal"}
+    demand, retention = executor._link_root_sets(linker)
+    assert set(demand).issuperset(
+        {"_command_line_forced", "_mainCRTStartup", "_WinMainCRTStartup"}
     )
+    assert "_forced" not in demand
+    assert set(retention) == {"_directive_export", "_internal"}
     assert executor._module_definition_receipts["program"].exports == ("_internal",)
 
 
@@ -2358,16 +2809,16 @@ def test_link_control_audit_rejects_def_stub_hidden_read(tmp_path: Path) -> None
     )
 
     with pytest.raises(ClassicProjectError, match="forbidden STUB"):
-        executor._audit_link_controls()
+        executor.audit_link_controls()
 
 
 def test_link_control_audit_accumulates_dependency_waves_atomically(
     tmp_path: Path,
 ) -> None:
-    executor, _linkers = _dependent_link_control_executor(tmp_path)
+    _coordinator, executor, _producer, _linkers = _dependent_link_control_executor(tmp_path)
     targets = {target.target_id: target for target in executor.targets}
 
-    first = executor._audit_link_controls((targets["library"], targets["tool"]))
+    first = executor.audit_link_controls((targets["library"], targets["tool"]))
 
     assert [item.step_id for item in first] == [
         "link-controls.library",
@@ -2375,28 +2826,100 @@ def test_link_control_audit_accumulates_dependency_waves_atomically(
     ]
     assert set(executor._link_directive_closures) == {"library", "tool"}
     with pytest.raises(ClassicProjectError, match=r"semantic archive.*absent"):
-        executor._audit_link_controls((targets["app"],))
+        executor.audit_link_controls((targets["app"],))
     assert set(executor._link_directive_closures) == {"library", "tool"}
     assert executor._progress.completed == 2
 
     (executor.build_root / "LIBRARY.lib").write_bytes(
         _directive_archive("library.obj", _directive_object(b"/INCLUDE:_import_root "))
     )
-    final = executor._audit_link_controls((targets["app"],))
+    final = executor.audit_link_controls((targets["app"],))
 
     assert [item.step_id for item in final] == ["link-controls.app"]
     assert set(executor._link_directive_closures) == {"app", "library", "tool"}
     assert executor._module_definition_receipts == {}
     assert executor._progress.completed == 3
-    assert {"_app_root", "_library_root", "_import_root"}.issubset(
+    assert {"_app_root", "_import_root"}.issubset(
         executor._link_directive_closures["app"].include_symbols
     )
+    assert "_library_root" not in executor._link_directive_closures["app"].include_symbols
+    semantic_closures = {closure.target_id: closure for closure in executor._target_link_closures()}
+    assert semantic_closures["app"].compiler_node_ids == ("compiler.app.0000",)
+    assert semantic_closures["app"].archive_refs == ("build/LIBRARY.lib",)
+    assert (
+        semantic_closures["app"].archives[0].payload
+        == (executor.build_root / "LIBRARY.lib").read_bytes()
+    )
     with pytest.raises(ClassicProjectError, match="already audited"):
-        executor._audit_link_controls((targets["app"],))
+        executor.audit_link_controls((targets["app"],))
+
+
+def test_link_control_audit_does_not_borrow_upstream_default_library_edge(
+    tmp_path: Path,
+) -> None:
+    _coordinator, executor, producer, linkers = _dependent_link_control_executor(tmp_path)
+    app_linker, library_linker, _tool_linker = linkers
+    runtime_reference = "system-library/runtime.lib"
+    runtime_path = executor.toolchain_root / "runtime.lib"
+    runtime_path.write_bytes(
+        _directive_archive("runtime.obj", _directive_object(b"/INCLUDE:_runtime_root "))
+    )
+    executor.system_libraries = MappingProxyType({runtime_reference: runtime_path})
+    (executor.build_root / "library.obj").write_bytes(
+        _directive_object(b"/DEFAULTLIB:runtime /INCLUDE:_library_root ")
+    )
+    (executor.build_root / "app.obj").write_bytes(
+        _directive_object(b"/DEFAULTLIB:runtime /INCLUDE:_app_root ")
+    )
+    admitted_library = ProducerNode.model_validate(
+        {
+            **library_linker.model_dump(mode="python"),
+            "directive_inputs": (runtime_reference,),
+        }
+    )
+
+    def graph_with(*replacements: ProducerNode) -> ProducerGraphDocument:
+        by_id = {node.id: node for node in replacements}
+        return ProducerGraphDocument(
+            schema_version=executor.graph.schema_version,
+            source_manifest_digest=executor.graph.source_manifest_digest,
+            source_topology_digest=executor.graph.source_topology_digest,
+            toolchain_lock_digest=executor.graph.toolchain_lock_digest,
+            path_profile_id=executor.graph.path_profile_id,
+            extractor=executor.graph.extractor,
+            nodes=tuple(by_id.get(node.id, node) for node in executor.graph.nodes),
+        )
+
+    executor.graph = graph_with(admitted_library)
+    producer.graph = executor.graph
+    targets = {target.target_id: target for target in executor.targets}
+    executor.audit_link_controls((targets["library"],))
+    (executor.build_root / "LIBRARY.lib").write_bytes(
+        _directive_archive("library.obj", _directive_object(b"/INCLUDE:_import_root "))
+    )
+
+    with pytest.raises(
+        ClassicProjectError,
+        match=r"--directive-input app=runtime\.lib",
+    ):
+        executor.audit_link_controls((targets["app"],))
+    assert set(executor._link_directive_closures) == {"library"}
+
+    admitted_app = ProducerNode.model_validate(
+        {
+            **app_linker.model_dump(mode="python"),
+            "directive_inputs": (runtime_reference,),
+        }
+    )
+    executor.graph = graph_with(admitted_library, admitted_app)
+    producer.graph = executor.graph
+    executor.audit_link_controls((targets["app"],))
+    assert set(executor._link_directive_closures) == {"app", "library"}
+    assert "_library_root" not in executor._link_directive_closures["app"].include_symbols
 
 
 def test_link_control_audit_requires_final_compiler_ancestry(tmp_path: Path) -> None:
-    executor, _linkers = _dependent_link_control_executor(tmp_path)
+    _coordinator, executor, producer, linkers = _dependent_link_control_executor(tmp_path)
     orphan = ProducerNode(
         id="compiler.orphan.0006",
         role=ProducerRole.COMPILER,
@@ -2405,22 +2928,36 @@ def test_link_control_audit_requires_final_compiler_ancestry(tmp_path: Path) -> 
         inputs=("source/orphan.cpp",),
         outputs=("build/orphan.obj", "build/orphan.pdb"),
     )
+    app_linker = linkers[0]
+    app_with_order_only_orphan = app_linker.model_copy(
+        update={"depends_on": tuple(sorted((*app_linker.depends_on, orphan.id), key=str.casefold))}
+    )
     executor.graph = ProducerGraphDocument(
         schema_version=1,
         source_manifest_digest=executor.graph.source_manifest_digest,
         toolchain_lock_digest=executor.graph.toolchain_lock_digest,
         path_profile_id=executor.graph.path_profile_id,
         extractor=executor.graph.extractor,
-        nodes=tuple(sorted((*executor.graph.nodes, orphan), key=lambda node: node.id.casefold())),
+        nodes=tuple(
+            sorted(
+                (
+                    *(node for node in executor.graph.nodes if node.id != app_linker.id),
+                    app_with_order_only_orphan,
+                    orphan,
+                ),
+                key=lambda node: node.id.casefold(),
+            )
+        ),
     )
+    producer.graph = executor.graph
     targets = {target.target_id: target for target in executor.targets}
-    executor._audit_link_controls((targets["library"], targets["tool"]))
+    executor.audit_link_controls((targets["library"], targets["tool"]))
     (executor.build_root / "LIBRARY.lib").write_bytes(
         _directive_archive("library.obj", _directive_object(b"/INCLUDE:_import_root "))
     )
 
     with pytest.raises(ClassicProjectError, match=r"compiler outputs lack.*orphan"):
-        executor._audit_link_controls((targets["app"],))
+        executor.audit_link_controls((targets["app"],))
 
     assert set(executor._link_directive_closures) == {"library", "tool"}
     assert executor._progress.completed == 2
@@ -2430,14 +2967,12 @@ def test_linker_waves_audit_before_each_ready_wave(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    executor, linkers = _dependent_link_control_executor(tmp_path)
-    completed = {
-        node.id for node in executor.graph.nodes if node.role is ProducerRole.COMPILER
-    }
+    executor, overlay, _producer, linkers = _dependent_link_control_executor(tmp_path)
+    completed = {node.id for node in overlay.graph.nodes if node.role is ProducerRole.COMPILER}
     waves: list[tuple[str, ...]] = []
 
     def run_ready_nodes(
-        current: classic_runtime.ClassicProducerGraphBuildExecutor,
+        current: classic_runtime_producer.ClassicProducerExecution,
         _supervisor: ProcessSupervisor,
         nodes: tuple[ProducerNode, ...],
         **kwargs: object,
@@ -2445,11 +2980,9 @@ def test_linker_waves_audit_before_each_ready_wave(
         current_completed = cast(set[str], kwargs["completed"])
         waves.append(tuple(node.id for node in nodes))
         for node in nodes:
-            for output in current._declared_node_outputs(node):
+            for output in current.declared_outputs(node):
                 payload = (
-                    _directive_archive(
-                        "library.obj", _directive_object(b"/INCLUDE:_import_root ")
-                    )
+                    _directive_archive("library.obj", _directive_object(b"/INCLUDE:_import_root "))
                     if output.suffix.casefold() == ".lib"
                     else b"linked"
                 )
@@ -2458,8 +2991,8 @@ def test_linker_waves_audit_before_each_ready_wave(
         return []
 
     monkeypatch.setattr(
-        classic_runtime.ClassicProducerGraphBuildExecutor,
-        "_run_graph_nodes",
+        classic_runtime_producer.ClassicProducerExecution,
+        "run_graph_nodes",
         run_ready_nodes,
     )
 
@@ -2480,30 +3013,28 @@ def test_linker_waves_audit_before_each_ready_wave(
         "link-controls.tool",
         "link-controls.app",
     ]
-    assert completed == {node.id for node in executor.graph.nodes}
+    assert completed == {node.id for node in overlay.graph.nodes}
 
 
 def test_linker_waves_do_not_run_a_wave_whose_audit_fails(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    executor, linkers = _dependent_link_control_executor(tmp_path)
-    completed = {
-        node.id for node in executor.graph.nodes if node.role is ProducerRole.COMPILER
-    }
+    executor, overlay, _producer, linkers = _dependent_link_control_executor(tmp_path)
+    completed = {node.id for node in overlay.graph.nodes if node.role is ProducerRole.COMPILER}
     waves: list[tuple[str, ...]] = []
-    original_audit = classic_runtime.ClassicProducerGraphBuildExecutor._audit_link_controls
+    original_audit = classic_runtime_overlay.ClassicOverlayEpochs.audit_link_controls
 
     def fail_downstream_audit(
-        current: classic_runtime.ClassicProducerGraphBuildExecutor,
-        targets: tuple[classic_runtime.ClassicProducerTarget, ...] | None = None,
+        current: classic_runtime_overlay.ClassicOverlayEpochs,
+        targets: tuple[classic_runtime_graph.ClassicProducerTarget, ...] | None = None,
     ) -> tuple[StepExecutionReceipt, ...]:
         if targets is not None and any(target.target_id == "app" for target in targets):
             raise ClassicProjectError("downstream linker-control audit failed")
         return original_audit(current, targets)
 
     def run_ready_nodes(
-        current: classic_runtime.ClassicProducerGraphBuildExecutor,
+        current: classic_runtime_producer.ClassicProducerExecution,
         _supervisor: ProcessSupervisor,
         nodes: tuple[ProducerNode, ...],
         **kwargs: object,
@@ -2511,11 +3042,9 @@ def test_linker_waves_do_not_run_a_wave_whose_audit_fails(
         waves.append(tuple(node.id for node in nodes))
         current_completed = cast(set[str], kwargs["completed"])
         for node in nodes:
-            for output in current._declared_node_outputs(node):
+            for output in current.declared_outputs(node):
                 payload = (
-                    _directive_archive(
-                        "library.obj", _directive_object(b"/INCLUDE:_import_root ")
-                    )
+                    _directive_archive("library.obj", _directive_object(b"/INCLUDE:_import_root "))
                     if output.suffix.casefold() == ".lib"
                     else b"linked"
                 )
@@ -2524,13 +3053,13 @@ def test_linker_waves_do_not_run_a_wave_whose_audit_fails(
         return []
 
     monkeypatch.setattr(
-        classic_runtime.ClassicProducerGraphBuildExecutor,
-        "_audit_link_controls",
+        classic_runtime_overlay.ClassicOverlayEpochs,
+        "audit_link_controls",
         fail_downstream_audit,
     )
     monkeypatch.setattr(
-        classic_runtime.ClassicProducerGraphBuildExecutor,
-        "_run_graph_nodes",
+        classic_runtime_producer.ClassicProducerExecution,
+        "run_graph_nodes",
         run_ready_nodes,
     )
 
@@ -2551,13 +3080,11 @@ def test_linker_waves_reject_downstream_mutation_of_upstream_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    executor, linkers = _dependent_link_control_executor(tmp_path)
-    completed = {
-        node.id for node in executor.graph.nodes if node.role is ProducerRole.COMPILER
-    }
+    executor, overlay, _producer, linkers = _dependent_link_control_executor(tmp_path)
+    completed = {node.id for node in overlay.graph.nodes if node.role is ProducerRole.COMPILER}
 
     def run_ready_nodes(
-        current: classic_runtime.ClassicProducerGraphBuildExecutor,
+        current: classic_runtime_producer.ClassicProducerExecution,
         _supervisor: ProcessSupervisor,
         nodes: tuple[ProducerNode, ...],
         **kwargs: object,
@@ -2566,11 +3093,9 @@ def test_linker_waves_reject_downstream_mutation_of_upstream_output(
         if any(node.target_id == "app" for node in nodes):
             (current.build_root / "LIBRARY.lib").write_bytes(b"mutated downstream")
         for node in nodes:
-            for output in current._declared_node_outputs(node):
+            for output in current.declared_outputs(node):
                 payload = (
-                    _directive_archive(
-                        "library.obj", _directive_object(b"/INCLUDE:_import_root ")
-                    )
+                    _directive_archive("library.obj", _directive_object(b"/INCLUDE:_import_root "))
                     if output.suffix.casefold() == ".lib"
                     else b"linked"
                 )
@@ -2579,8 +3104,8 @@ def test_linker_waves_reject_downstream_mutation_of_upstream_output(
         return []
 
     monkeypatch.setattr(
-        classic_runtime.ClassicProducerGraphBuildExecutor,
-        "_run_graph_nodes",
+        classic_runtime_producer.ClassicProducerExecution,
+        "run_graph_nodes",
         run_ready_nodes,
     )
 
@@ -2601,15 +3126,13 @@ def test_linker_waves_reject_control_audit_mutation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    executor, linkers = _dependent_link_control_executor(tmp_path)
-    completed = {
-        node.id for node in executor.graph.nodes if node.role is ProducerRole.COMPILER
-    }
-    original_audit = classic_runtime.ClassicProducerGraphBuildExecutor._audit_link_controls
+    executor, overlay, _producer, linkers = _dependent_link_control_executor(tmp_path)
+    completed = {node.id for node in overlay.graph.nodes if node.role is ProducerRole.COMPILER}
+    original_audit = classic_runtime_overlay.ClassicOverlayEpochs.audit_link_controls
 
     def mutate_after_audit(
-        current: classic_runtime.ClassicProducerGraphBuildExecutor,
-        targets: tuple[classic_runtime.ClassicProducerTarget, ...] | None = None,
+        current: classic_runtime_overlay.ClassicOverlayEpochs,
+        targets: tuple[classic_runtime_graph.ClassicProducerTarget, ...] | None = None,
     ) -> tuple[StepExecutionReceipt, ...]:
         receipts = original_audit(current, targets)
         if targets is not None and any(target.target_id == "app" for target in targets):
@@ -2617,18 +3140,16 @@ def test_linker_waves_reject_control_audit_mutation(
         return receipts
 
     def run_ready_nodes(
-        current: classic_runtime.ClassicProducerGraphBuildExecutor,
+        current: classic_runtime_producer.ClassicProducerExecution,
         _supervisor: ProcessSupervisor,
         nodes: tuple[ProducerNode, ...],
         **kwargs: object,
     ) -> list[StepExecutionReceipt]:
         current_completed = cast(set[str], kwargs["completed"])
         for node in nodes:
-            for output in current._declared_node_outputs(node):
+            for output in current.declared_outputs(node):
                 payload = (
-                    _directive_archive(
-                        "library.obj", _directive_object(b"/INCLUDE:_import_root ")
-                    )
+                    _directive_archive("library.obj", _directive_object(b"/INCLUDE:_import_root "))
                     if output.suffix.casefold() == ".lib"
                     else b"linked"
                 )
@@ -2637,13 +3158,13 @@ def test_linker_waves_reject_control_audit_mutation(
         return []
 
     monkeypatch.setattr(
-        classic_runtime.ClassicProducerGraphBuildExecutor,
-        "_audit_link_controls",
+        classic_runtime_overlay.ClassicOverlayEpochs,
+        "audit_link_controls",
         mutate_after_audit,
     )
     monkeypatch.setattr(
-        classic_runtime.ClassicProducerGraphBuildExecutor,
-        "_run_graph_nodes",
+        classic_runtime_producer.ClassicProducerExecution,
+        "run_graph_nodes",
         run_ready_nodes,
     )
 
@@ -2662,9 +3183,11 @@ def test_linker_waves_reject_control_audit_mutation(
 
 def test_progress_reporter_serializes_parallel_events() -> None:
     events: list[tuple[int, int, str, str]] = []
-    reporter = classic_runtime._ProgressReporter(
+    reporter = classic_runtime_producer.ClassicProgressReporter(
         32,
-        lambda completed, total, phase, node_id: events.append((completed, total, phase, node_id)),
+        lambda completed, total, phase, node_id, _kind, _reason: events.append(
+            (completed, total, phase, node_id)
+        ),
     )
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = [
@@ -2680,14 +3203,42 @@ def test_progress_reporter_serializes_parallel_events() -> None:
     assert {item[3] for item in events} == {f"compiler.unit.{index:04d}" for index in range(32)}
 
 
+def test_progress_reporter_names_activity_without_advancing_work() -> None:
+    events: list[tuple[int, int, str, str, str, str | None]] = []
+    reporter = classic_runtime_producer.ClassicProgressReporter(
+        1,
+        lambda completed, total, phase, node_id, kind, reason: events.append(
+            (completed, total, phase, node_id, kind, reason)
+        ),
+    )
+
+    reporter.activity(
+        "phase_started",
+        "evidence",
+        "assembling authenticity evidence",
+    )
+    reporter.emit("validation", "execution-record")
+
+    assert events[0] == (
+        0,
+        1,
+        "evidence",
+        "assembling authenticity evidence",
+        "phase_started",
+        None,
+    )
+    assert events[1][0] == 1
+    assert events[1][4] == "unit_finished"
+
+
 def test_cold_progress_withholds_completion_until_runtime_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[tuple[int, int, str, str]] = []
     executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
-    executor._progress = classic_runtime._ProgressReporter(
+    executor._progress = classic_runtime_producer.ClassicProgressReporter(
         2,
-        lambda completed, total, phase, node_id: events.append(
+        lambda completed, total, phase, node_id, _kind, _reason: events.append(
             (completed, total, phase, node_id)
         ),
     )
@@ -2703,24 +3254,49 @@ def test_cold_progress_withholds_completion_until_runtime_close(
         current._progress.emit("terminal", "publish.program")
         return object()
 
-    def fail_close(_current: classic_runtime.ClassicProducerGraphBuildExecutor) -> None:
+    def fail_close() -> None:
         raise ClassicProjectError("runtime namespace changed while closing")
+
+    executor.producer = SimpleNamespace(
+        begin_certifying=lambda: None,
+        close=fail_close,
+    )
 
     monkeypatch.setattr(
         classic_runtime.ClassicProducerGraphBuildExecutor,
         "_execute",
         execute_until_finalization,
     )
-    monkeypatch.setattr(
-        classic_runtime.ClassicProducerGraphBuildExecutor,
-        "_close_runtime",
-        fail_close,
-    )
-
     with pytest.raises(ClassicProjectError, match="namespace changed"):
         executor.execute(BuildPlan(()), cold=True)
 
     assert events == [(1, 2, "terminal", "publish.program")]
+
+
+def test_classic_validator_revalidates_before_build_side_effects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[str] = []
+    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor.producer = SimpleNamespace(
+        begin_certifying=lambda: events.append("begin"),
+        close=lambda: events.append("close"),
+    )
+
+    def reject_changed_validator() -> None:
+        events.append("revalidate")
+        raise ClassicProjectError("validator closure changed")
+
+    monkeypatch.setattr(
+        classic_runtime,
+        "revalidate_classic_validator_implementation",
+        reject_changed_validator,
+    )
+
+    with pytest.raises(ClassicProjectError, match="validator closure changed"):
+        executor.execute(BuildPlan(()), cold=True)
+
+    assert events == ["revalidate"]
 
 
 def test_rooted_toolchain_environment_preserves_producer_spelling() -> None:
@@ -2731,14 +3307,12 @@ def test_rooted_toolchain_environment_preserves_producer_spelling() -> None:
             r"Z:\Users\builder\MSVC420\mfc\include"
         ),
         "LIB": r"Z:\Users\builder\MSVC420\lib;Z:\Users\builder\MSVC420\mfc\lib",
-        "LIBPATH": (
-            r"Z:\Users\builder\MSVC420\lib;Z:\Users\builder\MSVC420\mfc\lib"
-        ),
+        "LIBPATH": (r"Z:\Users\builder\MSVC420\lib;Z:\Users\builder\MSVC420\mfc\lib"),
         "TEMP": r"Z:\build\.reprobit-tmp\lane-0000",
         "TMP": r"Z:\build\.reprobit-tmp\lane-0000",
     }
 
-    rendered = classic_runtime._rooted_toolchain_environment(
+    rendered = classic_runtime_environment._rooted_toolchain_environment(
         environment,
         logical_toolchain_root=r"Z:\Users\builder\MSVC420",
     )
@@ -2778,7 +3352,7 @@ def test_rooted_toolchain_environment_rejects_unsealed_paths(
     environment[name] = value
 
     with pytest.raises(ClassicProjectError, match=f"(?:{name} is malformed|{name} leaves)"):
-        classic_runtime._rooted_toolchain_environment(
+        classic_runtime_environment._rooted_toolchain_environment(
             environment,
             logical_toolchain_root=r"Z:\toolchain",
         )
@@ -2793,15 +3367,15 @@ def test_compiler_environment_digest_binds_exact_path_presentation() -> None:
     }
     rooted_environment = {name: value[2:] for name, value in drive_environment.items()}
 
-    assert classic_runtime._compiler_environment_digest(
+    assert classic_runtime_environment._compiler_environment_digest(
         drive_environment
-    ) != classic_runtime._compiler_environment_digest(rooted_environment)
-    assert classic_runtime._compiler_environment_digest(
+    ) != classic_runtime_environment._compiler_environment_digest(rooted_environment)
+    assert classic_runtime_environment._compiler_environment_digest(
         rooted_environment
-    ) == classic_runtime._compiler_environment_digest(dict(rooted_environment))
-    assert classic_runtime._compiler_environment_digest(
+    ) == classic_runtime_environment._compiler_environment_digest(dict(rooted_environment))
+    assert classic_runtime_environment._compiler_environment_digest(
         rooted_environment
-    ) != classic_runtime._compiler_environment_digest(
+    ) != classic_runtime_environment._compiler_environment_digest(
         {**rooted_environment, "WINEDLLOVERRIDES": "msvcrt40=n;msvcrt20=n"}
     )
 
@@ -2824,7 +3398,7 @@ def test_compiler_environment_digest_rejects_ambiguous_paths(value: str) -> None
     }
 
     with pytest.raises(ClassicProjectError, match="leaves the logical path profile"):
-        classic_runtime._compiler_environment_digest(environment)
+        classic_runtime_environment._compiler_environment_digest(environment)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Wine lanes are POSIX-only")
@@ -2865,7 +3439,7 @@ def test_parallel_wine_lanes_have_private_prefixes_and_temporaries(
     logical_root = tmp_path / "logical-drive"
     build_root = logical_root / "build"
     build_root.mkdir(parents=True)
-    workspace = classic_runtime._DirectLogicalWorkspace(
+    workspace = classic_runtime_environment._DirectLogicalWorkspace(
         logical_root,
         "R",
         logical_root / "source",
@@ -2909,14 +3483,14 @@ def test_parallel_wine_lanes_have_private_prefixes_and_temporaries(
         assert timeout_seconds == 10
         stack.close()
 
-    monkeypatch.setattr(classic_runtime, "_close_backend_runtime", close_runtime)
+    monkeypatch.setattr(classic_runtime_environment, "_close_backend_runtime", close_runtime)
     session_root = tmp_path / "session"
     session_root.mkdir()
     authority_root = session_root / "path-proxies"
     authority_root.mkdir()
     authority_file = authority_root / "cl"
     authority_file.write_bytes(b"sealed frontend")
-    lane_pool = classic_runtime._prepare_execution_lanes(
+    lane_pool = classic_runtime_environment._prepare_execution_lanes(
         bundle,
         installation=cast(ClassicMSVCToolchain, Installation()),
         backend=backend,
@@ -2982,17 +3556,19 @@ def test_lazy_lane_pool_reuses_one_lane_for_sequential_work() -> None:
         }
     )
 
-    def create(index: int) -> classic_runtime._ExecutionLane:
+    def create(index: int) -> classic_runtime_environment._ExecutionLane:
         created.append(index)
-        return classic_runtime._ExecutionLane(
+        return classic_runtime_environment._ExecutionLane(
             f"lane-{index:04d}", environment, cast(WorkerSandbox, object())
         )
 
-    pool = classic_runtime._LazyExecutionLanePool(
+    pool = classic_runtime_environment._LazyExecutionLanePool(
         maximum=8,
         create=create,
         close_created=lambda: closed.append(True),
-        compiler_environment_digest=classic_runtime._compiler_environment_digest(environment),
+        compiler_environment_digest=classic_runtime_environment._compiler_environment_digest(
+            environment
+        ),
     )
     assert pool.created_count == 0
     first = pool.acquire()
@@ -3015,13 +3591,15 @@ def test_lazy_lane_pool_rejects_close_with_borrowed_lane_then_cleans() -> None:
         }
     )
     closed: list[bool] = []
-    pool = classic_runtime._LazyExecutionLanePool(
+    pool = classic_runtime_environment._LazyExecutionLanePool(
         maximum=1,
-        create=lambda index: classic_runtime._ExecutionLane(
+        create=lambda index: classic_runtime_environment._ExecutionLane(
             f"lane-{index:04d}", environment, cast(WorkerSandbox, object())
         ),
         close_created=lambda: closed.append(True),
-        compiler_environment_digest=classic_runtime._compiler_environment_digest(environment),
+        compiler_environment_digest=classic_runtime_environment._compiler_environment_digest(
+            environment
+        ),
     )
     lane = pool.acquire()
     with pytest.raises(ClassicProjectError, match="lanes were active"):
@@ -3062,22 +3640,26 @@ def test_discarded_warm_dependency_replay_erases_arena_after_parse_failure(
             self.releases += 1
 
     pool = Pool()
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_developer.ClassicDeveloperExecution)
     executor.build_root = build_root
     executor.session_root = session_root
-    executor.generated_node_inputs = MappingProxyType({})
-    executor.role_commands = MappingProxyType({ProducerRole.COMPILER: Path("compiler")})
-    executor.compile_timeout = 30.0
-    executor._lane_pool = cast(classic_runtime._LazyExecutionLanePool, pool)
+    executor.overlay = SimpleNamespace(generated_node_inputs=MappingProxyType({}))
+    executor.producer = SimpleNamespace(
+        role_commands=MappingProxyType({ProducerRole.COMPILER: Path("compiler")}),
+        compile_timeout=30.0,
+        lane_pool=cast(classic_runtime_environment._LazyExecutionLanePool, pool),
+        node_arguments=lambda _node: node.arguments,
+        logical_for_host_path=lambda path: str(path),
+        producer_cwd=lambda _lane, path: path,
+        compiler_companion_output=(
+            classic_runtime_producer.ClassicProducerExecution.compiler_companion_output
+        ),
+    )
     executor._warm_node = lambda _node_id: node  # type: ignore[method-assign]
     executor._warm_epoch = lambda **_kwargs: (  # type: ignore[method-assign]
         cast(ProcessSupervisor, object()),
         object(),
-        "namespace",
-        "effective",
     )
-    executor._node_arguments = lambda _node: node.arguments  # type: ignore[method-assign]
-    executor._logical_for_host_path = lambda path: str(path)  # type: ignore[method-assign]
 
     def run(*_args: object, **_kwargs: object) -> tuple[ProcessResult, object]:
         arenas = tuple((build_root / ".reprobit-warm-replay").iterdir())
@@ -3087,7 +3669,7 @@ def test_discarded_warm_dependency_replay_erases_arena_after_parse_failure(
         (arenas[0] / "dependencies.sbr").write_bytes(b"not-an-sbr")
         return ProcessResult(("compiler",), 0, b"", 1, 0.01), object()
 
-    monkeypatch.setattr(classic_runtime, "_run", run)
+    monkeypatch.setattr(classic_runtime_developer, "_run", run)
     replay = executor.replay_warm_compiler_dependencies(
         node.id,
         cancellation=CancellationToken(),
@@ -3110,8 +3692,8 @@ def test_runtime_authority_labels_preserve_same_basename_full_census(
     second = second_root / "cl.exe"
     first.write_bytes(b"host transport")
     second.write_bytes(b"toolchain compiler")
-    first_label = classic_runtime._runtime_authority_label(first)
-    second_label = classic_runtime._runtime_authority_label(second)
+    first_label = classic_runtime_producer._runtime_authority_label(first)
+    second_label = classic_runtime_producer._runtime_authority_label(second)
     assert first_label.casefold() != second_label.casefold()
 
     with SealedNamespaceLease(
@@ -3195,9 +3777,7 @@ def _runtime_donor_request(
             include_directories,
             projection,
         ),
-        carrier_identifiers=(
-            frozenset({"DonorCarrier"}) if force_include else frozenset()
-        ),
+        carrier_identifiers=(frozenset({"DonorCarrier"}) if force_include else frozenset()),
         receipt=DonorCompileReceipt(
             "donor_modern_identity",
             family,
@@ -3218,8 +3798,8 @@ def test_donor_compile_record_selects_declared_cross_target_lane(tmp_path: Path)
     build_root = tmp_path / "build"
     build_root.mkdir()
 
-    def record(owner: str, define: str) -> classic_runtime._CompileRecord:
-        return classic_runtime._CompileRecord(
+    def record(owner: str, define: str) -> classic_runtime_graph.ClassicCompileRecord:
+        return classic_runtime_graph.ClassicCompileRecord(
             f"compiler.{owner}.0000",
             build_root,
             source,
@@ -3249,11 +3829,11 @@ def test_donor_compile_record_selects_declared_cross_target_lane(tmp_path: Path)
     unit = SimpleNamespace(donors=(donor,))
     owner_record = record("program", "OWNER_LANE")
     declared_lane = record("config", "REQUIRED")
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_donor.ClassicDonorComposition)
     executor.effective_root = effective_root
     executor.compile_records = (owner_record, declared_lane)
 
-    selected = executor._record_for_donor(unit, 0)
+    selected = executor.record_for_donor(unit, 0)
 
     assert selected is declared_lane
     assert selected.node_id == "compiler.config.0000"
@@ -3281,7 +3861,7 @@ def test_donor_compile_record_rejects_non_unique_declared_lane(
     build_root = tmp_path / "build"
     build_root.mkdir()
     records = tuple(
-        classic_runtime._CompileRecord(
+        classic_runtime_graph.ClassicCompileRecord(
             f"compiler.lane{index}.0000",
             build_root,
             source,
@@ -3313,7 +3893,7 @@ def test_donor_compile_record_rejects_non_unique_declared_lane(
             ),
         )
     )
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_donor.ClassicDonorComposition)
     executor.effective_root = effective_root
     executor.compile_records = records
 
@@ -3321,7 +3901,7 @@ def test_donor_compile_record_rejects_non_unique_declared_lane(
         ClassicProjectError,
         match=rf"{expected_count} committed compile lanes for required define 'REQUIRED'",
     ):
-        executor._record_for_donor(unit, 0)
+        executor.record_for_donor(unit, 0)
 
 
 @pytest.mark.parametrize(
@@ -3365,7 +3945,7 @@ def test_donor_compiler_command_preserves_legacy_visible_path_contract(
         overlay=overlay,
     )
     source_windows = source.replace("/", "\\")
-    record = classic_runtime._CompileRecord(
+    record = classic_runtime_graph.ClassicCompileRecord(
         "compiler.program.0000",
         drive / "Users/project/build",
         source_path,
@@ -3386,10 +3966,12 @@ def test_donor_compiler_command_preserves_legacy_visible_path_contract(
         ),
         "program",
     )
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_donor.ClassicDonorComposition)
     executor.effective_root = effective_root
-    executor._logical_drive_root = drive.resolve(strict=True)
-    executor._logical_drive_letter = "Z"
+    producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    producer._logical_drive_root = drive.resolve(strict=True)
+    producer._logical_drive_letter = "Z"
+    executor.producer = producer
 
     command = executor._donor_compiler_command(record, request, arena)
 
@@ -3453,7 +4035,7 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
         force_include=True,
         overlay=True,
     )
-    record = classic_runtime._CompileRecord(
+    record = classic_runtime_graph.ClassicCompileRecord(
         "compiler.program.0000",
         build_root,
         source,
@@ -3513,7 +4095,7 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
         def release(self, _lane: object) -> None:
             return None
 
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_donor.ClassicDonorComposition)
     executor.effective_root = effective_root
     executor.build_root = build_root
     executor.session_root = session_root
@@ -3527,21 +4109,23 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
         nodes=(node,),
     )
     executor.compile_timeout = 30.0
-    executor._lane_pool = cast(classic_runtime._LazyExecutionLanePool, Pool())
-    executor._logical_drive_root = drive.resolve(strict=True)
-    executor._logical_drive_letter = "Z"
-    executor._donor_include_authority = classic_runtime.SealedIncludeAuthority(
+    producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    producer._lane_pool = cast(classic_runtime_environment._LazyExecutionLanePool, Pool())
+    producer._logical_drive_root = drive.resolve(strict=True)
+    producer._logical_drive_letter = "Z"
+    executor.producer = producer
+    include_authority = classic_includes.SealedIncludeAuthority(
         (r"Z:\Toolchain", r"Z:\Users\project\source"),
         tuple(
             sorted(
                 (
-                    classic_runtime.SealedIncludeFile(
+                    classic_includes.SealedIncludeFile(
                         r"Z:\Users\project\source\src\unit.cpp",
                         Digest.from_bytes(b"effective source\n"),
                         len(b"effective source\n"),
                         IncludeOrigin.PROJECT_SOURCE,
                     ),
-                    classic_runtime.SealedIncludeFile(
+                    classic_includes.SealedIncludeFile(
                         r"Z:\Users\project\source\include\rendered.h",
                         Digest.from_bytes(b"effective header\n"),
                         len(b"effective header\n"),
@@ -3578,7 +4162,7 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
             assert (cwd / "o.pdb").read_bytes() == b"pdb"
             (cwd / ".reprobit-donor-dependencies.obj").write_bytes(b"discard object")
             (cwd / ".reprobit-donor-dependencies.pdb").write_bytes(b"discard pdb")
-            working = executor._logical_for_host_path(cwd)
+            working = producer.logical_for_host_path(cwd)
             mirror_header = working + r"\inc\source\include\rendered.h"
             sbr = bytearray(b"\x00\x02\x00\x07\x00")
             sbr.extend(working.encode("ascii") + b"\0")
@@ -3592,14 +4176,20 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
         result = ProcessResult(argv, 0, b"", 1, 0.01)
         return result, CommandSpec.create(argv, cwd=cwd, environment=environment)
 
-    monkeypatch.setattr(classic_runtime, "_run", run)
+    monkeypatch.setattr(classic_runtime_donor, "_run", run)
     with ProcessSupervisor() as supervisor:
-        invocation = executor._invoke_donor_compiler(
+        invocation = executor.invoke_donor_compiler(
             supervisor,
-            cast(classic_runtime.ClassicPreparedUnit, unit),
+            cast(classic_orchestration.ClassicPreparedUnit, unit),
             0,
             CancellationToken(),
             step_id="donor.fixture",
+            compiler_epoch=classic_runtime_overlay.ClassicActiveCompilerEpoch(
+                "fixture",
+                include_authority,
+                classic_runtime_producer._tree_file_seal(effective_root),
+                False,
+            ),
             capture_dependencies=True,
         )
 
@@ -3627,14 +4217,10 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
     )
     for prefix in ("/fo", "/fd"):
         canonical_index = next(
-            index
-            for index, item in enumerate(captured[0][0])
-            if item.casefold().startswith(prefix)
+            index for index, item in enumerate(captured[0][0]) if item.casefold().startswith(prefix)
         )
         replay_index = next(
-            index
-            for index, item in enumerate(replay_command)
-            if item.casefold().startswith(prefix)
+            index for index, item in enumerate(replay_command) if item.casefold().startswith(prefix)
         )
         replay_command[replay_index] = captured[0][0][canonical_index]
     assert tuple(replay_command) == captured[0][0]
@@ -3645,11 +4231,9 @@ def test_donor_invocation_uses_legacy_arena_layout_and_relative_outputs(
     assert invocation.dependency_replay is not None
     assert invocation.dependency_replay.reason is None
     assert [item.logical_path for item in invocation.dependency_replay.reads] == [
-        executor._logical_for_host_path(captured[0][1] / "s.cpp"),
-        executor._logical_for_host_path(captured[0][1] / "run.h"),
-        executor._logical_for_host_path(
-            captured[0][1] / "inc/source/include/rendered.h"
-        ),
+        producer.logical_for_host_path(captured[0][1] / "s.cpp"),
+        producer.logical_for_host_path(captured[0][1] / "run.h"),
+        producer.logical_for_host_path(captured[0][1] / "inc/source/include/rendered.h"),
     ]
     assert not tuple(
         item
@@ -3668,11 +4252,13 @@ def test_projected_donor_dependency_parse_failure_is_discarded(
     (arena / "s.cpp").write_bytes(b"donor source\n")
     session_root = tmp_path / "session"
     session_root.mkdir()
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor = object.__new__(classic_runtime_donor.ClassicDonorComposition)
     executor.session_root = session_root
-    executor._logical_drive_root = drive.resolve(strict=True)
-    executor._logical_drive_letter = "R"
-    executor._donor_include_authority = classic_runtime.SealedIncludeAuthority(
+    producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    producer._logical_drive_root = drive.resolve(strict=True)
+    producer._logical_drive_letter = "R"
+    executor.producer = producer
+    include_authority = classic_includes.SealedIncludeAuthority(
         (r"R:\source", r"R:\toolchain"),
         (),
     )
@@ -3694,7 +4280,7 @@ def test_projected_donor_dependency_parse_failure_is_discarded(
             CommandSpec.create(argv, cwd=arena, environment=lane.environment),
         )
 
-    monkeypatch.setattr(classic_runtime, "_run", run)
+    monkeypatch.setattr(classic_runtime_donor, "_run", run)
     with ProcessSupervisor() as supervisor:
         replay = executor._replay_projected_donor_dependencies(
             supervisor,
@@ -3709,11 +4295,17 @@ def test_projected_donor_dependency_parse_failure_is_discarded(
                 "s.cpp",
             ),
             arena=arena,
-            arena_seal=classic_runtime._tree_file_seal(arena),
-            lane=cast(classic_runtime._ExecutionLane, lane),
+            arena_seal=classic_runtime_producer._tree_file_seal(arena),
+            lane=cast(classic_runtime_environment._ExecutionLane, lane),
             timeout=30.0,
             step_id="donor.fixture",
             cancellation=CancellationToken(),
+            compiler_epoch=classic_runtime_overlay.ClassicActiveCompilerEpoch(
+                "fixture",
+                include_authority,
+                MappingProxyType({}),
+                False,
+            ),
         )
 
     assert replay.trace is None
@@ -3755,34 +4347,39 @@ def test_exact_compiler_probe_returns_raw_outputs_and_closes_runtime(
             self.closed = True
 
     pool = Pool()
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
-    executor.record = None
-    executor._runtime_open = True
-    executor._lane_pool = cast(classic_runtime._LazyExecutionLanePool, pool)
+    executor = object.__new__(classic_runtime_developer.ClassicDeveloperExecution)
+    executor._warm_stack = None
     executor.graph = graph
-    executor.generated_node_inputs = MappingProxyType({})
-    executor.overlay_witnesses = ()
+    executor.overlay = SimpleNamespace(
+        generated_node_inputs=MappingProxyType({}),
+        overlay_witnesses=(),
+    )
     executor.effective_root = source_root
     executor.build_root = build_root
-    executor._output_lock = Lock()
-    executor._physical_outputs = {}
+    producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    producer._runtime_open = True
+    producer._mode = None
+    producer._lane_pool = cast(classic_runtime_environment._LazyExecutionLanePool, pool)
+    producer._output_lock = Lock()
+    producer._physical_outputs = {}
+    executor.producer = producer
     empty_snapshot = SimpleNamespace(files=())
-    executor._authority_namespace_lease = lambda: nullcontext(  # type: ignore[method-assign]
+    producer.authority_namespace_lease = lambda: nullcontext(  # type: ignore[method-assign]
         SimpleNamespace(snapshot=empty_snapshot)
     )
-    executor._source_namespace_lease = lambda: nullcontext(  # type: ignore[method-assign]
+    producer.source_namespace_lease = lambda: nullcontext(  # type: ignore[method-assign]
         SimpleNamespace(snapshot=empty_snapshot)
     )
-    executor._capture_compiler_namespace = (  # type: ignore[method-assign]
+    producer.capture_compiler_namespace = (  # type: ignore[method-assign]
         lambda *args, **kwargs: SimpleNamespace(evidence=SimpleNamespace(namespace_id="probe"))
     )
-    executor._include_authority = lambda: object()  # type: ignore[method-assign]
+    producer.include_authority = lambda: object()  # type: ignore[method-assign]
 
     def reference(value: str) -> Path | None:
         prefix, relative = value.split("/", 1)
         return (source_root if prefix == "source" else build_root) / relative
 
-    executor._reference = reference  # type: ignore[method-assign]
+    producer.reference = reference  # type: ignore[method-assign]
 
     def run_nodes(
         supervisor: ProcessSupervisor,
@@ -3795,12 +4392,12 @@ def test_exact_compiler_probe_returns_raw_outputs_and_closes_runtime(
         pdb_path = build_root / "unit.pdb"
         object_path.write_bytes(b"raw object")
         pdb_path.write_bytes(b"raw pdb")
-        executor._physical_outputs[object_path] = object_path
-        executor._physical_outputs[pdb_path] = pdb_path
+        producer._physical_outputs[object_path] = object_path
+        producer._physical_outputs[pdb_path] = pdb_path
         cast(set[str], kwargs["completed"]).add(node.id)
-        return [classic_runtime._internal_step(f"probe.{node.id}", {}, 0.0)]
+        return [classic_runtime_producer._internal_step(f"probe.{node.id}", {}, 0.0)]
 
-    executor._run_graph_nodes = run_nodes  # type: ignore[method-assign]
+    producer.run_graph_nodes = run_nodes  # type: ignore[method-assign]
 
     outputs = executor.probe_compiler_nodes((node.id,))
 
@@ -3810,7 +4407,7 @@ def test_exact_compiler_probe_returns_raw_outputs_and_closes_runtime(
     assert outputs[0].object_digest == Digest.from_bytes(b"raw object")
     assert outputs[0].pdb_digest == Digest.from_bytes(b"raw pdb")
     assert pool.closed is True
-    assert executor._runtime_open is False
+    assert producer._runtime_open is False
 
 
 def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
@@ -3846,26 +4443,32 @@ def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
             self.closed = True
 
     pool = Pool()
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
-    executor.record = None
-    executor._runtime_open = True
-    executor._lane_pool = cast(classic_runtime._LazyExecutionLanePool, pool)
-    executor.units = cast(tuple[classic_runtime.ClassicPreparedUnit, ...], (unit,))
-    executor.overlay_witnesses = ()
-    executor.generated_translation_units = frozenset()
+    executor = object.__new__(classic_runtime_developer.ClassicDeveloperExecution)
+    executor._warm_stack = None
+    executor.units = cast(tuple[classic_orchestration.ClassicPreparedUnit, ...], (unit,))
+    executor.overlay = SimpleNamespace(
+        overlay_witnesses=(),
+        generated_translation_units=frozenset(),
+    )
     executor.effective_root = source_root
-    empty_snapshot = classic_runtime.SealedNamespaceSnapshot(())
-    executor._authority_namespace_lease = lambda: nullcontext(  # type: ignore[method-assign]
+    producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    producer._runtime_open = True
+    producer._mode = None
+    producer._lane_pool = cast(classic_runtime_environment._LazyExecutionLanePool, pool)
+    executor.producer = producer
+    empty_snapshot = SealedNamespaceSnapshot(())
+    producer.authority_namespace_lease = lambda: nullcontext(  # type: ignore[method-assign]
         SimpleNamespace(snapshot=empty_snapshot)
     )
-    executor._source_namespace_lease = lambda: nullcontext(  # type: ignore[method-assign]
+    producer.source_namespace_lease = lambda: nullcontext(  # type: ignore[method-assign]
         SimpleNamespace(snapshot=empty_snapshot)
     )
-    executor._capture_compiler_namespace = (  # type: ignore[method-assign]
+    producer.capture_compiler_namespace = (  # type: ignore[method-assign]
         lambda *args, **kwargs: SimpleNamespace(
             evidence=SimpleNamespace(namespace_id="donor-probe")
         )
     )
+    producer.include_authority = lambda: object()  # type: ignore[method-assign]
 
     invoked: list[str] = []
 
@@ -3876,13 +4479,14 @@ def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
         cancellation: CancellationToken,
         *,
         step_id: str,
-    ) -> classic_runtime._DonorCompilerInvocation:
-        del supervisor, cancellation
+        compiler_epoch: classic_runtime_overlay.ClassicActiveCompilerEpoch,
+    ) -> classic_runtime_donor._DonorCompilerInvocation:
+        del supervisor, cancellation, compiler_epoch
         donor = unit_arg.donors[donor_index]
         invoked.append(donor.intervention.id)
         object_payload = f"object:{donor.intervention.id}".encode()
         pdb_payload = f"pdb:{donor.intervention.id}".encode()
-        record = classic_runtime._CompileRecord(
+        record = classic_runtime_graph.ClassicCompileRecord(
             "compiler.program.0000",
             tmp_path,
             source,
@@ -3892,7 +4496,7 @@ def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
             "program",
         )
         spec = CommandSpec.create(("cl",), cwd=tmp_path, timeout_seconds=1)
-        return classic_runtime._DonorCompilerInvocation(
+        return classic_runtime_donor._DonorCompilerInvocation(
             record,
             tmp_path / "donor.obj",
             tmp_path / "donor.pdb",
@@ -3904,7 +4508,7 @@ def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
             step_id,
         )
 
-    executor._invoke_donor_compiler = invoke  # type: ignore[method-assign]
+    executor.donors = SimpleNamespace(invoke_donor_compiler=invoke)
 
     outputs = executor.probe_donor_compilers(("donor.second", "donor.first"))
 
@@ -3914,7 +4518,7 @@ def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
     assert outputs[0].source_reference == "unit.cpp"
     assert outputs[0].producer_node_id == "compiler.program.0000"
     assert outputs[0].rendered_inputs == (
-        classic_runtime.ClassicDonorProbeInput(
+        classic_runtime_developer.ClassicDonorProbeInput(
             "unit.cpp",
             Digest.from_bytes(b"rendered second\n"),
             len(b"rendered second\n"),
@@ -3926,7 +4530,7 @@ def test_exact_donor_probe_returns_prepared_inputs_and_consumes_runtime(
     assert outputs[0].object_digest == Digest.from_bytes(outputs[0].object_payload)
     assert outputs[0].pdb_digest == Digest.from_bytes(outputs[0].pdb_payload)
     assert pool.closed is True
-    assert executor._runtime_open is False
+    assert producer._runtime_open is False
 
 
 def test_donor_probe_rejects_unprepared_id_and_still_closes_runtime(tmp_path: Path) -> None:
@@ -3941,31 +4545,30 @@ def test_donor_probe_rejects_unprepared_id_and_still_closes_runtime(tmp_path: Pa
             self.closed = True
 
     pool = Pool()
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
-    executor.record = None
-    executor._runtime_open = True
-    executor._lane_pool = cast(classic_runtime._LazyExecutionLanePool, pool)
+    executor = object.__new__(classic_runtime_developer.ClassicDeveloperExecution)
+    executor._warm_stack = None
     executor.units = ()
     executor.effective_root = source_root
+    producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    producer._runtime_open = True
+    producer._mode = None
+    producer._lane_pool = cast(classic_runtime_environment._LazyExecutionLanePool, pool)
+    executor.producer = producer
 
     with pytest.raises(ClassicProjectError, match="unknown prepared donors"):
         executor.probe_donor_compilers(("donor.absent",))
 
     assert pool.closed is True
-    assert executor._runtime_open is False
+    assert producer._runtime_open is False
 
 
 def test_legacy_oracle_binding_requires_the_exact_prepared_capability_set() -> None:
-    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
-    executor.record = None
+    executor = object.__new__(classic_runtime_donor.ClassicDonorComposition)
+    executor._started = False
     executor._legacy_oracles = MappingProxyType({})
     executor.units = cast(
-        tuple[classic_runtime.ClassicPreparedUnit, ...],
-        (
-            SimpleNamespace(
-                legacy_actions=(SimpleNamespace(oracle_target="program"),)
-            ),
-        ),
+        tuple[classic_orchestration.ClassicPreparedUnit, ...],
+        (SimpleNamespace(legacy_actions=(SimpleNamespace(oracle_target="program"),)),),
     )
 
     with pytest.raises(ClassicProjectError, match=r"extra=\['unused'\]"):
@@ -4022,7 +4625,7 @@ def test_close_runtime_rejects_drive_exposed_while_producers_were_live(
     monkeypatch.setattr(backend, "terminate_worker_server", terminate)
 
     with pytest.raises(BackendError, match="mapping changed during producer execution"):
-        classic_runtime._close_backend_runtime(
+        classic_runtime_environment._close_backend_runtime(
             backend,
             worker,
             stack,
@@ -4052,7 +4655,7 @@ def test_close_runtime_rejects_transient_drive_mapping_create_delete(
     monkeypatch.setattr(backend, "terminate_worker_server", terminate)
 
     with pytest.raises(BackendError, match="mapping changed during producer execution"):
-        classic_runtime._close_backend_runtime(
+        classic_runtime_environment._close_backend_runtime(
             backend,
             worker,
             stack,
@@ -4089,14 +4692,14 @@ def test_close_runtime_scrubs_recreated_wine_drives_after_server_reap(
 
     if residual_kind == "regular":
         with pytest.raises(BackendError, match="drive"):
-            classic_runtime._close_backend_runtime(
+            classic_runtime_environment._close_backend_runtime(
                 backend,
                 worker,
                 stack,
                 logical_drive="Z",
             )
     else:
-        classic_runtime._close_backend_runtime(
+        classic_runtime_environment._close_backend_runtime(
             backend,
             worker,
             stack,

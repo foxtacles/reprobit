@@ -10,3 +10,10 @@ Extraction revision:
 Copyright remains with Christian Semmler and the upstream contributors identified by that
 revision's history. ReproBit is distributed under LGPL-3.0-only; see LICENSE for the complete
 license terms.
+
+ReproBit also distributes a fixed snapshot of six POSIX MSVC transport shell
+files under runtime/msvc42-wine. They contain no Microsoft toolchain payload
+and retain their permissive license notice in each file:
+
+    Copyright (c) 2025 archaic-msvc developers
+    Copyright (c) 2018 Martin Storsjo

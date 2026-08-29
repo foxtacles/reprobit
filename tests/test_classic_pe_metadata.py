@@ -4,7 +4,8 @@ import struct
 
 import pytest
 
-from reprobit import classic
+import reprobit.classic.pe_metadata as pe_metadata_algorithms
+from reprobit.binary import ByteIdentityError
 
 PE = 0x80
 OPTIONAL = PE + 24
@@ -73,7 +74,7 @@ def _image(*, cyclic_resource: bool = False) -> bytes:
 
 def test_pe_metadata_normalizes_only_declared_timestamp_fields() -> None:
     source = _image()
-    result, proof = classic.apply_pe_metadata_candidate(
+    result, proof = pe_metadata_algorithms.apply_pe_metadata_candidate(
         source,
         {"link_time": 123, "resource_time": 456},
     )
@@ -90,23 +91,21 @@ def test_pe_metadata_normalizes_only_declared_timestamp_fields() -> None:
         for byte in range(offset, offset + 4)
     }
     assert {
-        index
-        for index, pair in enumerate(zip(source, result, strict=True))
-        if pair[0] != pair[1]
+        index for index, pair in enumerate(zip(source, result, strict=True)) if pair[0] != pair[1]
     } <= allowed
 
 
 def test_pe_metadata_rejects_resource_cycles() -> None:
-    with pytest.raises(classic.ByteIdentityError, match="cycle"):
-        classic.apply_pe_metadata_candidate(
+    with pytest.raises(ByteIdentityError, match="cycle"):
+        pe_metadata_algorithms.apply_pe_metadata_candidate(
             _image(cyclic_resource=True),
             {"link_time": 123, "resource_time": 456},
         )
 
 
 def test_pe_metadata_rejects_payload_fields() -> None:
-    with pytest.raises(classic.ByteIdentityError, match="payload"):
-        classic.apply_pe_metadata_candidate(
+    with pytest.raises(ByteIdentityError, match="payload"):
+        pe_metadata_algorithms.apply_pe_metadata_candidate(
             _image(),
             {"link_time": 123, "resource_time": 456, "payload": "AAAA"},
         )

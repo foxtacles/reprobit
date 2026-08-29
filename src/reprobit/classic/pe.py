@@ -8,9 +8,10 @@ from dataclasses import dataclass
 from itertools import pairwise
 from typing import TypedDict
 
+from reprobit.binary import require
+
 from .foundation import (
     exact_audit_keys,
-    require,
     require_exact_int,
     require_payload_free_declaration,
     require_sha,

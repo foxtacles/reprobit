@@ -1,12 +1,9 @@
-"""Canonical machine report and deterministic self-contained HTML rendering."""
+"""Immutable canonical machine-report models."""
 
 from __future__ import annotations
 
-import html
-import os
 from collections.abc import Mapping
 from enum import StrEnum
-from pathlib import Path, PurePosixPath
 from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -27,8 +24,7 @@ from reprobit.model import (
     quarantine_proof_binding,
 )
 from reprobit.schema import MsvcRelease, ProjectBundle
-from reprobit.secure_paths import atomic_publish_relative
-from reprobit.strict_json import JsonValue, StrictJSONError, canonical_json, strict_load
+from reprobit.strict_json import canonical_json
 
 
 class ToolSummary(StrictModel):
@@ -630,6 +626,18 @@ class Report(StrictModel):
             {item.id for item in self.targets}
         ) != len(self.targets):
             raise ValueError("report targets must be unique and canonical")
+        target_ids = {item.id for item in self.targets}
+        cost_targets = {
+            *(item.target for item in self.costs.by_target),
+            *(item.scope.target for item in self.costs.by_function),
+            *(item.scope.target for item in self.costs.interventions),
+        }
+        unknown_cost_targets = cost_targets - target_ids
+        if unknown_cost_targets:
+            raise ValueError(
+                "report costs name unknown targets: "
+                f"{sorted(unknown_cost_targets)}"
+            )
         if self.timings != tuple(sorted(self.timings, key=lambda item: item.stage)) or len(
             {item.stage for item in self.timings}
         ) != len(self.timings):
@@ -957,322 +965,6 @@ class Report(StrictModel):
         )
 
 
-def _atomic_write(path: str | Path, data: bytes) -> None:
-    destination = Path(os.path.abspath(path))
-    if not destination.anchor or len(destination.parts) < 2:
-        raise OSError(f"report destination has no secure relative path: {path}")
-    root = Path(destination.anchor)
-    relative = PurePosixPath(*destination.parts[1:]).as_posix()
-    atomic_publish_relative(root, relative, data)
-
-
-def write_report_json(report: Report, path: str | Path) -> None:
-    """Write canonical report JSON atomically."""
-
-    _atomic_write(path, canonical_json(report))
-
-
-def read_report_json(path: str | Path) -> Report:
-    """Read and strictly validate a canonical report-v2 document."""
-
-    source = Path(path)
-    try:
-        value = strict_load(source)
-        return Report.model_validate_json(canonical_json(value))
-    except (StrictJSONError, ValueError) as exc:
-        raise ValueError(f"invalid report {source}: {exc}") from exc
-
-
-def _yes_no(value: bool) -> str:
-    return "yes" if value else "no"
-
-
-def _table(headers: tuple[str, ...], rows: tuple[tuple[str, ...], ...]) -> str:
-    head = "".join(f'<th scope="col">{html.escape(value)}</th>' for value in headers)
-    body = "".join(
-        "<tr>" + "".join(f"<td>{html.escape(value)}</td>" for value in row) + "</tr>"
-        for row in rows
-    )
-    return f"<table><thead><tr>{head}</tr></thead><tbody>{body}</tbody></table>"
-
-
-def render_report_html(report: Report) -> str:
-    """Render a deterministic report with no network or script dependency."""
-
-    verdict_rows = tuple(
-        (label, _yes_no(value))
-        for label, value in (
-            ("Cold build", report.verdict.cold),
-            ("Byte exact", report.verdict.byte_exact),
-            ("Logic certified", report.verdict.logic_certified),
-            ("Toolchain origin", report.verdict.toolchain_origin),
-            ("Quarantined", report.verdict.quarantined),
-            ("Clean", report.verdict.clean),
-        )
-    )
-    target_rows = tuple(
-        (
-            item.id,
-            item.artifact,
-            str(item.candidate_size) if item.candidate_size is not None else "not recorded",
-            item.candidate_digest.value if item.candidate_digest is not None else "not recorded",
-            str(item.oracle_size),
-            item.oracle_digest.value,
-            _yes_no(item.byte_exact),
-        )
-        for item in report.targets
-    )
-    class_rows = tuple(
-        (
-            item.cost_class.value,
-            str(item.interventions),
-            str(item.units),
-            str(item.cost),
-        )
-        for item in report.costs.by_class
-    )
-    function_rows = tuple(
-        (
-            item.scope.target,
-            item.scope.translation_unit or "",
-            item.scope.function or "",
-            str(item.direct_cost),
-            f"{item.allocated_shared_cost.numerator}/{item.allocated_shared_cost.denominator}",
-            str(item.exposure_cost),
-        )
-        for item in report.costs.by_function
-    )
-    intervention_rows = tuple(
-        (
-            item.intervention_id,
-            item.kind,
-            item.cost_class.value,
-            item.scope.target,
-            item.scope.translation_unit or "",
-            item.scope.function or "",
-            ", ".join(f"{unit.kind.value} x {unit.count}" for unit in item.units),
-            str(item.cost),
-        )
-        for item in report.costs.interventions
-    )
-    quarantine = ""
-    if report.verdict.quarantined:
-        ranges = sum(len(item.ranges) for item in report.verdict.quarantines)
-        bytes_installed = sum(item.byte_count for item in report.verdict.quarantines)
-        quarantine_rows = tuple(
-            (
-                item.id,
-                item.artifact_id,
-                item.scope.function if item.scope is not None and item.scope.function else "",
-                item.coordinate_space,
-                f"0x{item.base_address:08x}" if item.base_address is not None else "",
-                ", ".join(f"[0x{span.offset:x}, 0x{span.end:x})" for span in item.ranges),
-                str(item.byte_count),
-                item.reason,
-            )
-            for item in report.verdict.quarantines
-        )
-        quarantine = (
-            '<section class="warning" role="alert"><h2>Authenticity quarantine</h2>'
-            f"<p>{len(report.verdict.quarantines)} action(s), {ranges} range(s), "
-            f"{bytes_installed} byte(s). This output is not clean and does not have "
-            "toolchain-origin authenticity.</p>"
-            + _table(
-                (
-                    "Action",
-                    "Artifact",
-                    "Function",
-                    "Coordinates",
-                    "Function VA",
-                    "Ranges",
-                    "Bytes",
-                    "Reason",
-                ),
-                quarantine_rows,
-            )
-            + "</section>"
-        )
-    embedded = canonical_json(report).decode("utf-8").strip()
-    embedded = embedded.replace("&", "\\u0026").replace("<", "\\u003c").replace(">", "\\u003e")
-    title = html.escape(f"{report.project_id} — ReproBit report")
-    verdict_table = _table(("Claim", "Result"), verdict_rows)
-    targets_table = _table(
-        (
-            "Target",
-            "Artifact",
-            "Candidate bytes",
-            "Candidate SHA-256",
-            "Oracle bytes",
-            "Oracle SHA-256",
-            "Exact",
-        ),
-        target_rows,
-    )
-    classes_table = _table(("Class", "Interventions", "Units", "Cost"), class_rows)
-    functions_table = _table(
-        (
-            "Target",
-            "Translation unit",
-            "Function",
-            "Direct",
-            "Allocated shared",
-            "Exposure",
-        ),
-        function_rows,
-    )
-    interventions_table = _table(
-        (
-            "ID",
-            "Kind",
-            "Class",
-            "Target",
-            "Translation unit",
-            "Function",
-            "Units",
-            "Cost",
-        ),
-        intervention_rows,
-    )
-    component_rows = (
-        (
-            report.proof.adapter.role,
-            report.proof.adapter.id,
-            report.proof.adapter.implementation,
-            report.proof.adapter.version,
-            report.proof.adapter.digest.value,
-        ),
-        *(
-            (
-                item.role,
-                item.id,
-                item.implementation,
-                item.version,
-                item.digest.value,
-            )
-            for item in report.proof.providers
-        ),
-        (
-            report.proof.package.role,
-            report.proof.package.id,
-            report.proof.package.implementation,
-            report.proof.package.version,
-            report.proof.package.digest.value,
-        ),
-    )
-    components_table = _table(
-        ("Role", "ID", "Implementation", "Version", "SHA-256"),
-        component_rows,
-    )
-    tool_rows = tuple(
-        (
-            item.id,
-            str(item.size) if item.size is not None else "not recorded",
-            item.digest.value,
-        )
-        for item in report.toolchain.tools
-    )
-    tree_rows = tuple(
-        (
-            item.id,
-            item.path,
-            str(item.entry_count),
-            str(item.max_depth),
-            item.membership_digest.value,
-            item.content_digest.value,
-        )
-        for item in report.toolchain.input_trees
-    )
-    tools_table = _table(("Tool", "Bytes", "SHA-256"), tool_rows)
-    trees_table = _table(
-        ("Tree", "Path", "Entries", "Depth", "Membership SHA-256", "Content SHA-256"),
-        tree_rows,
-    )
-    issues_table = _table(
-        ("Claim", "Code", "Message"),
-        tuple((item.claim, item.code, item.message) for item in report.proof.audit_issues),
-    )
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{title}</title>
-<style>
-:root{{--bg:#f7f8fa;--panel:#fff;--ink:#17202a;--muted:#5d6d7e;--line:#d5d8dc;
---ok:#176b3a;--bad:#a61b1b}}
-*{{box-sizing:border-box}}
-body{{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 system-ui,sans-serif}}
-main{{max-width:1200px;margin:auto;padding:2rem}}
-h1,h2{{line-height:1.15}} .lede{{color:var(--muted)}}
-.grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:1rem}}
-section{{background:var(--panel);border:1px solid var(--line);border-radius:8px;
-padding:1rem;margin:1rem 0;overflow:auto}}
-.warning{{border:3px solid var(--bad);background:#fff1f1;color:#690f0f}}
-.metric{{font-size:2rem;font-weight:700}}
-table{{width:100%;border-collapse:collapse;font-size:.9rem}}
-th,td{{border-bottom:1px solid var(--line);padding:.5rem;text-align:left;vertical-align:top}}
-th{{background:#eef1f4}}
-code{{font-family:ui-monospace,monospace;overflow-wrap:anywhere}}
-.ok{{color:var(--ok)}} .bad{{color:var(--bad)}}
-</style>
-</head>
-<body><main>
-<h1>{title}</h1>
-<p class="lede">Run <code>{report.run_id.value}</code> ·
-cost model v{report.costs.model_version}</p>
-{quarantine}
-<div class="grid">
-<section><h2>Verdict</h2>{verdict_table}</section>
-<section><h2>Total cost</h2><div class="metric">{report.costs.project_total}</div>
-<p>Unallocated shared cost: {report.costs.unallocated_shared_cost}</p></section>
-<section><h2>Evidence</h2><p>{report.evidence.artifacts} artifacts<br>
-{report.evidence.provenance_nodes} provenance nodes<br>
-{report.evidence.passed_certificates}/{report.evidence.certificates}
-certificates passed<br>{len(report.proof.producers)} producer attestations<br>
-{len(report.proof.audit_issues)} audit issues</p>
-<p>Evidence SHA-256<br><code>{report.proof.digest.value}</code></p></section>
-</div>
-<section><h2>Targets</h2>{targets_table}</section>
-<section><h2>Locked toolchain</h2>
-<p>Profile <code>{html.escape(report.toolchain.profile)}</code> ·
-MSVC {html.escape(report.toolchain.release.value)}</p>
-<h3>Executable and runtime files</h3>{tools_table}
-<h3>Portable input trees</h3>{trees_table}</section>
-<section><h2>Trusted components</h2>{components_table}</section>
-<section><h2>Audit issues</h2>{issues_table}</section>
-<section><h2>Costs by class</h2>{classes_table}</section>
-<section><h2>Function costs</h2>{functions_table}</section>
-<section><h2>Interventions</h2>{interventions_table}</section>
-<script type="application/json" id="reprobit-report">{embedded}</script>
-</main></body></html>
-"""
-
-
-def write_report_html(report: Report, path: str | Path) -> None:
-    """Write a self-contained report atomically."""
-
-    _atomic_write(path, render_report_html(report).encode("utf-8"))
-
-
-def report_json_schema() -> JsonValue:
-    """Return the self-contained, stably identified report schema."""
-
-    return {
-        "$schema": "https://json-schema.org/draft/2020-12/schema",
-        "$id": "urn:reprobit:schema:report:2",
-        **Report.model_json_schema(
-            mode="validation",
-            ref_template="#/$defs/{model}",
-        ),
-    }
-
-
-def write_report_json_schema(path: str | Path) -> None:
-    """Write the canonical report schema atomically."""
-
-    _atomic_write(path, canonical_json(report_json_schema()))
-
-
 __all__ = [
     "AuditIssueSummary",
     "BuildExecutionSummary",
@@ -1295,10 +987,4 @@ __all__ = [
     "ToolSummary",
     "ToolchainSummary",
     "ToolchainTreeSummary",
-    "read_report_json",
-    "render_report_html",
-    "report_json_schema",
-    "write_report_html",
-    "write_report_json",
-    "write_report_json_schema",
 ]

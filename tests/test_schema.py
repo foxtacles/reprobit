@@ -13,21 +13,27 @@ from reprobit.producer_graph import (
     ProducerRole,
     toolchain_document_digest,
 )
+from reprobit.project_loader import load_project, load_project_tree
 from reprobit.schema import (
     BuildPlanDocument,
     ClassicArchiveAuthority,
+    ClassicProofReceipt,
+    ClassicRecipeFamily,
+    ClassicRecipeIntervention,
+    ClassicRecipeRole,
     ClassicTargetGate,
     ClassicTranslationUnitPlan,
     InterventionDocument,
     LinkOrderingIntervention,
     LogicalPathProfile,
     ProjectBundle,
+    ProofDocument,
     SchemaError,
     SchemaVersionError,
     SourceManifestDocument,
     SourceManifestEntry,
-    load_project,
-    load_project_tree,
+    classic_analysis_link_options,
+    classic_analysis_pdb_paths,
     project_document_schemas,
     schema_catalog,
     source_manifest_digest,
@@ -65,6 +71,71 @@ oracle = "references/program.exe"
 
 def sha(seed: bytes) -> dict[str, str]:
     return Digest.from_bytes(seed).model_dump(mode="json")
+
+
+def _build_plan_with_terminal_policy(terminal_producers: object) -> BuildPlanDocument:
+    return BuildPlanDocument(
+        schema_version=3,
+        source_manifest_digest=Digest.from_bytes(b"source"),
+        phase=None,
+        translation_units=(),
+        source_overlay_digest=Digest.from_bytes(b"overlay"),
+        source_overlay_interventions=(),
+        archives=(),
+        terminal_producers=terminal_producers,
+        execution_backends={},
+        toolchain_policy={},
+        target_policies=[],
+        target_gates=(),
+    )
+
+
+def test_analysis_link_options_are_json_native_and_closed() -> None:
+    plan = _build_plan_with_terminal_policy(
+        {"link": {"analysis_added_options": ["/DEBUG"]}}
+    )
+    reparsed = BuildPlanDocument.model_validate_json(plan.model_dump_json())
+    assert classic_analysis_link_options(reparsed) == ("/DEBUG",)
+    assert classic_analysis_link_options(_build_plan_with_terminal_policy({})) == ()
+
+
+@pytest.mark.parametrize(
+    "options",
+    ([], ["/debug"], ["/DEBUG", "/DEBUG"], "/DEBUG"),
+)
+def test_analysis_link_options_reject_malformed_or_widened_values(options: object) -> None:
+    plan = _build_plan_with_terminal_policy(
+        {"link": {"analysis_added_options": options}}
+    )
+    with pytest.raises(ValidationError):
+        classic_analysis_link_options(plan)
+
+
+def test_analysis_pdb_path_cannot_alias_a_verification_oracle(tmp_path: Path) -> None:
+    create_tree(tmp_path)
+    baseline = load_project_tree(tmp_path)
+    assert baseline.source_manifest is not None
+    target = baseline.spec.targets[0]
+    spec = baseline.spec.model_copy(
+        update={
+            "targets": (
+                target.model_copy(update={"oracle": "build/program.PDB"}),
+            )
+        }
+    )
+    plan = _build_plan_with_terminal_policy(
+        {"link": {"analysis_added_options": ["/DEBUG"]}}
+    ).model_copy(
+        update={
+            "source_manifest_digest": source_manifest_digest(
+                baseline.source_manifest
+            )
+        }
+    )
+    bundle = baseline.model_copy(update={"spec": spec, "build_plan": plan})
+
+    with pytest.raises(ValueError, match="aliases protected verification oracle"):
+        classic_analysis_pdb_paths(bundle)
 
 
 def test_build_target_can_lead_with_a_digit_without_widening_internal_ids() -> None:
@@ -156,6 +227,134 @@ def create_tree(root: Path) -> None:
             "functions": [],
         },
     )
+
+
+@pytest.mark.parametrize(
+    ("role", "scope", "symbol", "message"),
+    (
+        (
+            ClassicRecipeRole.FUNCTION,
+            Scope(target="program", translation_unit="main"),
+            "work()",
+            "exact symbol",
+        ),
+        (
+            ClassicRecipeRole.FUNCTION,
+            Scope(target="program", translation_unit="main", function="other()"),
+            "work()",
+            "exact symbol",
+        ),
+        (
+            ClassicRecipeRole.DONOR,
+            Scope(target="program"),
+            None,
+            "translation-unit scope",
+        ),
+        (
+            ClassicRecipeRole.DONOR,
+            Scope(target="program", translation_unit="main", function="work()"),
+            None,
+            "cannot have function scope",
+        ),
+        (
+            ClassicRecipeRole.PROJECT,
+            Scope(target="program", translation_unit="main"),
+            None,
+            "requires target scope",
+        ),
+    ),
+)
+def test_classic_recipe_role_requires_its_authoritative_scope(
+    role: ClassicRecipeRole,
+    scope: Scope,
+    symbol: str | None,
+    message: str,
+) -> None:
+    with pytest.raises(ValidationError, match=message):
+        ClassicRecipeIntervention(
+            id="classic",
+            scope=scope,
+            rationale="scope contract fixture",
+            family=ClassicRecipeFamily.DECLARATION_SHAPE,
+            role=role,
+            build_target="program",
+            symbol=symbol,
+        )
+
+
+def test_classic_donor_beneficiaries_are_exact_dependency_consumers(
+    tmp_path: Path,
+) -> None:
+    create_tree(tmp_path)
+    baseline = load_project_tree(tmp_path)
+    function_scope = Scope(
+        target="program",
+        translation_unit="main",
+        function="work()",
+    )
+
+    def bundle_with(beneficiaries: tuple[Scope, ...]) -> ProjectBundle:
+        donor = ClassicRecipeIntervention(
+            id="donor",
+            scope=Scope(target="program", translation_unit="main"),
+            rationale="dependency allocation fixture",
+            family=ClassicRecipeFamily.DECLARATION_SHAPE,
+            role=ClassicRecipeRole.DONOR,
+            build_target="program",
+            beneficiaries=beneficiaries,
+        )
+        function = ClassicRecipeIntervention(
+            id="function",
+            scope=function_scope,
+            rationale="dependency allocation fixture",
+            dependencies=(donor.id,),
+            family=ClassicRecipeFamily.EQUAL_BODY_STRICT,
+            role=ClassicRecipeRole.FUNCTION,
+            build_target="program",
+            symbol="work()",
+        )
+        return ProjectBundle(
+            root=baseline.root,
+            spec=baseline.spec,
+            toolchain_lock=baseline.toolchain_lock,
+            source_manifest=baseline.source_manifest,
+            build_plan=baseline.build_plan,
+            producer_graph=baseline.producer_graph,
+            intervention_documents=(
+                InterventionDocument(
+                    schema_version=3,
+                    target_id="program",
+                    translation_unit_id="main",
+                    build_target="program",
+                    interventions=(donor, function),
+                ),
+            ),
+            proof_documents=(
+                ProofDocument(
+                    schema_version=3,
+                    target_id="program",
+                    translation_unit_id="main",
+                    expected_observations=(
+                        ClassicProofReceipt(
+                            id="donor-proof",
+                            intervention_id=donor.id,
+                            family=donor.family,
+                        ),
+                        ClassicProofReceipt(
+                            id="function-proof",
+                            intervention_id=function.id,
+                            family=function.family,
+                        ),
+                    ),
+                ),
+            ),
+            oracle_documents=baseline.oracle_documents,
+        )
+
+    accepted = bundle_with((function_scope,))
+    assert accepted.interventions[0].beneficiaries == (function_scope,)
+    with pytest.raises(ValidationError, match="dependency consumers"):
+        bundle_with(())
 
 
 def test_strict_json_rejects_ambiguous_documents() -> None:

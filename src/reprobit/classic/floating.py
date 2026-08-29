@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from .foundation import require, require_payload_free_declaration
-from .ia32 import supported_ia32_instruction_length
+from reprobit.binary import require
+from reprobit.ia32 import supported_ia32_instruction_length
+
+from .foundation import require_payload_free_declaration
 from .relational import ia32_relational_flow_walk
 
 """Classic compiler algorithms: floating."""

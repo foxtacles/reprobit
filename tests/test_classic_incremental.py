@@ -12,6 +12,12 @@ from typing import cast
 import pytest
 
 import reprobit.classic_incremental as classic_incremental
+import reprobit.classic_incremental_context as incremental_context
+import reprobit.classic_incremental_execution as incremental_execution
+import reprobit.classic_incremental_keys as incremental_keys
+import reprobit.classic_incremental_nodes as incremental_nodes
+import reprobit.classic_incremental_planning as incremental_planning
+import reprobit.classic_publication as classic_publication
 import reprobit.incremental_executor as incremental_executor
 from reprobit.backends import BackendCapabilities
 from reprobit.cache import CacheLease, CacheRecord, cache_key
@@ -35,11 +41,11 @@ from reprobit.classic_orchestration import (
     classic_rdata_repack_authority,
     classic_terminal_pipeline_authority,
 )
-from reprobit.classic_runtime import (
-    _ClassicWarmCompilerReplay,
-    _ClassicWarmCompilerTransformResult,
-    _ClassicWarmDonorDependencyReplay,
+from reprobit.classic_runtime_developer import (
+    ClassicWarmCompilerReplay,
+    ClassicWarmCompilerTransformResult,
 )
+from reprobit.classic_runtime_donor import ClassicWarmDonorDependencyReplay
 from reprobit.incremental import DeveloperAuthority
 from reprobit.incremental_executor import IncrementalProgress, PreparedNodeInputs
 from reprobit.model import Digest, Scope
@@ -60,7 +66,7 @@ from reprobit.schema import (
     ProducerGraphBuildAdapter,
 )
 from reprobit.secure_paths import SecurePathError, atomic_publish_relative
-from reprobit.strict_json import JsonValue
+from reprobit.strict_json import JsonValue, canonical_json
 from reprobit.toolchains import ClassicMSVCToolchain
 
 
@@ -110,7 +116,7 @@ def test_warm_wine_environment_binds_rendered_frontend_paths() -> None:
                 "TMP": temp_directory,
             }
 
-    environment = classic_incremental._warm_cache_environment(
+    environment = incremental_planning._warm_cache_environment(
         cast(ClassicMSVCToolchain, Installation()),
         build_root=r"Z:\build",
         posix_wine=True,
@@ -121,14 +127,12 @@ def test_warm_wine_environment_binds_rendered_frontend_paths() -> None:
     assert environment["INCLUDE"] == (
         r"\Users\builder\MSVC420\include;\Users\builder\MSVC420\mfc\include"
     )
-    assert environment["LIB"] == (
-        r"\Users\builder\MSVC420\lib;\Users\builder\MSVC420\mfc\lib"
-    )
+    assert environment["LIB"] == (r"\Users\builder\MSVC420\lib;\Users\builder\MSVC420\mfc\lib")
     assert environment["LIBPATH"] == environment["LIB"]
     assert environment["TEMP"] == r"Z:\build\.reprobit-tmp\$LANE"
     assert environment["TMP"] == r"Z:\build\.reprobit-tmp\$LANE"
 
-    native = classic_incremental._warm_cache_environment(
+    native = incremental_planning._warm_cache_environment(
         cast(ClassicMSVCToolchain, Installation()),
         build_root=r"Z:\build",
         posix_wine=False,
@@ -145,12 +149,15 @@ class _FakeWarmExecutor:
         self.staging_root: Path | None = None
         self.bound_oracles: tuple[str, ...] = ()
         self.explicit_authority_verifications = 0
-        self.donor_dependencies: dict[
-            str, tuple[_ClassicWarmDonorDependencyReplay, ...]
-        ] = {}
+        self.analysis_link_calls: list[str] = []
+        self.donor_dependencies: dict[str, tuple[ClassicWarmDonorDependencyReplay, ...]] = {}
 
     def bind_warm_staging_root(self, root: Path) -> None:
         self.staging_root = root
+
+    @property
+    def initialized_lane_count(self) -> int:
+        return self.lanes
 
     def bind_legacy_oracles(self, values: object) -> None:
         self.bound_oracles = tuple(sorted(cast(dict[str, object], values)))
@@ -178,9 +185,9 @@ class _FakeWarmExecutor:
         node_id: str,
         *,
         cancellation: object,
-    ) -> _ClassicWarmCompilerReplay:
+    ) -> ClassicWarmCompilerReplay:
         del cancellation
-        return _ClassicWarmCompilerReplay(
+        return ClassicWarmCompilerReplay(
             MsvcSbrTrace(
                 r"R:\build",
                 (MsvcSbrSource(self.sources[node_id], None),),
@@ -195,12 +202,12 @@ class _FakeWarmExecutor:
         inputs: object,
         outputs: MappingProxyType[str, Path] | dict[str, Path],
         cancellation: object,
-    ) -> _ClassicWarmCompilerTransformResult:
+    ) -> ClassicWarmCompilerTransformResult:
         del inputs, cancellation
         for name, output in outputs.items():
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(f"transformed:{compiler_node_id}:{name}".encode())
-        return _ClassicWarmCompilerTransformResult(
+        return ClassicWarmCompilerTransformResult(
             (),
             self.donor_dependencies.get(compiler_node_id, ()),
         )
@@ -217,15 +224,37 @@ class _FakeWarmExecutor:
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_bytes(input_path.read_bytes() + f":terminal:{target_id}".encode())
 
+    def execute_warm_analysis_link(
+        self,
+        target_id: str,
+        *,
+        inputs: PreparedNodeInputs,
+        outputs: MappingProxyType[str, Path] | dict[str, Path],
+        cancellation: object,
+    ) -> None:
+        del cancellation
+        self.analysis_link_calls.append(target_id)
+        generation = len(self.analysis_link_calls)
+        input_payload = b"|".join(
+            item.snapshot.path.read_bytes() for _name, item in sorted(inputs.entries.items())
+        )
+        assert set(outputs) == {"image", "pdb"}
+        for output in outputs.values():
+            output.parent.mkdir(parents=True, exist_ok=True)
+        outputs["image"].write_bytes(
+            b"analysis-image:" + str(generation).encode() + b":" + input_payload
+        )
+        outputs["pdb"].write_bytes(
+            b"analysis-pdb:" + str(generation).encode() + b":" + input_payload
+        )
+
 
 class _FakePrepared:
-    def __init__(self, executor: _FakeWarmExecutor) -> None:
-        self.executor = executor
+    def __init__(self, runtime: _FakeWarmExecutor) -> None:
+        self.developer = runtime
+        self.donors = runtime
+        self.producer = runtime
         self.closed = False
-
-    @property
-    def initialized_lane_count(self) -> int:
-        return self.executor.lanes
 
     def close(self) -> None:
         self.closed = True
@@ -272,14 +301,21 @@ def _linker(target: str, compiler: ProducerNode) -> ProducerNode:
 
 
 def _directive_object(body: bytes) -> bytes:
-    def symbol(name: str, *, section: int, symbol_type: int, storage: int) -> bytes:
+    def symbol(
+        name: str,
+        *,
+        section: int,
+        symbol_type: int,
+        storage: int,
+        auxiliary_count: int = 0,
+    ) -> bytes:
         return name.encode("ascii").ljust(8, b"\0") + struct.pack(
-            "<IhHBB", 0, section, symbol_type, storage, 0
+            "<IhHBB", 0, section, symbol_type, storage, auxiliary_count
         )
 
     section_table_end = 60
     symbols = (
-        symbol(".drectve", section=1, symbol_type=0, storage=3)
+        symbol(".drectve", section=1, symbol_type=0, storage=3, auxiliary_count=1)
         + struct.pack("<IHHIhBBH", len(body), 0, 0, 0, 0, 2, 0, 0)
         + symbol("_fixture", section=1, symbol_type=32, storage=2)
     )
@@ -300,6 +336,21 @@ def _directive_object(body: bytes) -> bytes:
     return header + section + body + symbols + struct.pack("<I", 4)
 
 
+def _directive_archive(name: str, payload: bytes) -> bytes:
+    member_name = (name.encode("ascii") + b"/").ljust(16, b" ")
+    header = (
+        member_name
+        + b"0".ljust(12, b" ")
+        + b"0".ljust(6, b" ")
+        + b"0".ljust(6, b" ")
+        + b"100644".ljust(8, b" ")
+        + str(len(payload)).encode("ascii").ljust(10, b" ")
+        + b"`\n"
+    )
+    padding = b"\n" if len(payload) & 1 else b""
+    return b"!<arch>\n" + header + payload + padding
+
+
 def test_warm_link_control_audit_binds_and_rejects_hidden_directives() -> None:
     compiler = _compiler("app", 0)
     baseline_linker = _linker("app", compiler)
@@ -317,12 +368,12 @@ def test_warm_link_control_audit_binds_and_rejects_hidden_directives() -> None:
         outputs=baseline_linker.outputs,
         depends_on=baseline_linker.depends_on,
     )
-    baseline = classic_incremental._warm_link_control_material(
+    baseline = incremental_keys._warm_link_control_material(
         baseline_linker,
         (compiler, baseline_linker),
         payload_for_reference=lambda _reference: _directive_object(b"/INCLUDE:_entry "),
     )
-    added = classic_incremental._warm_link_control_material(
+    added = incremental_keys._warm_link_control_material(
         suppressed_linker,
         (compiler, suppressed_linker),
         payload_for_reference=lambda _reference: _directive_object(
@@ -332,27 +383,162 @@ def test_warm_link_control_audit_binds_and_rejects_hidden_directives() -> None:
     assert added != baseline
 
     with pytest.raises(
-        classic_incremental.ClassicIncrementalError,
+        incremental_context.ClassicIncrementalError,
         match="lacks committed DEFAULTLIB edges",
     ):
-        classic_incremental._warm_link_control_material(
+        incremental_keys._warm_link_control_material(
             baseline_linker,
             (compiler, baseline_linker),
-            payload_for_reference=lambda _reference: _directive_object(
-                b"/DEFAULTLIB:runtime "
-            ),
+            payload_for_reference=lambda _reference: _directive_object(b"/DEFAULTLIB:runtime "),
         )
     with pytest.raises(
-        classic_incremental.ClassicIncrementalError,
+        incremental_context.ClassicIncrementalError,
         match="conflicts with DISALLOWLIB",
     ):
-        classic_incremental._warm_link_control_material(
+        incremental_keys._warm_link_control_material(
             baseline_linker,
             (compiler, baseline_linker),
             payload_for_reference=lambda _reference: _directive_object(
                 b"/DEFAULTLIB:runtime /DISALLOWLIB:runtime "
             ),
         )
+
+
+def test_warm_link_control_stops_at_upstream_linker_boundary() -> None:
+    upstream_compiler = _compiler("library", 0)
+    upstream_linker = ProducerNode(
+        id="linker.library.0000",
+        role=ProducerRole.LINKER,
+        owner="library",
+        target_id="library",
+        arguments=(
+            "${BUILD}/library-0.obj",
+            "/dll",
+            "/implib:${BUILD}/library.lib",
+            "/out:${BUILD}/library.dll",
+        ),
+        inputs=(upstream_compiler.outputs[0],),
+        directive_inputs=("system-library/runtime.lib",),
+        outputs=("build/library.dll", "build/library.exp", "build/library.lib"),
+        depends_on=(upstream_compiler.id,),
+    )
+    downstream_compiler = _compiler("app", 1)
+    downstream_linker = ProducerNode(
+        id="linker.app.0000",
+        role=ProducerRole.LINKER,
+        owner="app",
+        target_id="app",
+        arguments=(
+            "${BUILD}/app-1.obj",
+            "${BUILD}/library.lib",
+            "/out:${BUILD}/app.exe",
+        ),
+        inputs=(downstream_compiler.outputs[0], "build/library.lib"),
+        outputs=("build/app.exe",),
+        depends_on=(downstream_compiler.id, upstream_linker.id),
+    )
+    graph_nodes = (
+        upstream_compiler,
+        upstream_linker,
+        downstream_compiler,
+        downstream_linker,
+    )
+    payloads = {
+        upstream_compiler.outputs[0]: _directive_object(b"/DEFAULTLIB:runtime /INCLUDE:_upstream "),
+        downstream_compiler.outputs[0]: _directive_object(b"/DEFAULTLIB:runtime "),
+        "build/library.lib": _directive_archive(
+            "library.obj", _directive_object(b"/INCLUDE:_import_root ")
+        ),
+        "system-library/runtime.lib": _directive_archive(
+            "runtime.obj", _directive_object(b"/INCLUDE:_runtime_root ")
+        ),
+    }
+    requested: list[str] = []
+
+    def payload_for_reference(reference: str) -> bytes:
+        requested.append(reference)
+        return payloads[reference]
+
+    with pytest.raises(
+        incremental_context.ClassicIncrementalError,
+        match=r"--directive-input app=runtime\.lib",
+    ):
+        incremental_keys._warm_link_control_material(
+            downstream_linker,
+            graph_nodes,
+            payload_for_reference=payload_for_reference,
+        )
+    assert set(requested) == {downstream_compiler.outputs[0], "build/library.lib"}
+
+    admitted_downstream = ProducerNode.model_validate(
+        {
+            **downstream_linker.model_dump(mode="python"),
+            "directive_inputs": ("system-library/runtime.lib",),
+        }
+    )
+    with pytest.raises(
+        incremental_context.ClassicIncrementalError,
+        match="graph is incomplete or ambiguous",
+    ):
+        incremental_keys._warm_link_control_material(
+            admitted_downstream,
+            graph_nodes,
+            payload_for_reference=payload_for_reference,
+        )
+    incremental_keys._warm_link_control_material(
+        admitted_downstream,
+        (*graph_nodes[:-1], admitted_downstream),
+        payload_for_reference=payload_for_reference,
+    )
+
+
+def test_incremental_base_key_material_bytes_are_stable() -> None:
+    bundle = SimpleNamespace(
+        producer_graph=SimpleNamespace(path_profile_id="fixture"),
+        spec=SimpleNamespace(
+            paths=SimpleNamespace(
+                source=r"R:\source",
+                build=r"R:\build",
+                toolchain=r"R:\toolchain",
+            )
+        ),
+    )
+
+    material = incremental_keys._base_material(
+        bundle=cast(object, bundle),  # type: ignore[arg-type]
+        graph_digest="graph-digest",
+        node_identity=cast(JsonValue, {"id": "compiler.unit"}),
+        role="compiler",
+        toolchain=cast(JsonValue, {"lock": "toolchain"}),
+        runtime=cast(JsonValue, {"backend": "fixture"}),
+        argv=("cl", "/c"),
+        environment={"B": "2", "A": "1"},
+        direct_inputs=(cast(JsonValue, {"path": "source/unit.cpp", "digest": "abc"}),),
+        dependencies={},
+        recursive_reads=(cast(JsonValue, {"path": "source/unit.h", "digest": "def"}),),
+        overlay_inputs=(cast(JsonValue, {"overlay": "decl"}),),
+        generated_inputs=(cast(JsonValue, {"generated": "carrier"}),),
+        donor_inputs=(cast(JsonValue, {"donor": "unit"}),),
+        composition_inputs=(cast(JsonValue, {"proof": "receipt"}),),
+        transform_inputs=(cast(JsonValue, {"transform": "rdata"}),),
+    )
+
+    expected = (
+        rb'{"argv":["cl","/c"],"composition_inputs":[{"proof":"receipt"}],'
+        rb'"cwd":"R:\\build","direct_inputs":[{"digest":"abc",'
+        rb'"path":"source/unit.cpp"}],"donor_inputs":[{"donor":"unit"}],'
+        rb'"environment":{"A":"1","B":"2"},"generated_inputs":'
+        rb'[{"generated":"carrier"}],"graph":"graph-digest","node":'
+        rb'{"id":"compiler.unit"},"overlay_inputs":[{"overlay":"decl"}],'
+        rb'"path_profile":{"build":"R:\\build","id":"fixture",'
+        rb'"source":"R:\\source","toolchain":"R:\\toolchain"},'
+        rb'"producer_dependencies":[],"recursive_reads":[{"digest":"def",'
+        rb'"path":"source/unit.h"}],"role":"compiler","runtime":'
+        rb'{"backend":"fixture"},"toolchain":{"lock":"toolchain"},'
+        rb'"transform_inputs":[{"transform":"rdata"}]}'
+        b"\n"
+    )
+    assert canonical_json(material) == expected
 
 
 def _project_recipe(
@@ -478,7 +664,7 @@ def test_warm_runtime_material_binds_path_independent_proxy_asset(
 ) -> None:
     proxy = tmp_path / "ReproBitPathProxy.sh"
     proxy.write_bytes(b"#!/bin/sh\nexit 0\n")
-    monkeypatch.setattr(classic_incremental, "runtime_asset_path", lambda _name: proxy)
+    monkeypatch.setattr(incremental_planning, "runtime_asset_path", lambda _name: proxy)
     backend = SimpleNamespace(
         identifier="fixture",
         capabilities=BackendCapabilities(
@@ -492,9 +678,9 @@ def test_warm_runtime_material_binds_path_independent_proxy_asset(
         wine_pin=None,
         wineserver_pin=None,
     )
-    first = classic_incremental._runtime_material(cast(object, backend), None, None)  # type: ignore[arg-type]
+    first = incremental_planning._runtime_material(cast(object, backend), None, None)  # type: ignore[arg-type]
     proxy.write_bytes(b"#!/bin/sh\nexit 7\n")
-    second = classic_incremental._runtime_material(cast(object, backend), None, None)  # type: ignore[arg-type]
+    second = incremental_planning._runtime_material(cast(object, backend), None, None)  # type: ignore[arg-type]
 
     assert first != second
     rendered = cast(dict[str, object], first)
@@ -502,6 +688,7 @@ def test_warm_runtime_material_binds_path_independent_proxy_asset(
     proxy_material = programs[-1]
     assert proxy_material["role"] == "runtime-path-proxy-template"
     assert "path" not in proxy_material
+
 
 def _fixture_bundle(
     root: Path,
@@ -574,6 +761,7 @@ def _fixture_bundle(
         producer_graph=graph,
         build_plan=SimpleNamespace(
             translation_units=tuple(unit.plan for unit in units),
+            terminal_producers={},
         ),
         toolchain_lock=SimpleNamespace(model_dump=lambda **_kwargs: {"lock": "fake"}),
         intervention_documents=documents,
@@ -582,6 +770,39 @@ def _fixture_bundle(
     )
     sources = {compiler.id: r"R:\source\shared.cpp" for compiler in compilers}
     return bundle, units, sources
+
+
+def _enable_analysis_links(bundle: SimpleNamespace) -> None:
+    bundle.producer_graph = bundle.producer_graph.model_copy(
+        update={
+            "nodes": tuple(
+                node.model_copy(
+                    update={
+                        "arguments": (
+                            *node.arguments,
+                            f"/PDB:${{BUILD}}/{node.target_id}.PDB",
+                            "/INCREMENTAL:NO",
+                        )
+                    }
+                )
+                if node.role is ProducerRole.LINKER
+                else node
+                for node in bundle.producer_graph.nodes
+            )
+        }
+    )
+    bundle.build_plan.terminal_producers = {"link": {"analysis_added_options": ["/DEBUG"]}}
+    bundle.source_manifest = SimpleNamespace(entries=(SimpleNamespace(path="shared.cpp"),))
+    bundle.spec.state_dir = ".reprobit-state"
+    bundle.spec.toolchain.lock_file = "reprobit/toolchain.lock.json"
+    bundle.spec.layout = SimpleNamespace(
+        source_manifest="reprobit/source-manifest.json",
+        build_plan="reprobit/build-plan.json",
+        producer_graph="reprobit/producer-graph.json",
+        interventions="reprobit/interventions",
+        proofs="reprobit/proofs",
+        oracles="reprobit/oracles",
+    )
 
 
 def _patch_planner(
@@ -621,21 +842,25 @@ def _patch_planner(
             not in deferred_outputs
         ),
     )
-    monkeypatch.setattr(classic_incremental, "ClassicMSVCToolchain", _FakeInstallation)
+    monkeypatch.setattr(incremental_planning, "ClassicMSVCToolchain", _FakeInstallation)
     monkeypatch.setattr(
-        classic_incremental.ToolchainLock,
+        incremental_planning.ToolchainLock,
         "from_schema_v3",
         lambda _value: object(),
     )
     relatives = {role: f"bin/{role.value}.exe" for role in ProducerRole}
     monkeypatch.setattr(
-        classic_incremental,
+        incremental_planning,
         "_graph_role_bindings",
         lambda *_args: ({role: role.value for role in ProducerRole}, relatives),
     )
-    monkeypatch.setattr(classic_incremental, "_runtime_material", lambda *_args, **_kwargs: {})
     monkeypatch.setattr(
-        classic_incremental,
+        incremental_planning,
+        "_runtime_material",
+        lambda *_args, **_kwargs: {},
+    )
+    monkeypatch.setattr(
+        incremental_keys,
         "_warm_link_control_material",
         lambda linker, _nodes, **_kwargs: {
             "schema": 1,
@@ -645,11 +870,19 @@ def _patch_planner(
             "module_definition": None,
         },
     )
-    monkeypatch.setattr(classic_incremental, "_overlay_dialect", lambda *_args: object())
-    monkeypatch.setattr(classic_incremental, "_graph_system_library_map", lambda *_a, **_k: {})
-    monkeypatch.setattr(classic_incremental, "prepare_classic_units", lambda *_a, **_k: units)
+    monkeypatch.setattr(incremental_planning, "_overlay_dialect", lambda *_args: object())
     monkeypatch.setattr(
-        classic_incremental,
+        incremental_planning,
+        "_graph_system_library_map",
+        lambda *_a, **_k: {},
+    )
+    monkeypatch.setattr(
+        incremental_planning,
+        "prepare_classic_units",
+        lambda *_a, **_k: units,
+    )
+    monkeypatch.setattr(
+        incremental_planning,
         "_render_sources",
         lambda *_args, **_kwargs: (
             MappingProxyType(
@@ -666,7 +899,7 @@ def _patch_planner(
         ),
     )
     monkeypatch.setattr(
-        classic_incremental,
+        incremental_planning,
         "_include_authorities",
         lambda *_a, **_k: (
             ordinary_authority,
@@ -693,7 +926,11 @@ def _patch_planner(
         runtime_calls.append(prepared)
         return prepared
 
-    monkeypatch.setattr(classic_incremental, "prepare_classic_producer_graph_run", prepare)
+    monkeypatch.setattr(
+        incremental_context,
+        "prepare_classic_producer_graph_run",
+        prepare,
+    )
 
 
 def _run(
@@ -704,7 +941,7 @@ def _run(
     session: Path,
     jobs: int = 1,
     progress: IncrementalProgress | None = None,
-) -> classic_incremental.ClassicIncrementalResult:
+) -> incremental_context.ClassicIncrementalResult:
     toolchain = root / "toolchain"
     toolchain.mkdir(exist_ok=True)
     return classic_incremental.execute_classic_incremental_build(
@@ -766,15 +1003,15 @@ def test_all_hit_build_skips_full_prepare_and_clean_project_ignores_oracle(
     indexed_records.clear()
 
     monkeypatch.setattr(
-        classic_incremental,
+        incremental_context,
         "prepare_classic_producer_graph_run",
         lambda *_a, **_k: pytest.fail("all-hit build constructed a prepared run"),
     )
-    expected_implementation = classic_incremental.package_implementation_digest()
+    expected_implementation = incremental_planning.producer_implementation_digest()
     implementation_revalidations: list[Digest] = []
     monkeypatch.setattr(
-        classic_incremental,
-        "revalidate_package_implementation",
+        incremental_execution,
+        "revalidate_producer_implementation",
         implementation_revalidations.append,
     )
     monkeypatch.setattr(
@@ -798,6 +1035,375 @@ def test_all_hit_build_skips_full_prepare_and_clean_project_ignores_oracle(
         target_before.st_ino,
         target_before.st_mtime_ns,
     )
+
+
+def test_analysis_link_pair_is_cacheable_and_only_its_pdb_is_published(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    bundle, units, sources = _fixture_bundle(root)
+    _enable_analysis_links(bundle)
+    executor = _FakeWarmExecutor(sources)
+    runtime_calls: list[_FakePrepared] = []
+    _patch_planner(
+        monkeypatch,
+        bundle=bundle,
+        units=units,
+        sources=sources,
+        project_root=root,
+        runtime_calls=runtime_calls,
+        warm_executor=executor,
+    )
+
+    first = _run(bundle, root=root, state=state, session=tmp_path / "run-1")
+
+    exact = root / "artifacts" / "app.exe"
+    pdb = root / "artifacts" / "app.PDB"
+    assert first.summary.misses == 5
+    assert executor.analysis_link_calls == ["app"]
+    assert exact.read_bytes() == b"raw:linker.app.0000:build/app.exe:terminal:app"
+    assert pdb.read_bytes().startswith(b"analysis-pdb:1:")
+    assert {item.producer_step for item in first.receipt.outputs} == {
+        "terminal.app",
+        "analysis-link.app",
+    }
+    assert sorted(path.name for path in (root / "artifacts").iterdir()) == [
+        "app.PDB",
+        "app.exe",
+    ]
+    pdb_before = pdb.stat()
+
+    monkeypatch.setattr(
+        incremental_context,
+        "prepare_classic_producer_graph_run",
+        lambda *_a, **_k: pytest.fail("all-hit analysis build constructed a runtime"),
+    )
+    second = _run(bundle, root=root, state=state, session=tmp_path / "run-2")
+
+    assert second.summary.hits == 5
+    assert second.summary.misses == 0
+    assert second.summary.published_targets == 0
+    assert second.summary.unchanged_targets == 1
+    assert executor.analysis_link_calls == ["app"]
+    pdb_after = pdb.stat()
+    assert (pdb_after.st_dev, pdb_after.st_ino, pdb_after.st_mtime_ns) == (
+        pdb_before.st_dev,
+        pdb_before.st_ino,
+        pdb_before.st_mtime_ns,
+    )
+
+
+def test_analysis_pdb_relinks_when_link_authority_changes_even_if_exact_image_does_not(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    bundle, units, sources = _fixture_bundle(root)
+    _enable_analysis_links(bundle)
+    executor = _FakeWarmExecutor(sources)
+    runtime_calls: list[_FakePrepared] = []
+    _patch_planner(
+        monkeypatch,
+        bundle=bundle,
+        units=units,
+        sources=sources,
+        project_root=root,
+        runtime_calls=runtime_calls,
+        warm_executor=executor,
+    )
+
+    _run(bundle, root=root, state=state, session=tmp_path / "run-1")
+    exact = root / "artifacts" / "app.exe"
+    pdb = root / "artifacts" / "app.PDB"
+    first_exact = exact.read_bytes()
+    first_pdb = pdb.read_bytes()
+
+    bundle.producer_graph = bundle.producer_graph.model_copy(
+        update={
+            "nodes": tuple(
+                node.model_copy(update={"arguments": (*node.arguments, "/FIXED:NO")})
+                if node.role is ProducerRole.LINKER
+                else node
+                for node in bundle.producer_graph.nodes
+            )
+        }
+    )
+    second = _run(bundle, root=root, state=state, session=tmp_path / "run-2")
+
+    assert executor.analysis_link_calls == ["app", "app"]
+    assert second.summary.misses >= 3
+    assert exact.read_bytes() == first_exact
+    assert pdb.read_bytes() != first_pdb
+    assert pdb.read_bytes().startswith(b"analysis-pdb:2:")
+
+
+def test_analysis_link_cache_is_local_to_its_target_inputs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    bundle, original_units, sources = _fixture_bundle(
+        root,
+        targets=("app", "tool"),
+    )
+    tool_payload = b"int tool(void) { return 11; }\n"
+    (root / "tool.cpp").write_bytes(tool_payload)
+    tool_compiler = next(
+        node
+        for node in bundle.producer_graph.nodes
+        if node.role is ProducerRole.COMPILER and node.owner == "tool"
+    )
+    split_tool_compiler = tool_compiler.model_copy(
+        update={
+            "arguments": (*tool_compiler.arguments[:-1], "${SOURCE}/tool.cpp"),
+            "inputs": ("source/tool.cpp",),
+        }
+    )
+    bundle.producer_graph = bundle.producer_graph.model_copy(
+        update={
+            "nodes": tuple(
+                split_tool_compiler if node.id == tool_compiler.id else node
+                for node in bundle.producer_graph.nodes
+            )
+        }
+    )
+    units = tuple(
+        replace(
+            unit,
+            plan=unit.plan.model_copy(
+                update={
+                    "source": "tool.cpp",
+                    "source_digest": Digest.from_bytes(tool_payload),
+                }
+            ),
+        )
+        if unit.plan.build_target == "tool"
+        else unit
+        for unit in original_units
+    )
+    bundle.build_plan.translation_units = tuple(unit.plan for unit in units)
+    sources[tool_compiler.id] = r"R:\source\tool.cpp"
+    _enable_analysis_links(bundle)
+    bundle.source_manifest.entries = (
+        SimpleNamespace(path="shared.cpp"),
+        SimpleNamespace(path="tool.cpp"),
+    )
+    executor = _FakeWarmExecutor(sources)
+    runtime_calls: list[_FakePrepared] = []
+
+    def patch() -> None:
+        _patch_planner(
+            monkeypatch,
+            bundle=bundle,
+            units=units,
+            sources=sources,
+            project_root=root,
+            runtime_calls=runtime_calls,
+            source_payloads={
+                "shared.cpp": (root / "shared.cpp").read_bytes(),
+                "tool.cpp": (root / "tool.cpp").read_bytes(),
+            },
+            warm_executor=executor,
+        )
+
+    patch()
+    _run(bundle, root=root, state=state, session=tmp_path / "run-1", jobs=2)
+    assert executor.analysis_link_calls == ["app", "tool"]
+    app_pdb = root / "artifacts" / "app.PDB"
+    tool_pdb = root / "artifacts" / "tool.PDB"
+    app_before = app_pdb.stat()
+    tool_before = tool_pdb.read_bytes()
+
+    (root / "tool.cpp").write_bytes(b"int tool(void) { return 12; }\n")
+    patch()
+    second = _run(
+        bundle,
+        root=root,
+        state=state,
+        session=tmp_path / "run-2",
+        jobs=2,
+    )
+
+    assert executor.analysis_link_calls == ["app", "tool", "tool"]
+    assert second.summary.hits == 5
+    assert second.summary.misses == 5
+    app_after = app_pdb.stat()
+    assert (app_after.st_dev, app_after.st_ino, app_after.st_mtime_ns) == (
+        app_before.st_dev,
+        app_before.st_ino,
+        app_before.st_mtime_ns,
+    )
+    assert tool_pdb.read_bytes() != tool_before
+
+
+def test_analysis_link_missing_pdb_fails_before_target_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class MissingPdbExecutor(_FakeWarmExecutor):
+        def execute_warm_analysis_link(self, target_id: str, **kwargs: object) -> None:
+            self.analysis_link_calls.append(target_id)
+            outputs = cast(dict[str, Path], kwargs["outputs"])
+            outputs["image"].parent.mkdir(parents=True, exist_ok=True)
+            outputs["image"].write_bytes(b"analysis-image-without-pdb")
+
+    root = tmp_path / "project"
+    root.mkdir()
+    artifacts = root / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "app.exe").write_bytes(b"prior-exact")
+    (artifacts / "app.PDB").write_bytes(b"prior-pdb")
+    state = tmp_path / "state"
+    state.mkdir()
+    bundle, units, sources = _fixture_bundle(root)
+    _enable_analysis_links(bundle)
+    runtime_calls: list[_FakePrepared] = []
+    _patch_planner(
+        monkeypatch,
+        bundle=bundle,
+        units=units,
+        sources=sources,
+        project_root=root,
+        runtime_calls=runtime_calls,
+        warm_executor=MissingPdbExecutor(sources),
+    )
+
+    with pytest.raises(RuntimeError, match="omitted output 'pdb'"):
+        _run(bundle, root=root, state=state, session=tmp_path / "run")
+
+    assert (artifacts / "app.exe").read_bytes() == b"prior-exact"
+    assert (artifacts / "app.PDB").read_bytes() == b"prior-pdb"
+
+
+def test_analysis_pdb_publication_failure_rolls_back_exact_image(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    artifacts = root / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "app.exe").write_bytes(b"prior-exact")
+    (artifacts / "app.PDB").write_bytes(b"prior-pdb")
+    state = tmp_path / "state"
+    state.mkdir()
+    bundle, units, sources = _fixture_bundle(root)
+    _enable_analysis_links(bundle)
+    runtime_calls: list[_FakePrepared] = []
+    _patch_planner(
+        monkeypatch,
+        bundle=bundle,
+        units=units,
+        sources=sources,
+        project_root=root,
+        runtime_calls=runtime_calls,
+    )
+    original_publish = classic_publication.atomic_publish_relative_if_current
+
+    def fail_pdb(
+        project: Path,
+        relative: str,
+        payload: bytes,
+        *,
+        expected: object,
+        **publication_options: object,
+    ) -> object:
+        if relative == "artifacts/app.PDB":
+            raise SecurePathError("injected analysis PDB failure")
+        return original_publish(  # type: ignore[arg-type]
+            project,
+            relative,
+            payload,
+            expected=expected,
+            **publication_options,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(
+        classic_publication,
+        "atomic_publish_relative_if_current",
+        fail_pdb,
+    )
+    with pytest.raises(
+        incremental_context.ClassicIncrementalError,
+        match="target set could not be published",
+    ):
+        _run(bundle, root=root, state=state, session=tmp_path / "run")
+
+    assert (artifacts / "app.exe").read_bytes() == b"prior-exact"
+    assert (artifacts / "app.PDB").read_bytes() == b"prior-pdb"
+
+
+def test_multi_target_analysis_pdb_failure_rolls_back_every_image_and_pdb(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    artifacts = root / "artifacts"
+    artifacts.mkdir()
+    originals = {
+        "app.exe": b"prior-app-exact",
+        "app.PDB": b"prior-app-pdb",
+        "tool.exe": b"prior-tool-exact",
+        "tool.PDB": b"prior-tool-pdb",
+    }
+    for name, payload in originals.items():
+        (artifacts / name).write_bytes(payload)
+    state = tmp_path / "state"
+    state.mkdir()
+    bundle, units, sources = _fixture_bundle(root, targets=("app", "tool"))
+    _enable_analysis_links(bundle)
+    runtime_calls: list[_FakePrepared] = []
+    _patch_planner(
+        monkeypatch,
+        bundle=bundle,
+        units=units,
+        sources=sources,
+        project_root=root,
+        runtime_calls=runtime_calls,
+    )
+    original_publish = classic_publication.atomic_publish_relative_if_current
+
+    def fail_last_pdb(
+        project: Path,
+        relative: str,
+        payload: bytes,
+        *,
+        expected: object,
+        **publication_options: object,
+    ) -> object:
+        if relative == "artifacts/tool.PDB":
+            raise SecurePathError("injected final analysis PDB failure")
+        return original_publish(  # type: ignore[arg-type]
+            project,
+            relative,
+            payload,
+            expected=expected,
+            **publication_options,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(
+        classic_publication,
+        "atomic_publish_relative_if_current",
+        fail_last_pdb,
+    )
+    with pytest.raises(
+        incremental_context.ClassicIncrementalError,
+        match="target set could not be published",
+    ):
+        _run(bundle, root=root, state=state, session=tmp_path / "run", jobs=2)
+
+    assert {name: (artifacts / name).read_bytes() for name in originals} == originals
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX terminal mode publication")
@@ -872,7 +1478,12 @@ def test_progress_reserves_publication_and_summary_covers_the_whole_build(
         runtime_calls=runtime_calls,
     )
     clock = iter((100.0, 104.25))
-    monkeypatch.setattr(classic_incremental, "monotonic", lambda: next(clock))
+
+    def read_clock() -> float:
+        return next(clock)
+
+    monkeypatch.setattr(classic_incremental, "monotonic", read_clock)
+    monkeypatch.setattr(incremental_execution, "monotonic", read_clock)
     events: list[tuple[ProgressKind, int, int, str, str, str | None]] = []
 
     result = _run(
@@ -914,7 +1525,7 @@ def test_target_publication_uses_terminal_record_not_mutable_workspace(
         project_root=root,
         runtime_calls=runtime_calls,
     )
-    original_execute = classic_incremental.IncrementalDAGExecutor.execute
+    original_execute = incremental_execution.IncrementalDAGExecutor.execute
     expected: list[bytes] = []
 
     def execute_then_mutate(
@@ -922,16 +1533,14 @@ def test_target_publication_uses_terminal_record_not_mutable_workspace(
         nodes: tuple[object, ...],
     ) -> object:
         result = original_execute(executor, nodes)  # type: ignore[arg-type]
-        terminal = next(
-            node for node in nodes if cast(object, node).id == "terminal.app"
-        )
+        terminal = next(node for node in nodes if cast(object, node).id == "terminal.app")
         artifact = cast(object, terminal).outputs["artifact"]
         expected.append(artifact.read_bytes())
         artifact.write_bytes(b"peer-mutated-terminal-workspace")
         return result
 
     monkeypatch.setattr(
-        classic_incremental.IncrementalDAGExecutor,
+        incremental_execution.IncrementalDAGExecutor,
         "execute",
         execute_then_mutate,
     )
@@ -961,8 +1570,8 @@ def test_shared_source_targets_keep_distinct_units_and_compiler_base_keys(
     )
     observed_material: list[dict[str, object]] = []
     compiler_probes: list[tuple[str, dict[str, object]]] = []
-    original_key = classic_incremental.producer_cache_key
-    original_probe = classic_incremental.probe_compiler_cache
+    original_key = incremental_nodes.producer_cache_key
+    original_probe = incremental_nodes.probe_compiler_cache
 
     def capture(material: dict[str, object]) -> str:
         observed_material.append(material)
@@ -977,8 +1586,8 @@ def test_shared_source_targets_keep_distinct_units_and_compiler_base_keys(
         )
         return original_probe(*args, **kwargs)  # type: ignore[arg-type]
 
-    monkeypatch.setattr(classic_incremental, "producer_cache_key", capture)
-    monkeypatch.setattr(classic_incremental, "probe_compiler_cache", capture_probe)
+    monkeypatch.setattr(incremental_nodes, "producer_cache_key", capture)
+    monkeypatch.setattr(incremental_nodes, "probe_compiler_cache", capture_probe)
     result = _run(bundle, root=root, state=state, session=tmp_path / "run")
     transforms = [item for item in observed_material if item.get("role") == "compiler-transform"]
     assert len({key for key, _material in compiler_probes}) == 2
@@ -1024,7 +1633,8 @@ def test_multiple_target_scoped_rdata_repacks_for_one_object_fail_before_cache(
         update={"nodes": (compiler, *shared_linkers)}
     )
     bundle.build_plan = SimpleNamespace(
-        translation_units=(next(unit.plan for unit in units if unit.plan.build_target == "app"),)
+        translation_units=(next(unit.plan for unit in units if unit.plan.build_target == "app"),),
+        terminal_producers={},
     )
     object_value = compiler.outputs[0].removeprefix("build/")
     app = _project_recipe(
@@ -1041,9 +1651,7 @@ def test_multiple_target_scoped_rdata_repacks_for_one_object_fail_before_cache(
     bundle.interventions = interventions
     bundle.proof_documents = (
         SimpleNamespace(
-            expected_observations=tuple(
-                _rdata_receipt(item.id) for item in interventions
-            )
+            expected_observations=tuple(_rdata_receipt(item.id) for item in interventions)
         ),
     )
     runtime_calls: list[_FakePrepared] = []
@@ -1057,7 +1665,7 @@ def test_multiple_target_scoped_rdata_repacks_for_one_object_fail_before_cache(
     )
 
     with pytest.raises(
-        classic_incremental.ClassicIncrementalError,
+        incremental_context.ClassicIncrementalError,
         match="multiple rdata repacks name",
     ):
         _run(bundle, root=root, state=state, session=tmp_path / "run")
@@ -1103,30 +1711,27 @@ def test_rdata_authority_rejects_before_warm_setup(
         id="proof_rdata_preflight",
         intervention_id=intervention.id,
         family=intervention.family,
-        expected_values={"rdata_pool_repack": declaration}
-        if receipt_introduces_selector
-        else {},
+        expected_values={"rdata_pool_repack": declaration} if receipt_introduces_selector else {},
     )
     bundle.interventions = (intervention,)
-    bundle.proof_documents = (
-        SimpleNamespace(expected_observations=(receipt,)),
-    )
+    bundle.proof_documents = (SimpleNamespace(expected_observations=(receipt,)),)
     bundle.build_plan = SimpleNamespace(
         translation_units=tuple(unit.plan for unit in units) if planned_lane else (),
+        terminal_producers={},
     )
     monkeypatch.setattr(
-        classic_incremental,
+        incremental_planning,
         "ClassicMSVCToolchain",
         lambda *_args, **_kwargs: pytest.fail("warm preflight constructed a toolchain"),
     )
     monkeypatch.setattr(
-        classic_incremental,
+        incremental_context,
         "prepare_classic_producer_graph_run",
         lambda *_args, **_kwargs: pytest.fail("warm preflight prepared a runtime"),
     )
     session = tmp_path / "run"
 
-    with pytest.raises(classic_incremental.ClassicIncrementalError, match=message):
+    with pytest.raises(incremental_context.ClassicIncrementalError, match=message):
         _run(bundle, root=root, state=state, session=session)
 
     assert not session.exists()
@@ -1218,7 +1823,7 @@ def test_donor_source_mirror_header_edit_invalidates_only_its_transform_closure(
             ),
         )
         executor.donor_dependencies[compiler.id] = (
-            _ClassicWarmDonorDependencyReplay(
+            ClassicWarmDonorDependencyReplay(
                 intervention.id,
                 trace,
                 (
@@ -1293,7 +1898,10 @@ def test_intervention_free_compiler_stays_raw_and_reaches_its_linker(
     state = tmp_path / "state"
     state.mkdir()
     bundle, all_units, sources = _fixture_bundle(root, targets=("app", "tool"))
-    bundle.build_plan = SimpleNamespace(translation_units=(all_units[0].plan,))
+    bundle.build_plan = SimpleNamespace(
+        translation_units=(all_units[0].plan,),
+        terminal_producers={},
+    )
 
     class MixedExecutor(_FakeWarmExecutor):
         def __init__(self) -> None:
@@ -1305,9 +1913,7 @@ def test_intervention_free_compiler_stays_raw_and_reaches_its_linker(
                 inputs = cast(PreparedNodeInputs, kwargs["inputs"])
                 self.link_inputs[node_id] = tuple(
                     item.snapshot.path.read_bytes()
-                    for _reference, item in sorted(
-                        inputs.entries.items(), key=lambda item: item[0]
-                    )
+                    for _reference, item in sorted(inputs.entries.items(), key=lambda item: item[0])
                 )
             return super().execute_warm_graph_node(node_id, **kwargs)  # type: ignore[arg-type]
 
@@ -1334,12 +1940,8 @@ def test_intervention_free_compiler_stays_raw_and_reaches_its_linker(
     )
 
     assert result.summary.misses == 7
-    assert executor.link_inputs["linker.app.0000"][0].startswith(
-        b"transformed:compiler.app.0000"
-    )
-    assert executor.link_inputs["linker.tool.0000"][0].startswith(
-        b"raw:compiler.tool.0001"
-    )
+    assert executor.link_inputs["linker.app.0000"][0].startswith(b"transformed:compiler.app.0000")
+    assert executor.link_inputs["linker.tool.0000"][0].startswith(b"raw:compiler.tool.0001")
     assert not (tmp_path / "run/transforms/compiler.tool.0001").exists()
 
 
@@ -1407,7 +2009,7 @@ def test_target_set_publication_rolls_back_without_overwriting_peer(
         project_root=root,
         runtime_calls=runtime_calls,
     )
-    original_publish = classic_incremental.atomic_publish_relative_if_current
+    original_publish = classic_publication.atomic_publish_relative_if_current
 
     def fail_second(
         project: Path,
@@ -1430,12 +2032,12 @@ def test_target_set_publication_rolls_back_without_overwriting_peer(
         )
 
     monkeypatch.setattr(
-        classic_incremental,
+        classic_publication,
         "atomic_publish_relative_if_current",
         fail_second,
     )
     with pytest.raises(
-        classic_incremental.ClassicIncrementalError,
+        incremental_context.ClassicIncrementalError,
         match="target set could not be published",
     ):
         _run(bundle, root=root, state=state, session=tmp_path / "run", jobs=2)
@@ -1474,7 +2076,7 @@ def test_target_set_publication_rejects_preimage_and_final_reseal_races(
         project_root=root,
         runtime_calls=runtime_calls,
     )
-    original_publish = classic_incremental.atomic_publish_relative_if_current
+    original_publish = classic_publication.atomic_publish_relative_if_current
     raced = False
 
     def race_publication(
@@ -1502,12 +2104,12 @@ def test_target_set_publication_rejects_preimage_and_final_reseal_races(
         return published
 
     monkeypatch.setattr(
-        classic_incremental,
+        classic_publication,
         "atomic_publish_relative_if_current",
         race_publication,
     )
     with pytest.raises(
-        classic_incremental.ClassicIncrementalError,
+        incremental_context.ClassicIncrementalError,
         match="target set could not be published",
     ):
         _run(bundle, root=root, state=state, session=tmp_path / "run", jobs=2)
@@ -1524,7 +2126,7 @@ def test_warm_secure_location_canonicalizes_macos_var_alias(tmp_path: Path) -> N
     assert str(source).startswith("/private/var/")
     alias = Path(str(source).removeprefix("/private"))
 
-    payload, snapshot = classic_incremental._payload(alias)
+    payload, snapshot = incremental_context.read_payload(alias)
 
     assert payload == b"input"
     assert snapshot.path == source
@@ -1548,8 +2150,12 @@ def test_cleanless_header_is_ordinary_but_carrier_is_deferred(
         spec=SimpleNamespace(paths=paths),
         toolchain_lock=SimpleNamespace(tools=(), runtime_files=()),
     )
-    monkeypatch.setattr(classic_incremental, "_toolchain_tree_files", lambda *_args: set())
-    ordinary, generated, _physical, _payloads = classic_incremental._include_authorities(
+    monkeypatch.setattr(
+        incremental_planning,
+        "_toolchain_tree_files",
+        lambda *_args: set(),
+    )
+    ordinary, generated, _physical, _payloads = incremental_planning._include_authorities(
         cast(object, bundle),  # type: ignore[arg-type]
         project_root=project,
         toolchain_root=toolchain,
@@ -1601,10 +2207,10 @@ def test_legacy_oracle_invalidates_only_owning_transform_closure(
     )
     oracle_bindings: list[tuple[str, ...]] = []
 
-    def bind(runtime: classic_incremental._WarmRuntime) -> None:
+    def bind(runtime: incremental_context.WarmRuntime) -> None:
         oracle_bindings.append(tuple(sorted(runtime.oracle_paths)))
 
-    monkeypatch.setattr(classic_incremental._WarmRuntime, "ensure_oracles", bind)
+    monkeypatch.setattr(incremental_context.WarmRuntime, "ensure_oracles", bind)
     first = _run(bundle, root=root, state=state, session=tmp_path / "legacy-1")
     assert first.summary.misses == 8
     assert oracle_bindings == [("app",)]
@@ -1620,6 +2226,101 @@ def test_legacy_oracle_invalidates_only_owning_transform_closure(
     assert third.summary.hits == 5
     assert third.summary.runtime_init_count == 1
     assert oracle_bindings == [("app",), ("app",)]
+
+
+def test_runtime_factory_binds_all_legacy_oracles_before_donor_use(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    oracle_paths = {target_id: tmp_path / f"{target_id}.oracle" for target_id in ("app", "tool")}
+    for target_id, path in oracle_paths.items():
+        path.write_bytes(f"oracle:{target_id}".encode())
+    oracle_snapshots = {
+        target_id: incremental_context.snapshot_file(path)
+        for target_id, path in oracle_paths.items()
+    }
+
+    class SealedOracle:
+        def __init__(self, target_id: str) -> None:
+            self.target_id = target_id
+
+        def _digest_receipt(self) -> tuple[str, int]:
+            snapshot = oracle_snapshots[self.target_id]
+            return snapshot.digest.value, snapshot.size
+
+    class OracleLease:
+        def __init__(self, target_id: str) -> None:
+            self.oracle = SealedOracle(target_id)
+
+        def __enter__(self) -> SealedOracle:
+            return self.oracle
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class LifecycleExecutor(_FakeWarmExecutor):
+        def __init__(self) -> None:
+            super().__init__({})
+            self.composition_started = False
+            self.binding_attempts = 0
+
+        def bind_legacy_oracles(self, values: object) -> None:
+            self.binding_attempts += 1
+            if self.composition_started:
+                raise RuntimeError("legacy capabilities were bound after donor use")
+            capabilities = cast(dict[str, object], values)
+            if set(capabilities) != {"app", "tool"}:
+                raise RuntimeError("legacy capability set was incomplete")
+            super().bind_legacy_oracles(values)
+
+    lifecycle = LifecycleExecutor()
+    prepared = _FakePrepared(lifecycle)
+    monkeypatch.setattr(
+        incremental_context,
+        "prepare_classic_producer_graph_run",
+        lambda *_args, **_kwargs: prepared,
+    )
+
+    import reprobit.legacy as legacy
+    import reprobit.verify as verify
+
+    by_path = {path: target_id for target_id, path in oracle_paths.items()}
+    monkeypatch.setattr(
+        verify,
+        "seal_file_oracle",
+        lambda path: OracleLease(by_path[path]),
+    )
+    monkeypatch.setattr(legacy, "bind_pe32_oracle", lambda sealed: sealed.target_id)
+    plan = SimpleNamespace(
+        runtime_lock=incremental_context.Lock(),
+        runtime_holder={},
+        bundle=object(),
+        project_root=tmp_path,
+        session_root=tmp_path / "session",
+        toolchain_root=tmp_path / "toolchain",
+        backend=object(),
+        jobs=2,
+        compiler_transport=None,
+        resource_transport=None,
+        initialization_timeout=1.0,
+        compile_timeout=1.0,
+        link_timeout=1.0,
+        cleanup_timeout=1.0,
+        staging_root=tmp_path / "staging",
+        oracle_paths=MappingProxyType(oracle_paths),
+        oracle_snapshots=MappingProxyType(oracle_snapshots),
+    )
+
+    runtime = incremental_context.runtime_factory(cast(object, plan))  # type: ignore[arg-type]
+
+    assert lifecycle.bound_oracles == ("app", "tool")
+    assert lifecycle.binding_attempts == 1
+    assert plan.runtime_holder == {"runtime": runtime}
+    lifecycle.composition_started = True
+    runtime.ensure_oracles()
+    assert lifecycle.binding_attempts == 1
+    runtime.close()
+    assert prepared.closed is True
 
 
 def test_generated_epoch_waits_for_all_ordinary_transforms_and_resources(
@@ -1667,9 +2368,7 @@ def test_generated_epoch_waits_for_all_ordinary_transforms_and_resources(
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-unix-makefiles-v1",
-        nodes=tuple(
-            sorted((ordinary, resource, generated, linker), key=lambda item: item.id)
-        ),
+        nodes=tuple(sorted((ordinary, resource, generated, linker), key=lambda item: item.id)),
     )
     paths = LogicalPathProfile(
         id="fixture",
@@ -1714,6 +2413,7 @@ def test_generated_epoch_waits_for_all_ordinary_transforms_and_resources(
         producer_graph=graph,
         build_plan=SimpleNamespace(
             translation_units=tuple(unit.plan for unit in units),
+            terminal_producers={},
         ),
         toolchain_lock=SimpleNamespace(model_dump=lambda **_kwargs: {"lock": "fake"}),
         intervention_documents=documents,
@@ -1754,13 +2454,13 @@ def test_generated_epoch_waits_for_all_ordinary_transforms_and_resources(
             node_id: str,
             *,
             cancellation: object,
-        ) -> _ClassicWarmCompilerReplay:
+        ) -> ClassicWarmCompilerReplay:
             if node_id != ordinary.id:
                 return super().replay_warm_compiler_dependencies(
                     node_id,
                     cancellation=cancellation,
                 )
-            return _ClassicWarmCompilerReplay(
+            return ClassicWarmCompilerReplay(
                 MsvcSbrTrace(
                     r"R:\build",
                     (
@@ -1800,7 +2500,7 @@ def test_generated_epoch_waits_for_all_ordinary_transforms_and_resources(
     assert resource.id in barrier_executor.completed
 
     monkeypatch.setattr(
-        classic_incremental,
+        incremental_context,
         "prepare_classic_producer_graph_run",
         lambda *_a, **_k: pytest.fail("all-hit epoch build constructed a prepared run"),
     )

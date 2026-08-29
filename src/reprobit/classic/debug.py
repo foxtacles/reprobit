@@ -2,8 +2,12 @@ from __future__ import annotations
 
 from collections import Counter
 import struct
-from .coff import CoffObject, RELOCATION_WIDTHS, coff_body, coff_table, detailed_relocations, function_multiset
-from .foundation import exact_audit_keys, require, require_exact_int, require_sha, sha256_bytes
+
+from reprobit.binary import require
+from reprobit.coff import CoffObject, RELOCATION_WIDTHS, coff_body, coff_table, detailed_relocations
+
+from .coff import function_multiset
+from .foundation import exact_audit_keys, require_exact_int, require_sha, sha256_bytes
 from .ia32 import ORDINARY_FPO_MOSAIC_IDENTITY_KIND, SOURCE_FPO_MOSAIC_IDENTITY_KIND
 
 """Classic compiler algorithms: debug."""

@@ -25,7 +25,9 @@ interventions, proof expectations, or oracle receipts. `source preview` hashes
 the proposed Git-tracked read set without writing and reports added, removed,
 and changed paths, required producer-graph invalidation, and any effective
 translation-unit or source-overlay pins that no longer hold. Repeat `--path` on
-either source command to inspect an explicit file or tree set instead.
+either source command to supply a complete replacement file or tree set. It is
+not a filter over the current manifest: every omitted path is reported as a
+removal.
 
 `source lock` publishes the manifest and build-plan manifest binding in one
 content-addressed transaction. Every admitted source file is a transaction
@@ -52,7 +54,12 @@ interventions and their fixed costs; pass `--intervention ID` to select one.
 
 ```console
 rbit doctor . --toolchain-root /opt/toolchains/msvc42
-rbit toolchain lock --project . --root /opt/toolchains/msvc42
+rbit toolchain lock --project . --root /opt/toolchains/msvc42 \
+  --runtime-file wine/x86/cl \
+  --runtime-file wine/x86/rc \
+  --runtime-file wine/x86/link \
+  --runtime-file wine/x86/lib \
+  --runtime-file wine/x86/wine-msvc.sh
 ```
 
 The lock command hashes required compiler producers and portable include and
@@ -63,6 +70,10 @@ file and tree receipts. The authenticated provisioner and CI workflow establish
 acquisition; the lock receipts establish the installed content. Platform wrappers
 or support files that participate in execution must be named explicitly with
 repeatable `--runtime-file` arguments and remain outside `profile_sources`.
+The five paths above are the complete portable runtime set for MSVC 4.2 on
+POSIX. `wine/x86/msvcenv.sh` is used only while CMake configures the one-time
+migration tree; direct ReproBit builds do not execute it, so the provisioner
+authenticates it but the portable runtime lock does not include it.
 Committed lock paths are relative to the supplied toolchain root; the physical
 root itself remains local configuration. `rbit validate` rejects a registered
 profile whose locked profile paths are missing, disagree with these reviewed
@@ -74,10 +85,10 @@ locks with `rbit toolchain lock` instead of expecting compatibility conversion.
 `doctor` checks the selected host backend and, when a project and toolchain root
 are supplied, verifies the installation against the committed lock. Add
 `--execute-probe` to execute the bounded Wine probe on POSIX. On native Windows
-the opt-in probe creates a temporary anonymous DeviceMap, assigns it to a Job
-Object-contained suspended child before resume, and requires that child's
-descendant to observe the same private drive. The temporary map and process
-tree are always closed before doctor returns.
+the opt-in probe creates a fresh, verified logon session and defines a temporary
+drive only in that session. The real producer starts suspended inside a nested
+Job Object, and the probe requires its descendant to observe the same drive.
+The mapping is removed only after that complete producer tree exits.
 
 ## Commit the direct producer graph
 
@@ -153,8 +164,8 @@ audits current-run producer and intervention evidence, performs literal
 comparison, and writes canonical JSON plus self-contained HTML. The two
 transport options are supplied together on POSIX. Native Windows rejects those
 POSIX selectors. Before preparing a native producer arena it reruns the bounded
-private-map process-lineage probe and fails closed unless the host can assign
-the map before a child resumes and preserve it through producer descendants.
+fresh-LUID lineage-drive probe and fails closed unless the host can admit a
+suspended producer and preserve its drive through all producer descendants.
 The initialization, compile/resource, librarian/linker, and cleanup deadlines
 are independently bounded; their defaults are 600, 600, 900, and 10 seconds.
 For a project-level `source_overlay_graph`, ReproBit derives a declaration
@@ -184,12 +195,26 @@ override may only narrow acceptance; it cannot silently broaden a clean project
 to accept quarantine. Similarly, target and toolchain overrides are checked
 against committed project identities.
 
+## Preview compiler interventions
+
+`rbit discover` runs a bounded, resumable MSVC 4.2 declaration campaign outside
+the certification boundary. It reports whole-function, private-donor, and
+same-symbol mosaic candidates without editing source or applying them. See the
+[discovery guide](discovery.md) for the request format, incremental behavior,
+progress events, and reviewable artifact outputs.
+
 ## Schema-v2 migration
 
 ```console
 rbit manifest migrate tools/legacy-manifest.json --project-root .
-rbit manifest migrate tools/legacy-manifest.json --project-root . --apply
+rbit manifest migrate tools/legacy-manifest.json --project-root . \
+  --semantic-claims tools/reprobit-migration-claims.once.json --apply
 ```
+
+`--semantic-claims` supplies reviewed scope/header facts that schema v2 never
+recorded. The strict one-off JSON sidecar is not a runtime input or migration
+output; leave the historical manifest unchanged and discard the sidecar after
+reviewing the generated schema-v3 project.
 
 The first command is a deterministic preview. `--apply` publishes the complete
 schema-v3 tree in one content-addressed transaction after validating it in a

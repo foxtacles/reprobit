@@ -9,8 +9,9 @@ import ntpath
 import os
 import re
 import stat
+import tempfile
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
@@ -20,6 +21,7 @@ from pydantic import ValidationError
 
 from reprobit.model import AuthenticityPolicy, ByteRange, Digest, Scope
 from reprobit.paths import normalize_logical_path
+from reprobit.project_loader import load_project_tree
 from reprobit.schema import (
     BuildPlanDocument,
     ClassicArchiveAuthority,
@@ -39,6 +41,7 @@ from reprobit.schema import (
     MsvcRelease,
     OracleDocument,
     OracleInstallRange,
+    ProjectBundle,
     ProofDocument,
     SourceManifestDocument,
     SourceManifestEntry,
@@ -66,6 +69,20 @@ class MigrationOutput:
     source_sha256: str
     intervention_count: int
     proof_count: int
+
+
+def validate_migration_files(
+    files: Mapping[PurePosixPath, bytes],
+) -> ProjectBundle:
+    """Load and cross-validate one complete in-memory migration candidate."""
+
+    with tempfile.TemporaryDirectory(prefix="reprobit-migration-") as directory:
+        root = Path(directory)
+        for relative, data in files.items():
+            destination = root.joinpath(*relative.parts)
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(data)
+        return load_project_tree(root, verify_source_authority=False)
 
 
 _SAFE_ID = re.compile(r"[^a-z0-9_.-]+")
@@ -110,6 +127,9 @@ _HOST_ABSOLUTE_ROOTS = (
     "/usr/",
     "/var/",
 )
+_FUNCTION_CLAIM_GENERATORS = frozenset(
+    {"assert_reseat", "empty_scopes", "literal_alias", "local_ids", "noop_assign"}
+)
 
 
 def _reject_duplicate(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -143,6 +163,40 @@ def load_legacy_manifest(path: Path) -> tuple[dict[str, Any], str]:
     if not isinstance(parsed, dict) or parsed.get("schema") != 2:
         raise MigrationError("migration input must be a schema-v2 object")
     return parsed, hashlib.sha256(raw).hexdigest()
+
+
+def _load_semantic_claims_sidecar(path: Path | None) -> dict[str, Any] | None:
+    """Load the reviewed, one-shot source-overlay migration claims."""
+
+    if path is None:
+        return None
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        raise MigrationError(f"cannot read semantic-claims sidecar: {exc}") from exc
+
+    def reject_constant(value: str) -> None:
+        raise MigrationError(f"non-finite JSON number in semantic-claims sidecar: {value}")
+
+    try:
+        parsed = json.loads(
+            raw,
+            object_pairs_hook=_reject_duplicate,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise MigrationError(f"invalid semantic-claims sidecar JSON: {exc}") from exc
+    if (
+        not isinstance(parsed, dict)
+        or set(parsed) != {"bindings", "schema"}
+        or type(parsed.get("schema")) is not int
+        or parsed.get("schema") != 1
+        or not isinstance(parsed.get("bindings"), list)
+    ):
+        raise MigrationError(
+            "semantic-claims sidecar must be exactly a schema-1 {schema, bindings} object"
+        )
+    return parsed
 
 
 def _canonical(value: Any) -> bytes:
@@ -883,6 +937,191 @@ def _inferred_overlay_toolchain_policy(
     return _json_value(policy, "inferred classic overlay toolchain policy")
 
 
+def _migration_generator_leaves(value: object, *, context: str) -> tuple[dict[str, object], ...]:
+    """Flatten one legacy typed generator in the runtime's leaf order."""
+
+    if not isinstance(value, Mapping) or not isinstance(value.get("k"), str):
+        raise MigrationError(f"{context} generator is malformed")
+    normalized = {str(key): item for key, item in value.items()}
+    if normalized["k"] != "seq":
+        return (normalized,)
+    raw_items = normalized.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise MigrationError(f"{context} generator sequence is empty")
+    leaves: list[dict[str, object]] = []
+    for index, raw_item in enumerate(raw_items):
+        if not isinstance(raw_item, Mapping):
+            raise MigrationError(f"{context} generator item {index} is malformed")
+        child = {str(key): item for key, item in raw_item.items() if key != "line"}
+        leaves.extend(
+            _migration_generator_leaves(
+                child,
+                context=f"{context} generator item {index}",
+            )
+        )
+    return tuple(leaves)
+
+
+def _overlay_claim_requirements(
+    outputs: list[object],
+) -> dict[tuple[str, int], str]:
+    """Name every v2 leaf whose ambiguity must be closed in v3."""
+
+    requirements: dict[tuple[str, int], str] = {}
+    seen_operations: set[str] = set()
+    for output_index, raw_output in enumerate(outputs):
+        if not isinstance(raw_output, Mapping):
+            raise MigrationError(f"source overlay output {output_index} is malformed")
+        path = _relative(raw_output.get("path"), f"source overlay output {output_index}")
+        operations = raw_output.get("ops")
+        if not isinstance(operations, list):
+            raise MigrationError(f"source overlay output {path!r} has invalid operations")
+        for operation_index, raw_operation in enumerate(operations):
+            if not isinstance(raw_operation, Mapping):
+                raise MigrationError(f"source overlay output {path!r} has an invalid operation")
+            operation_id = raw_operation.get("id", f"{path}#{operation_index}")
+            if not isinstance(operation_id, str) or not operation_id:
+                raise MigrationError(f"source overlay output {path!r} has an invalid operation ID")
+            if operation_id in seen_operations:
+                raise MigrationError(f"source overlay operation is duplicated: {operation_id!r}")
+            seen_operations.add(operation_id)
+            leaves = _migration_generator_leaves(
+                raw_operation.get("gen"),
+                context=f"source overlay operation {operation_id!r}",
+            )
+            for leaf_index, leaf in enumerate(leaves):
+                kind = leaf["k"]
+                claim_kind = (
+                    "function_scope"
+                    if kind in _FUNCTION_CLAIM_GENERATORS
+                    else "logical_header"
+                    if kind == "include"
+                    else None
+                )
+                if claim_kind is not None:
+                    requirements[(operation_id, leaf_index)] = claim_kind
+    return requirements
+
+
+def _canonical_semantic_claims(
+    bindings: Sequence[object],
+    requirements: Mapping[tuple[str, int], str],
+) -> list[dict[str, object]]:
+    """Validate exact claim coverage and canonicalize only its ordering."""
+
+    result: dict[tuple[str, int], dict[str, object]] = {}
+    for index, raw_binding in enumerate(bindings):
+        if not isinstance(raw_binding, Mapping):
+            raise MigrationError(f"source-overlay semantic claim {index} is malformed")
+        binding = {str(key): item for key, item in raw_binding.items()}
+        operation = binding.get("operation")
+        leaf = binding.get("leaf")
+        kind = binding.get("kind")
+        if (
+            not isinstance(operation, str)
+            or not operation
+            or "\x00" in operation
+            or not isinstance(leaf, int)
+            or isinstance(leaf, bool)
+            or leaf < 0
+            or kind not in {"function_scope", "logical_header"}
+        ):
+            raise MigrationError(f"source-overlay semantic claim {index} is malformed")
+        if kind == "logical_header":
+            if set(binding) != {"kind", "leaf", "logical_path", "operation"}:
+                raise MigrationError(f"source-overlay logical-header claim {index} is not closed")
+            logical_path = binding.get("logical_path")
+            if (
+                not isinstance(logical_path, str)
+                or _relative(
+                    logical_path,
+                    f"source-overlay semantic claim {index} logical path",
+                )
+                != logical_path
+            ):
+                raise MigrationError(f"source-overlay logical-header claim {index} is malformed")
+        else:
+            if set(binding) != {
+                "bindings",
+                "function",
+                "kind",
+                "leaf",
+                "operation",
+                "range_sha256",
+                "range_size",
+            }:
+                raise MigrationError(f"source-overlay function-scope claim {index} is not closed")
+            function = binding.get("function")
+            range_digest = binding.get("range_sha256")
+            range_size = binding.get("range_size")
+            raw_scalar_bindings = binding.get("bindings")
+            if (
+                not isinstance(function, str)
+                or not function
+                or "\x00" in function
+                or not isinstance(range_digest, str)
+                or _SHA256.fullmatch(range_digest) is None
+                or type(range_size) is not int
+                or range_size <= 0
+                or not isinstance(raw_scalar_bindings, list)
+            ):
+                raise MigrationError(f"source-overlay function-scope claim {index} is malformed")
+            scalar_names: list[str] = []
+            for scalar_index, raw_scalar in enumerate(raw_scalar_bindings):
+                if not isinstance(raw_scalar, Mapping):
+                    raise MigrationError(
+                        "source-overlay function-scope scalar binding "
+                        f"{index}:{scalar_index} is malformed"
+                    )
+                scalar = {str(key): item for key, item in raw_scalar.items()}
+                identifier = scalar.get("identifier")
+                type_spelling = scalar.get("type")
+                if (
+                    set(scalar) != {"identifier", "initialized", "type"}
+                    or not isinstance(identifier, str)
+                    or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", identifier) is None
+                    or not isinstance(type_spelling, str)
+                    or not type_spelling
+                    or "\x00" in type_spelling
+                    or not isinstance(scalar.get("initialized"), bool)
+                ):
+                    raise MigrationError(
+                        "source-overlay function-scope scalar binding "
+                        f"{index}:{scalar_index} is malformed"
+                    )
+                scalar_names.append(identifier)
+            if scalar_names != sorted(scalar_names, key=str.casefold) or len(
+                {item.casefold() for item in scalar_names}
+            ) != len(scalar_names):
+                raise MigrationError(
+                    f"source-overlay function-scope claim {index} bindings are not canonical"
+                )
+        key = (operation, leaf)
+        if key in result:
+            raise MigrationError(f"source-overlay semantic claim is duplicated: {key!r}")
+        result[key] = binding
+    missing = sorted(set(requirements) - set(result))
+    extra = sorted(set(result) - set(requirements))
+    wrong = sorted(
+        key
+        for key in set(requirements) & set(result)
+        if result[key].get("kind") != requirements[key]
+    )
+    if missing or extra or wrong:
+        raise MigrationError(
+            "source-overlay semantic claim coverage differs; "
+            f"missing={missing}, extra={extra}, wrong_kind={wrong}"
+        )
+    return sorted(
+        result.values(),
+        key=lambda item: (
+            str(item["operation"]).casefold(),
+            cast(int, item["leaf"]),
+            str(item["kind"]),
+        ),
+    )
+
+
 def _logical_dos_path(value: Any) -> str:
     if not isinstance(value, str):
         raise MigrationError("legacy path contract lacks an absolute pinned path")
@@ -1101,7 +1340,7 @@ def _locked_import_order(
     expected_size = image.get("original_size")
     if type(expected_size) is not int or expected_size != len(payload):
         raise MigrationError(f"IAT-order image differs from its size: {relative!r}")
-    from reprobit.classic import capture_pe_import_order
+    from reprobit.classic.pe_imports import capture_pe_import_order
 
     try:
         declaration = capture_pe_import_order(payload)
@@ -1111,7 +1350,11 @@ def _locked_import_order(
 
 
 def _convert_v2_manifest(
-    manifest: dict[str, Any], source_sha256: str, *, source_root: Path | None
+    manifest: dict[str, Any],
+    source_sha256: str,
+    *,
+    source_root: Path | None,
+    semantic_claims: Mapping[str, Any] | None,
 ) -> MigrationOutput:
     if manifest.get("schema") != 2:
         raise MigrationError("conversion input must be a schema-v2 object")
@@ -1383,6 +1626,12 @@ def _convert_v2_manifest(
     overlay = manifest.get("source_overlay")
     if not isinstance(overlay, dict):
         raise MigrationError("legacy source_overlay must be an object")
+    if "semantic_claims" in overlay:
+        raise MigrationError(
+            "schema-v2 migration input must remain immutable: remove "
+            "source_overlay.semantic_claims and pass the one-off reviewed file with "
+            "--semantic-claims"
+        )
     outputs = overlay.get("outputs")
     graph = overlay.get("graph")
     if not isinstance(outputs, list) or not isinstance(graph, dict):
@@ -1393,7 +1642,9 @@ def _convert_v2_manifest(
         source_manifest,
         source_root=source_root,
     )
+    claim_requirements = _overlay_claim_requirements(cast(list[object], outputs))
     overlay_groups: defaultdict[str, list[Any]] = defaultdict(list)
+    overlay_operation_targets: dict[str, str] = {}
     for output in outputs:
         if not isinstance(output, dict) or not isinstance(output.get("path"), str):
             raise MigrationError("legacy source overlay output is invalid")
@@ -1404,6 +1655,55 @@ def _convert_v2_manifest(
                 raise MigrationError(f"cannot associate source overlay output {path!r}")
             first = next(iter(target_records))
         overlay_groups[first].append(output)
+        operations = output.get("ops")
+        if not isinstance(operations, list):
+            raise MigrationError(f"source overlay output {path!r} has invalid operations")
+        for index, operation in enumerate(operations):
+            if not isinstance(operation, dict):
+                raise MigrationError(f"source overlay output {path!r} has an invalid operation")
+            operation_id = operation.get("id", f"{path}#{index}")
+            if not isinstance(operation_id, str) or not operation_id:
+                raise MigrationError(f"source overlay output {path!r} has an invalid operation ID")
+            if operation_id in overlay_operation_targets:
+                raise MigrationError(f"source overlay operation is duplicated: {operation_id!r}")
+            overlay_operation_targets[operation_id] = first
+
+    semantic_claim_groups: defaultdict[str, list[Any]] = defaultdict(list)
+    raw_semantic_claims = semantic_claims
+    if raw_semantic_claims is not None:
+        if not isinstance(raw_semantic_claims, dict) or set(raw_semantic_claims) != {
+            "bindings",
+            "schema",
+        }:
+            raise MigrationError("legacy source-overlay semantic claims have invalid shape")
+        semantic_claim_schema = raw_semantic_claims.get("schema")
+        bindings = raw_semantic_claims.get("bindings")
+        if semantic_claim_schema != 1 or not isinstance(bindings, list):
+            raise MigrationError("legacy source-overlay semantic claims are malformed")
+        for binding in bindings:
+            if not isinstance(binding, dict) or not isinstance(binding.get("operation"), str):
+                raise MigrationError("legacy source-overlay semantic claim is malformed")
+            operation_id = binding["operation"]
+            if operation_id not in overlay_operation_targets:
+                raise MigrationError(
+                    f"source-overlay semantic claim names an unknown operation: {operation_id!r}"
+                )
+        semantic_bindings = _canonical_semantic_claims(bindings, claim_requirements)
+    elif claim_requirements:
+        required = sorted(
+            f"{operation}[{leaf}]={kind}" for (operation, leaf), kind in claim_requirements.items()
+        )
+        raise MigrationError(
+            "legacy source overlay requires an explicit semantic-claims sidecar; "
+            "pass --semantic-claims with one reviewed binding for each required generator "
+            "leaf: " + ", ".join(required)
+        )
+    else:
+        semantic_bindings = []
+    for binding in semantic_bindings:
+        operation_id = cast(str, binding["operation"])
+        target_id = overlay_operation_targets[operation_id]
+        semantic_claim_groups[target_id].append(binding)
     graph_groups: defaultdict[str, list[Any]] = defaultdict(list)
     generated = graph.get("generated_tus", [])
     if not isinstance(generated, list):
@@ -1424,6 +1724,10 @@ def _convert_v2_manifest(
             "schema": overlay.get("schema"),
             "outputs": overlay_groups[target_id],
             "graph": {"generated_tus": graph_groups[target_id], "link_admissions": []},
+            "semantic_claims": {
+                "schema": 1,
+                "bindings": semantic_claim_groups[target_id],
+            },
         }
         intervention, receipt = _project_recipe(
             intervention_id=_stable_id("project", {"target": target_id, "kind": "source-overlay"}),
@@ -1534,18 +1838,28 @@ def convert_v2_manifest(
     source_sha256: str,
     *,
     source_root: Path | None = None,
+    semantic_claims_path: Path | None = None,
 ) -> MigrationOutput:
     """Convert v2 data, translating model errors into migration failures."""
 
     try:
-        return _convert_v2_manifest(manifest, source_sha256, source_root=source_root)
+        return _convert_v2_manifest(
+            manifest,
+            source_sha256,
+            source_root=source_root,
+            semantic_claims=_load_semantic_claims_sidecar(semantic_claims_path),
+        )
     except MigrationError:
         raise
     except (ValidationError, TypeError, ValueError) as exc:
         raise MigrationError(f"migration generated invalid schema-v3 data: {exc}") from exc
 
 
-def migration_output(path: Path) -> MigrationOutput:
+def migration_output(
+    path: Path,
+    *,
+    semantic_claims_path: Path | None = None,
+) -> MigrationOutput:
     manifest, source_sha256 = load_legacy_manifest(path)
     declared = tuple(_declared_source_pins(manifest))
     project_root = next(
@@ -1565,6 +1879,7 @@ def migration_output(path: Path) -> MigrationOutput:
         manifest,
         source_sha256,
         source_root=project_root,
+        semantic_claims_path=semantic_claims_path,
     )
 
 
@@ -1574,4 +1889,5 @@ __all__ = [
     "convert_v2_manifest",
     "load_legacy_manifest",
     "migration_output",
+    "validate_migration_files",
 ]

@@ -91,9 +91,7 @@ def test_operation_subset_is_validated_but_uses_fresh_counterfactual_identity() 
     }
 
     empty = render_classic_overlay_subset(document, clean, frozenset())
-    selected = render_classic_overlay_subset(
-        document, clean, frozenset({"op_forward"})
-    )
+    selected = render_classic_overlay_subset(document, clean, frozenset({"op_forward"}))
 
     assert empty.outputs == clean
     assert empty.receipts[0].operations == ()
@@ -180,9 +178,7 @@ def test_leaf_subset_rejects_unknown_leaf() -> None:
     }
 
     with pytest.raises(ValueError, match="unknown leaves"):
-        render_classic_overlay_leaf_subset(
-            document, clean, frozenset({("op_forward", 1)})
-        )
+        render_classic_overlay_leaf_subset(document, clean, frozenset({("op_forward", 1)}))
 
 
 def test_render_session_reuses_only_compact_requested_anchor_indexes() -> None:
@@ -224,9 +220,7 @@ def test_render_session_is_thread_safe_and_closes_deterministically() -> None:
     with ThreadPoolExecutor(max_workers=4) as executor:
         results = tuple(
             executor.map(
-                lambda _index: render_classic_overlay(
-                    document, clean, session=session
-                ),
+                lambda _index: render_classic_overlay(document, clean, session=session),
                 range(12),
             )
         )
@@ -267,9 +261,7 @@ def test_anchor_ambiguity_behavior_is_preserved_by_match_only_index() -> None:
     }
 
     with pytest.raises(SourceEditError, match="ambiguous"):
-        render_classic_overlay_declarations(
-            [declaration], {"src/unit.cpp": source}
-        )
+        render_classic_overlay_declarations([declaration], {"src/unit.cpp": source})
 
 
 def test_declaration_digest_rejects_changed_clean_input() -> None:
@@ -355,16 +347,12 @@ def _probe_document() -> dict[str, object]:
 
 def test_member_probe_dialect_is_inferred_and_locked_from_clean_declarations() -> None:
     document = _probe_document()
-    sources = {
-        "include/widget.h": b"class Widget { public: virtual int Probe(int); };\n"
-    }
+    sources = {"include/widget.h": b"class Widget { public: virtual int Probe(int); };\n"}
 
     inferred = infer_classic_overlay_dialect(document, sources)
 
     assert inferred == ClassicOverlayDialect(qualified_member_probe_return_type="int")
-    assert infer_classic_overlay_dialect(
-        document, sources, locked_dialect=inferred
-    ) == inferred
+    assert infer_classic_overlay_dialect(document, sources, locked_dialect=inferred) == inferred
     with pytest.raises(SourceEditError, match="locked classic overlay dialect differs"):
         infer_classic_overlay_dialect(
             document,
@@ -613,9 +601,7 @@ def test_authenticated_relocation_requires_one_producer_and_consumer() -> None:
         "src/widget.cpp": effective_destination,
     }
     with pytest.raises(SourceEditError, match="dependency universe differs"):
-        render_classic_overlay_declarations(
-            declarations[:1], {"include/widget.h": held}
-        )
+        render_classic_overlay_declarations(declarations[:1], {"include/widget.h": held})
 
 
 def _fixture_environment() -> tuple[Path, Path, ClassicOverlayDialect] | None:
@@ -698,25 +684,18 @@ def test_all_migrated_donor_overlays_render_to_their_declared_identities() -> No
     for proof_path in sorted((stage / "reprobit" / "proofs" / "tus").glob("*.json")):
         proof_shard = json.loads(proof_path.read_text(encoding="utf-8"))
         proof_by_intervention.update(
-            {
-                proof["intervention_id"]: proof
-                for proof in proof_shard["expected_observations"]
-            }
+            {proof["intervention_id"]: proof for proof in proof_shard["expected_observations"]}
         )
 
     intervention_count = 0
     rendering_count = 0
     operation_count = 0
-    for intervention_path in sorted(
-        (stage / "reprobit" / "interventions" / "tus").glob("*.json")
-    ):
+    for intervention_path in sorted((stage / "reprobit" / "interventions" / "tus").glob("*.json")):
         shard = json.loads(intervention_path.read_text(encoding="utf-8"))
         for intervention in shard["interventions"]:
             if intervention.get("family") != "donor_source_overlay":
                 continue
-            parameters = {
-                item["name"]: item["value"] for item in intervention["parameters"]
-            }
+            parameters = {item["name"]: item["value"] for item in intervention["parameters"]}
             proof = proof_by_intervention[intervention["id"]]
             expected = proof["expected_values"]
             declarations: list[dict[str, object]] = []
@@ -725,9 +704,7 @@ def test_all_migrated_donor_overlays_render_to_their_declared_identities() -> No
                 path = rendering["path"]
                 operations = list(rendering["operations"])
                 if index == 0 and "canonical_overlay_replay" in parameters:
-                    assert parameters["canonical_overlay_replay"] == (
-                        "owning_translation_unit_v1"
-                    )
+                    assert parameters["canonical_overlay_replay"] == ("owning_translation_unit_v1")
                     operations = list(canonical_outputs[path]["ops"]) + operations
                 declarations.append(
                     {

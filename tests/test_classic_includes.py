@@ -136,9 +136,7 @@ def test_include_trace_rejects_host_other_drive_unc_and_build_paths(
         ),
     )
 
-    with pytest.raises(
-        ClassicIncludeTraceError, match=r"resolves to 0|not a DOS path"
-    ):
+    with pytest.raises(ClassicIncludeTraceError, match=r"resolves to 0|not a DOS path"):
         resolve_msvc_include_trace(
             trace,
             expected_working_directory=r"R:\build",
@@ -216,9 +214,7 @@ def test_include_search_roots_must_be_sealed_even_on_native_windows() -> None:
     authority = _authority(
         _file(r"R:\source\main.cpp", IncludeOrigin.PROJECT_SOURCE),
     )
-    trace = MsvcSbrTrace(
-        r"R:\build", (MsvcSbrSource(r"R:\source\main.cpp", None),)
-    )
+    trace = MsvcSbrTrace(r"R:\build", (MsvcSbrSource(r"R:\source\main.cpp", None),))
 
     with pytest.raises(ClassicIncludeTraceError, match="leaves sealed authority"):
         resolve_msvc_include_trace(
@@ -238,9 +234,7 @@ def test_forced_include_must_appear_in_complete_trace() -> None:
         _file(r"R:\source\main.cpp", IncludeOrigin.PROJECT_SOURCE),
         _file(r"R:\source\forced.h", IncludeOrigin.PROJECT_SOURCE),
     )
-    trace = MsvcSbrTrace(
-        r"R:\build", (MsvcSbrSource(r"R:\source\main.cpp", None),)
-    )
+    trace = MsvcSbrTrace(r"R:\build", (MsvcSbrSource(r"R:\source\main.cpp", None),))
 
     with pytest.raises(ClassicIncludeTraceError, match="forced include"):
         resolve_msvc_include_trace(

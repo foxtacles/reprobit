@@ -7,14 +7,14 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
-import reprobit.producer_graph as producer_graph
+import reprobit.producer_graph_cmake as producer_graph_cmake
 from reprobit.model import Digest
 from reprobit.producer_graph import (
     ProducerGraphDocument,
     ProducerGraphError,
     ProducerNode,
     ProducerRole,
-    extract_cmake_unix_makefiles_graph,
+    linker_input_sequence,
     materialize_argument,
     materialize_reference,
     producer_graph_accepts_source,
@@ -23,6 +23,7 @@ from reprobit.producer_graph import (
     source_topology_digest,
     write_producer_graph,
 )
+from reprobit.producer_graph_cmake import extract_cmake_unix_makefiles_graph
 
 
 def _digest(value: str) -> Digest:
@@ -32,9 +33,9 @@ def _digest(value: str) -> Digest:
 def test_windows_shell_words_preserve_backslashes_and_strip_quotes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(producer_graph.os, "name", "nt")
+    monkeypatch.setattr(producer_graph_cmake.os, "name", "nt")
 
-    assert producer_graph._split_command_line(
+    assert producer_graph_cmake._split_command_line(
         r'"C:\Program Files\MSVC\cl.exe" /FoC:\build\unit.obj C:\src\unit.cpp'
     ) == (
         r"C:\Program Files\MSVC\cl.exe",
@@ -46,9 +47,9 @@ def test_windows_shell_words_preserve_backslashes_and_strip_quotes(
 def test_windows_shell_words_follow_crt_backslash_quote_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(producer_graph.os, "name", "nt")
+    monkeypatch.setattr(producer_graph_cmake.os, "name", "nt")
 
-    assert producer_graph._split_command_line(
+    assert producer_graph_cmake._split_command_line(
         'cl.exe /DVERSION=\\"1.0\\" "C:\\path with space\\\\" "" unit.cpp'
     ) == (
         "cl.exe",
@@ -69,7 +70,7 @@ def test_windows_bound_root_suffix_is_normalized_to_portable_separators(
         def __fspath__(self) -> str:
             return r"C:\source"
 
-    assert producer_graph._replace_root(
+    assert producer_graph_cmake._replace_root(
         r"/FoC:\source\obj\unit.obj",
         cast(Path, WindowsRoot()),
         "${SOURCE}",
@@ -240,6 +241,41 @@ def test_graph_requires_closed_build_dependencies() -> None:
             extractor="cmake-unix-makefiles-v1",
             nodes=(compiler, linker),
         )
+
+
+def test_linker_input_sequence_preserves_positional_kind_order_and_repeated_archives() -> None:
+    node = ProducerNode(
+        id="linker.app",
+        role=ProducerRole.LINKER,
+        owner="app",
+        target_id="app",
+        arguments=(
+            "${BUILD}/obj/a.obj",
+            "${BUILD}/res/app.res",
+            "kernel32.lib",
+            "${BUILD}/libs/runtime.lib",
+            "${BUILD}/obj/b.obj",
+            "${BUILD}/libs/runtime.lib",
+            "/out:${BUILD}/APP.EXE",
+        ),
+        inputs=(
+            "build/libs/runtime.lib",
+            "build/obj/a.obj",
+            "build/obj/b.obj",
+            "build/res/app.res",
+            "system-library/kernel32.lib",
+        ),
+        outputs=("build/APP.EXE",),
+    )
+
+    assert linker_input_sequence(node) == (
+        "build/obj/a.obj",
+        "build/res/app.res",
+        "system-library/kernel32.lib",
+        "build/libs/runtime.lib",
+        "build/obj/b.obj",
+        "build/libs/runtime.lib",
+    )
 
 
 def test_graph_v2_binds_path_topology_but_not_source_content() -> None:

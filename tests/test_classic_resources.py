@@ -31,9 +31,7 @@ def _authority(payloads: dict[str, bytes]) -> SealedIncludeAuthority:
                     else IncludeOrigin.TOOLCHAIN_TREE
                 ),
             )
-            for path, payload in sorted(
-                payloads.items(), key=lambda item: item[0].casefold()
-            )
+            for path, payload in sorted(payloads.items(), key=lambda item: item[0].casefold())
         ),
     )
 
@@ -42,7 +40,7 @@ def test_resource_scanner_closes_includes_conditionals_and_payloads() -> None:
     payloads = {
         r"R:\source\res\app.rc": (
             b'#include "resource.h"\n'
-            b'#include <afxres.h>\n'
+            b"#include <afxres.h>\n"
             b'#if FEATURE\nIDI_APP ICON DISCARDABLE "app.ico"\n#else\n'
             b'IDB_APP BITMAP "app.bmp"\n#endif\n'
         ),
@@ -75,16 +73,14 @@ def test_resource_scanner_closes_includes_conditionals_and_payloads() -> None:
     ("source", "message"),
     (
         (b"#include HEADER_NAME\n", "macro include"),
-        (b'IDI_APP ICON ICON_NAME\n', "lacks a literal path"),
+        (b"IDI_APP ICON ICON_NAME\n", "lacks a literal path"),
         (b'IDR_APP CUSTOM "payload.bin"\n', "unknown file-backed"),
         (b'#include "C:\\host\\escape.h"\n', "resolves to 0"),
         (b"#if FEATURE\n", "unterminated conditional"),
         (b'#rcinclude "hidden.rc2"\n', "unknown directive"),
     ),
 )
-def test_resource_scanner_rejects_unprovable_recursive_reads(
-    source: bytes, message: str
-) -> None:
+def test_resource_scanner_rejects_unprovable_recursive_reads(source: bytes, message: str) -> None:
     payloads = {r"R:\source\app.rc": source}
 
     with pytest.raises(ClassicResourceDependencyError, match=message):

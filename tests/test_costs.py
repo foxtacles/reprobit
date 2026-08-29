@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import pytest
+from pydantic import ValidationError
 
 from reprobit.costs import (
+    CostBreakdown,
     CostClass,
-    CostModelV1,
-    CostModelV2,
+    CostModel,
     CostUnitKind,
     calculate_cost,
 )
@@ -20,15 +21,15 @@ from reprobit.schema import (
     SemanticRewriteMethod,
     StateCarrierIntervention,
 )
+from reprobit.strict_json import canonical_json
 
 
 def test_cost_model_weights_are_fixed() -> None:
-    assert CostModelV1.version == 1
-    assert CostModelV2.version == 2
-    assert CostModelV1.weights[CostClass.STATE_CARRIER] == 1
-    assert CostModelV1.weights[CostClass.ORACLE_INSTALL] == 10_000
+    assert CostModel.version == 2
+    assert CostModel.weights[CostClass.STATE_CARRIER] == 1
+    assert CostModel.weights[CostClass.ORACLE_INSTALL] == 10_000
     with pytest.raises(TypeError):
-        CostModelV1.weights[CostClass.STATE_CARRIER] = 0  # type: ignore[index]
+        CostModel.weights[CostClass.STATE_CARRIER] = 0  # type: ignore[index]
 
 
 def test_calculate_cost_counts_unique_nodes_once_and_allocates_shared_rationally() -> None:
@@ -68,6 +69,7 @@ def test_calculate_cost_counts_unique_nodes_once_and_allocates_shared_rationally
     assert by_function["first()"].allocated_shared_cost.numerator == 5
     assert by_function["first()"].exposure_cost == 10
     assert by_function["second()"].allocated_shared_cost.numerator == 5
+    assert result.interventions[0].beneficiaries == (first, second)
 
 
 def test_conflicting_duplicate_intervention_id_is_rejected() -> None:
@@ -160,6 +162,7 @@ def test_source_overlay_cost_uses_typed_units_so_bundling_cannot_lower_it() -> N
 
     assert bundled.model_version == 2
     assert bundled.project_total == split.project_total == 200
+    assert bundled.interventions[0].family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
     assert bundled.interventions[0].units[0].kind is CostUnitKind.SOURCE_OVERLAY_EDIT
     assert bundled.interventions[0].units[0].count == 2
     assert bundled.by_class[0].units == split.by_class[0].units == 2
@@ -184,3 +187,130 @@ def test_source_overlay_graph_actions_are_separate_typed_units() -> None:
         (CostUnitKind.LINK_ADMISSION, 1, 100),
     ]
     assert result.by_target[0].units == 3
+
+
+def test_function_scoped_intervention_rejects_shared_beneficiaries() -> None:
+    direct = Scope(target="program", translation_unit="main", function="direct()")
+    other = Scope(target="program", translation_unit="main", function="other()")
+    with pytest.raises(ValidationError, match="cannot declare shared beneficiaries"):
+        SemanticRewriteIntervention(
+            id="invalid-direct-beneficiaries",
+            scope=direct,
+            rationale="a direct action cannot also claim shared allocation",
+            beneficiaries=(other,),
+            method=SemanticRewriteMethod.SCHEDULING,
+            source_artifact="donor-object",
+            rewrite_digest={"value": "0" * 64},
+        )
+
+
+def test_cost_breakdown_accepts_only_the_current_model_version() -> None:
+    result = calculate_cost(
+        (
+            StateCarrierIntervention(
+                id="state",
+                scope=Scope(target="program"),
+                rationale="current model fixture",
+                carrier="declaration",
+            ),
+        )
+    )
+    payload = result.model_dump(mode="json")
+    payload["model_version"] = 999
+    with pytest.raises(ValidationError, match="Input should be 2"):
+        CostBreakdown.model_validate_json(canonical_json(payload))
+
+
+def test_cost_breakdown_rejects_noncanonical_or_duplicate_intervention_rows() -> None:
+    result = calculate_cost(
+        tuple(
+            StateCarrierIntervention(
+                id=identifier,
+                scope=Scope(target="program"),
+                rationale="canonical ledger fixture",
+                carrier=identifier,
+            )
+            for identifier in ("state-a", "state-b")
+        )
+    )
+    reordered = result.model_dump(mode="json")
+    reordered["interventions"].reverse()
+    with pytest.raises(ValidationError, match="unique and canonical"):
+        CostBreakdown.model_validate_json(canonical_json(reordered))
+
+    duplicated = calculate_cost(
+        (
+            StateCarrierIntervention(
+                id="state",
+                scope=Scope(target="program"),
+                rationale="duplicate ledger fixture",
+                carrier="declaration",
+            ),
+        )
+    ).model_dump(mode="json")
+    duplicated["interventions"].append(duplicated["interventions"][0])
+    duplicated["project_total"] = 2
+    duplicated["unallocated_shared_cost"] = 2
+    for row in (*duplicated["by_class"], *duplicated["by_target"]):
+        row["interventions"] = 2
+        row["units"] = 2
+        row["cost"] = 2
+    with pytest.raises(ValidationError, match="unique and canonical"):
+        CostBreakdown.model_validate_json(canonical_json(duplicated))
+
+
+def test_cost_record_rejects_noncanonical_class_or_weight() -> None:
+    result = calculate_cost(
+        (
+            StateCarrierIntervention(
+                id="state",
+                scope=Scope(target="program"),
+                rationale="canonical classification fixture",
+                carrier="declaration",
+            ),
+        )
+    )
+    wrong_weight = result.model_dump(mode="json")
+    intervention = wrong_weight["interventions"][0]
+    intervention["units"][0].update(unit_cost=2, cost=2)
+    intervention["cost"] = 2
+    wrong_weight["project_total"] = 2
+    wrong_weight["unallocated_shared_cost"] = 2
+    wrong_weight["by_class"][0]["cost"] = 2
+    wrong_weight["by_target"][0]["cost"] = 2
+    with pytest.raises(ValidationError, match="canonical class weight"):
+        CostBreakdown.model_validate_json(canonical_json(wrong_weight))
+
+    wrong_class = result.model_dump(mode="json")
+    intervention = wrong_class["interventions"][0]
+    intervention["cost_class"] = "generated_supplier"
+    intervention["units"][0].update(unit_cost=5, cost=5)
+    intervention["cost"] = 5
+    wrong_class["project_total"] = 5
+    wrong_class["unallocated_shared_cost"] = 5
+    wrong_class["by_class"][0].update(
+        cost_class="generated_supplier", cost=5
+    )
+    wrong_class["by_target"][0]["cost"] = 5
+    with pytest.raises(ValidationError, match="canonical mapping"):
+        CostBreakdown.model_validate_json(canonical_json(wrong_class))
+
+
+def test_cost_breakdown_rejects_forged_function_attribution() -> None:
+    function = Scope(target="program", translation_unit="main", function="work()")
+    result = calculate_cost(
+        (
+            SemanticRewriteIntervention(
+                id="rewrite",
+                scope=function,
+                rationale="function attribution fixture",
+                method=SemanticRewriteMethod.SCHEDULING,
+                source_artifact="donor-object",
+                rewrite_digest={"value": "0" * 64},
+            ),
+        )
+    )
+    payload = result.model_dump(mode="json")
+    payload["by_function"][0]["direct_cost"] = 999_999
+    with pytest.raises(ValidationError, match="function costs differ"):
+        CostBreakdown.model_validate_json(canonical_json(payload))

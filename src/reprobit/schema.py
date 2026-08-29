@@ -1,15 +1,14 @@
-"""Schema-v3 project models and strict tree loading."""
+"""Schema-v3 project models and generated schema documents."""
 
 from __future__ import annotations
 
 import os
 import re
-import tomllib
 from collections.abc import Iterable
 from enum import StrEnum
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Annotated, Any, Literal, Self, TypeAlias, TypeVar
+from typing import Annotated, Any, Literal, Self, TypeAlias
 
 from pydantic import Field, TypeAdapter, WithJsonSchema, field_validator, model_validator
 from pydantic import JsonValue as PydanticJsonValue
@@ -29,13 +28,9 @@ from reprobit.producer_graph import (
     ProducerGraphDocument,
     linker_library_sequence,
     producer_graph_accepts_source,
-    read_producer_graph,
     toolchain_document_digest,
 )
-from reprobit.strict_json import JsonValue, StrictJSONError, canonical_json, strict_load
-
-if TYPE_CHECKING:
-    from reprobit.classic_overlay import ClassicOverlayRenderSession
+from reprobit.strict_json import JsonValue, canonical_json
 
 RelativePath = Annotated[str, Field(min_length=1, max_length=4096)]
 NativeJsonValue: TypeAlias = Annotated[
@@ -406,6 +401,8 @@ class InterventionBase(StrictModel):
     def no_self_dependency(self) -> InterventionBase:
         if self.id in self.dependencies:
             raise ValueError("intervention cannot depend on itself")
+        if self.scope.function is not None and self.beneficiaries:
+            raise ValueError("function-scoped intervention cannot declare shared beneficiaries")
         beneficiary_keys: list[tuple[str, str, str]] = []
         for beneficiary in self.beneficiaries:
             if beneficiary.function is None or beneficiary.translation_unit is None:
@@ -669,10 +666,28 @@ class ClassicRecipeIntervention(InterventionBase):
         names = [field.name for field in self.parameters]
         if names != sorted(names) or len(names) != len(set(names)):
             raise ValueError("classic recipe parameters must be unique and canonically ordered")
-        if self.role is ClassicRecipeRole.FUNCTION and self.symbol is None:
-            raise ValueError("classic function recipe requires symbol")
-        if self.role is not ClassicRecipeRole.FUNCTION and self.symbol is not None:
-            raise ValueError("only classic function recipes may name a symbol")
+        if self.role is ClassicRecipeRole.FUNCTION:
+            if self.symbol is None:
+                raise ValueError("classic function recipe requires symbol")
+            if self.scope.function != self.symbol:
+                raise ValueError(
+                    "classic function recipe scope must name its exact symbol"
+                )
+        else:
+            if self.symbol is not None:
+                raise ValueError("only classic function recipes may name a symbol")
+            if self.scope.function is not None:
+                raise ValueError("classic donor/project recipe cannot have function scope")
+        if (
+            self.role is ClassicRecipeRole.DONOR
+            and self.scope.translation_unit is None
+        ):
+            raise ValueError("classic donor recipe requires translation-unit scope")
+        if (
+            self.role is ClassicRecipeRole.PROJECT
+            and self.scope.translation_unit is not None
+        ):
+            raise ValueError("classic project recipe requires target scope")
         if self.family is ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION:
             raise ValueError("simulated elision must use legacy.oracle_install quarantine")
         forbidden = _forbidden_classic_paths(self.parameters)
@@ -960,6 +975,15 @@ class ClassicSdkArchiveAuthority(StrictModel):
         return checked
 
 
+class ClassicAnalysisLinkPolicy(StrictModel):
+    """Closed options admitted only for a non-certifying analysis relink."""
+
+    analysis_added_options: Annotated[
+        list[Literal["/DEBUG"]],
+        Field(min_length=1, max_length=1),
+    ]
+
+
 class BuildPlanDocument(StrictModel):
     """Typed migration carrier for build inputs not owned by recipe shards.
 
@@ -1026,6 +1050,90 @@ def project_sdk_archive_authorities(
     folded = [item.path.casefold() for item in authorities]
     _require_unique(folded, "project SDK archive path")
     return authorities
+
+
+def classic_analysis_link_options(plan: BuildPlanDocument) -> tuple[str, ...]:
+    """Return the explicitly authorized, closed analysis-only linker options."""
+
+    terminal = plan.terminal_producers
+    if not isinstance(terminal, dict):
+        raise ValueError("build-plan terminal producers must be an object")
+    raw_link = terminal.get("link")
+    if raw_link is None:
+        return ()
+    if not isinstance(raw_link, dict):
+        raise ValueError("build-plan terminal link policy must be an object")
+    if "analysis_added_options" not in raw_link:
+        return ()
+    policy = ClassicAnalysisLinkPolicy.model_validate(
+        {"analysis_added_options": raw_link["analysis_added_options"]}
+    )
+    return tuple(policy.analysis_added_options)
+
+
+def classic_analysis_pdb_paths(bundle: ProjectBundle) -> tuple[tuple[str, str], ...]:
+    """Derive analysis PDB outputs without admitting protected project paths."""
+
+    if bundle.build_plan is None:
+        return ()
+    if not classic_analysis_link_options(bundle.build_plan):
+        return ()
+    if bundle.source_manifest is None:
+        raise ValueError("analysis PDB outputs require a complete source manifest")
+
+    claims: dict[str, str] = {}
+
+    def claim(relative: str, owner: str) -> None:
+        folded = relative.replace("\\", "/").casefold()
+        previous = claims.get(folded)
+        if previous is not None:
+            raise ValueError(
+                f"analysis PDB path {relative!r} aliases protected {previous}"
+            )
+        claims[folded] = owner
+
+    for target in bundle.spec.targets:
+        claim(target.artifact, f"target artifact for {target.id!r}")
+        claim(target.oracle, f"verification oracle for {target.id!r}")
+    for entry in bundle.source_manifest.entries:
+        claim(entry.path, f"source-manifest entry {entry.path!r}")
+    for relative, owner in (
+        (bundle.spec.toolchain.lock_file, "toolchain lock"),
+        (bundle.spec.layout.source_manifest, "source manifest"),
+        (bundle.spec.layout.build_plan, "build plan"),
+        (bundle.spec.layout.producer_graph, "producer graph"),
+    ):
+        claim(relative, owner)
+
+    protected_roots = tuple(
+        value.replace("\\", "/").rstrip("/").casefold()
+        for value in (
+            bundle.spec.state_dir,
+            bundle.spec.layout.interventions,
+            bundle.spec.layout.proofs,
+            bundle.spec.layout.oracles,
+        )
+    )
+    derived: list[tuple[str, str]] = []
+    for target in bundle.spec.targets:
+        relative = PurePosixPath(target.artifact).with_suffix(".PDB").as_posix()
+        folded = relative.casefold()
+        protected_root = next(
+            (
+                root
+                for root in protected_roots
+                if folded == root or folded.startswith(root + "/")
+            ),
+            None,
+        )
+        if protected_root is not None:
+            raise ValueError(
+                f"analysis PDB path {relative!r} enters protected project root "
+                f"{protected_root!r}"
+            )
+        claim(relative, f"analysis PDB for {target.id!r}")
+        derived.append((target.id, relative))
+    return tuple(derived)
 
 
 def _validate_archive_link_contracts(
@@ -1171,6 +1279,7 @@ class ProjectBundle(StrictModel):
         if self.build_plan is not None:
             if self.source_manifest is None:
                 raise ValueError("build plan requires a portable source manifest")
+            classic_analysis_pdb_paths(self)
             actual_source_manifest_digest = source_manifest_digest(self.source_manifest)
             if self.build_plan.source_manifest_digest != actual_source_manifest_digest:
                 raise ValueError("build-plan source manifest digest does not match its document")
@@ -1370,6 +1479,7 @@ class ProjectBundle(StrictModel):
                 raise ValueError(
                     f"intervention {item.id!r} has dangling dependencies: {sorted(unknown)}"
                 )
+        _validate_classic_donor_beneficiaries(interventions)
         _reject_dependency_cycles(interventions)
         if self.build_plan is not None:
             overlay_ids = {
@@ -1512,6 +1622,37 @@ def _require_unique(values: Iterable[str], label: str) -> None:
         raise ValueError(f"duplicate {label}: {', '.join(sorted(duplicates))}")
 
 
+def _validate_classic_donor_beneficiaries(
+    interventions: tuple[Intervention, ...],
+) -> None:
+    """Keep donor cost allocation identical to its dependency consumers."""
+
+    consumers: dict[str, dict[tuple[str, str, str], Scope]] = {}
+    for intervention in interventions:
+        scope = intervention.scope
+        if scope.function is None or scope.translation_unit is None:
+            continue
+        key = (scope.target, scope.translation_unit, scope.function)
+        for dependency in intervention.dependencies:
+            consumers.setdefault(dependency, {})[key] = scope
+
+    for intervention in interventions:
+        if not (
+            isinstance(intervention, ClassicRecipeIntervention)
+            and intervention.role is ClassicRecipeRole.DONOR
+        ):
+            continue
+        expected = tuple(
+            consumers.get(intervention.id, {})[key]
+            for key in sorted(consumers.get(intervention.id, {}))
+        )
+        if intervention.beneficiaries != expected:
+            raise ValueError(
+                f"classic donor {intervention.id!r} beneficiaries differ from "
+                "its dependency consumers"
+            )
+
+
 def _reject_dependency_cycles(interventions: tuple[Intervention, ...]) -> None:
     graph = {item.id: item.dependencies for item in interventions}
     visiting: set[str] = set()
@@ -1532,134 +1673,6 @@ def _reject_dependency_cycles(interventions: tuple[Intervention, ...]) -> None:
         visit(node)
 
 
-ModelT = TypeVar("ModelT", bound=StrictModel)
-
-
-def _load_json_model(path: Path, model: type[ModelT]) -> ModelT:
-    try:
-        value = strict_load(path)
-        return model.model_validate_json(canonical_json(value))
-    except (StrictJSONError, ValueError) as exc:
-        if isinstance(exc, SchemaError):
-            raise
-        raise SchemaError(f"invalid {path}: {exc}") from exc
-
-
-def load_project(path: str | Path) -> ProjectSpec:
-    """Load a strict ``reprobit.toml`` entry point."""
-
-    source = Path(path)
-    if source.is_dir():
-        source = source / "reprobit.toml"
-    try:
-        document = tomllib.loads(source.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
-        raise SchemaError(f"cannot load {source}: {exc}") from exc
-    version = document.get("schema_version")
-    if version != 3:
-        raise SchemaVersionError(f"{source} uses schema {version!r}; runtime accepts only schema 3")
-    try:
-        # TOML arrays are lists; round-tripping through JSON retains strict scalar
-        # types while allowing immutable tuple fields to consume array syntax.
-        return ProjectSpec.model_validate_json(canonical_json(document))
-    except ValueError as exc:
-        raise SchemaError(f"invalid {source}: {exc}") from exc
-
-
-def _safe_child(root: Path, relative: str) -> Path:
-    candidate = root.joinpath(*relative.replace("\\", "/").split("/"))
-    resolved = candidate.resolve()
-    try:
-        resolved.relative_to(root)
-    except ValueError as exc:
-        raise SchemaError(f"path escapes project root: {relative}") from exc
-    return resolved
-
-
-def _document_paths(root: Path, relative: str) -> tuple[Path, ...]:
-    directory = _safe_child(root, relative)
-    if not directory.is_dir():
-        raise SchemaError(f"manifest directory does not exist: {directory}")
-    paths = tuple(sorted(directory.rglob("*.json"), key=lambda item: item.as_posix()))
-    for path in paths:
-        resolved = path.resolve()
-        try:
-            resolved.relative_to(root)
-        except ValueError as exc:
-            raise SchemaError(f"manifest path escapes project root: {path}") from exc
-    return paths
-
-
-def load_project_tree(
-    root: str | Path,
-    *,
-    verify_source_authority: bool = True,
-    overlay_render_session: ClassicOverlayRenderSession | None = None,
-) -> ProjectBundle:
-    """Load and cross-validate every committed schema-v3 document."""
-
-    project_root = Path(root).resolve()
-    if not project_root.is_dir():
-        raise SchemaError(f"project root is not a directory: {project_root}")
-    spec = load_project(project_root / "reprobit.toml")
-    lock_path = _safe_child(project_root, spec.toolchain.lock_file)
-    toolchain_lock = _load_json_model(lock_path, ToolchainLock)
-    from reprobit.toolchains import (
-        TOOLCHAIN_PROFILES,
-        ToolchainError,
-        validate_toolchain_profile_sources,
-    )
-
-    if toolchain_lock.profile in TOOLCHAIN_PROFILES:
-        try:
-            validate_toolchain_profile_sources(toolchain_lock)
-        except ToolchainError as exc:
-            raise SchemaError(f"invalid {lock_path}: {exc}") from exc
-    source_manifest_path = _safe_child(project_root, spec.layout.source_manifest)
-    source_manifest = _load_json_model(source_manifest_path, SourceManifestDocument)
-    build_plan_path = _safe_child(project_root, spec.layout.build_plan)
-    build_plan = (
-        _load_json_model(build_plan_path, BuildPlanDocument) if build_plan_path.is_file() else None
-    )
-    producer_graph_path = _safe_child(project_root, spec.layout.producer_graph)
-    producer_graph = (
-        read_producer_graph(producer_graph_path) if producer_graph_path.is_file() else None
-    )
-    intervention_documents = tuple(
-        _load_json_model(path, InterventionDocument)
-        for path in _document_paths(project_root, spec.layout.interventions)
-    )
-    proof_documents = tuple(
-        _load_json_model(path, ProofDocument)
-        for path in _document_paths(project_root, spec.layout.proofs)
-    )
-    oracle_documents = tuple(
-        _load_json_model(path, OracleDocument)
-        for path in _document_paths(project_root, spec.layout.oracles)
-    )
-    try:
-        bundle = ProjectBundle(
-            root=os.fspath(project_root),
-            spec=spec,
-            toolchain_lock=toolchain_lock,
-            source_manifest=source_manifest,
-            build_plan=build_plan,
-            producer_graph=producer_graph,
-            intervention_documents=intervention_documents,
-            proof_documents=proof_documents,
-            oracle_documents=oracle_documents,
-        )
-        if verify_source_authority:
-            from reprobit.source_authority import validate_source_authority
-
-            validate_source_authority(
-                bundle,
-                project_root,
-                render_session=overlay_render_session,
-            )
-        return bundle
-    except ValueError as exc:
-        raise SchemaError(f"invalid project tree: {exc}") from exc
 
 
 def schema_catalog() -> JsonValue:
@@ -1802,7 +1815,6 @@ __all__ = [
     "OracleInstallRange",
     "OverlayOperation",
     "ProducerGraphBuildAdapter",
-    "ProducerGraphDocument",
     "ProjectBundle",
     "ProjectSpec",
     "ProofDocument",
@@ -1821,10 +1833,9 @@ __all__ = [
     "ToolchainProfileSource",
     "ToolchainRef",
     "VerifierSpec",
-    "canonical_json",
+    "classic_analysis_link_options",
+    "classic_analysis_pdb_paths",
     "legacy_allowlist_digest",
-    "load_project",
-    "load_project_tree",
     "project_document_schemas",
     "schema_catalog",
     "source_manifest_digest",

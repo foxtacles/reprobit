@@ -28,21 +28,25 @@ checks reproduced exactly, and fourteen deliberately broken claims were each
 refused by the same run.  These tests fix the results, and the refusals fix
 every form that was measured and then deliberately LEFT OUT.
 """
+
 from __future__ import annotations
 
 import hashlib
 import unittest
 
-from reprobit import classic as byte_identity
+import reprobit.classic.registers as register_algorithms
+import reprobit.classic.scheduling as schedule_algorithms
+from reprobit.binary import ByteIdentityError
 
 
 def decode(encoding: str, relocations: dict | None = None) -> dict:
-    return byte_identity.decode_ia32_bijection_instruction(
-        bytes.fromhex(encoding), 0, encoding, relocations)
+    return register_algorithms.decode_ia32_bijection_instruction(
+        bytes.fromhex(encoding), 0, encoding, relocations
+    )
 
 
 def refusal(case, encoding: str) -> str:
-    with case.assertRaises(byte_identity.ByteIdentityError) as caught:
+    with case.assertRaises(ByteIdentityError) as caught:
         decode(encoding)
     return str(caught.exception)
 
@@ -64,11 +68,10 @@ class AddedFormTests(unittest.TestCase):
         """`90` is NOP; `91..97` exchange EAX with a register the field
         names, and the other half of that exchange is named by nothing."""
         for encoding in ("91", "92", "93", "96", "97"):
-            self.assertIn("outside the register-bijection table",
-                          refusal(self, encoding))
+            self.assertIn("outside the register-bijection table", refusal(self, encoding))
 
     def test_a_byte_alu_form_freezes_both_fields(self):
-        decoded = decode("0ad3")               # or dl, bl
+        decoded = decode("0ad3")  # or dl, bl
         self.assertEqual(decoded["reads"], frozenset({"ebx", "edx"}))
         self.assertEqual(decoded["writes"], frozenset())
         self.assertEqual(decoded["frozen"], frozenset({"ebx", "edx"}))
@@ -77,11 +80,10 @@ class AddedFormTests(unittest.TestCase):
         self.assertEqual(decoded["fields"], [])
 
     def test_a_byte_alu_memory_form_rewrites_only_its_address_register(self):
-        decoded = decode("224524")             # and al, [ebp+0x24]
+        decoded = decode("224524")  # and al, [ebp+0x24]
         self.assertEqual(decoded["reads"], frozenset({"eax", "ebp"}))
         self.assertEqual(decoded["frozen"], frozenset({"eax"}))
-        self.assertEqual(decoded["read_atoms"],
-                         frozenset({"eax.l", "ebp.w"}))
+        self.assertEqual(decoded["read_atoms"], frozenset({"eax.l", "ebp.w"}))
         self.assertEqual(decoded["write_atoms"], frozenset({"eax.l"}))
         self.assertEqual(decoded["fields"], [(1, 0)])
         self.assertEqual(decoded["memory"]["width"], 1)
@@ -103,8 +105,7 @@ class AddedFormTests(unittest.TestCase):
             self.assertEqual(decoded["write_atoms"], frozenset(), encoding)
 
     def test_the_dword_accumulator_forms_define_eax(self):
-        for encoding in ("25ff000000", "0d0e1a1a0f", "2d33010000",
-                         "3500000400"):
+        for encoding in ("25ff000000", "0d0e1a1a0f", "2d33010000", "3500000400"):
             decoded = decode(encoding)
             self.assertEqual(decoded["reads"], frozenset({"eax"}), encoding)
             self.assertEqual(decoded["writes"], frozenset({"eax"}), encoding)
@@ -118,7 +119,7 @@ class AddedFormTests(unittest.TestCase):
             self.assertEqual(decoded["write_atoms"], frozenset(), encoding)
 
     def test_mov_r8_imm8_freezes_its_field_and_reads_nothing(self):
-        decoded = decode("b301")               # mov bl, 1
+        decoded = decode("b301")  # mov bl, 1
         self.assertEqual(decoded["fields"], [])
         self.assertEqual(decoded["frozen"], frozenset({"ebx"}))
         self.assertEqual(decoded["reads"], frozenset({"ebx"}))
@@ -134,21 +135,21 @@ class AddedFormTests(unittest.TestCase):
         self.assertEqual(decoded["fields"], [])
 
     def test_a_dword_shift_by_immediate_reads_and_defines_its_operand(self):
-        decoded = decode("c1e003")             # shl eax, 3
+        decoded = decode("c1e003")  # shl eax, 3
         self.assertEqual(decoded["reads"], frozenset({"eax"}))
         self.assertEqual(decoded["writes"], frozenset({"eax"}))
         self.assertEqual(decoded["frozen"], frozenset())
         self.assertEqual(decoded["fields"], [(1, 0)])
 
     def test_a_shift_by_cl_freezes_ecx(self):
-        decoded = decode("d3e0")               # shl eax, cl
+        decoded = decode("d3e0")  # shl eax, cl
         self.assertEqual(decoded["reads"], frozenset({"eax", "ecx"}))
         self.assertEqual(decoded["writes"], frozenset({"eax"}))
         self.assertEqual(decoded["frozen"], frozenset({"ecx"}))
         self.assertEqual(decoded["fields"], [(1, 0)])
 
     def test_a_byte_shift_by_cl_freezes_both(self):
-        decoded = decode("d2e2")               # shl dl, cl
+        decoded = decode("d2e2")  # shl dl, cl
         self.assertEqual(decoded["reads"], frozenset({"ecx", "edx"}))
         self.assertEqual(decoded["writes"], frozenset())
         self.assertEqual(decoded["frozen"], frozenset({"ecx", "edx"}))
@@ -156,10 +157,8 @@ class AddedFormTests(unittest.TestCase):
 
     def test_the_rotate_through_carry_members_stay_refused(self):
         """RCL and RCR rotate through CF, and /6 is an undefined slot."""
-        for encoding in ("c1d003", "c1d803", "c1f003", "d1d0", "d3d0",
-                         "c0d003", "d0d0", "d2d0"):
-            self.assertIn("outside the register-bijection table",
-                          refusal(self, encoding))
+        for encoding in ("c1d003", "c1d803", "c1f003", "d1d0", "d3d0", "c0d003", "d0d0", "d2d0"):
+            self.assertIn("outside the register-bijection table", refusal(self, encoding))
 
     def test_inc_and_dec_r_m32_fall_through_and_write_memory(self):
         for encoding, base in (("ff4e0c", "esi"), ("ff470c", "edi")):
@@ -172,7 +171,7 @@ class AddedFormTests(unittest.TestCase):
             self.assertEqual(decoded["memory"]["width"], 4, encoding)
 
     def test_inc_r32_through_the_group_defines_the_register(self):
-        decoded = decode("ffc1")               # inc ecx
+        decoded = decode("ffc1")  # inc ecx
         self.assertEqual(decoded["reads"], frozenset({"ecx"}))
         self.assertEqual(decoded["writes"], frozenset({"ecx"}))
         self.assertEqual(decoded["flow"], "fall")
@@ -181,8 +180,7 @@ class AddedFormTests(unittest.TestCase):
         """/3 and /5 are far transfers and /6 is PUSH r/m32, whose store at
         [esp-4] this decoder does not describe."""
         for encoding in ("ff5e0c", "ff6e0c", "ff7508"):
-            self.assertIn("outside the register-bijection table",
-                          refusal(self, encoding))
+            self.assertIn("outside the register-bijection table", refusal(self, encoding))
 
     def test_the_indirect_call_and_computed_jump_are_unchanged(self):
         self.assertEqual(decode("ffd1")["flow"], "call")
@@ -193,11 +191,10 @@ class OperandSizePrefixTests(unittest.TestCase):
     """`66` widens a form only where a 16-bit write cannot be a false kill."""
 
     def test_a_sixteen_bit_load_kills_only_the_low_two_atoms(self):
-        decoded = decode("668b4a24")           # mov cx, [edx+0x24]
+        decoded = decode("668b4a24")  # mov cx, [edx+0x24]
         self.assertEqual(decoded["reads"], frozenset({"ecx", "edx"}))
         self.assertEqual(decoded["writes"], frozenset())
-        self.assertEqual(decoded["write_atoms"],
-                         frozenset({"ecx.l", "ecx.h"}))
+        self.assertEqual(decoded["write_atoms"], frozenset({"ecx.l", "ecx.h"}))
         self.assertEqual(decoded["memory"]["width"], 2)
         self.assertEqual(sorted(decoded["fields"]), [(2, 0), (2, 3)])
 
@@ -206,9 +203,10 @@ class OperandSizePrefixTests(unittest.TestCase):
         it was.  Crediting the idiom here would be a false kill of edi.u."""
         wide = decode("33ff")
         self.assertEqual(wide["reads"], frozenset())
-        self.assertEqual(wide["write_atoms"],
-                         frozenset({"edi.w"}) if False
-                         else byte_identity.ia32_register_atoms({"edi"}))
+        self.assertEqual(
+            wide["write_atoms"],
+            frozenset({"edi.w"}) if False else register_algorithms.ia32_register_atoms({"edi"}),
+        )
         narrow = decode("6633ff")
         self.assertEqual(narrow["reads"], frozenset({"edi"}))
         self.assertEqual(narrow["writes"], frozenset())
@@ -216,16 +214,15 @@ class OperandSizePrefixTests(unittest.TestCase):
         self.assertEqual(narrow["read_atoms"], frozenset({"edi.w"}))
 
     def test_inc_r16_kills_nothing_of_an_index_register(self):
-        decoded = decode("6647")               # inc di
+        decoded = decode("6647")  # inc di
         self.assertEqual(decoded["writes"], frozenset())
         self.assertEqual(decoded["write_atoms"], frozenset())
         self.assertEqual(decoded["fields"], [(1, 0)])
 
     def test_inc_r16_kills_the_low_two_atoms_of_a_byte_register(self):
-        decoded = decode("6643")               # inc bx
+        decoded = decode("6643")  # inc bx
         self.assertEqual(decoded["writes"], frozenset())
-        self.assertEqual(decoded["write_atoms"],
-                         frozenset({"ebx.l", "ebx.h"}))
+        self.assertEqual(decoded["write_atoms"], frozenset({"ebx.l", "ebx.h"}))
 
     def test_a_sixteen_bit_store_narrows_the_memory_descriptor(self):
         decoded = decode("66c7819c0000000100")
@@ -234,13 +231,13 @@ class OperandSizePrefixTests(unittest.TestCase):
         self.assertFalse(decoded["memory"]["read"])
 
     def test_a_sixteen_bit_group_one_compare_reads_only(self):
-        decoded = decode("66837812ff")         # cmp word [eax+0x12], -1
+        decoded = decode("66837812ff")  # cmp word [eax+0x12], -1
         self.assertEqual(decoded["reads"], frozenset({"eax"}))
         self.assertEqual(decoded["write_atoms"], frozenset())
         self.assertEqual(decoded["memory"]["width"], 2)
 
     def test_a_sixteen_bit_accumulator_compare_is_admitted(self):
-        decoded = decode("663d0100")           # cmp ax, 1
+        decoded = decode("663d0100")  # cmp ax, 1
         self.assertEqual(decoded["reads"], frozenset({"eax"}))
         self.assertEqual(decoded["writes"], frozenset())
         self.assertEqual(decoded["frozen"], frozenset({"eax"}))
@@ -250,8 +247,7 @@ class OperandSizePrefixTests(unittest.TestCase):
         definition of EAX is a full one; there is no field for the
         width-aware rule to work on, so the prefix is refused."""
         for encoding in ("66050100", "66250100", "662d0100", "660d0100"):
-            self.assertIn("operand-size prefix is outside",
-                          refusal(self, encoding))
+            self.assertIn("operand-size prefix is outside", refusal(self, encoding))
 
     def test_a_sixteen_bit_push_stays_refused(self):
         """`push ax` moves ESP by two; the stack model describes four."""
@@ -261,17 +257,14 @@ class OperandSizePrefixTests(unittest.TestCase):
     def test_a_sixteen_bit_group_three_stays_refused(self):
         """MUL/DIV share the opcode and their implicit pair at 16 bits is
         DX:AX, not EDX:EAX."""
-        self.assertIn("operand-size prefix is outside",
-                      refusal(self, "66f7d9"))
+        self.assertIn("operand-size prefix is outside", refusal(self, "66f7d9"))
 
     def test_the_prefix_is_refused_on_the_transfer_members_of_ff(self):
-        self.assertIn("operand-size prefix on extension /2",
-                      refusal(self, "66ffd1"))
-        self.assertIn("operand-size prefix on extension /4",
-                      refusal(self, "66ff24851c0f1010"))
+        self.assertIn("operand-size prefix on extension /2", refusal(self, "66ffd1"))
+        self.assertIn("operand-size prefix on extension /4", refusal(self, "66ff24851c0f1010"))
 
     def test_the_prefix_is_admitted_on_inc_and_dec_r_m16(self):
-        decoded = decode("66ff86d4000000")     # inc word [esi+0xd4]
+        decoded = decode("66ff86d4000000")  # inc word [esi+0xd4]
         self.assertEqual(decoded["memory"]["width"], 2)
         self.assertTrue(decoded["memory"]["write"])
 
@@ -313,8 +306,7 @@ class RepeatedStringFormTests(unittest.TestCase):
         self.assertFalse(decoded["memory"]["write"])
 
     def test_every_string_form_declares_its_memory_unknown(self):
-        for encoding in ("f3a4", "f3a5", "f3aa", "f3ab", "f2ae", "f3ae",
-                         "f2a6", "f3a6"):
+        for encoding in ("f3a4", "f3a5", "f3aa", "f3ab", "f2ae", "f3ae", "f2a6", "f3a6"):
             self.assertTrue(decode(encoding)["memory"]["unknown"], encoding)
             self.assertIsNone(decode(encoding)["memory"]["base"], encoding)
             self.assertEqual(decode(encoding)["memory"]["width"], 0, encoding)
@@ -327,50 +319,41 @@ class RepeatedStringFormTests(unittest.TestCase):
         A span whose extent is a runtime count has neither, so the class it
         would otherwise mislead refuses it -- twice over, because `F3 A5` is
         not in the schedule flag table either."""
-        with self.assertRaises(byte_identity.ByteIdentityError) as caught:
-            byte_identity.ia32_schedule_instruction_facts(
-                decode("f3a5"), "window")
-        self.assertIn("outside the instruction-schedule table",
-                      str(caught.exception))
+        with self.assertRaises(ByteIdentityError) as caught:
+            schedule_algorithms.ia32_schedule_instruction_facts(decode("f3a5"), "window")
+        self.assertIn("outside the instruction-schedule table", str(caught.exception))
         # and the gate behind it, reached by handing an opcode the schedule
         # table DOES admit a memory descriptor of unknown extent
         smuggled = dict(decode("8b4608"))
         smuggled["memory"] = dict(decode("f3a5")["memory"])
-        with self.assertRaises(byte_identity.ByteIdentityError) as caught:
-            byte_identity.ia32_schedule_instruction_facts(smuggled, "window")
+        with self.assertRaises(ByteIdentityError) as caught:
+            schedule_algorithms.ia32_schedule_instruction_facts(smuggled, "window")
         self.assertIn("unknown extent", str(caught.exception))
 
     def test_a_string_opcode_without_a_repeat_prefix_stays_refused(self):
         for encoding in ("a4", "a5", "aa", "ab", "ae", "a6", "ac", "ad"):
-            self.assertIn("outside the register-bijection table",
-                          refusal(self, encoding))
+            self.assertIn("outside the register-bijection table", refusal(self, encoding))
 
     def test_a_repeat_prefix_on_a_non_string_opcode_stays_refused(self):
         for encoding in ("f390", "f38bc1", "f2c3", "f38b4608"):
-            self.assertIn("outside the register-bijection table",
-                          refusal(self, encoding))
+            self.assertIn("outside the register-bijection table", refusal(self, encoding))
 
     def test_repne_on_a_movs_stays_refused(self):
         """Only the prefix/opcode PAIRS in the table are admitted: REPNE MOVS
         is architecturally legal and semantically not what MOVS with REP is,
         so it is not guessed."""
-        self.assertIn("outside the register-bijection table",
-                      refusal(self, "f2a5"))
-        self.assertIn("outside the register-bijection table",
-                      refusal(self, "f2ab"))
+        self.assertIn("outside the register-bijection table", refusal(self, "f2a5"))
+        self.assertIn("outside the register-bijection table", refusal(self, "f2ab"))
 
     def test_the_lock_prefix_stays_refused(self):
-        self.assertIn("prefixed instructions are outside",
-                      refusal(self, "f00130"))
+        self.assertIn("prefixed instructions are outside", refusal(self, "f00130"))
 
     def test_an_operand_size_prefix_on_a_string_form_stays_refused(self):
         for encoding in ("66f3a5", "f366a5", "66f3ab"):
-            self.assertIn("repeated string operation",
-                          refusal(self, encoding))
+            self.assertIn("repeated string operation", refusal(self, encoding))
 
     def test_two_repeat_prefixes_are_refused(self):
-        self.assertIn("unsupported repeated instruction prefix",
-                      refusal(self, "f3f3a5"))
+        self.assertIn("unsupported repeated instruction prefix", refusal(self, "f3f3a5"))
 
 
 class AddressRegisterAtomTests(unittest.TestCase):
@@ -384,40 +367,36 @@ class AddressRegisterAtomTests(unittest.TestCase):
     """
 
     def test_a_base_register_is_live_in_the_atom_lattice(self):
-        decoded = decode("8b4608")             # mov eax, [esi+8]
+        decoded = decode("8b4608")  # mov eax, [esi+8]
         self.assertEqual(decoded["reads"], frozenset({"esi"}))
         self.assertEqual(decoded["read_atoms"], frozenset({"esi.w"}))
 
     def test_a_sib_base_and_index_are_both_live(self):
-        decoded = decode("8b448f10")           # mov eax, [edi+ecx*4+0x10]
+        decoded = decode("8b448f10")  # mov eax, [edi+ecx*4+0x10]
         self.assertEqual(decoded["reads"], frozenset({"ecx", "edi"}))
         self.assertEqual(
-            decoded["read_atoms"],
-            byte_identity.ia32_register_atoms({"ecx", "edi"}))
+            decoded["read_atoms"], register_algorithms.ia32_register_atoms({"ecx", "edi"})
+        )
 
     def test_the_fixpoint_keeps_an_address_register_live(self):
         """The end-to-end statement: a body that loads through EBX before
         defining it must report EBX live on entry."""
-        body = bytes.fromhex("8b03" "8bd8" "c3")   # mov eax,[ebx]; mov ebx,eax
-        instructions = byte_identity.decode_ia32_bijection_body(body, "live")
-        live, _ = byte_identity._register_bijection_live_sets(
-            instructions, "live")
-        self.assertLessEqual(byte_identity.ia32_register_atoms({"ebx"}),
-                             live[0])
+        body = bytes.fromhex("8b038bd8c3")  # mov eax,[ebx]; mov ebx,eax
+        instructions = register_algorithms.decode_ia32_bijection_body(body, "live")
+        live, _ = register_algorithms._register_bijection_live_sets(instructions, "live")
+        self.assertLessEqual(register_algorithms.ia32_register_atoms({"ebx"}), live[0])
 
 
 class OpcodeRegisterFieldTests(unittest.TestCase):
     """The 3-bit opcode field is accounted for at the form's own width."""
 
     def test_a_thirty_two_bit_opreg_is_unchanged(self):
-        decoded = decode("40")                 # inc eax
+        decoded = decode("40")  # inc eax
         self.assertEqual(decoded["reads"], frozenset({"eax"}))
         self.assertEqual(decoded["writes"], frozenset({"eax"}))
         self.assertEqual(decoded["fields"], [(0, 0)])
-        self.assertEqual(decoded["read_atoms"],
-                         byte_identity.ia32_register_atoms({"eax"}))
-        self.assertEqual(decoded["write_atoms"],
-                         byte_identity.ia32_register_atoms({"eax"}))
+        self.assertEqual(decoded["read_atoms"], register_algorithms.ia32_register_atoms({"eax"}))
+        self.assertEqual(decoded["write_atoms"], register_algorithms.ia32_register_atoms({"eax"}))
 
     def test_push_and_pop_are_unchanged(self):
         push = decode("50")
@@ -438,8 +417,7 @@ class OpcodeRegisterFieldTests(unittest.TestCase):
         decoded = decode("66b80100")
         self.assertEqual(decoded["reads"], frozenset({"eax"}))
         self.assertEqual(decoded["writes"], frozenset())
-        self.assertEqual(decoded["write_atoms"],
-                         frozenset({"eax.l", "eax.h"}))
+        self.assertEqual(decoded["write_atoms"], frozenset({"eax.l", "eax.h"}))
         self.assertEqual(decoded["fields"], [(1, 0)])
 
 
@@ -452,8 +430,8 @@ class DeliberateRefusalTests(unittest.TestCase):
         failure mode the web-recolour class had to fix once already."""
         self.assertIn("opcode 0x00 is outside", refusal(self, "0000"))
         body = bytes(16)
-        with self.assertRaises(byte_identity.ByteIdentityError):
-            byte_identity.decode_ia32_bijection_body(body, "zeros")
+        with self.assertRaises(ByteIdentityError):
+            register_algorithms.decode_ia32_bijection_body(body, "zeros")
 
     def test_movzx_and_movsx_from_a_byte_source_are_admitted_asymmetrically(self):
         """`0F B6`/`0F BE` became load-bearing on 2026-08-22: Tickle's
@@ -461,12 +439,12 @@ class DeliberateRefusalTests(unittest.TestCase):
         rewritable and kills; the r/m8 source is a frozen AL..BH field,
         recorded through the form's `rm_width`; a memory source freezes
         nothing (its base and index are 32-bit address registers)."""
-        decoded = decode("0fbec3")          # movsx eax, bl
+        decoded = decode("0fbec3")  # movsx eax, bl
         self.assertEqual(decoded["writes"], frozenset({"eax"}))
         self.assertEqual(decoded["frozen"], frozenset({"ebx"}))
         self.assertEqual(sorted(decoded["fields"]), [(2, 3)])
         self.assertIn("ebx.l", decoded["read_atoms"])
-        decoded = decode("0fb64608")        # movzx eax, byte [esi+8]
+        decoded = decode("0fb64608")  # movzx eax, byte [esi+8]
         self.assertEqual(decoded["writes"], frozenset({"eax"}))
         self.assertEqual(decoded["frozen"], frozenset())
         self.assertIn("esi.w", decoded["read_atoms"])
@@ -479,43 +457,50 @@ class DeliberateRefusalTests(unittest.TestCase):
         self.assertEqual(decoded["writes"], frozenset({"eax"}))
         self.assertEqual(sorted(decoded["fields"]), [(2, 0), (2, 3)])
 
-    def test_imul_stays_refused_and_setcc_is_admitted(self):
-        """`0F AF` is still not needed by any row, so it is not guessed.
+    def test_dword_imul_and_setcc_are_admitted(self):
+        """`0F AF /r` is the exact two-operand DWORD form used by TestTimer.
         SETcc (`0F 90..9F`) became load-bearing on 2026-08-22: the
         BuildROIMap donor-rewriting pre-image decodes one, and the ISA
         defines its reg field as an ignored /0 extension with an r/m8
         write, which is exactly how the table admits it."""
-        self.assertIn("outside the register-bijection table",
-                      refusal(self, "0faf6c2478"))
+        decoded = decode("0faf6c2478")  # imul ebp, dword ptr [esp+0x78]
+        self.assertEqual(decoded["reads"], frozenset({"ebp", "esp"}))
+        self.assertEqual(decoded["writes"], frozenset({"ebp"}))
+        self.assertEqual(decoded["fields"], [(2, 3), (3, 0)])
+        self.assertEqual(decoded["frozen"], frozenset())
+        self.assertEqual(decoded["memory"]["base"], "esp")
+        self.assertTrue(decoded["memory"]["read"])
+        self.assertFalse(decoded["memory"]["write"])
         for encoding, register in (("0f94c0", "eax"), ("0f9cc1", "ecx")):
             decoded = decode(encoding)
             self.assertEqual(decoded["fields"], [])
             self.assertEqual(decoded["frozen"], frozenset({register}))
-            self.assertEqual(decoded["write_atoms"],
-                             frozenset({register + ".l"}))
+            self.assertEqual(decoded["write_atoms"], frozenset({register + ".l"}))
 
     def test_the_flag_and_stack_transfer_forms_stay_refused(self):
         for encoding in ("9c", "9d", "9e", "9f", "60", "61"):
-            self.assertIn("outside the register-bijection table",
-                          refusal(self, encoding))
+            self.assertIn("outside the register-bijection table", refusal(self, encoding))
 
     def test_xchg_and_the_string_load_forms_stay_refused(self):
         for encoding in ("87c1", "86c1", "ac", "ad"):
-            self.assertIn("outside the register-bijection table",
-                          refusal(self, encoding))
+            self.assertIn("outside the register-bijection table", refusal(self, encoding))
 
     def test_the_three_byte_imul_forms_stay_refused(self):
         for encoding in ("6bc00a", "69c000000100"):
-            self.assertIn("outside the register-bijection table",
-                          refusal(self, encoding))
+            self.assertIn("outside the register-bijection table", refusal(self, encoding))
+
+    def test_the_word_two_operand_imul_stays_refused(self):
+        self.assertIn(
+            "operand-size prefix is outside",
+            refusal(self, "660faf6c2478"),
+        )
 
     def test_the_byte_divide_stays_refused(self):
         """`F6 /6` and `/7` divide AX by r/m8 -- an implicit pair the byte
         entry does not describe.  The DWORD siblings under `F7` are
         pre-existing entries and stay admitted with EDX:EAX frozen."""
         for encoding in ("f6f1", "f6f9", "f6e1", "f6e9"):
-            self.assertIn("outside the register-bijection table",
-                          refusal(self, encoding))
+            self.assertIn("outside the register-bijection table", refusal(self, encoding))
         decoded = decode("f7f1")
         self.assertEqual(decoded["frozen"], frozenset({"eax", "edx"}))
 
@@ -529,26 +514,22 @@ class TableIntegrityTests(unittest.TestCase):
     obligations are what make an entry admissible in the first place.
     """
 
-    DIGEST = None          # filled in below, next to the corpus that made it
+    DIGEST = None  # filled in below, next to the corpus that made it
 
     @staticmethod
     def corpus() -> list[str]:
         """A deterministic encoding corpus over the whole table."""
         modrm = [0xC1, 0xD3, 0xFE, 0x46, 0x51, 0x7B, 0x04, 0x8F]
         rows = []
-        for opcode in sorted(byte_identity.IA32_BIJECTION_FORMS):
+        for opcode in sorted(register_algorithms.IA32_BIJECTION_FORMS):
             for prefix in (b"", b"\x66"):
                 for byte in modrm:
-                    rows.append(prefix + bytes([opcode, byte])
-                                + b"\x10\x5a\x5a\x5a\x5a\x5a")
-                rows.append(prefix + bytes([opcode])
-                            + b"\x5a\x5a\x5a\x5a\x5a\x5a")
-        for opcode in sorted(byte_identity.IA32_BIJECTION_TWO_BYTE_FORMS):
+                    rows.append(prefix + bytes([opcode, byte]) + b"\x10\x5a\x5a\x5a\x5a\x5a")
+                rows.append(prefix + bytes([opcode]) + b"\x5a\x5a\x5a\x5a\x5a\x5a")
+        for opcode in sorted(register_algorithms.IA32_BIJECTION_TWO_BYTE_FORMS):
             for byte in modrm:
-                rows.append(bytes([0x0F, opcode, byte])
-                            + b"\x10\x5a\x5a\x5a\x5a\x5a")
-        for prefix, opcode in sorted(
-                byte_identity.IA32_BIJECTION_REPEATED_STRING_FORMS):
+                rows.append(bytes([0x0F, opcode, byte]) + b"\x10\x5a\x5a\x5a\x5a\x5a")
+        for prefix, opcode in sorted(register_algorithms.IA32_BIJECTION_REPEATED_STRING_FORMS):
             rows.append(bytes([prefix, opcode]))
         return [row.hex() for row in rows]
 
@@ -558,13 +539,12 @@ class TableIntegrityTests(unittest.TestCase):
             digest.update(encoding.encode())
             try:
                 decoded = decode(encoding)
-            except byte_identity.ByteIdentityError:
+            except ByteIdentityError:
                 digest.update(b"|refused")
                 continue
             for key in ("length", "flow", "fields"):
                 digest.update(f"|{decoded[key]}".encode())
-            for key in ("reads", "writes", "read_atoms", "write_atoms",
-                        "frozen"):
+            for key in ("reads", "writes", "read_atoms", "write_atoms", "frozen"):
                 digest.update(f"|{sorted(decoded[key])}".encode())
             digest.update(f"|{decoded['memory']}".encode())
         return digest.hexdigest()
@@ -572,22 +552,25 @@ class TableIntegrityTests(unittest.TestCase):
     def test_the_admitted_table_matches_its_hardware_verified_digest(self):
         self.assertEqual(
             self.digest(),
-            # Re-pinned 2026-08-22 (second pin that day) for the deliberate
-            # byte-source MOVZX/MOVSX admission (0F B6/0F BE, asymmetric
-            # rm_width); the prior pin was the SETcc admission.  Every other
-            # row of the corpus digests identically.
-            "7339e65b9630ffd6dcf5ee5a2eafe74269be97317439d26a4d5f3fbb242cb0cd")
+            # Re-pinned 2026-08-29 after an MSVC 4.20/Wine hardware probe of
+            # TestTimer's exact `0F AF 44 24 14` form.  Four independent
+            # register files and multiply inputs confirmed destination
+            # read/write, memory-source/base read, unchanged unrelated GPRs,
+            # unchanged ESP and unchanged source memory.  The emitted object
+            # was disassembled to require those exact five bytes.
+            "e9619e167fca3eebd2e25f31c4409860be719fe6687ee899376eac041c302800",
+        )
 
     def test_the_corpus_covers_every_admitted_opcode(self):
         admitted = set()
         for encoding in self.corpus():
             try:
                 decode(encoding)
-            except byte_identity.ByteIdentityError:
+            except ByteIdentityError:
                 continue
             admitted.add(encoding[:2])
         self.assertGreater(len(admitted), 60)
 
 
-if __name__ == "__main__":       # pragma: no cover
+if __name__ == "__main__":  # pragma: no cover
     unittest.main()

@@ -3,7 +3,10 @@ from __future__ import annotations
 import re
 from collections.abc import Iterator
 from typing import Protocol
-from .foundation import SOURCE_OVERLAY_TOKEN_RE, require, sha256_bytes
+
+from reprobit.binary import require
+
+from .foundation import SOURCE_OVERLAY_TOKEN_RE, sha256_bytes
 
 """Classic compiler algorithms: source proofs."""
 

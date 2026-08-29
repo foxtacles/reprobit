@@ -35,12 +35,19 @@ import unittest
 import test_classic_composed_rewriting_full as composed_fixture
 import test_classic_instruction_schedule_full as fixture
 
-from reprobit import classic as byte_identity
+import reprobit.classic.floating as floating_algorithms
+import reprobit.classic.foundation as foundation_algorithms
+import reprobit.classic.registers as register_algorithms
+import reprobit.classic.rewriting as rewriting_algorithms
+import reprobit.coff as coff_format
+from reprobit.binary import ByteIdentityError
 
-PROLOGUE = bytes.fromhex("5356" "33c9" "8b09")
-PAIRS = [bytes.fromhex("dd442410" "dc4c2418"),
-         bytes.fromhex("dd442420" "dc4c2428"),
-         bytes.fromhex("dd442430" "dc4c2438")]
+PROLOGUE = bytes.fromhex("535633c98b09")
+PAIRS = [
+    bytes.fromhex("dd442410dc4c2418"),
+    bytes.fromhex("dd442420dc4c2428"),
+    bytes.fromhex("dd442430dc4c2438"),
+]
 FADDP = bytes.fromhex("dec1")
 FSTP = bytes.fromhex("dd5c2408")
 TAIL = FSTP + bytes.fromhex("5e5bc3")
@@ -57,20 +64,21 @@ IMAGE_FP = PROLOGUE + PERMUTED + TAIL
 
 def chain_declaration(**overrides):
     item = {
-        "chain_start": CHAIN_START, "chain_end": CHAIN_END,
+        "chain_start": CHAIN_START,
+        "chain_end": CHAIN_END,
         "order": list(ORDER),
         "expected_rewritten_offsets": sorted(
-            index for index in range(CHAIN_START, CHAIN_END)
-            if BODY[index] != IMAGE_FP[index]),
+            index for index in range(CHAIN_START, CHAIN_END) if BODY[index] != IMAGE_FP[index]
+        ),
     }
     item.update(overrides)
     return item
 
 
 def apply_chains(body=BODY, chains=None, relocations=frozenset()):
-    return byte_identity.apply_fp_sum_reassociation(
-        body, chains if chains is not None else [chain_declaration()],
-        relocations, "test")
+    return floating_algorithms.apply_fp_sum_reassociation(
+        body, chains if chains is not None else [chain_declaration()], relocations, "test"
+    )
 
 
 class ApplyTests(unittest.TestCase):
@@ -86,69 +94,73 @@ class ApplyTests(unittest.TestCase):
 
     def test_the_pair_multiset_and_skeleton_survive_the_rewrite(self):
         image, _ = apply_chains()
-        self.assertEqual(sorted([image[6:14], image[14:22], image[24:32]]),
-                         sorted(PAIRS))
+        self.assertEqual(sorted([image[6:14], image[14:22], image[24:32]]), sorted(PAIRS))
         self.assertEqual(image[22:24], FADDP)
         self.assertEqual(image[32:34], FADDP)
         self.assertEqual(image[:CHAIN_START], BODY[:CHAIN_START])
         self.assertEqual(image[CHAIN_END:], BODY[CHAIN_END:])
 
     def test_an_identity_permutation_does_not_move_the_body(self):
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            apply_chains(chains=[chain_declaration(
-                order=[0, 1, 2], expected_rewritten_offsets=[CHAIN_START])])
+        with self.assertRaises(ByteIdentityError) as raised:
+            apply_chains(
+                chains=[
+                    chain_declaration(order=[0, 1, 2], expected_rewritten_offsets=[CHAIN_START])
+                ]
+            )
         self.assertIn("does not move the body", str(raised.exception))
 
     def test_an_order_that_is_not_a_permutation_is_refused(self):
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
+        with self.assertRaises(ByteIdentityError) as raised:
             apply_chains(chains=[chain_declaration(order=[1, 1, 2])])
         self.assertIn("not a permutation", str(raised.exception))
 
     def test_a_non_fp_instruction_inside_the_chain_is_refused(self):
         """F1: only fld m64, fmul m64 and faddp st(1) may appear."""
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
+        with self.assertRaises(ByteIdentityError) as raised:
             apply_chains(chains=[chain_declaration(chain_end=CHAIN_END + 4)])
-        self.assertIn("not an fld m64, fmul m64 or faddp",
-                      str(raised.exception))
+        self.assertIn("not an fld m64, fmul m64 or faddp", str(raised.exception))
 
     def test_a_chain_that_splits_a_product_pair_is_refused(self):
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            apply_chains(chains=[chain_declaration(
-                chain_end=CHAIN_START + 4, order=[1, 0])])
+        with self.assertRaises(ByteIdentityError) as raised:
+            apply_chains(chains=[chain_declaration(chain_end=CHAIN_START + 4, order=[1, 0])])
         self.assertIn("ends inside a product pair", str(raised.exception))
 
     def test_a_relocation_inside_the_chain_is_refused(self):
         """F3: a relocated operand cannot travel with a permuted pair."""
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
+        with self.assertRaises(ByteIdentityError) as raised:
             apply_chains(relocations=frozenset({CHAIN_START + 4}))
-        self.assertIn("relocation lies inside the chain",
-                      str(raised.exception))
+        self.assertIn("relocation lies inside the chain", str(raised.exception))
 
     def test_a_branch_into_the_chain_interior_is_refused(self):
         """F3: the chain is reached only by falling into its first byte."""
         branched = bytearray(BODY)
-        branched[4:6] = bytes.fromhex("7212")   # jb +0x12 -> offset 24
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
+        branched[4:6] = bytes.fromhex("7212")  # jb +0x12 -> offset 24
+        with self.assertRaises(ByteIdentityError) as raised:
             apply_chains(body=bytes(branched))
-        self.assertIn("branch targets the chain interior",
-                      str(raised.exception))
+        self.assertIn("branch targets the chain interior", str(raised.exception))
 
     def test_variable_length_pairs_keep_the_chain_length(self):
         """Pairs of different encodings permute as whole units."""
-        short = bytes.fromhex("dd4560" "dc4d68")     # fld/fmul [ebp+disp8]
+        short = bytes.fromhex("dd4560dc4d68")  # fld/fmul [ebp+disp8]
         body = PROLOGUE + PAIRS[0] + short + FADDP + PAIRS[2] + FADDP + TAIL
         chain_end = len(PROLOGUE) + 8 + 6 + 2 + 8 + 2
-        image, _ = apply_chains(body=body, chains=[{
-            "chain_start": CHAIN_START, "chain_end": chain_end,
-            "order": [1, 0, 2],
-            "expected_rewritten_offsets": sorted(
-                index for index in range(CHAIN_START, chain_end)
-                if body[index] != (PROLOGUE + short + PAIRS[0] + FADDP
-                                   + PAIRS[2] + FADDP + TAIL)[index]),
-        }])
-        self.assertEqual(
-            image, PROLOGUE + short + PAIRS[0] + FADDP + PAIRS[2] + FADDP
-            + TAIL)
+        image, _ = apply_chains(
+            body=body,
+            chains=[
+                {
+                    "chain_start": CHAIN_START,
+                    "chain_end": chain_end,
+                    "order": [1, 0, 2],
+                    "expected_rewritten_offsets": sorted(
+                        index
+                        for index in range(CHAIN_START, chain_end)
+                        if body[index]
+                        != (PROLOGUE + short + PAIRS[0] + FADDP + PAIRS[2] + FADDP + TAIL)[index]
+                    ),
+                }
+            ],
+        )
+        self.assertEqual(image, PROLOGUE + short + PAIRS[0] + FADDP + PAIRS[2] + FADDP + TAIL)
 
 
 class DonorRewritingValidatorTests(unittest.TestCase):
@@ -156,26 +168,28 @@ class DonorRewritingValidatorTests(unittest.TestCase):
 
     def spec(self, **overrides):
         value = {
-            "kind": byte_identity.DONOR_REWRITING_KIND,
+            "kind": rewriting_algorithms.DONOR_REWRITING_KIND,
             "fp_sum_rotations": [chain_declaration()],
-            "register_bijections": [{
-                "mapping": {"ecx": "edx", "edx": "ecx"},
-                "region_start": SIGMA_REGION[0],
-                "region_end": SIGMA_REGION[1],
-                "expected_region_instruction_count": 2,
-                "expected_rewritten_offsets": [3, 5],
-            }],
+            "register_bijections": [
+                {
+                    "mapping": {"ecx": "edx", "edx": "ecx"},
+                    "region_start": SIGMA_REGION[0],
+                    "region_end": SIGMA_REGION[1],
+                    "expected_region_instruction_count": 2,
+                    "expected_rewritten_offsets": [3, 5],
+                }
+            ],
             "expected_instruction_count": 14,
             "expected_changed_offsets": sorted(
-                set(chain_declaration()["expected_rewritten_offsets"])
-                | {3, 5}),
+                set(chain_declaration()["expected_rewritten_offsets"]) | {3, 5}
+            ),
             "expected_procedure_range": [SIZE, 2, SIZE - 3],
             "expected_code_symbol_references": [],
             "expected_external_entries": [],
             "authenticity_rationale": "x" * 64,
         }
         value.update(overrides)
-        return byte_identity.validate_donor_rewriting(value, "test", SIZE)
+        return rewriting_algorithms.validate_donor_rewriting(value, "test", SIZE)
 
     def test_a_valid_declaration_normalizes(self):
         spec = self.spec()
@@ -183,44 +197,55 @@ class DonorRewritingValidatorTests(unittest.TestCase):
         self.assertEqual(len(spec["register_bijections"]), 1)
 
     def test_a_declaration_without_any_certificate_is_refused(self):
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            self.spec(fp_sum_rotations=[], register_bijections=[],
-                      expected_changed_offsets=[1])
+        with self.assertRaises(ByteIdentityError) as raised:
+            self.spec(fp_sum_rotations=[], register_bijections=[], expected_changed_offsets=[1])
         self.assertIn("declares no certificate", str(raised.exception))
 
     def test_overlapping_chains_are_refused(self):
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            self.spec(fp_sum_rotations=[
-                chain_declaration(),
-                chain_declaration(chain_start=CHAIN_START + 2)])
+        with self.assertRaises(ByteIdentityError) as raised:
+            self.spec(
+                fp_sum_rotations=[
+                    chain_declaration(),
+                    chain_declaration(chain_start=CHAIN_START + 2),
+                ]
+            )
         self.assertIn("unsorted or overlapping", str(raised.exception))
 
     def test_a_bijection_inside_a_chain_is_refused(self):
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            self.spec(register_bijections=[{
-                "mapping": {"ecx": "edx", "edx": "ecx"},
-                "region_start": CHAIN_START + 1,
-                "region_end": CHAIN_START + 5,
-                "expected_region_instruction_count": 1,
-                "expected_rewritten_offsets": [CHAIN_START + 2],
-            }], expected_changed_offsets=sorted(
-                set(chain_declaration()["expected_rewritten_offsets"])
-                | {CHAIN_START + 2}))
+        with self.assertRaises(ByteIdentityError) as raised:
+            self.spec(
+                register_bijections=[
+                    {
+                        "mapping": {"ecx": "edx", "edx": "ecx"},
+                        "region_start": CHAIN_START + 1,
+                        "region_end": CHAIN_START + 5,
+                        "expected_region_instruction_count": 1,
+                        "expected_rewritten_offsets": [CHAIN_START + 2],
+                    }
+                ],
+                expected_changed_offsets=sorted(
+                    set(chain_declaration()["expected_rewritten_offsets"]) | {CHAIN_START + 2}
+                ),
+            )
         self.assertIn("inside an fp-sum chain", str(raised.exception))
 
     def test_a_structural_register_in_the_mapping_is_refused(self):
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            self.spec(register_bijections=[{
-                "mapping": {"esp": "edx", "edx": "esp"},
-                "region_start": SIGMA_REGION[0],
-                "region_end": SIGMA_REGION[1],
-                "expected_region_instruction_count": 2,
-                "expected_rewritten_offsets": [3, 5],
-            }])
+        with self.assertRaises(ByteIdentityError) as raised:
+            self.spec(
+                register_bijections=[
+                    {
+                        "mapping": {"esp": "edx", "edx": "esp"},
+                        "region_start": SIGMA_REGION[0],
+                        "region_end": SIGMA_REGION[1],
+                        "expected_region_instruction_count": 2,
+                        "expected_rewritten_offsets": [3, 5],
+                    }
+                ]
+            )
         self.assertIn("touches ESP or EBP", str(raised.exception))
 
     def test_a_changed_set_that_omits_a_rewritten_byte_is_refused(self):
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
+        with self.assertRaises(ByteIdentityError) as raised:
             self.spec(expected_changed_offsets=[3, 5])
         self.assertIn("omits a rewritten byte", str(raised.exception))
 
@@ -233,88 +258,92 @@ class ComposedRewritingIntegrationTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         sigma = bytearray(IMAGE_FP)
-        sigma[3] = 0xD2   # xor ecx,ecx -> xor edx,edx
-        sigma[5] = 0x12   # mov ecx,[ecx] -> mov edx,[edx]
+        sigma[3] = 0xD2  # xor ecx,ecx -> xor edx,edx
+        sigma[5] = 0x12  # mov ecx,[ecx] -> mov edx,[edx]
         cls.IMAGE = bytes(sigma)
         cls.PROCEDURE_RANGE = [SIZE, 2, SIZE - 3]
-        cls.stream = fixture.codeview_stream(
-            size=SIZE, debug_start=2, debug_end=SIZE - 3)
+        cls.stream = fixture.codeview_stream(size=SIZE, debug_start=2, debug_end=SIZE - 3)
         cls.seed = composed_fixture.make_coff(
-            body=BODY, line_rows=((0, 11), (CHAIN_START, 12)),
-            debug_stream=cls.stream)
+            body=BODY, line_rows=((0, 11), (CHAIN_START, 12)), debug_stream=cls.stream
+        )
 
     def record(self, **spec_overrides):
         spec = {
-            "kind": byte_identity.COMPOSED_REWRITING_KIND,
+            "kind": rewriting_algorithms.COMPOSED_REWRITING_KIND,
             "windows": [],
             "relational_sites": [],
             "fp_sum_rotations": [chain_declaration()],
-            "register_bijections": [{
-                "mapping": {"ecx": "edx", "edx": "ecx"},
-                "region_start": SIGMA_REGION[0],
-                "region_end": SIGMA_REGION[1],
-                "expected_region_instruction_count": 2,
-                "expected_rewritten_offsets": [3, 5],
-                "debug_s_register_map": [],
-            }],
+            "register_bijections": [
+                {
+                    "mapping": {"ecx": "edx", "edx": "ecx"},
+                    "region_start": SIGMA_REGION[0],
+                    "region_end": SIGMA_REGION[1],
+                    "expected_region_instruction_count": 2,
+                    "expected_rewritten_offsets": [3, 5],
+                    "debug_s_register_map": [],
+                }
+            ],
             "expected_instruction_count": len(
-                byte_identity.decode_ia32_bijection_body(
-                    self.IMAGE, "fixture", {})),
+                register_algorithms.decode_ia32_bijection_body(self.IMAGE, "fixture", {})
+            ),
             "expected_changed_offsets": sorted(
-                index for index in range(SIZE)
-                if BODY[index] != self.IMAGE[index]),
+                index for index in range(SIZE) if BODY[index] != self.IMAGE[index]
+            ),
             "expected_procedure_range": list(self.PROCEDURE_RANGE),
             "expected_code_symbol_references": [],
             "expected_external_entries": [],
-            "expected_seed_debug_s_sha256":
-                byte_identity.sha256_bytes(self.stream),
-            "expected_image_debug_s_sha256":
-                byte_identity.sha256_bytes(self.stream),
-            "authenticity_rationale":
-                "One chain-scoped fp-sum rotation and one regional register "
-                "bijection composed inside a single entry.",
+            "expected_seed_debug_s_sha256": foundation_algorithms.sha256_bytes(self.stream),
+            "expected_image_debug_s_sha256": foundation_algorithms.sha256_bytes(self.stream),
+            "authenticity_rationale": "One chain-scoped fp-sum rotation and one regional register "
+            "bijection composed inside a single entry.",
         }
         spec.update(spec_overrides)
         return composed_fixture.function_record(
-            self.seed, self.seed, self.IMAGE, composed_rewriting=spec)
+            self.seed, self.seed, self.IMAGE, composed_rewriting=spec
+        )
 
     def test_a_rotation_and_a_bijection_produce_the_candidate(self):
-        composed, detail = (
-            byte_identity.produce_composed_rewriting_candidate(
-                self.seed, self.seed, self.record()))
-        checked = byte_identity.CoffObject(composed)
+        composed, detail = rewriting_algorithms.produce_composed_rewriting_candidate(
+            self.seed, self.seed, self.record()
+        )
+        checked = coff_format.CoffObject(composed)
         section = checked.function_section(fixture.TARGET_SYMBOL)
-        self.assertEqual(byte_identity.coff_body(checked, section),
-                         self.IMAGE)
+        self.assertEqual(coff_format.coff_body(checked, section), self.IMAGE)
         self.assertTrue(detail["candidate_only"])
         self.assertEqual(len(detail["fp_sum_reassociation"]), 1)
         self.assertEqual(len(detail["register_bijections"]), 1)
 
     def test_a_rotation_whose_rewrite_set_differs_is_refused(self):
         record = self.record()
-        record["composed_rewriting"]["fp_sum_rotations"][0][
-            "expected_rewritten_offsets"] = [CHAIN_START]
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            byte_identity.produce_composed_rewriting_candidate(
-                self.seed, self.seed, record)
+        record["composed_rewriting"]["fp_sum_rotations"][0]["expected_rewritten_offsets"] = [
+            CHAIN_START
+        ]
+        with self.assertRaises(ByteIdentityError) as raised:
+            rewriting_algorithms.produce_composed_rewriting_candidate(self.seed, self.seed, record)
         self.assertIn("rewrote a different byte set", str(raised.exception))
 
     def test_a_chain_overlapping_a_bijection_region_is_refused(self):
-        record = self.record(register_bijections=[{
-                "mapping": {"ecx": "edx", "edx": "ecx"},
-                "region_start": CHAIN_START + 1,
-                "region_end": CHAIN_START + 5,
-                "expected_region_instruction_count": 1,
-                "expected_rewritten_offsets": [CHAIN_START + 2],
-                "debug_s_register_map": [],
-            }], expected_changed_offsets=sorted(
-                set(chain_declaration()["expected_rewritten_offsets"])
-                | {CHAIN_START + 2}))
+        record = self.record(
+            register_bijections=[
+                {
+                    "mapping": {"ecx": "edx", "edx": "ecx"},
+                    "region_start": CHAIN_START + 1,
+                    "region_end": CHAIN_START + 5,
+                    "expected_region_instruction_count": 1,
+                    "expected_rewritten_offsets": [CHAIN_START + 2],
+                    "debug_s_register_map": [],
+                }
+            ],
+            expected_changed_offsets=sorted(
+                set(chain_declaration()["expected_rewritten_offsets"]) | {CHAIN_START + 2}
+            ),
+        )
         del record["composed_rewriting"]["windows"]
         del record["composed_rewriting"]["relational_sites"]
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            byte_identity.validate_composed_rewriting(
-                record["composed_rewriting"], "test", SIZE)
+        with self.assertRaises(ByteIdentityError) as raised:
+            rewriting_algorithms.validate_composed_rewriting(
+                record["composed_rewriting"], "test", SIZE
+            )
         self.assertIn("overlaps another certificate", str(raised.exception))
 
 

@@ -9,7 +9,8 @@ import sys
 from pathlib import Path, PurePosixPath
 
 from reprobit.model import Digest
-from reprobit.report import Report, render_report_html
+from reprobit.report import Report
+from reprobit.report_io import render_report_html
 from reprobit.secure_paths import atomic_publish_new_relative, read_relative_file
 from reprobit.strict_json import canonical_json, strict_loads
 

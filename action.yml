@@ -1,83 +1,83 @@
-name: ReproBit byte identity
-description: Build, certify, and report byte-identical compiler output
+name: Verify byte-identical builds with ReproBit
+description: Run a cold build, verify its authenticity, and publish reports
 
 inputs:
   project-directory:
-    description: Directory containing reprobit.toml
+    description: Project directory containing reprobit.toml
     default: .
   toolchain-root:
-    description: Locally provisioned toolchain root
+    description: Path to the already-provisioned local toolchain
     required: true
   compiler-transport:
-    description: POSIX host transport selector for the locked compiler
+    description: Locked Wine launcher for the compiler on macOS or Linux; empty on Windows
     default: ""
   resource-transport:
-    description: POSIX host transport selector for the locked resource compiler
+    description: Locked Wine launcher for the resource compiler on macOS or Linux; empty on Windows
     default: ""
   jobs:
-    description: Maximum globally scheduled jobs
-    default: "1"
+    description: Maximum number of build steps to run at once
+    default: "4"
   policy:
-    description: Optional policy override; clean may narrow allow-quarantine, never broaden it
+    description: Optional narrowing override; clean may narrow allow-quarantine but never broaden it
     default: ""
   initialization-timeout:
-    description: Seconds allowed to initialize each isolated execution lane
+    description: Seconds allowed to prepare each isolated build lane
     default: "600"
   compile-timeout:
-    description: Seconds allowed for one compiler or resource producer
+    description: Seconds allowed for each compiler or resource-compiler process
     default: "600"
   link-timeout:
-    description: Seconds allowed for one librarian or linker producer
+    description: Seconds allowed for each librarian or linker process
     default: "900"
   cleanup-timeout:
-    description: Seconds allowed to drain each isolated execution lane
+    description: Seconds allowed to stop and drain each isolated build lane
     default: "10"
   report-directory:
-    description: Report output directory relative to the project
+    description: Report directory relative to the project
     default: build/reprobit-report
 
 outputs:
   report-produced:
-    description: Whether verification published a validated canonical report
+    description: Whether this run published and validated its canonical reports
     value: ${{ steps.summary.outputs.report-produced }}
   accepted:
-    description: Whether the verification result satisfied the requested policy
+    description: Whether this run met the selected policy
     value: ${{ steps.summary.outputs.accepted }}
   clean:
-    description: Whether every clean-authenticity claim passed
+    description: Whether every clean authenticity claim passed
     value: ${{ steps.summary.outputs.clean }}
   byte-exact:
-    description: Whether all selected target bytes equal their oracles
+    description: Whether every selected candidate matched its reference bytes
     value: ${{ steps.summary.outputs.byte-exact }}
   logic-certified:
-    description: Whether every intervention passed its proof obligations
+    description: Whether every intervention passed its required checks
     value: ${{ steps.summary.outputs.logic-certified }}
   toolchain-origin:
-    description: Whether all first-party payload has toolchain ancestry
+    description: Whether first-party program bytes came from the declared toolchain
     value: ${{ steps.summary.outputs.toolchain-origin }}
   quarantined:
-    description: Whether any allowlisted legacy action was used
+    description: Whether an allowlisted legacy action ran
     value: ${{ steps.summary.outputs.quarantined }}
   total-cost:
-    description: Cost-model total for selected targets
+    description: Total intervention cost for the selected targets
     value: ${{ steps.summary.outputs.total-cost }}
   report-json:
-    description: Canonical JSON report path
+    description: Path to the canonical JSON report
     value: ${{ steps.summary.outputs.report-json }}
   report-html:
-    description: Self-contained HTML report path
+    description: Path to the self-contained HTML report
     value: ${{ steps.summary.outputs.report-html }}
 
 runs:
   using: composite
   steps:
-    - name: Install ReproBit from this action checkout
+    - name: Install this checked-out ReproBit Action
       shell: bash
       env:
         REPROBIT_ACTION_PATH: ${{ github.action_path }}
       run: python -m pip install "$REPROBIT_ACTION_PATH"
 
-    - name: Initialize this verification invocation
+    - name: Create a fresh-run receipt
       id: invocation
       shell: bash
       run: |
@@ -87,7 +87,7 @@ runs:
         printf 'nonce=%s\n' "$nonce" >> "$GITHUB_OUTPUT"
         printf 'receipt=%s\n' "$receipt" >> "$GITHUB_OUTPUT"
 
-    - name: Check backend and toolchain
+    - name: Verify the backend and toolchain
       shell: bash
       working-directory: ${{ inputs.project-directory }}
       env:
@@ -97,7 +97,7 @@ runs:
         --toolchain-root "$REPROBIT_TOOLCHAIN_ROOT"
         --execute-probe
 
-    - name: Run cold verification
+    - name: Build cold, verify, and write reports
       id: verification
       continue-on-error: true
       shell: bash
@@ -145,7 +145,7 @@ runs:
           "${policy_args[@]}" \
           "${transport_args[@]}"
 
-    - name: Publish outputs and job summary
+    - name: Publish verified outputs and the job summary
       id: summary
       if: always()
       shell: bash
@@ -162,7 +162,7 @@ runs:
         --nonce "$REPROBIT_ACTION_NONCE"
         "$REPROBIT_REPORT_DIRECTORY/report.json"
 
-    - name: Enforce verification result
+    - name: Fail the job when verification failed
       if: always() && steps.verification.outcome == 'failure'
       shell: bash
       run: exit 1

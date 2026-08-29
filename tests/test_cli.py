@@ -12,7 +12,18 @@ from types import SimpleNamespace
 import pytest
 
 from reprobit.classic_project import ClassicProjectError
-from reprobit.cli import _legacy_oracle_targets, _Output, _positive_seconds, main
+from reprobit.cli import (
+    _legacy_oracle_targets,
+    _positive_seconds,
+    main,
+)
+from reprobit.cli_output import CLIOutput
+from reprobit.cli_paths import CLIError
+from reprobit.discovery_cli import (
+    _discovery_wineserver_lifecycle,
+    _resolve_paths,
+    _run_discovery_wineserver_command,
+)
 from reprobit.incremental import IncrementalBuildSummary
 from reprobit.migration import MigrationOutput
 from reprobit.model import (
@@ -27,7 +38,14 @@ from reprobit.model import (
     Scope,
     Verdict,
 )
+from reprobit.producer_graph import (
+    ProducerGraphDocument,
+    ProducerGraphError,
+    ProducerNode,
+    ProducerRole,
+)
 from reprobit.progress import ProgressKind
+from reprobit.project_loader import load_project, load_project_tree
 from reprobit.report import (
     BuildExecutionSummary,
     ComponentIdentity,
@@ -39,8 +57,8 @@ from reprobit.report import (
     RuntimeBindingPreimage,
     RuntimeProofBinding,
     TargetComparisonSummary,
-    write_report_json,
 )
+from reprobit.report_io import write_report_json
 from reprobit.schema import (
     AuthenticitySettings,
     BuildPlanDocument,
@@ -60,8 +78,6 @@ from reprobit.schema import (
     StateCarrierIntervention,
     ToolchainLock,
     ToolchainProfileSource,
-    load_project,
-    load_project_tree,
     source_manifest_digest,
 )
 from reprobit.source_lock import build_source_manifest
@@ -100,6 +116,298 @@ def test_cli_treats_a_closed_output_pipe_as_normal_completion(
     monkeypatch.setattr(sys, "stdout", ClosedPipe())
 
     assert main(["cmake-module"]) == 0
+
+
+def _write_discovery_request(tmp_path: Path, *, source: str | None = None) -> Path:
+    example = (
+        Path(__file__).parents[1]
+        / "examples"
+        / "declaration-discovery"
+        / "campaign.json"
+    )
+    document = strict_load(example)
+    assert isinstance(document, dict)
+    if source is not None:
+        document["source"] = source
+    request = tmp_path / "campaign.json"
+    request.write_bytes(canonical_json(document))
+    return request
+
+
+def test_discover_rejects_report_aliasing_input_by_case(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _write_discovery_request(tmp_path, source="reference.json")
+
+    assert (
+        main(
+            [
+                "discover",
+                str(request),
+                "--toolchain-root",
+                str(tmp_path / "unused-toolchain"),
+                "--report-json",
+                "REFERENCE.JSON",
+            ]
+        )
+        == 2
+    )
+    assert "report path overlaps a campaign input" in capsys.readouterr().err
+
+
+def test_discover_rejects_input_paths_aliasing_by_case(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _write_discovery_request(tmp_path, source="REFERENCE.OBJ")
+
+    assert (
+        main(
+            [
+                "discover",
+                str(request),
+                "--toolchain-root",
+                str(tmp_path / "unused-toolchain"),
+            ]
+        )
+        == 2
+    )
+    assert "inputs alias under case-insensitive path rules" in capsys.readouterr().err
+
+
+def test_discover_keeps_report_outside_incremental_state(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _write_discovery_request(tmp_path)
+
+    assert (
+        main(
+            [
+                "discover",
+                str(request),
+                "--toolchain-root",
+                str(tmp_path / "unused-toolchain"),
+                "--report-html",
+                ".REPROBIT-DISCOVERY/runtime/session.html",
+            ]
+        )
+        == 2
+    )
+    assert "report paths must not overlap discovery state" in capsys.readouterr().err
+
+
+def test_discover_keeps_inputs_outside_incremental_state(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _write_discovery_request(tmp_path, source="STATE/source.cpp")
+
+    assert (
+        main(
+            [
+                "discover",
+                str(request),
+                "--toolchain-root",
+                str(tmp_path / "unused-toolchain"),
+                "--state-directory",
+                "state",
+            ]
+        )
+        == 2
+    )
+    assert "state directory contains campaign input" in capsys.readouterr().err
+
+
+def test_discover_report_outputs_default_and_derive_as_a_sibling(tmp_path: Path) -> None:
+    request = _write_discovery_request(tmp_path)
+    defaults = _resolve_paths(
+        SimpleNamespace(
+            request=str(request),
+            report_json=None,
+            report_html=None,
+            state_directory=".state",
+        )
+    )
+    from_json = _resolve_paths(
+        SimpleNamespace(
+            request=str(request),
+            report_json="reports/review.json",
+            report_html=None,
+            state_directory=".state",
+        )
+    )
+    from_html = _resolve_paths(
+        SimpleNamespace(
+            request=str(request),
+            report_json=None,
+            report_html="reports/findings.html",
+            state_directory=".state",
+        )
+    )
+
+    assert defaults.report_json == Path("campaign.report.json")
+    assert defaults.report_html == Path("campaign.report.html")
+    assert from_json.report_html == Path("reports/review.html")
+    assert from_html.report_json == Path("reports/findings.json")
+
+
+def test_discover_requires_paired_reports_to_be_siblings(tmp_path: Path) -> None:
+    request = _write_discovery_request(tmp_path)
+
+    with pytest.raises(CLIError, match="must be sibling files"):
+        _resolve_paths(
+            SimpleNamespace(
+                request=str(request),
+                report_json="json/review.json",
+                report_html="html/review.html",
+                state_directory=".state",
+            )
+        )
+
+
+def test_discover_has_no_ambiguous_output_flag(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _write_discovery_request(tmp_path)
+
+    with pytest.raises(SystemExit) as raised:
+        main(
+            [
+                "discover",
+                str(request),
+                "--toolchain-root",
+                str(tmp_path / "unused-toolchain"),
+                "--output",
+                "review.json",
+            ]
+        )
+
+    assert raised.value.code == 2
+    assert "unrecognized arguments: --output" in capsys.readouterr().err
+
+
+def test_discovery_wineserver_lifecycle_clears_and_reaps_each_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def fake_control(**kwargs: object) -> None:
+        calls.append((str(kwargs["phase"]), str(kwargs["argument"])))
+
+    monkeypatch.setattr(
+        "reprobit.discovery_cli._run_discovery_wineserver_command",
+        fake_control,
+    )
+    arguments = {
+        "executable": tmp_path / "wineserver",
+        "runtime_root": tmp_path,
+        "environment": {"WINEPREFIX": os.fspath(tmp_path / "prefix")},
+        "timeout_seconds": 1.0,
+    }
+
+    for run in range(2):
+        with _discovery_wineserver_lifecycle(**arguments):
+            calls.append(("body", str(run)))
+
+    assert calls == [
+        ("preflight", "-k"),
+        ("preflight", "-w"),
+        ("body", "0"),
+        ("cleanup", "-k"),
+        ("cleanup", "-w"),
+        ("preflight", "-k"),
+        ("preflight", "-w"),
+        ("body", "1"),
+        ("cleanup", "-k"),
+        ("cleanup", "-w"),
+    ]
+
+
+def test_discovery_wineserver_stop_accepts_an_already_stopped_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from reprobit.process import CommandFailed, ProcessResult
+
+    def no_server(_supervisor: object, specification: object) -> None:
+        result = ProcessResult(
+            argv=(str(tmp_path / "wineserver"), "-k"),
+            returncode=1,
+            output=b"",
+            attempts=1,
+            duration_seconds=0.0,
+        )
+        raise CommandFailed(result, specification)
+
+    monkeypatch.setattr("reprobit.process.ProcessSupervisor.run", no_server)
+
+    _run_discovery_wineserver_command(
+        executable=tmp_path / "wineserver",
+        runtime_root=tmp_path,
+        environment={"WINEPREFIX": os.fspath(tmp_path / "prefix")},
+        timeout_seconds=1.0,
+        argument="-k",
+        phase="preflight",
+    )
+
+
+def test_discovery_wineserver_cleanup_preserves_primary_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    primary = RuntimeError("campaign failed")
+
+    def fake_control(**kwargs: object) -> None:
+        if kwargs["phase"] == "cleanup" and kwargs["argument"] == "-k":
+            raise CLIError("fake cleanup failure")
+
+    monkeypatch.setattr(
+        "reprobit.discovery_cli._run_discovery_wineserver_command",
+        fake_control,
+    )
+
+    with (
+        pytest.raises(RuntimeError, match="campaign failed") as caught,
+        _discovery_wineserver_lifecycle(
+            executable=tmp_path / "wineserver",
+            runtime_root=tmp_path,
+            environment={"WINEPREFIX": os.fspath(tmp_path / "prefix")},
+            timeout_seconds=1.0,
+        ),
+    ):
+        raise primary
+
+    assert caught.value is primary
+    assert any("Wine cleanup also failed" in note for note in caught.value.__notes__)
+
+
+def test_discovery_wineserver_cleanup_failure_is_not_silent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_control(**kwargs: object) -> None:
+        if kwargs["phase"] == "cleanup":
+            raise CLIError(f"fake {kwargs['argument']} cleanup failure")
+
+    monkeypatch.setattr(
+        "reprobit.discovery_cli._run_discovery_wineserver_command",
+        fake_control,
+    )
+
+    with (
+        pytest.raises(CLIError, match="fake -k cleanup failure; fake -w cleanup failure"),
+        _discovery_wineserver_lifecycle(
+            executable=tmp_path / "wineserver",
+            runtime_root=tmp_path,
+            environment={"WINEPREFIX": os.fspath(tmp_path / "prefix")},
+            timeout_seconds=1.0,
+        ),
+    ):
+        pass
 
 
 def test_source_lock_transactionally_replaces_the_explicit_read_set(tmp_path: Path) -> None:
@@ -589,6 +897,12 @@ def test_graph_configure_exposes_closed_migration_receipt(
 ) -> None:
     project = tmp_path / "project"
     _complete_project(project)
+    # This command prepares metadata for a replacement graph.  The graph being
+    # replaced must not prevent configuration after another authority (most
+    # commonly the toolchain lock) was deliberately refreshed.
+    (project / "reprobit/producer-graph.json").write_bytes(b"stale graph")
+    with pytest.raises(ProducerGraphError):
+        load_project_tree(project)
     capsys.readouterr()
     toolchain = tmp_path / "toolchain"
     toolchain.mkdir()
@@ -758,9 +1072,7 @@ def test_toolchain_lock_commits_only_schema_v3(tmp_path: Path) -> None:
     assert len(document["runtime_files"]) == len(profile.required_runtime_files) + 1
     assert {item["path"] for item in document["runtime_files"]} >= {"wine/x86/cl"}
     assigned_paths = {
-        path.casefold()
-        for source in document["profile_sources"]
-        for path in source["paths"]
+        path.casefold() for source in document["profile_sources"] for path in source["paths"]
     }
     assert "wine/x86/cl" not in assigned_paths
     assert len(document["input_trees"]) == len(profile.include_roots + profile.library_roots)
@@ -894,9 +1206,9 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     extracted_v2["schema_version"] = 1
     loaded_manifest = load_project_tree(project).source_manifest
     assert loaded_manifest is not None
-    extracted_v2["source_manifest_digest"] = source_manifest_digest(
-        loaded_manifest
-    ).model_dump(mode="json")
+    extracted_v2["source_manifest_digest"] = source_manifest_digest(loaded_manifest).model_dump(
+        mode="json"
+    )
     graph_path.write_bytes(canonical_json(extracted_v2))
     assert main(["graph", "upgrade", "--project", str(project)]) == 0
     upgraded = load_project_tree(project).producer_graph
@@ -998,6 +1310,20 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     capsys.readouterr()
     link_file.write_text(f"{linker} {object_path} /out:APP.EXE\n", encoding="utf-8")
 
+    stale_v1 = json.loads(committed_graph)
+    stale_v1.pop("source_topology_digest")
+    stale_v1["schema_version"] = 1
+    stale_v1["source_manifest_digest"] = source_manifest_digest(loaded_manifest).model_dump(
+        mode="json"
+    )
+    stale_v1["toolchain_lock_digest"] = Digest.from_bytes(b"previous lock").model_dump(mode="json")
+    graph_path.write_bytes(canonical_json(stale_v1))
+    assert main(["graph", "upgrade", "--project", str(project)]) == 2
+    stale_error = capsys.readouterr().err
+    assert "cannot repin a changed toolchain" in stale_error
+    assert "graph configure" in stale_error and "graph extract" in stale_error
+    graph_path.write_bytes(committed_graph)
+
     source.write_text("int main() { return 1; }\n", encoding="utf-8")
     lock_argv = [
         "source",
@@ -1033,9 +1359,14 @@ def test_version_is_available_for_packaging_smoke(
     assert capsys.readouterr().out.startswith("rbit ")
 
 
+class _CapturedTTY(StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
 def test_producer_progress_is_structured_for_ndjson_and_restrained_for_text() -> None:
     machine = StringIO()
-    with _Output("ndjson", machine, StringIO()).producer_activity("build") as progress:
+    with CLIOutput("ndjson", machine, StringIO()).producer_activity("build") as progress:
         progress(
             1,
             100,
@@ -1043,6 +1374,13 @@ def test_producer_progress_is_structured_for_ndjson_and_restrained_for_text() ->
             "unit.one",
             ProgressKind.CACHE_MISS,
             "recursive header changed",
+        )
+        progress(
+            1,
+            100,
+            "analyze",
+            "analyzing compiler products",
+            ProgressKind.PHASE_STARTED,
         )
         progress(
             100,
@@ -1055,19 +1393,22 @@ def test_producer_progress_is_structured_for_ndjson_and_restrained_for_text() ->
     assert [event["event"] for event in events] == [
         "workflow_progress",
         "producer_progress",
+        "workflow_progress",
         "producer_progress",
         "workflow_progress",
     ]
     assert events[0]["kind"] == "phase_started"
     assert events[1]["kind"] == "cache_miss"
     assert events[1]["reason"] == "recursive header changed"
-    assert events[2]["kind"] == "cache_hit"
+    assert events[2]["kind"] == "phase_started"
+    assert events[2]["phase"] == "analyze"
+    assert events[3]["kind"] == "cache_hit"
     assert events[-1]["kind"] == "phase_finished"
     assert events[-2]["completed"] == events[-2]["total"] == 100
-    assert [event["sequence"] for event in events] == [1, 2, 3, 4]
+    assert [event["sequence"] for event in events] == [1, 2, 3, 4, 5]
 
     human = StringIO()
-    with _Output("text", StringIO(), human).producer_activity("build") as progress:
+    with CLIOutput("text", StringIO(), human).producer_activity("build") as progress:
         progress(1, 100, "compile", "unit.one", ProgressKind.CACHE_MISS)
         progress(2, 100, "compile", "unit.two", ProgressKind.CACHE_HIT)
         progress(9, 100, "compile", "unit.nine", ProgressKind.CACHE_HIT)
@@ -1083,11 +1424,62 @@ def test_producer_progress_is_structured_for_ndjson_and_restrained_for_text() ->
     assert lines[4].startswith("build: complete")
 
 
+def test_interactive_producer_progress_is_transient_on_success() -> None:
+    human = _CapturedTTY()
+    with CLIOutput("text", StringIO(), human).producer_activity("build") as progress:
+        progress(1, 2, "compile", "unit.one", ProgressKind.CACHE_MISS)
+        progress(2, 2, "compile", "unit.two", ProgressKind.CACHE_HIT)
+
+    assert "build: complete" not in human.getvalue()
+
+
+def test_interactive_producer_progress_leaves_durable_failure_context() -> None:
+    human = _CapturedTTY()
+    with (
+        pytest.raises(RuntimeError, match="producer failed"),
+        CLIOutput("text", StringIO(), human).producer_activity("build") as progress,
+    ):
+        progress(1, 10, "compile", "unit.one", ProgressKind.CACHE_MISS)
+        progress(
+            1,
+            10,
+            "audit",
+            "projection.unit.one",
+            ProgressKind.PHASE_FAILED,
+            "projection mismatch",
+        )
+        raise RuntimeError("producer failed")
+
+    summary = human.getvalue().splitlines()[-1]
+    assert summary.startswith("build: failed after 1/10")
+    assert "s elapsed" in summary
+    assert "last failure: audit: projection.unit.one: projection mismatch" in summary
+    assert "error: producer failed" in summary
+    assert "cache 0 hit/1 miss" in summary
+
+
+def test_interactive_activity_is_transient_on_success_and_durable_on_failure() -> None:
+    success = _CapturedTTY()
+    with CLIOutput("text", StringIO(), success).activity("loading project"):
+        pass
+    assert "loading project: complete" not in success.getvalue()
+
+    failure = _CapturedTTY()
+    with (
+        pytest.raises(RuntimeError, match="invalid project"),
+        CLIOutput("text", StringIO(), failure).activity("loading project"),
+    ):
+        raise RuntimeError("invalid project")
+    failed_summary = failure.getvalue().splitlines()[-1]
+    assert failed_summary.startswith("loading project: failed (")
+    assert "s elapsed; error: invalid project" in failed_summary
+
+
 def test_redirected_progress_reports_latest_count_when_execution_fails() -> None:
     human = StringIO()
     with (
         pytest.raises(RuntimeError, match="producer failed"),
-        _Output("text", StringIO(), human).producer_activity("build") as progress,
+        CLIOutput("text", StringIO(), human).producer_activity("build") as progress,
     ):
         progress(1, 100, "compile", "unit.one")
         progress(9, 100, "compile", "unit.nine")
@@ -1097,9 +1489,8 @@ def test_redirected_progress_reports_latest_count_when_execution_fails() -> None
     assert lines[0] == "build..."
     assert "1/100" in lines[1]
     assert lines[2] == (
-        "build: failed after 9/100 (last completed: compile: unit.nine)"
+        "build: failed (9/100; compile: unit.nine; error: producer failed)"
     )
-    assert lines[3] == "build: failed"
 
 
 def test_incremental_summary_is_complete_in_text_and_ndjson() -> None:
@@ -1114,7 +1505,7 @@ def test_incremental_summary_is_complete_in_text_and_ndjson() -> None:
         unchanged_targets=1,
     )
     human = StringIO()
-    _Output("text", human, StringIO()).incremental_summary(summary)
+    CLIOutput("text", human, StringIO()).incremental_summary(summary)
     rendered = human.getvalue()
     assert "99 hit, 1 miss (99.0%)" in rendered
     assert "1 runtime lane(s)" in rendered
@@ -1124,7 +1515,7 @@ def test_incremental_summary_is_complete_in_text_and_ndjson() -> None:
     assert "compile.unit: recursive header changed" in rendered
 
     machine = StringIO()
-    _Output("ndjson", machine, StringIO()).incremental_summary(summary)
+    CLIOutput("ndjson", machine, StringIO()).incremental_summary(summary)
     event = json.loads(machine.getvalue())
     assert event["event"] == "incremental_build_summary"
     assert event["producer_hits"] == 97
@@ -1147,13 +1538,11 @@ def test_incremental_text_summary_bounds_invalidation_details() -> None:
         transform_misses=0,
         elapsed_seconds=1.0,
         runtime_init_count=1,
-        invalidations=tuple(
-            (f"compile.{index:02d}", f"reason {index}") for index in range(10)
-        ),
+        invalidations=tuple((f"compile.{index:02d}", f"reason {index}") for index in range(10)),
     )
     human = StringIO()
 
-    _Output("text", human, StringIO()).incremental_summary(summary)
+    CLIOutput("text", human, StringIO()).incremental_summary(summary)
 
     rendered = human.getvalue()
     assert "compile.07: reason 7" in rendered
@@ -1202,12 +1591,7 @@ def test_state_status_and_gc_expose_retained_workspace_lifecycle(
     assert retained.is_dir()
     assert "would remove 1 retained run" in capsys.readouterr().out
 
-    assert (
-        main(
-            ["state", "gc", str(project), "--older-than-hours", "0"]
-        )
-        == 0
-    )
+    assert main(["state", "gc", str(project), "--older-than-hours", "0"]) == 0
     assert not retained.exists()
     assert "removed 1 retained run" in capsys.readouterr().out
 
@@ -1322,7 +1706,7 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
     """Cold developer and certifying paths stay outside cache initialization."""
 
     from reprobit.build import BuildPlan
-    from reprobit.engine import BuildExecutionReceipt, FileReceipt
+    from reprobit.execution import BuildExecutionReceipt, FileReceipt
 
     project = tmp_path / "project"
     _complete_project(project)
@@ -1366,17 +1750,20 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
 
     def prepare(*_args: object, **_kwargs: object) -> SimpleNamespace:
         prepared_calls.append("prepared")
+        executor = FakeExecutor()
         return SimpleNamespace(
-            executor=FakeExecutor(),
+            executor=executor,
+            donors=executor,
             evidence_provider=SimpleNamespace(name="cold-test-provider"),
             plan=BuildPlan(()),
             close=lambda: None,
         )
 
     class FakeVerificationResult:
-        verdict = SimpleNamespace(clean=True)
+        verdict = SimpleNamespace(clean=True, quarantined=False, quarantines=())
         evidence = SimpleNamespace(origin_integrity=True)
         report = SimpleNamespace(costs=SimpleNamespace(project_total=0))
+        targets = (SimpleNamespace(comparison=SimpleNamespace(byte_exact=True)),)
 
         @staticmethod
         def accepts(_policy: object) -> bool:
@@ -1412,7 +1799,7 @@ def test_plain_build_loads_worktree_authority_before_state_and_emits_warm_summar
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from reprobit.engine import BuildExecutionReceipt, FileReceipt
+    from reprobit.execution import BuildExecutionReceipt, FileReceipt
 
     project = tmp_path / "project"
     _initialize(project)
@@ -1569,12 +1956,77 @@ def test_manifest_preview_and_apply_use_the_cas_transaction(
     files = _migration_files(source_project)
     legacy = tmp_path / "legacy.json"
     legacy.write_text('{"schema":2}')
+    claims = tmp_path / "claims.json"
+    claims.write_text('{"schema":1,"bindings":[]}')
     result = MigrationOutput(files, "a" * 64, 1, 0)
-    monkeypatch.setattr("reprobit.migration.migration_output", lambda path: result)
+    seen_claims: list[Path | None] = []
+
+    def migrate(
+        path: Path,
+        *,
+        semantic_claims_path: Path | None = None,
+    ) -> MigrationOutput:
+        seen_claims.append(semantic_claims_path)
+        return result
+
+    monkeypatch.setattr("reprobit.migration.migration_output", migrate)
     destination = tmp_path / "destination"
     destination.mkdir()
+    stale_intervention = (
+        destination / "reprobit/interventions/tus/program--tu_ffffffffffffffff.json"
+    )
+    stale_proof = destination / "reprobit/proofs/tus/program--tu_ffffffffffffffff.json"
+    stale_intervention.parent.mkdir(parents=True)
+    stale_proof.parent.mkdir(parents=True)
+    extra_intervention = json.loads(files[PurePosixPath("reprobit/interventions/program.json")])
+    extra_intervention["interventions"][0]["id"] = "state.extra"
+    extra_intervention["interventions"][0]["carrier"] = "state.extra.carrier"
+    stale_intervention.write_bytes(canonical_json(extra_intervention))
+    stale_proof.write_bytes(files[PurePosixPath("reprobit/proofs/program.proof.json")])
+    stale_graph = destination / "reprobit/producer-graph.json"
+    stale_graph.write_bytes(
+        canonical_json(
+            ProducerGraphDocument(
+                schema_version=2,
+                source_topology_digest=Digest.from_bytes(b"stale source topology"),
+                toolchain_lock_digest=Digest.from_bytes(b"stale toolchain"),
+                path_profile_id="dos-stable-v1",
+                extractor="cmake-unix-makefiles-v1",
+                nodes=(
+                    ProducerNode(
+                        id="compiler.stale",
+                        role=ProducerRole.COMPILER,
+                        owner="program",
+                        arguments=("/c",),
+                        outputs=("build/stale.obj",),
+                    ),
+                ),
+            )
+        )
+    )
+    arbitrary = destination / "reprobit/interventions/tus/keep-me.txt"
+    arbitrary.write_text("not a ReproBit schema file", encoding="utf-8")
+    preserved_paths = (stale_intervention, stale_proof)
 
-    assert main(["manifest", "migrate", str(legacy), "--project-root", str(destination)]) == 0
+    assert (
+        main(
+            [
+                "manifest",
+                "migrate",
+                str(legacy),
+                "--project-root",
+                str(destination),
+                "--semantic-claims",
+                str(claims),
+            ]
+        )
+        == 0
+    )
+    preview = capsys.readouterr().out
+    assert "1 managed removal(s)" in preview
+    assert str(stale_graph.relative_to(destination)) in preview
+    assert all(f"preserve {path.relative_to(destination)}" in preview for path in preserved_paths)
+    assert all(path.is_file() for path in (*preserved_paths, stale_graph))
     assert not (destination / "reprobit.toml").exists()
     assert (
         main(
@@ -1584,12 +2036,22 @@ def test_manifest_preview_and_apply_use_the_cas_transaction(
                 str(legacy),
                 "--project-root",
                 str(destination),
+                "--semantic-claims",
+                str(claims),
                 "--apply",
             ]
         )
         == 0
     )
-    assert load_project_tree(destination).spec.project_id == "sample"
+    applied = capsys.readouterr().out
+    assert "1 managed removal(s)" in applied
+    assert seen_claims == [claims.resolve(), claims.resolve()]
+    assert not stale_graph.exists()
+    assert all(path.is_file() for path in preserved_paths)
+    assert arbitrary.read_text(encoding="utf-8") == "not a ReproBit schema file"
+    loaded = load_project_tree(destination)
+    assert loaded.spec.project_id == "sample"
+    assert any(item.id == "state.extra" for item in loaded.interventions)
 
 
 def test_report_and_cmake_module_commands(

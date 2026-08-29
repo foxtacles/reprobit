@@ -91,6 +91,42 @@ def test_long_silent_phase_emits_heartbeat() -> None:
     assert events[-1].kind is ProgressKind.PHASE_FINISHED
 
 
+def test_heartbeat_retains_latest_count_and_named_subphase() -> None:
+    events: list[ProgressEvent] = []
+    received = threading.Event()
+
+    def observe(event: ProgressEvent) -> None:
+        events.append(event)
+        if event.kind is ProgressKind.HEARTBEAT and event.completed == 7:
+            received.set()
+
+    emitter = ProgressEmitter(observe, heartbeat_seconds=0.01)
+    with emitter.phase("execute", "building project") as phase:
+        phase.advance(
+            completed=7,
+            total=10,
+            phase="compile",
+            node_id="compiler.sample.0007",
+        )
+        phase.activity(
+            kind=ProgressKind.PHASE_STARTED,
+            phase="evidence",
+            message="assembling authenticity evidence",
+        )
+        assert received.wait(timeout=1)
+
+    heartbeat = next(
+        event
+        for event in events
+        if event.kind is ProgressKind.HEARTBEAT and event.completed == 7
+    )
+    assert (heartbeat.completed, heartbeat.total) == (7, 10)
+    assert heartbeat.phase == "evidence"
+    assert heartbeat.node_id == "assembling authenticity evidence"
+    assert events[-1].kind is ProgressKind.PHASE_FINISHED
+    assert (events[-1].completed, events[-1].total) == (7, 10)
+
+
 def test_parallel_progress_emission_is_totally_ordered() -> None:
     events: list[ProgressEvent] = []
     emitter = ProgressEmitter(events.append, heartbeat_seconds=60)

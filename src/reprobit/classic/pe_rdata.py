@@ -8,10 +8,11 @@ from collections.abc import Mapping
 from pathlib import PurePosixPath
 from typing import Any
 
-from .coff import CoffObject
+from reprobit.binary import require
+from reprobit.coff import CoffObject
+
 from .foundation import (
     exact_audit_keys,
-    require,
     require_exact_int,
     require_payload_free_declaration,
     require_sha,

@@ -140,6 +140,7 @@ class ProvenanceKind(StrEnum):
     SOURCE = "source"
     TOOLCHAIN = "toolchain"
     PRODUCER = "producer"
+    OBJECT_TRANSFORM = "object_transform"
     INTERVENTION = "intervention"
     METADATA_TRANSFORM = "metadata_transform"
     EXTERNAL = "external"
@@ -170,6 +171,20 @@ class ProvenanceNode(StrictModel):
                 raise ValueError("oracle_install provenance requires intervention_id")
         elif self.origin is ArtifactOrigin.ORACLE:
             raise ValueError("oracle origin is restricted to oracle_install provenance")
+        if self.kind is ProvenanceKind.OBJECT_TRANSFORM:
+            if self.origin is not ArtifactOrigin.COMPOSED:
+                raise ValueError("object_transform provenance must have composed origin")
+            if self.operation not in {
+                "restore_comdat_group_order",
+                "swap_comdat_group_order",
+            }:
+                raise ValueError("object_transform provenance has an unsupported operation")
+            if len(self.parents) != 1:
+                raise ValueError("object_transform provenance requires one parent")
+            if self.intervention_id is not None or self.certificate_ids:
+                raise ValueError(
+                    "object_transform provenance uses its dedicated attestation"
+                )
         if self.kind is ProvenanceKind.INTERVENTION and self.intervention_id is None:
             raise ValueError("intervention provenance requires intervention_id")
         return self

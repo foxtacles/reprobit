@@ -168,6 +168,35 @@ class ProgressPhase:
         self._thread: threading.Thread | None = None
         self._entered = False
         self._started: float | None = None
+        self._snapshot_lock = threading.Lock()
+        self._latest_count: tuple[int, int] | None = None
+        self._latest_context: tuple[str, str] | None = None
+        self._latest_reason: str | None = None
+
+    def _remember(
+        self,
+        *,
+        phase: str,
+        node_id: str,
+        completed: int | None = None,
+        total: int | None = None,
+        reason: str | None = None,
+    ) -> None:
+        with self._snapshot_lock:
+            if completed is not None and total is not None:
+                self._latest_count = (completed, total)
+            self._latest_context = (phase, node_id)
+            self._latest_reason = reason
+
+    def _snapshot(
+        self,
+    ) -> tuple[int | None, int | None, str, str | None, str | None]:
+        with self._snapshot_lock:
+            completed, total = self._latest_count or (None, None)
+            if self._latest_context is None:
+                return completed, total, self.phase, None, self._latest_reason
+            phase, node_id = self._latest_context
+            return completed, total, phase, node_id, self._latest_reason
 
     def _elapsed(self) -> float:
         if self._started is None:
@@ -188,10 +217,15 @@ class ProgressPhase:
 
         def heartbeat() -> None:
             while not self._stop.wait(self._heartbeat_seconds):
+                completed, total, phase, node_id, reason = self._snapshot()
                 self._emitter.emit(
                     ProgressKind.HEARTBEAT,
-                    self.phase,
+                    phase,
                     self.message,
+                    completed=completed,
+                    total=total,
+                    node_id=node_id,
+                    reason=reason,
                     elapsed_seconds=self._elapsed(),
                 )
 
@@ -213,7 +247,7 @@ class ProgressPhase:
     ) -> ProgressEvent:
         """Record completion of one known work unit."""
 
-        return self._emitter.emit(
+        event = self._emitter.emit(
             ProgressKind.UNIT_FINISHED,
             phase,
             f"completed {node_id}",
@@ -222,6 +256,13 @@ class ProgressPhase:
             node_id=node_id,
             elapsed_seconds=self._elapsed(),
         )
+        self._remember(
+            completed=completed,
+            total=total,
+            phase=phase,
+            node_id=node_id,
+        )
+        return event
 
     def cache(
         self,
@@ -235,7 +276,7 @@ class ProgressPhase:
     ) -> ProgressEvent:
         """Record an explicit developer-cache decision."""
 
-        return self._emitter.emit(
+        event = self._emitter.emit(
             ProgressKind.CACHE_HIT if hit else ProgressKind.CACHE_MISS,
             phase,
             f"cache {'hit' if hit else 'miss'} for {node_id}",
@@ -245,6 +286,45 @@ class ProgressPhase:
             reason=reason,
             elapsed_seconds=self._elapsed(),
         )
+        self._remember(
+            completed=completed,
+            total=total,
+            phase=phase,
+            node_id=node_id,
+            reason=reason,
+        )
+        return event
+
+    def activity(
+        self,
+        *,
+        kind: ProgressKind,
+        phase: str,
+        message: str,
+        reason: str | None = None,
+    ) -> ProgressEvent:
+        """Record one named sub-phase without changing completed-unit counts."""
+
+        if kind not in {
+            ProgressKind.PHASE_STARTED,
+            ProgressKind.PHASE_FINISHED,
+            ProgressKind.PHASE_FAILED,
+            ProgressKind.HEARTBEAT,
+        }:
+            raise ValueError(f"progress activity cannot emit {kind.value!r}")
+        event = self._emitter.emit(
+            kind,
+            phase,
+            message,
+            reason=reason,
+            elapsed_seconds=self._elapsed(),
+        )
+        self._remember(
+            phase=phase,
+            node_id=message,
+            reason=reason if kind is ProgressKind.PHASE_FAILED else None,
+        )
+        return event
 
     def __exit__(
         self,
@@ -257,11 +337,15 @@ class ProgressPhase:
         thread = self._thread
         if thread is not None:
             thread.join(timeout=min(self._heartbeat_seconds, 1.0))
+        completed, total, phase, node_id, _reason = self._snapshot()
         if exc_type is None:
             self._emitter.emit(
                 ProgressKind.PHASE_FINISHED,
                 self.phase,
                 self.message,
+                completed=completed,
+                total=total,
+                node_id=node_id,
                 elapsed_seconds=self._elapsed(),
             )
         else:
@@ -271,8 +355,11 @@ class ProgressPhase:
             detail = detail.replace("\x00", r"\0")
             self._emitter.emit(
                 ProgressKind.PHASE_FAILED,
-                self.phase,
+                phase,
                 self.message,
+                completed=completed,
+                total=total,
+                node_id=node_id,
                 reason=detail,
                 elapsed_seconds=self._elapsed(),
             )

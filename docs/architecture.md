@@ -7,6 +7,12 @@ librarian, and linker invocation, while execution backends provide bounded
 processes and stable compiler-visible paths. CMake can bootstrap that graph
 during migration, but it is outside the certification runtime.
 
+The reusable core and discovery tools are lasting parts of ReproBit. The
+built-in classic-MSVC adapter is supported product code too, not a disposable
+migration layer. Only the legacy runner, the schema-v2 claims sidecar, and the
+configured CMake migration tree are one-off inputs; discard them after the new
+project data has been reviewed and verified.
+
 The producer and verifier are separate trust domains. A normal producer receives project
 source and declared toolchain inputs, but no reference-image path or raw-byte service. It
 publishes artifacts and provenance receipts. The verifier owns the reference image and reports

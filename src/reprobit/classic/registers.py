@@ -1,10 +1,14 @@
 from __future__ import annotations
 
-from .coff import CoffObject, _coff_marker, _coff_section_symbol, _coff_table_bytes, _comdat_child, _comdat_child_closure, coff_auxiliary, coff_body, coff_unpack, comdat_primary_identity_multiset, detailed_relocations, function_multiset, function_symbol, section_definitions
+from reprobit.binary import ByteIdentityError, require
+from reprobit.coff import CoffObject, coff_auxiliary, coff_body, coff_unpack, detailed_relocations, section_definitions
+from reprobit.ia32 import IA32_PREFIXES, supported_ia32_instruction_length
+
+from .coff import _coff_marker, _coff_section_symbol, _coff_table_bytes, _comdat_child, _comdat_child_closure, comdat_primary_identity_multiset, function_multiset, function_symbol
 from .composition import compose_equal_body_comdat, compose_same_slot_resize, instruction_mosaic_metadata_sha256, require_instruction_mosaic_semantic_relocations
 from .debug import CODEVIEW_SYMBOL_NAME_OFFSETS, FPO_RECORD_KEYS, _apply_replacements, local_symbol_kind, parse_codeview_symbol_stream, parse_fpo_data, shifted_pointer
-from .foundation import ByteIdentityError, exact_audit_keys, exact_keys, require, require_exact_int, require_payload_free_declaration, require_sha, sha256_bytes
-from .ia32 import _IA32_PREFIXES, require_declared_relocation_semantics, supported_ia32_instruction_length
+from .foundation import exact_audit_keys, exact_keys, require_exact_int, require_payload_free_declaration, require_sha, sha256_bytes
+from .ia32 import require_declared_relocation_semantics
 
 """Classic compiler algorithms: registers."""
 REGISTER_BIJECTION_CLASS = 'retail_exact_register_bijection'
@@ -156,7 +160,7 @@ def _ia32_bijection_table_widening(table: dict) -> dict:
     return table
 
 def _ia32_bijection_two_byte_table() -> dict:
-    """The 0F escape forms this class admits: near Jcc, MOVZX/MOVSX r32,r16.
+    """The admitted 0F forms: near Jcc, SETcc, MOVZX/MOVSX, and DWORD IMUL.
 
     `0F B7`/`0F BF` widen a 16-bit source into a 32-bit destination.  Both
     fields number the SAME eight registers (a mod == 3 r/m16 is AX..DI, not
@@ -168,7 +172,9 @@ def _ia32_bijection_two_byte_table() -> dict:
     exactly as every other width-8 field is -- `rm_width` records that
     split.  A memory-source encoding freezes nothing: its base and index
     are ordinary 32-bit address registers.  (Tickle's mirror region is the
-    row that needs them.)
+    row that needs them.)  `0F AF /r` is admitted only at the native DWORD
+    width: its destination is both read and written and its r/m source is
+    read.  The 66-prefixed and immediate 69/6B siblings remain closed.
     """
     table = {}
     for opcode in range(128, 144):
@@ -177,6 +183,9 @@ def _ia32_bijection_two_byte_table() -> dict:
         table[opcode] = _bijection_form(modrm=True, reg='gpr', reg_write=True, rm_read=True)
     for opcode in (182, 190):
         table[opcode] = _bijection_form(modrm=True, reg='gpr', reg_write=True, rm_read=True, rm_width=8)
+    # IMUL r32,r/m32 reads and rewrites its explicit destination and reads its
+    # explicit source.  The 16-bit prefix remains outside this exact row.
+    table[175] = _bijection_form(modrm=True, reg='gpr', reg_read=True, reg_write=True, rm_read=True)
     for opcode in range(144, 160):
         table[opcode] = _bijection_form(modrm=True, reg='ext', ext_allowed=frozenset({0}), rm_write=True, width=8)
     return table
@@ -308,7 +317,7 @@ def decode_ia32_bijection_instruction(body: bytes, offset: int, context: str, re
     segment_prefix = False
     operand_size_16 = False
     repeat_prefix = None
-    while encoded[cursor] in _IA32_PREFIXES:
+    while encoded[cursor] in IA32_PREFIXES:
         prefix = encoded[cursor]
         if prefix in _IA32_INERT_SEGMENT_PREFIXES:
             require(not segment_prefix, f'{context}: repeated segment prefix')
@@ -1038,21 +1047,8 @@ REGISTER_BIJECTION_REENCODING_CLASS = 'retail_exact_register_bijection_reencodin
 REGISTER_BIJECTION_REENCODING_KIND = 'frame_pointer_free_register_bijection_v1'
 FPO_FRAME_KIND_FPO = 0
 
-def require_frame_pointer_free_frame(coff: 'CoffObject', section: dict, body: bytes, instructions: list[dict], context: str) -> dict:
-    """Obligation 11: prove EBP is not this body's frame pointer.
-
-    Two independent facts are required, and BOTH come from the object itself:
-    the compiler's own FPO record for this COMDAT declares FRAME_FPO with no
-    structured exception handling, and no instruction in the decoded body
-    derives EBP from ESP.  The first is the compiler's statement that the
-    function has no EBP frame; the second is a structural check on the code
-    that no `mov ebp, esp` / `lea ebp, [esp+d]` establishes one anyway.
-    """
-    closure = _comdat_child_closure(coff, section)
-    require(closure == (2, ('.debug$F', '.debug$S')), f'{context}: a frame-pointer-free proof needs the FPO closure')
-    record = parse_fpo_data(bytes(coff_body(coff, _comdat_child(coff, section, '.debug$F'))), expected_proc_size=section['raw_size'])
-    require(record['cbFrame'] == FPO_FRAME_KIND_FPO, f"{context}: the FPO record does not declare FRAME_FPO, so EBP may be this body's frame pointer")
-    require(record['fHasSEH'] == 0, f'{context}: the FPO record declares structured exception handling, whose unwind may read EBP')
+def require_no_ebp_frame_derivation(body: bytes, instructions, context: str) -> None:
+    """Prove that decoded instructions never establish EBP from ESP."""
     for item in instructions:
         if 'ebp' not in item['writes']:
             continue
@@ -1071,6 +1067,23 @@ def require_frame_pointer_free_frame(coff: 'CoffObject', section: dict, body: by
                 continue
             direct.add(name)
         require('esp' not in direct, f"{context}: the instruction at {item['offset']} derives EBP from ESP, which establishes a frame pointer")
+
+def require_frame_pointer_free_frame(coff: 'CoffObject', section: dict, body: bytes, instructions: list[dict], context: str) -> dict:
+    """Obligation 11: prove EBP is not this body's frame pointer.
+
+    Two independent facts are required, and BOTH come from the object itself:
+    the compiler's own FPO record for this COMDAT declares FRAME_FPO with no
+    structured exception handling, and no instruction in the decoded body
+    derives EBP from ESP.  The first is the compiler's statement that the
+    function has no EBP frame; the second is a structural check on the code
+    that no `mov ebp, esp` / `lea ebp, [esp+d]` establishes one anyway.
+    """
+    closure = _comdat_child_closure(coff, section)
+    require(closure == (2, ('.debug$F', '.debug$S')), f'{context}: a frame-pointer-free proof needs the FPO closure')
+    record = parse_fpo_data(bytes(coff_body(coff, _comdat_child(coff, section, '.debug$F'))), expected_proc_size=section['raw_size'])
+    require(record['cbFrame'] == FPO_FRAME_KIND_FPO, f"{context}: the FPO record does not declare FRAME_FPO, so EBP may be this body's frame pointer")
+    require(record['fHasSEH'] == 0, f'{context}: the FPO record declares structured exception handling, whose unwind may read EBP')
+    require_no_ebp_frame_derivation(body, instructions, context)
     return record
 
 def _reencoding_region_for(regions: list[dict], offset: int) -> dict | None:

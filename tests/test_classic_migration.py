@@ -85,6 +85,28 @@ def _executable(path: Path, payload: str = "#!/bin/sh\nexit 0\n") -> Path:
     return path
 
 
+@pytest.mark.skipif(os.name != "posix", reason="executable transport fixture is POSIX")
+def test_transport_sibling_rejects_symlink_only_and_two_real_aliases(
+    tmp_path: Path,
+) -> None:
+    real = _executable(tmp_path / "elsewhere")
+    (tmp_path / "link").symlink_to(real)
+    with pytest.raises(
+        classic_migration.ClassicMigrationError,
+        match="does not uniquely provide 'link'",
+    ):
+        classic_migration._transport_sibling(tmp_path, "link")
+
+    (tmp_path / "link").unlink()
+    _executable(tmp_path / "link")
+    _executable(tmp_path / "link.exe")
+    with pytest.raises(
+        classic_migration.ClassicMigrationError,
+        match="does not uniquely provide 'link'",
+    ):
+        classic_migration._transport_sibling(tmp_path, "link")
+
+
 @pytest.mark.parametrize(
     ("mutate_source", "link_admission"),
     ((False, False), (True, False), (False, True)),
@@ -104,6 +126,7 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
     transports.mkdir(parents=True)
     for name in ("cl", "rc", "link", "lib"):
         _executable(transports / name)
+        (transports / f"{name}.exe").symlink_to(name)
     module_root = tmp_path / "cmake"
     module_root.mkdir()
     (module_root / "ReproBit.cmake").write_text("# fixture\n", encoding="utf-8")
@@ -223,5 +246,6 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
     )
     assert arguments[arguments.index("-G") + 1] == "Unix Makefiles"
     assert "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" in arguments
+    assert f"-DREPROBIT_EFFECTIVE_SOURCE_ROOT={workspace / 'source'}" in arguments
     assert "-DREPROBIT_TERMINAL=ON" in arguments
     assert not (workspace / "build/program.exe").exists()

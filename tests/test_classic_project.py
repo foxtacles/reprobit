@@ -8,6 +8,12 @@ from pathlib import Path
 
 import pytest
 
+import reprobit.classic.composition as classic_composition
+import reprobit.classic.scheduling as classic_scheduling
+from reprobit.classic.compiler_identity import (
+    Msvc420CompilerIdentity,
+    issue_msvc420_compiler_identity,
+)
 from reprobit.classic_project import (
     FAMILY_COVERAGE,
     ClassicDispatchMaterials,
@@ -40,6 +46,7 @@ from reprobit.schema import (
     SourceManifestEntry,
     TargetSpec,
     ToolchainLock,
+    ToolchainProfileSource,
     ToolchainRef,
     source_manifest_digest,
 )
@@ -329,11 +336,9 @@ def test_family_coverage_is_exhaustive_and_quarantine_fails_closed() -> None:
     assert simulated.mode.value == "quarantine-only"
 
 
-def test_function_dispatch_restores_typed_legacy_facade_fields(
+def test_function_dispatch_materializes_typed_candidate_fields(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from reprobit import classic
-
     symbol = "?Function@@YAHXZ"
     intervention = ClassicRecipeIntervention(
         id="function.same-slot",
@@ -358,7 +363,7 @@ def test_function_dispatch_restores_typed_legacy_facade_fields(
         captured.update(values)
         return seed, {"accepted": True}
 
-    monkeypatch.setattr(classic, "compose_same_slot_resize", compose)
+    monkeypatch.setattr(classic_composition, "compose_same_slot_resize", compose)
     result = ClassicFamilyDispatcher().dispatch(
         intervention,
         ClassicDispatchMaterials(
@@ -383,11 +388,108 @@ def test_function_dispatch_restores_typed_legacy_facade_fields(
         )
 
 
+def test_web_dispatch_preserves_exact_compiler_scope_and_never_synthesizes_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    symbol = "?Function@@YAHXZ"
+    intervention = ClassicRecipeIntervention(
+        id="function.web",
+        scope=Scope(target="program", translation_unit="unit", function=symbol),
+        rationale="exercise exact compiler-target authority at the dispatcher seam",
+        family=ClassicRecipeFamily.RETAIL_EXACT_WEB_RECOLOUR,
+        role=ClassicRecipeRole.FUNCTION,
+        build_target="app",
+        dependencies=("donor",),
+        symbol=symbol,
+    )
+    tools = (
+        (
+            "bin/CL.EXE",
+            37_888,
+            "c5bf7ad84482e8a54d5753fcbd3e648d8a1192f5ca8b8cf1f5d23b651750585f",
+            ("compiler",),
+        ),
+        (
+            "bin/C1XX.EXE",
+            793_088,
+            "9e0782ec157b30a387ca855374bc4c1b8a605dfb12364425497ba431541a5bf9",
+            ("runtime",),
+        ),
+        (
+            "bin/C2.EXE",
+            549_888,
+            "2aa1fcace0779531b3ec80b730663acd98f181aed3cdff51366440c602b724b5",
+            ("runtime",),
+        ),
+    )
+    identity = issue_msvc420_compiler_identity(
+        ToolchainLock(
+            schema_version=3,
+            adapter="classic-msvc",
+            profile="msvc_4_2",
+            release=MsvcRelease.V4_2,
+            profile_sources=(
+                ToolchainProfileSource(
+                    repository="https://github.com/archaic-msvc/msvc420.git",
+                    revision="b42c244f0a83ba15ba2ffb62b0dc240d7b2dea50",
+                    paths=("bin/C1XX.EXE", "bin/C2.EXE", "bin/CL.EXE"),
+                ),
+            ),
+            tools=tuple(
+                LockedTool(
+                    id=f"compiler-{index}",
+                    path=path,
+                    size=size,
+                    digest=Digest(value=digest),
+                    roles=roles,
+                )
+                for index, (path, size, digest, roles) in enumerate(tools)
+            ),
+        )
+    )
+    assert identity is not None
+    received: list[object] = []
+
+    def produce(
+        seed: bytes,
+        _donor: bytes,
+        _function: dict[str, object],
+        *,
+        compiler_identity: Msvc420CompilerIdentity | None = None,
+    ) -> tuple[bytes, dict[str, object]]:
+        received.append(compiler_identity)
+        if compiler_identity != identity:
+            raise ClassicProjectError("compiler target is absent or wrong")
+        return seed, {"accepted": True}
+
+    monkeypatch.setattr(classic_scheduling, "produce_web_recolour_candidate", produce)
+    result = ClassicFamilyDispatcher().dispatch(
+        intervention,
+        ClassicDispatchMaterials(
+            seed_object=b"seed",
+            donor_object=b"donor",
+            compiler_identity=identity,
+        ),
+    )
+    assert result.output == b"seed"
+    assert received == [identity]
+
+    for compiler_identity in (None, "msvc-5.00-win32-i386"):
+        with pytest.raises(ClassicProjectError, match="absent or wrong"):
+            ClassicFamilyDispatcher().dispatch(
+                intervention,
+                ClassicDispatchMaterials(
+                    seed_object=b"seed",
+                    donor_object=b"donor",
+                    compiler_identity=compiler_identity,  # type: ignore[arg-type]
+                ),
+            )
+    assert received[-2:] == [None, "msvc-5.00-win32-i386"]
+
+
 def test_reloc_layout_dispatch_uses_equal_body_composer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from reprobit import classic
-
     symbol = "?Function@@YAHXZ"
     intervention = ClassicRecipeIntervention(
         id="function.reloc-layout",
@@ -415,8 +517,12 @@ def test_reloc_layout_dispatch_uses_equal_body_composer(
     def wrong_composer(*_args: object, **_kwargs: object) -> tuple[bytes, dict[str, object]]:
         raise AssertionError("relocation-layout dispatch reached equal-linked-span FPO")
 
-    monkeypatch.setattr(classic, "compose_equal_body_comdat", compose)
-    monkeypatch.setattr(classic, "compose_equal_linked_span_fpo", wrong_composer)
+    monkeypatch.setattr(classic_composition, "compose_equal_body_comdat", compose)
+    monkeypatch.setattr(
+        classic_composition,
+        "compose_equal_linked_span_fpo",
+        wrong_composer,
+    )
 
     result = ClassicFamilyDispatcher().dispatch(
         intervention,

@@ -1,10 +1,15 @@
 /.mypy_cache/
 /.pytest_cache/
 /.ruff_cache/
+/.coverage
 /.venv/
 /build/
 /dist/
 /*.egg-info/
 /.reprobit-state/
+/.reprobit-discovery/
+/examples/declaration-discovery/.sample-state/
+/examples/declaration-discovery/reference.obj
+/examples/declaration-discovery/*.report.json
 __pycache__/
 *.py[cod]

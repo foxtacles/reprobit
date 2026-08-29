@@ -16,11 +16,30 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
+import reprobit.classic.composition as composition
+from reprobit.classic.compiler_identity import (
+    Msvc420CompilerIdentity,
+    issue_msvc420_compiler_identity,
+)
+from reprobit.classic.semantic_contracts import (
+    DonorSemanticUse,
+    _ClassicDonorSemanticMaterial,
+    _require_classic_donor_semantic_material,
+    issue_classic_donor_semantics,
+)
+from reprobit.classic.semantic_errors import ClassicSemanticError
+from reprobit.classic.source_refactor_semantics import (
+    validate_donor_source_semantics,
+)
 from reprobit.classic_donors import (
     DonorCompileRequest,
     DonorSourceError,
     matching_candidate_constraints,
     prepare_donor_compile_request,
+)
+from reprobit.classic_link_topology import (
+    ClassicLinkTopologyError,
+    terminal_link_input_topology,
 )
 from reprobit.classic_project import (
     ClassicCandidate,
@@ -28,11 +47,6 @@ from reprobit.classic_project import (
     ClassicFamilyDispatcher,
     ClassicProjectError,
     InterventionWitness,
-)
-from reprobit.classic_semantics import (
-    ClassicSemanticError,
-    DonorSemanticUse,
-    issue_classic_donor_semantics,
 )
 from reprobit.model import Digest, SemanticProof
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole
@@ -65,6 +79,7 @@ class ClassicPreparedUnit:
     legacy_actions: tuple[LegacyOracleInstallIntervention, ...]
     actions: tuple[ClassicRecipeIntervention | LegacyOracleInstallIntervention, ...]
     receipts: tuple[ClassicProofReceipt, ...]
+    compiler_identity: Msvc420CompilerIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +87,8 @@ class ClassicUnitComposition:
     output: bytes
     witnesses: tuple[InterventionWitness, ...]
     group_order_evidence: Digest | None = None
+    group_order_input_digest: Digest | None = None
+    group_order_input_size: int | None = None
     donor_semantic_proofs: Mapping[str, SemanticProof] = field(
         default_factory=lambda: MappingProxyType({})
     )
@@ -197,40 +214,20 @@ def _compiler_terminal_consumer_targets(
 ) -> Mapping[str, frozenset[str]]:
     """Map compiler nodes to terminal targets reached through actual build inputs."""
 
-    output_owners: dict[str, ProducerNode] = {}
     consumers: dict[str, set[str]] = {
         node.id: set()
         for node in graph.nodes
         if node.role is ProducerRole.COMPILER
     }
-    for node in graph.nodes:
-        for reference in node.outputs:
-            identity = reference.casefold()
-            if identity in output_owners:
-                raise ClassicProjectError(
-                    f"producer graph repeats output authority for {reference!r}"
-                )
-            output_owners[identity] = node
-
-    def visit(node: ProducerNode, *, target_id: str, visited: set[str]) -> None:
-        if node.id in visited:
-            return
-        visited.add(node.id)
-        for reference in node.inputs:
-            if not reference.startswith("build/"):
-                continue
-            producer = output_owners.get(reference.casefold())
-            if producer is None:
-                continue
-            if producer.role is ProducerRole.COMPILER:
-                consumers[producer.id].add(target_id)
-            elif producer.role is not ProducerRole.LINKER:
-                visit(producer, target_id=target_id, visited=visited)
-
     for linker in (node for node in graph.nodes if node.role is ProducerRole.LINKER):
         if linker.target_id is None:
             raise ClassicProjectError(f"linker {linker.id!r} lacks a target identity")
-        visit(linker, target_id=linker.target_id, visited=set())
+        try:
+            topology = terminal_link_input_topology(graph, linker.target_id)
+        except ClassicLinkTopologyError as exc:
+            raise ClassicProjectError(str(exc)) from exc
+        for compiler_id in topology.compiler_node_ids:
+            consumers[compiler_id].add(linker.target_id)
     return MappingProxyType(
         {
             node_id: frozenset(target_ids)
@@ -620,6 +617,13 @@ def _donor_source(
     return value
 
 
+def _classic_compiler_identity(bundle: ProjectBundle) -> Msvc420CompilerIdentity | None:
+    """Issue canonical compiler evidence from the bundle's validated lock."""
+    if bundle.spec.toolchain.profile != bundle.toolchain_lock.profile:
+        return None
+    return issue_msvc420_compiler_identity(bundle.toolchain_lock)
+
+
 def prepare_classic_units(
     bundle: ProjectBundle,
     *,
@@ -639,6 +643,7 @@ def prepare_classic_units(
         if document.translation_unit_id is not None
     }
     canonical_operations = _canonical_overlay_operations(bundle)
+    compiler_identity = _classic_compiler_identity(bundle)
     prepared: list[ClassicPreparedUnit] = []
     for plan in bundle.build_plan.translation_units:
         document = documents.get(plan.id)
@@ -668,6 +673,12 @@ def prepare_classic_units(
             )
         )
         admitted_ids = {item.id for item in donors}
+        consumers_by_donor = {
+            donor.id: tuple(
+                function for function in functions if donor.id in function.dependencies
+            )
+            for donor in donors
+        }
         for function in (*functions, *legacy):
             unknown = set(function.dependencies) - admitted_ids
             if unknown:
@@ -728,6 +739,15 @@ def prepare_classic_units(
                     else None,
                     **kwargs,
                 )
+                validate_donor_source_semantics(
+                    donor,
+                    consumers_by_donor[donor.id],
+                    owning_source=plan.source,
+                    clean_sources=clean_sources,
+                    rendered_sources=request.logical_outputs,
+                    overlaid_paths=frozenset(canonical_operations),
+                    overlay_receipts=request.overlay_receipts,
+                )
             except ValueError as exc:
                 raise ClassicProjectError(
                     f"cannot prepare donor {donor.id!r}: {exc}"
@@ -746,6 +766,7 @@ def prepare_classic_units(
                 legacy,
                 actions,
                 unit_receipts,
+                compiler_identity,
             )
         )
     return tuple(prepared)
@@ -779,30 +800,38 @@ def compose_classic_unit(
     unit: ClassicPreparedUnit,
     *,
     seed_object: bytes,
-    donor_objects: Mapping[str, bytes],
-    donor_compile_statements: Mapping[str, Mapping[str, object]],
+    donor_materials: Mapping[str, _ClassicDonorSemanticMaterial],
     seed_source: bytes,
     legacy_oracles: Mapping[str, PE32VirtualAddressReader] | None = None,
 ) -> ClassicUnitComposition:
     """Compose one independently compiled TU without access to image-oracle bytes."""
 
-    from reprobit import classic
-
     if not isinstance(seed_object, bytes) or not isinstance(seed_source, bytes):
         raise ClassicProjectError("classic unit inputs must be immutable bytes")
-    expected_donors = {item.intervention.id for item in unit.donors}
-    if set(donor_objects) != expected_donors:
-        missing = sorted(expected_donors - set(donor_objects))
-        extra = sorted(set(donor_objects) - expected_donors)
+    prepared_donors = {item.intervention.id: item for item in unit.donors}
+    expected_donors = set(prepared_donors)
+    if set(donor_materials) != expected_donors:
+        missing = sorted(expected_donors - set(donor_materials))
+        extra = sorted(set(donor_materials) - expected_donors)
         raise ClassicProjectError(
-            f"fresh donor-object universe differs; missing={missing}, extra={extra}"
+            f"fresh donor-material universe differs; missing={missing}, extra={extra}"
         )
-    if set(donor_compile_statements) != expected_donors:
-        missing = sorted(expected_donors - set(donor_compile_statements))
-        extra = sorted(set(donor_compile_statements) - expected_donors)
-        raise ClassicProjectError(
-            f"donor compile-statement universe differs; missing={missing}, extra={extra}"
-        )
+    for donor_id, material in donor_materials.items():
+        prepared = prepared_donors[donor_id]
+        try:
+            _require_classic_donor_semantic_material(material, prepared.intervention)
+        except ClassicSemanticError as exc:
+            raise ClassicProjectError(
+                f"fresh donor material {donor_id!r} is invalid: {exc}"
+            ) from exc
+        if material.intervention.id != donor_id:
+            raise ClassicProjectError(
+                f"fresh donor material key differs from {material.intervention.id!r}"
+            )
+    donor_objects = {
+        donor_id: material.donor_object
+        for donor_id, material in donor_materials.items()
+    }
     donor_sources = {
         item.intervention.id: item.request.logical_outputs.get(unit.plan.source)
         for item in unit.donors
@@ -852,6 +881,9 @@ def compose_classic_unit(
                     action.scope.target,
                     result.evidence_digest,
                     legacy_oracle_install=True,
+                    semantic_output_statement=result.evidence_detail,
+                    output_digest=Digest.from_bytes(result.output),
+                    output_size=len(result.output),
                 )
             )
             continue
@@ -925,6 +957,7 @@ def compose_classic_unit(
                     additional_donor_objects=additional,
                     shape_identifiers=request.carrier_identifiers,
                     candidate_constraints=values,
+                    compiler_identity=unit.compiler_identity,
                 ),
             )
         except Exception as exc:
@@ -951,10 +984,16 @@ def compose_classic_unit(
                 semantic_proof=candidate.semantic_proof,
                 semantic_input_statement=candidate.semantic_input_statement,
                 semantic_output_statement=candidate.semantic_output_statement,
+                output_digest=Digest.from_bytes(candidate.output),
+                output_size=len(candidate.output),
             )
         )
     group_evidence: Digest | None = None
+    group_input_digest: Digest | None = None
+    group_input_size: int | None = None
     if unit.plan.group_order is not None:
+        group_input_digest = Digest.from_bytes(output)
+        group_input_size = len(output)
         raw_orders = unit.plan.group_order
         if not isinstance(raw_orders, list) or not raw_orders:
             raise ClassicProjectError("group-order declaration is malformed")
@@ -964,14 +1003,14 @@ def compose_classic_unit(
             if not isinstance(order, list):
                 raise ClassicProjectError("group-order list is malformed")
             if unit.plan.mode == "swap_comdat_group_order":
-                output, proof = classic.compose_swap_comdat_group_order(
+                output, proof = composition.compose_swap_comdat_group_order(
                     output, {"group_order": order}
                 )
             elif unit.plan.mode in {
                 "restore_comdat_group_order",
                 "compose_equal_body_comdat",
             }:
-                output, proof = classic.compose_restore_comdat_group_order(
+                output, proof = composition.compose_restore_comdat_group_order(
                     output, {"group_order": order}
                 )
             else:
@@ -986,9 +1025,7 @@ def compose_classic_unit(
         try:
             validation = issue_classic_donor_semantics(
                 prepared.intervention,
-                donor_object=donor_objects[donor_id],
-                source_inputs=prepared.request.files,
-                compiler_statement=donor_compile_statements[donor_id],
+                material=donor_materials[donor_id],
                 downstream_uses=donor_uses[donor_id],
                 quarantined_consumers=quarantined_uses[donor_id],
             )
@@ -1001,6 +1038,8 @@ def compose_classic_unit(
         output,
         tuple(witnesses),
         group_evidence,
+        group_input_digest,
+        group_input_size,
         MappingProxyType(donor_semantic_proofs),
         MappingProxyType(
             {
@@ -1046,6 +1085,8 @@ def apply_classic_terminal_pipeline(
                 semantic_proof=result.semantic_proof,
                 semantic_input_statement=result.semantic_input_statement,
                 semantic_output_statement=result.semantic_output_statement,
+                output_digest=Digest.from_bytes(result.output),
+                output_size=len(result.output),
             )
         )
     return ClassicTerminalComposition(output, tuple(witnesses))
@@ -1080,6 +1121,8 @@ def classic_rdata_repack(
         semantic_proof=result.semantic_proof,
         semantic_input_statement=result.semantic_input_statement,
         semantic_output_statement=result.semantic_output_statement,
+        output_digest=Digest.from_bytes(result.output),
+        output_size=len(result.output),
     )
 
 

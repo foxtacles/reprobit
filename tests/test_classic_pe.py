@@ -4,7 +4,10 @@ import struct
 
 import pytest
 
-from reprobit import classic
+import reprobit.classic.foundation as foundation_algorithms
+import reprobit.classic.pe as pe_algorithms
+import reprobit.classic.pe_text as pe_text_algorithms
+from reprobit.binary import ByteIdentityError
 
 
 def _candidate_and_expected() -> tuple[bytes, bytes, int, list[int]]:
@@ -55,14 +58,14 @@ def _plan(candidate: bytes, expected: bytes, pair: int, calls: list[int]) -> dic
         "schema": "adjacent_import_thunk_swap_v1",
         "pair_file_offset": pair,
         "call_file_offsets": calls,
-        "input_sha256": classic.sha256_bytes(candidate),
-        "output_sha256": classic.sha256_bytes(expected),
+        "input_sha256": foundation_algorithms.sha256_bytes(candidate),
+        "output_sha256": foundation_algorithms.sha256_bytes(expected),
     }
 
 
 def test_declarative_thunk_swap_uses_only_candidate_bytes() -> None:
     candidate, expected, pair, calls = _candidate_and_expected()
-    output, receipt = classic.apply_adjacent_import_thunk_swap(
+    output, receipt = pe_algorithms.apply_adjacent_import_thunk_swap(
         candidate, _plan(candidate, expected, pair, calls)
     )
 
@@ -77,16 +80,16 @@ def test_thunk_swap_refuses_a_postimage_pin_that_does_not_match() -> None:
     candidate, expected, pair, calls = _candidate_and_expected()
     plan = _plan(candidate, expected, pair, calls)
     plan["output_sha256"] = "0" * 64
-    with pytest.raises(classic.ByteIdentityError, match="output pin"):
-        classic.apply_adjacent_import_thunk_swap(candidate, plan)
+    with pytest.raises(ByteIdentityError, match="output pin"):
+        pe_algorithms.apply_adjacent_import_thunk_swap(candidate, plan)
 
 
 def test_thunk_swap_declaration_cannot_carry_target_payload() -> None:
     candidate, expected, pair, calls = _candidate_and_expected()
     plan = _plan(candidate, expected, pair, calls)
     plan["target_bytes"] = expected.hex()
-    with pytest.raises(classic.ByteIdentityError, match=r"embedded payload|unknown"):
-        classic.apply_adjacent_import_thunk_swap(candidate, plan)
+    with pytest.raises(ByteIdentityError, match=r"embedded payload|unknown"):
+        pe_algorithms.apply_adjacent_import_thunk_swap(candidate, plan)
 
 
 def _text_repack_candidate_and_plan() -> tuple[bytes, bytes, dict[str, object]]:
@@ -152,7 +155,7 @@ def _text_repack_candidate_and_plan() -> tuple[bytes, bytes, dict[str, object]]:
 
 def test_text_repack_moves_only_candidate_owned_pieces() -> None:
     candidate, expected, plan = _text_repack_candidate_and_plan()
-    output, receipt = classic.apply_text_repack_candidate(candidate, plan)
+    output, receipt = pe_text_algorithms.apply_text_repack_candidate(candidate, plan)
 
     assert output == expected
     assert receipt["candidate_only"] is True
@@ -163,12 +166,12 @@ def test_text_repack_moves_only_candidate_owned_pieces() -> None:
 def test_text_repack_rederives_its_fixup_set() -> None:
     candidate, _, plan = _text_repack_candidate_and_plan()
     plan["expected_rel32_fixups"] = [{"site_va": "0x00401000", "imm_offset": 1, "old": 0, "new": 1}]
-    with pytest.raises(classic.ByteIdentityError, match="derived rel32"):
-        classic.apply_text_repack_candidate(candidate, plan)
+    with pytest.raises(ByteIdentityError, match="derived rel32"):
+        pe_text_algorithms.apply_text_repack_candidate(candidate, plan)
 
 
 def test_text_repack_declaration_cannot_carry_target_payload() -> None:
     candidate, expected, plan = _text_repack_candidate_and_plan()
     plan["target_bytes"] = expected
-    with pytest.raises(classic.ByteIdentityError, match="embedded payload"):
-        classic.apply_text_repack_candidate(candidate, plan)
+    with pytest.raises(ByteIdentityError, match="embedded payload"):
+        pe_text_algorithms.apply_text_repack_candidate(candidate, plan)

@@ -7,7 +7,7 @@ import json
 import os
 import re
 import stat
-from collections.abc import Iterable, Iterator, Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -385,13 +385,6 @@ class ToolchainTreeReceipt:
             raise ValueError(f"unsupported toolchain tree algorithm: {self.algorithm}")
         _validate_sha256(self.membership_sha256, "toolchain tree membership")
         _validate_sha256(self.content_sha256, "toolchain tree content")
-
-    def __iter__(self) -> Iterator[str]:
-        """Retain ``dict(lock.tree_digests)`` compatibility for v1 callers."""
-
-        yield self.path
-        yield self.content_sha256
-
 
 def _validate_sha256(value: str, label: str) -> None:
     if not re.fullmatch(r"[0-9a-f]{64}", value):

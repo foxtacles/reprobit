@@ -8,13 +8,12 @@ import pytest
 
 from reprobit.cache import IncrementalCache, cache_key
 from reprobit.state import (
-    AdvisoryFileLock,
     KeepWorkspace,
     RunArena,
-    StateError,
     StateStore,
     human_bytes,
 )
+from reprobit.state_lock import AdvisoryFileLock, StateError
 
 
 def test_locked_marker_is_read_through_its_own_held_handle(tmp_path: Path) -> None:

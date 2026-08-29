@@ -7,7 +7,7 @@ from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from fractions import Fraction
 from types import MappingProxyType
-from typing import Annotated, ClassVar
+from typing import Annotated, ClassVar, Literal
 
 from pydantic import Field, model_validator
 
@@ -36,10 +36,10 @@ class CostUnitKind(StrEnum):
     LINK_ADMISSION = "link_admission"
 
 
-class CostModelV1:
+class CostModel:
     """Immutable cost taxonomy. Projects cannot replace these weights."""
 
-    version: ClassVar[int] = 1
+    version: ClassVar[Literal[2]] = 2
     weights: ClassVar[Mapping[CostClass, int]] = MappingProxyType(
         {
             CostClass.STATE_CARRIER: 1,
@@ -109,7 +109,6 @@ class CostModelV1:
             ClassicRecipeFamily.RETAIL_EXACT_SAME_TU_INSTRUCTION_HYBRID_RESIZE: (
                 CostClass.BINARY_SURGERY
             ),
-            ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION: CostClass.ORACLE_INSTALL,
             ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH: CostClass.CROSS_TU_OR_OVERLAY,
             ClassicRecipeFamily.ARCHIVE_ADMISSION: CostClass.LINK_ORDERING,
             ClassicRecipeFamily.IMAGE_METADATA: CostClass.GENERATED_SUPPLIER,
@@ -125,21 +124,33 @@ class CostModelV1:
         return cls._classes[intervention.kind]
 
     @classmethod
-    def weight(cls, intervention: Intervention) -> int:
-        return cls.weights[cls.classify(intervention)]
+    def classify_record(
+        cls,
+        *,
+        kind: str,
+        family: ClassicRecipeFamily | None,
+    ) -> CostClass:
+        """Classify the complete identity retained in a report cost record."""
+
+        if kind == "classic_recipe":
+            if family is None:
+                raise ValueError("classic-recipe cost record lacks its family")
+            try:
+                return cls._classic_classes[family]
+            except KeyError as exc:
+                raise ValueError(
+                    f"classic recipe family {family.value!r} is not costable"
+                ) from exc
+        if family is not None:
+            raise ValueError("only classic-recipe cost records may name a family")
+        try:
+            return cls._classes[kind]
+        except KeyError as exc:
+            raise ValueError(f"unknown intervention cost kind: {kind!r}") from exc
 
     @classmethod
-    def unit_counts(
-        cls, intervention: Intervention
-    ) -> Mapping[CostUnitKind, int]:
-        del intervention
-        return MappingProxyType({CostUnitKind.INTERVENTION: 1})
-
-
-class CostModelV2(CostModelV1):
-    """Typed-unit model that prevents source-overlay action bundling."""
-
-    version: ClassVar[int] = 2
+    def weight(cls, intervention: Intervention) -> int:
+        return cls.weights[cls.classify(intervention)]
 
     @classmethod
     def unit_counts(
@@ -149,7 +160,7 @@ class CostModelV2(CostModelV1):
             isinstance(intervention, ClassicRecipeIntervention)
             and intervention.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
         ):
-            return super().unit_counts(intervention)
+            return MappingProxyType({CostUnitKind.INTERVENTION: 1})
 
         parameters = {item.name: item.value for item in intervention.parameters}
         outputs = parameters.get("outputs")
@@ -224,15 +235,66 @@ class CostUnitCharge(StrictModel):
 class InterventionCost(StrictModel):
     intervention_id: Identifier
     kind: str
+    family: ClassicRecipeFamily | None = None
     cost_class: CostClass
     cost: Annotated[int, Field(ge=0)]
     scope: Scope
-    units: tuple[CostUnitCharge, ...] = ()
+    beneficiaries: tuple[Scope, ...] = ()
+    units: tuple[CostUnitCharge, ...]
 
     @model_validator(mode="after")
-    def total_matches_units(self) -> InterventionCost:
-        if self.units and self.cost != sum(unit.cost for unit in self.units):
+    def is_canonical_current_model(self) -> InterventionCost:
+        expected_class = CostModel.classify_record(kind=self.kind, family=self.family)
+        if self.cost_class is not expected_class:
+            raise ValueError("intervention cost class differs from its canonical mapping")
+        expected_unit_cost = CostModel.weights[self.cost_class]
+        if any(unit.unit_cost != expected_unit_cost for unit in self.units):
+            raise ValueError("intervention unit cost differs from its canonical class weight")
+        if self.cost != sum(unit.cost for unit in self.units):
             raise ValueError("intervention cost must equal its typed-unit costs")
+        unit_kinds = tuple(unit.kind for unit in self.units)
+        canonical_kinds = tuple(kind for kind in CostUnitKind if kind in unit_kinds)
+        if unit_kinds != canonical_kinds or len(unit_kinds) != len(set(unit_kinds)):
+            raise ValueError("intervention cost units must be unique and canonical")
+        is_overlay_graph = (
+            self.kind == "classic_recipe"
+            and self.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
+        )
+        if is_overlay_graph:
+            admitted = {
+                CostUnitKind.SOURCE_OVERLAY_EDIT,
+                CostUnitKind.GENERATED_TRANSLATION_UNIT,
+                CostUnitKind.LINK_ADMISSION,
+            }
+            if not self.units or any(unit.kind not in admitted for unit in self.units):
+                raise ValueError("source-overlay cost record has invalid typed units")
+        elif (
+            len(self.units) != 1
+            or self.units[0].kind is not CostUnitKind.INTERVENTION
+            or self.units[0].count != 1
+        ):
+            raise ValueError("ordinary intervention cost requires one intervention unit")
+
+        if self.scope.function is not None and self.beneficiaries:
+            raise ValueError("direct intervention cost cannot declare shared beneficiaries")
+        beneficiary_keys: list[tuple[str, str, str]] = []
+        for beneficiary in self.beneficiaries:
+            if beneficiary.function is None or beneficiary.translation_unit is None:
+                raise ValueError("cost beneficiary must name a function scope")
+            if beneficiary.target != self.scope.target:
+                raise ValueError("cost beneficiary must remain within its intervention target")
+            if (
+                self.scope.translation_unit is not None
+                and beneficiary.translation_unit != self.scope.translation_unit
+            ):
+                raise ValueError("cost beneficiary must remain within its intervention TU")
+            beneficiary_keys.append(
+                (beneficiary.target, beneficiary.translation_unit, beneficiary.function)
+            )
+        if beneficiary_keys != sorted(beneficiary_keys) or len(beneficiary_keys) != len(
+            set(beneficiary_keys)
+        ):
+            raise ValueError("cost beneficiaries must be unique and canonical")
         return self
 
 
@@ -263,8 +325,53 @@ class FunctionCost(StrictModel):
         return self
 
 
+def _function_key(scope: Scope) -> tuple[str, str, str]:
+    assert scope.translation_unit is not None
+    assert scope.function is not None
+    return (scope.target, scope.translation_unit, scope.function)
+
+
+def _derive_function_costs(
+    interventions: Iterable[InterventionCost],
+) -> tuple[tuple[FunctionCost, ...], int]:
+    direct_costs: defaultdict[tuple[str, str, str], int] = defaultdict(int)
+    allocated_costs: defaultdict[tuple[str, str, str], Fraction] = defaultdict(Fraction)
+    exposure_costs: defaultdict[tuple[str, str, str], int] = defaultdict(int)
+    function_scopes: dict[tuple[str, str, str], Scope] = {}
+    unallocated_shared = 0
+
+    for intervention in interventions:
+        if intervention.scope.function is not None:
+            key = _function_key(intervention.scope)
+            function_scopes[key] = intervention.scope
+            direct_costs[key] += intervention.cost
+            continue
+        if not intervention.beneficiaries:
+            unallocated_shared += intervention.cost
+            continue
+        share = Fraction(intervention.cost, len(intervention.beneficiaries))
+        for scope in intervention.beneficiaries:
+            key = _function_key(scope)
+            function_scopes[key] = scope
+            allocated_costs[key] += share
+            exposure_costs[key] += intervention.cost
+
+    return (
+        tuple(
+            FunctionCost(
+                scope=function_scopes[key],
+                direct_cost=direct_costs[key],
+                allocated_shared_cost=RationalCost.from_fraction(allocated_costs[key]),
+                exposure_cost=exposure_costs[key],
+            )
+            for key in sorted(function_scopes)
+        ),
+        unallocated_shared,
+    )
+
+
 class CostBreakdown(StrictModel):
-    model_version: Annotated[int, Field(ge=1)]
+    model_version: Literal[2]
     project_total: Annotated[int, Field(ge=0)]
     unallocated_shared_cost: Annotated[int, Field(ge=0)]
     by_class: tuple[ClassCost, ...]
@@ -273,11 +380,12 @@ class CostBreakdown(StrictModel):
     interventions: tuple[InterventionCost, ...]
 
     @model_validator(mode="after")
-    def typed_units_are_complete(self) -> CostBreakdown:
-        if self.model_version < 2:
-            return self
-        if any(not intervention.units for intervention in self.interventions):
-            raise ValueError("cost model v2 requires typed units for every intervention")
+    def is_complete_and_canonical(self) -> CostBreakdown:
+        intervention_ids = tuple(item.intervention_id for item in self.interventions)
+        if intervention_ids != tuple(sorted(intervention_ids)) or len(
+            intervention_ids
+        ) != len(set(intervention_ids)):
+            raise ValueError("cost interventions must be unique and canonical")
         if self.project_total != sum(item.cost for item in self.interventions):
             raise ValueError("project cost differs from typed intervention costs")
 
@@ -301,31 +409,40 @@ class CostBreakdown(StrictModel):
                 units + unit_count,
                 cost + item.cost,
             )
-        class_actual = {
-            item.cost_class: (item.interventions, item.units, item.cost)
-            for item in self.by_class
-        }
-        target_actual = {
-            item.target: (item.interventions, item.units, item.cost)
-            for item in self.by_target
-        }
-        if len(class_actual) != len(self.by_class) or class_actual != dict(class_expected):
+        expected_by_class = tuple(
+            ClassCost(
+                cost_class=cost_class,
+                interventions=class_expected[cost_class][0],
+                units=class_expected[cost_class][1],
+                cost=class_expected[cost_class][2],
+            )
+            for cost_class in CostClass
+            if cost_class in class_expected
+        )
+        expected_by_target = tuple(
+            TargetCost(
+                target=target,
+                interventions=target_expected[target][0],
+                units=target_expected[target][1],
+                cost=target_expected[target][2],
+            )
+            for target in sorted(target_expected)
+        )
+        if self.by_class != expected_by_class:
             raise ValueError("cost-by-class totals differ from typed intervention costs")
-        if len(target_actual) != len(self.by_target) or target_actual != dict(target_expected):
+        if self.by_target != expected_by_target:
             raise ValueError("cost-by-target totals differ from typed intervention costs")
+        expected_functions, expected_unallocated = _derive_function_costs(
+            self.interventions
+        )
+        if self.by_function != expected_functions:
+            raise ValueError("function costs differ from typed intervention attribution")
+        if self.unallocated_shared_cost != expected_unallocated:
+            raise ValueError("unallocated shared cost differs from typed interventions")
         return self
 
 
-def _function_key(scope: Scope) -> tuple[str, str, str]:
-    assert scope.translation_unit is not None
-    assert scope.function is not None
-    return (scope.target, scope.translation_unit, scope.function)
-
-
-def calculate_cost(
-    interventions: Iterable[Intervention],
-    model: type[CostModelV1] = CostModelV2,
-) -> CostBreakdown:
+def calculate_cost(interventions: Iterable[Intervention]) -> CostBreakdown:
     """Charge each intervention ID's typed units and derive non-duplicating views."""
 
     unique: dict[str, Intervention] = {}
@@ -342,16 +459,11 @@ def calculate_cost(
     target_counts: defaultdict[str, int] = defaultdict(int)
     target_unit_counts: defaultdict[str, int] = defaultdict(int)
     target_costs: defaultdict[str, int] = defaultdict(int)
-    direct_costs: defaultdict[tuple[str, str, str], int] = defaultdict(int)
-    allocated_costs: defaultdict[tuple[str, str, str], Fraction] = defaultdict(Fraction)
-    exposure_costs: defaultdict[tuple[str, str, str], int] = defaultdict(int)
-    function_scopes: dict[tuple[str, str, str], Scope] = {}
-    unallocated_shared = 0
 
     for intervention in sorted(unique.values(), key=lambda item: item.id):
-        cost_class = model.classify(intervention)
-        unit_cost = model.weight(intervention)
-        counts = model.unit_counts(intervention)
+        cost_class = CostModel.classify(intervention)
+        unit_cost = CostModel.weight(intervention)
+        counts = CostModel.unit_counts(intervention)
         units = tuple(
             CostUnitCharge(
                 kind=kind,
@@ -368,9 +480,15 @@ def calculate_cost(
             InterventionCost(
                 intervention_id=intervention.id,
                 kind=intervention.kind,
+                family=(
+                    intervention.family
+                    if isinstance(intervention, ClassicRecipeIntervention)
+                    else None
+                ),
                 cost_class=cost_class,
                 cost=cost,
                 scope=intervention.scope,
+                beneficiaries=intervention.beneficiaries,
                 units=units,
             )
         )
@@ -380,36 +498,7 @@ def calculate_cost(
         target_counts[intervention.scope.target] += 1
         target_unit_counts[intervention.scope.target] += unit_count
         target_costs[intervention.scope.target] += cost
-
-        if intervention.scope.function is not None:
-            key = _function_key(intervention.scope)
-            function_scopes[key] = intervention.scope
-            direct_costs[key] += cost
-            continue
-
-        beneficiaries = {
-            _function_key(scope): scope
-            for scope in intervention.beneficiaries
-            if scope.function is not None
-        }
-        if not beneficiaries:
-            unallocated_shared += cost
-            continue
-        share = Fraction(cost, len(beneficiaries))
-        for key, scope in beneficiaries.items():
-            function_scopes[key] = scope
-            allocated_costs[key] += share
-            exposure_costs[key] += cost
-
-    by_function = tuple(
-        FunctionCost(
-            scope=function_scopes[key],
-            direct_cost=direct_costs[key],
-            allocated_shared_cost=RationalCost.from_fraction(allocated_costs[key]),
-            exposure_cost=exposure_costs[key],
-        )
-        for key in sorted(function_scopes)
-    )
+    by_function, unallocated_shared = _derive_function_costs(item_costs)
     by_class = tuple(
         ClassCost(
             cost_class=cost_class,
@@ -430,7 +519,7 @@ def calculate_cost(
         for target in sorted(target_costs)
     )
     return CostBreakdown(
-        model_version=model.version,
+        model_version=CostModel.version,
         project_total=sum(item.cost for item in item_costs),
         unallocated_shared_cost=unallocated_shared,
         by_class=by_class,
@@ -444,8 +533,7 @@ __all__ = [
     "ClassCost",
     "CostBreakdown",
     "CostClass",
-    "CostModelV1",
-    "CostModelV2",
+    "CostModel",
     "CostUnitCharge",
     "CostUnitKind",
     "FunctionCost",

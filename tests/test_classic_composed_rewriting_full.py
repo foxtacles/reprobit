@@ -48,13 +48,20 @@ import unittest
 
 import test_classic_instruction_schedule_full as fixture
 
-from reprobit import classic as byte_identity
+import reprobit.classic.coff as coff_algorithms
+import reprobit.classic.composition as composition_algorithms
+import reprobit.classic.foundation as foundation_algorithms
+import reprobit.classic.registers as register_algorithms
+import reprobit.classic.relational as relational_algorithms
+import reprobit.classic.rewriting as rewriting_algorithms
+import reprobit.classic.scheduling as schedule_algorithms
+import reprobit.coff as coff_format
+from reprobit.binary import ByteIdentityError
 
 TARGET_SYMBOL = fixture.TARGET_SYMBOL
-PROLOGUE = bytes.fromhex("5356" "33f6")
-WINDOW_SOURCE = bytes.fromhex("8b44240c" "89742418" "8d5b08" "8974241c")
-TAIL = bytes.fromhex("33c9" "8b09" "33c9" "8b09" "33c9"
-                     "3bc3" "7202" "33c0" "5e" "5b" "c3")
+PROLOGUE = bytes.fromhex("535633f6")
+WINDOW_SOURCE = bytes.fromhex("8b44240c897424188d5b088974241c")
+TAIL = bytes.fromhex("33c98b0933c98b0933c93bc3720233c05e5bc3")
 BODY = PROLOGUE + WINDOW_SOURCE + TAIL
 SIZE = len(BODY)
 WINDOW = (len(PROLOGUE), len(PROLOGUE) + len(WINDOW_SOURCE))
@@ -71,7 +78,7 @@ def reordered(body=BODY):
     start, end = WINDOW
     pieces, cursor = [], start
     for length in LENGTHS:
-        pieces.append(body[cursor:cursor + length])
+        pieces.append(body[cursor : cursor + length])
         cursor += length
     assert cursor == end
     return body[:start] + b"".join(pieces[k] for k in ORDER) + body[end:]
@@ -82,13 +89,13 @@ def rewritten(body, second=False):
     the compare's OPCODE byte only -- `3b /r` and `39 /r` share a ModRM, so
     exchanging the opcode exchanges the operands."""
     image = bytearray(body)
-    image[20] = 0xD2          # xor ecx,ecx   -> xor edx,edx
-    image[22] = 0x12          # mov ecx,[ecx] -> mov edx,[edx]
+    image[20] = 0xD2  # xor ecx,ecx   -> xor edx,edx
+    image[22] = 0x12  # mov ecx,[ecx] -> mov edx,[edx]
     if second:
         image[24] = 0xD2
         image[26] = 0x12
     image[COMPARE_AT] = 0x39  # cmp eax,ebx   -> cmp ebx,eax
-    image[BRANCH_AT] = 0x77   # jb -> ja
+    image[BRANCH_AT] = 0x77  # jb -> ja
     return bytes(image)
 
 
@@ -98,7 +105,8 @@ SECOND_IMAGE = rewritten(reordered(), second=True)
 
 def window_declaration(**overrides):
     window = {
-        "start": WINDOW[0], "end": WINDOW[1],
+        "start": WINDOW[0],
+        "end": WINDOW[1],
         "source_instruction_lengths": list(LENGTHS),
         "target_order": list(ORDER),
         "expected_dependence_edges": [],
@@ -111,7 +119,8 @@ def window_declaration(**overrides):
 def bijection_declaration(**overrides):
     item = {
         "mapping": {"ecx": "edx", "edx": "ecx"},
-        "region_start": REGION[0], "region_end": REGION[1],
+        "region_start": REGION[0],
+        "region_end": REGION[1],
         "expected_region_instruction_count": 2,
         "expected_rewritten_offsets": [20, 22],
         "debug_s_register_map": [],
@@ -122,8 +131,10 @@ def bijection_declaration(**overrides):
 
 def site_declaration(**overrides):
     site = {
-        "compare_offset": COMPARE_AT, "branch_offset": BRANCH_AT,
-        "seed_condition": "b", "image_condition": "a",
+        "compare_offset": COMPARE_AT,
+        "branch_offset": BRANCH_AT,
+        "seed_condition": "b",
+        "image_condition": "a",
         "expected_rewritten_offsets": [COMPARE_AT, BRANCH_AT],
     }
     site.update(overrides)
@@ -132,24 +143,25 @@ def site_declaration(**overrides):
 
 def composed_spec(**overrides):
     spec = {
-        "kind": byte_identity.COMPOSED_REWRITING_KIND,
+        "kind": rewriting_algorithms.COMPOSED_REWRITING_KIND,
         "windows": [window_declaration()],
         "register_bijections": [bijection_declaration()],
         "relational_sites": [site_declaration()],
         "expected_instruction_count": len(
-            byte_identity.decode_ia32_bijection_body(IMAGE, "fixture", {})),
+            register_algorithms.decode_ia32_bijection_body(IMAGE, "fixture", {})
+        ),
         "expected_changed_offsets": sorted(
-            index for index in range(SIZE) if BODY[index] != IMAGE[index]),
+            index for index in range(SIZE) if BODY[index] != IMAGE[index]
+        ),
         "expected_procedure_range": list(PROCEDURE_RANGE),
         "expected_code_symbol_references": [],
         "expected_external_entries": [],
         "expected_seed_debug_s_sha256": "00" * 32,
         "expected_image_debug_s_sha256": "00" * 32,
-        "authenticity_rationale":
-            "One topological window reordering, one regional register "
-            "bijection whose support is proved dead at the region boundary, "
-            "and one mirrored comparison whose changed flags are dead at "
-            "both successors -- composed inside a single entry.",
+        "authenticity_rationale": "One topological window reordering, one regional register "
+        "bijection whose support is proved dead at the region boundary, "
+        "and one mirrored comparison whose changed flags are dead at "
+        "both successors -- composed inside a single entry.",
     }
     spec.update(overrides)
     return spec
@@ -160,51 +172,52 @@ def make_coff(**overrides):
         "body": BODY,
         "line_rows": LINE_ROWS,
         "debug_stream": fixture.codeview_stream(
-            size=SIZE, debug_start=PROCEDURE_RANGE[1],
-            debug_end=PROCEDURE_RANGE[2]),
+            size=SIZE, debug_start=PROCEDURE_RANGE[1], debug_end=PROCEDURE_RANGE[2]
+        ),
     }
     options.update(overrides)
     return fixture.make_coff(**options)
 
 
 def function_record(seed_bytes, donor_bytes, image, **overrides):
-    seed = byte_identity.CoffObject(seed_bytes)
-    donor = byte_identity.CoffObject(donor_bytes)
+    seed = coff_format.CoffObject(seed_bytes)
+    donor = coff_format.CoffObject(donor_bytes)
     sp = seed.function_section(TARGET_SYMBOL)
     dp = donor.function_section(TARGET_SYMBOL)
-    seed_body = byte_identity.coff_body(seed, sp)
-    stream = byte_identity.coff_body(
-        seed, byte_identity._comdat_child(seed, sp, ".debug$S"))
+    seed_body = coff_format.coff_body(seed, sp)
+    stream = coff_format.coff_body(seed, coff_algorithms._comdat_child(seed, sp, ".debug$S"))
     record = {
         "mangled": TARGET_SYMBOL,
         "donor": "d_0123456789ab",
-        "splice_class": byte_identity.COMPOSED_REWRITING_CLASS,
+        "splice_class": rewriting_algorithms.COMPOSED_REWRITING_CLASS,
         "expected_section_number": sp["number"],
         "expected_donor_section_number": dp["number"],
         "expected_section_count": len(seed.sections),
         "expected_donor_section_count": len(donor.sections),
         "expected_body_length": sp["raw_size"],
         "expected_characteristics": sp["characteristics"],
-        "expected_selection": byte_identity.section_definitions(
-            seed)[sp["number"]]["selection"],
+        "expected_selection": coff_format.section_definitions(seed)[sp["number"]]["selection"],
         "expected_relocation_count": sp["relocation_count"],
         "expected_seed_line_count": sp["line_count"],
         "expected_donor_line_count": dp["line_count"],
-        "expected_function_count": sum(
-            byte_identity.function_multiset(seed).values()),
+        "expected_function_count": sum(coff_algorithms.function_multiset(seed).values()),
         "expected_comdat_count": sum(
-            byte_identity.comdat_primary_identity_multiset(seed).values()),
-        "expected_seed_body_sha256": byte_identity.sha256_bytes(seed_body),
-        "expected_donor_body_sha256": byte_identity.sha256_bytes(
-            byte_identity.coff_body(donor, dp)),
-        "expected_body_sha256": byte_identity.sha256_bytes(image),
-        "expected_seed_metadata_sha256":
-            byte_identity.instruction_mosaic_metadata_sha256(seed, sp),
-        "expected_donor_metadata_sha256":
-            byte_identity.instruction_mosaic_metadata_sha256(donor, dp),
+            coff_algorithms.comdat_primary_identity_multiset(seed).values()
+        ),
+        "expected_seed_body_sha256": foundation_algorithms.sha256_bytes(seed_body),
+        "expected_donor_body_sha256": foundation_algorithms.sha256_bytes(
+            coff_format.coff_body(donor, dp)
+        ),
+        "expected_body_sha256": foundation_algorithms.sha256_bytes(image),
+        "expected_seed_metadata_sha256": composition_algorithms.instruction_mosaic_metadata_sha256(
+            seed, sp
+        ),
+        "expected_donor_metadata_sha256": composition_algorithms.instruction_mosaic_metadata_sha256(
+            donor, dp
+        ),
         "expected_changed_offsets": sorted(
-            index for index in range(len(image))
-            if seed_body[index] != image[index]),
+            index for index in range(len(image)) if seed_body[index] != image[index]
+        ),
         "expected_closure": [".debug$F", ".debug$S"],
         "expected_code_renames": [],
         "expected_xdata_rename_offsets": [],
@@ -216,8 +229,8 @@ def function_record(seed_bytes, donor_bytes, image, **overrides):
         },
         "retail_relocations": [],
         "composed_rewriting": composed_spec(
-            expected_seed_debug_s_sha256=byte_identity.sha256_bytes(stream),
-            expected_image_debug_s_sha256=byte_identity.sha256_bytes(stream),
+            expected_seed_debug_s_sha256=foundation_algorithms.sha256_bytes(stream),
+            expected_image_debug_s_sha256=foundation_algorithms.sha256_bytes(stream),
         ),
     }
     record.update(overrides)
@@ -228,101 +241,139 @@ class CompositionTests(unittest.TestCase):
     """The composition itself, on the primitives it delegates to."""
 
     def test_the_three_primitives_reach_retails_code_in_this_order(self):
-        image, _ = byte_identity.apply_instruction_schedule(
-            BODY, [window_declaration()], frozenset(), "s", {})
-        image, proof = byte_identity.apply_register_bijection(
-            image, {"ecx": "edx", "edx": "ecx"}, REGION, frozenset(), "b", {})
+        image, _ = schedule_algorithms.apply_instruction_schedule(
+            BODY, [window_declaration()], frozenset(), "s", {}
+        )
+        image, proof = register_algorithms.apply_register_bijection(
+            image, {"ecx": "edx", "edx": "ecx"}, REGION, frozenset(), "b", {}
+        )
         self.assertEqual(proof["rewritten_offsets"], [20, 22])
-        image, proof = byte_identity.apply_relational_form(
-            image, [{"compare_offset": COMPARE_AT,
-                     "branch_offset": BRANCH_AT,
-                     "seed_condition": "b", "image_condition": "a"}],
-            frozenset(), "r", {})
-        self.assertEqual(proof["rewritten_offsets"],
-                         [COMPARE_AT, BRANCH_AT])
+        image, proof = relational_algorithms.apply_relational_form(
+            image,
+            [
+                {
+                    "compare_offset": COMPARE_AT,
+                    "branch_offset": BRANCH_AT,
+                    "seed_condition": "b",
+                    "image_condition": "a",
+                }
+            ],
+            frozenset(),
+            "r",
+            {},
+        )
+        self.assertEqual(proof["rewritten_offsets"], [COMPARE_AT, BRANCH_AT])
         self.assertEqual(image, IMAGE)
 
     def test_the_bijection_and_the_reversal_commute(self):
         """C1: their relative order is free; only the window must be first."""
-        base, _ = byte_identity.apply_instruction_schedule(
-            BODY, [window_declaration()], frozenset(), "s", {})
-        first, _ = byte_identity.apply_relational_form(
-            base, [{"compare_offset": COMPARE_AT,
+        base, _ = schedule_algorithms.apply_instruction_schedule(
+            BODY, [window_declaration()], frozenset(), "s", {}
+        )
+        first, _ = relational_algorithms.apply_relational_form(
+            base,
+            [
+                {
+                    "compare_offset": COMPARE_AT,
                     "branch_offset": BRANCH_AT,
-                    "seed_condition": "b", "image_condition": "a"}],
-            frozenset(), "r", {})
-        first, _ = byte_identity.apply_register_bijection(
-            first, {"ecx": "edx", "edx": "ecx"}, REGION, frozenset(), "b", {})
+                    "seed_condition": "b",
+                    "image_condition": "a",
+                }
+            ],
+            frozenset(),
+            "r",
+            {},
+        )
+        first, _ = register_algorithms.apply_register_bijection(
+            first, {"ecx": "edx", "edx": "ecx"}, REGION, frozenset(), "b", {}
+        )
         self.assertEqual(first, IMAGE)
 
 
 class DeclarationTests(unittest.TestCase):
     def validate(self, **overrides):
-        return byte_identity.validate_composed_rewriting(
-            composed_spec(**overrides), "fixture", SIZE)
+        return rewriting_algorithms.validate_composed_rewriting(
+            composed_spec(**overrides), "fixture", SIZE
+        )
 
     def test_the_reference_declaration_validates(self):
         normalized = self.validate()
-        self.assertEqual(normalized["kind"],
-                         byte_identity.COMPOSED_REWRITING_KIND)
+        self.assertEqual(normalized["kind"], rewriting_algorithms.COMPOSED_REWRITING_KIND)
         self.assertEqual(len(normalized["windows"]), 1)
         self.assertEqual(len(normalized["register_bijections"]), 1)
         self.assertEqual(len(normalized["relational_sites"]), 1)
 
     def test_a_single_statement_is_refused(self):
         """A lone certificate belongs to its own class, not to this one."""
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            self.validate(register_bijections=[], relational_sites=[],
-                          expected_changed_offsets=sorted(
-                              index for index in range(SIZE)
-                              if BODY[index] != reordered()[index]))
+        with self.assertRaises(ByteIdentityError) as raised:
+            self.validate(
+                register_bijections=[],
+                relational_sites=[],
+                expected_changed_offsets=sorted(
+                    index for index in range(SIZE) if BODY[index] != reordered()[index]
+                ),
+            )
         self.assertIn("composes nothing", str(raised.exception))
 
     def test_overlapping_bijection_regions_are_refused(self):
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            self.validate(register_bijections=[
-                bijection_declaration(),
-                bijection_declaration(region_start=REGION[0] + 1)])
+        with self.assertRaises(ByteIdentityError) as raised:
+            self.validate(
+                register_bijections=[
+                    bijection_declaration(),
+                    bijection_declaration(region_start=REGION[0] + 1),
+                ]
+            )
         self.assertIn("unsorted or overlapping", str(raised.exception))
 
     def test_two_bijections_that_rewrite_one_byte_are_refused(self):
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            self.validate(register_bijections=[
-                bijection_declaration(region_end=REGION[0] + 2,
-                                      expected_rewritten_offsets=[20],
-                                      expected_region_instruction_count=1),
-                bijection_declaration(region_start=REGION[0] + 2,
-                                      region_end=REGION[1],
-                                      expected_rewritten_offsets=[20, 22],
-                                      expected_region_instruction_count=1)])
-        self.assertIn("expected_rewritten_offsets is invalid",
-                      str(raised.exception))
+        with self.assertRaises(ByteIdentityError) as raised:
+            self.validate(
+                register_bijections=[
+                    bijection_declaration(
+                        region_end=REGION[0] + 2,
+                        expected_rewritten_offsets=[20],
+                        expected_region_instruction_count=1,
+                    ),
+                    bijection_declaration(
+                        region_start=REGION[0] + 2,
+                        region_end=REGION[1],
+                        expected_rewritten_offsets=[20, 22],
+                        expected_region_instruction_count=1,
+                    ),
+                ]
+            )
+        self.assertIn("expected_rewritten_offsets is invalid", str(raised.exception))
 
     def test_a_byte_local_rewrite_inside_a_window_is_refused(self):
         """C2: a window may not also be a bijection region."""
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            self.validate(register_bijections=[bijection_declaration(
-                region_start=WINDOW[0] + 1, region_end=WINDOW[0] + 5,
-                expected_rewritten_offsets=[WINDOW[0] + 2])])
+        with self.assertRaises(ByteIdentityError) as raised:
+            self.validate(
+                register_bijections=[
+                    bijection_declaration(
+                        region_start=WINDOW[0] + 1,
+                        region_end=WINDOW[0] + 5,
+                        expected_rewritten_offsets=[WINDOW[0] + 2],
+                    )
+                ]
+            )
         self.assertIn("inside a reordered window", str(raised.exception))
 
     def test_a_relocation_reseat_is_refused(self):
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            self.validate(windows=[window_declaration(
-                relocation_reseat=[[WINDOW[0], WINDOW[0] + 4]])])
+        with self.assertRaises(ByteIdentityError) as raised:
+            self.validate(
+                windows=[window_declaration(relocation_reseat=[[WINDOW[0], WINDOW[0] + 4]])]
+            )
         self.assertIn("refuses to move a relocation", str(raised.exception))
 
     def test_a_condition_pair_that_is_not_the_mirror_is_refused(self):
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            self.validate(relational_sites=[
-                site_declaration(image_condition="ae")])
+        with self.assertRaises(ByteIdentityError) as raised:
+            self.validate(relational_sites=[site_declaration(image_condition="ae")])
         self.assertIn("not the closed table's mirror", str(raised.exception))
 
     def test_a_changed_set_that_omits_a_rewritten_byte_is_refused(self):
         changed = composed_spec()["expected_changed_offsets"]
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            self.validate(expected_changed_offsets=[
-                offset for offset in changed if offset != 20])
+        with self.assertRaises(ByteIdentityError) as raised:
+            self.validate(expected_changed_offsets=[offset for offset in changed if offset != 20])
         self.assertIn("omits a rewritten byte", str(raised.exception))
 
 
@@ -333,14 +384,15 @@ class CompositionEndToEndTests(unittest.TestCase):
 
     def compose(self, record=None, donor=None):
         record = record or function_record(self.seed, self.donor, IMAGE)
-        return byte_identity.produce_composed_rewriting_candidate(
-            self.seed, donor or self.donor, record)
+        return rewriting_algorithms.produce_composed_rewriting_candidate(
+            self.seed, donor or self.donor, record
+        )
 
     def test_the_certificate_produces_the_declared_candidate(self):
         composed, detail = self.compose()
-        checked = byte_identity.CoffObject(composed)
+        checked = coff_format.CoffObject(composed)
         section = checked.function_section(TARGET_SYMBOL)
-        self.assertEqual(byte_identity.coff_body(checked, section), IMAGE)
+        self.assertEqual(coff_format.coff_body(checked, section), IMAGE)
         self.assertTrue(detail["candidate_only"])
         self.assertEqual(len(detail["instruction_schedule"]), 1)
         self.assertEqual(len(detail["register_bijections"]), 1)
@@ -351,8 +403,9 @@ class CompositionEndToEndTests(unittest.TestCase):
         other[-2] ^= 0x01
         record = function_record(self.seed, self.donor, IMAGE)
         with self.assertRaises(TypeError):
-            byte_identity.produce_composed_rewriting_candidate(
-                self.seed, self.donor, record, bytes(other))
+            rewriting_algorithms.produce_composed_rewriting_candidate(
+                self.seed, self.donor, record, bytes(other)
+            )
 
     def test_a_witness_that_does_not_reproduce_the_seed_is_refused(self):
         """C4: the donor is a provenance witness, not a body source."""
@@ -360,23 +413,20 @@ class CompositionEndToEndTests(unittest.TestCase):
         other[-2] ^= 0x01
         donor = make_coff(body=bytes(other))
         record = function_record(self.seed, donor, IMAGE)
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
+        with self.assertRaises(ByteIdentityError) as raised:
             self.compose(record=record, donor=donor)
-        self.assertIn("does not reproduce the seed's body",
-                      str(raised.exception))
+        self.assertIn("does not reproduce the seed's body", str(raised.exception))
 
     def test_a_declared_rename_is_refused(self):
-        record = function_record(self.seed, self.donor, IMAGE,
-                                 expected_code_renames=[[0, "T"]])
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
+        record = function_record(self.seed, self.donor, IMAGE, expected_code_renames=[[0, "T"]])
+        with self.assertRaises(ByteIdentityError) as raised:
             self.compose(record=record)
         self.assertIn("can declare no rename", str(raised.exception))
 
     def test_a_bijection_whose_rewrite_set_differs_is_refused(self):
         record = function_record(self.seed, self.donor, IMAGE)
-        record["composed_rewriting"]["register_bijections"][0][
-            "expected_rewritten_offsets"] = [20]
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
+        record["composed_rewriting"]["register_bijections"][0]["expected_rewritten_offsets"] = [20]
+        with self.assertRaises(ByteIdentityError) as raised:
             self.compose(record=record)
         self.assertIn("rewrote a different byte set", str(raised.exception))
 
@@ -390,74 +440,86 @@ class CompositionEndToEndTests(unittest.TestCase):
         oracle -- so the refusal is C3 and nothing else.
         """
         stream = fixture.codeview_stream(
-            size=SIZE, debug_start=PROCEDURE_RANGE[1],
-            debug_end=PROCEDURE_RANGE[2]) + _register_record("i", "ecx")
+            size=SIZE, debug_start=PROCEDURE_RANGE[1], debug_end=PROCEDURE_RANGE[2]
+        ) + _register_record("i", "ecx")
         seed = make_coff(debug_stream=stream)
         donor = make_coff(debug_stream=stream)
         record = function_record(seed, donor, SECOND_IMAGE)
         record["composed_rewriting"]["register_bijections"] = [
             bijection_declaration(),
-            bijection_declaration(region_start=SECOND_REGION[0],
-                                  region_end=SECOND_REGION[1],
-                                  expected_rewritten_offsets=[24, 26]),
+            bijection_declaration(
+                region_start=SECOND_REGION[0],
+                region_end=SECOND_REGION[1],
+                expected_rewritten_offsets=[24, 26],
+            ),
         ]
-        record["composed_rewriting"]["expected_changed_offsets"] = \
-            record["expected_changed_offsets"]
+        record["composed_rewriting"]["expected_changed_offsets"] = record[
+            "expected_changed_offsets"
+        ]
         record["composed_rewriting"]["expected_instruction_count"] = len(
-            byte_identity.decode_ia32_bijection_body(
-                SECOND_IMAGE, "fixture", {}))
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            byte_identity.produce_composed_rewriting_candidate(
-                seed, donor, record)
-        self.assertIn("both name the S_REGISTER record",
-                      str(raised.exception))
+            register_algorithms.decode_ia32_bijection_body(SECOND_IMAGE, "fixture", {})
+        )
+        with self.assertRaises(ByteIdentityError) as raised:
+            rewriting_algorithms.produce_composed_rewriting_candidate(seed, donor, record)
+        self.assertIn("both name the S_REGISTER record", str(raised.exception))
 
     def test_two_disjoint_debug_claims_are_accepted(self):
         """The same two regions, each naming its OWN record, compose."""
-        stream = (fixture.codeview_stream(
-            size=SIZE, debug_start=PROCEDURE_RANGE[1],
-            debug_end=PROCEDURE_RANGE[2])
-            + _register_record("i", "ecx") + _register_record("j", "esi"))
+        stream = (
+            fixture.codeview_stream(
+                size=SIZE, debug_start=PROCEDURE_RANGE[1], debug_end=PROCEDURE_RANGE[2]
+            )
+            + _register_record("i", "ecx")
+            + _register_record("j", "esi")
+        )
         seed = make_coff(debug_stream=stream)
         donor = make_coff(debug_stream=stream)
         record = function_record(seed, donor, SECOND_IMAGE)
-        offset = len(stream) - len(_register_record("j", "esi")) \
-            - len(_register_record("i", "ecx"))
+        offset = len(stream) - len(_register_record("j", "esi")) - len(_register_record("i", "ecx"))
         record["composed_rewriting"]["register_bijections"] = [
-            bijection_declaration(debug_s_register_map=[{
-                "name": "i", "record_offset": offset,
-                "donor_register": "ecx", "image_register": "edx"}]),
+            bijection_declaration(
+                debug_s_register_map=[
+                    {
+                        "name": "i",
+                        "record_offset": offset,
+                        "donor_register": "ecx",
+                        "image_register": "edx",
+                    }
+                ]
+            ),
             bijection_declaration(
                 mapping={"esi": "edi", "edi": "esi"},
-                region_start=SECOND_REGION[0], region_end=SECOND_REGION[1],
+                region_start=SECOND_REGION[0],
+                region_end=SECOND_REGION[1],
                 expected_rewritten_offsets=[24, 26],
-                debug_s_register_map=[{
-                    "name": "j",
-                    "record_offset": offset + len(
-                        _register_record("i", "ecx")),
-                    "donor_register": "esi", "image_register": "edi"}]),
+                debug_s_register_map=[
+                    {
+                        "name": "j",
+                        "record_offset": offset + len(_register_record("i", "ecx")),
+                        "donor_register": "esi",
+                        "image_register": "edi",
+                    }
+                ],
+            ),
         ]
         # The second region does not carry esi or edi, so its sigma rewrites
         # nothing there -- which the primitive refuses.  What this test fixes
         # is that the two record claims are DISJOINT and therefore reach the
         # primitive at all, rather than being refused by C3.
-        with self.assertRaises(byte_identity.ByteIdentityError) as raised:
-            byte_identity.produce_composed_rewriting_candidate(
-                seed, donor, record)
-        self.assertNotIn("both name the S_REGISTER record",
-                         str(raised.exception))
+        with self.assertRaises(ByteIdentityError) as raised:
+            rewriting_algorithms.produce_composed_rewriting_candidate(seed, donor, record)
+        self.assertNotIn("both name the S_REGISTER record", str(raised.exception))
 
 
 def _register_record(name: str, register: str) -> bytes:
     import struct
+
     payload = bytearray(4)
-    struct.pack_into(
-        "<H", payload, 2,
-        byte_identity.CODEVIEW_X86_REGISTER_NUMBERS[register])
+    struct.pack_into("<H", payload, 2, register_algorithms.CODEVIEW_X86_REGISTER_NUMBERS[register])
     payload += bytes([len(name)]) + name.encode()
-    return struct.pack("<HH", len(payload) + 2,
-                       byte_identity.CODEVIEW_REGISTER_RECORD_TYPE) \
-        + bytes(payload)
+    return struct.pack(
+        "<HH", len(payload) + 2, register_algorithms.CODEVIEW_REGISTER_RECORD_TYPE
+    ) + bytes(payload)
 
 
 if __name__ == "__main__":  # pragma: no cover

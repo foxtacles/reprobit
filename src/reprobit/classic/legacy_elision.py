@@ -11,18 +11,22 @@ from __future__ import annotations
 
 from typing import Any, cast
 
-from .coff import (
+from reprobit.binary import ByteIdentityError, require
+from reprobit.coff import (
     CoffObject,
-    _comdat_child_closure,
     coff_body,
-    comdat_primary_identity_multiset,
     detailed_relocations,
-    function_multiset,
     section_definitions,
 )
+from reprobit.ia32 import supported_ia32_instruction_length
+
+from .coff import (
+    _comdat_child_closure,
+    comdat_primary_identity_multiset,
+    function_multiset,
+)
 from .composition import compose_same_slot_resize, instruction_mosaic_metadata_sha256
-from .foundation import ByteIdentityError, require, sha256_bytes
-from .ia32 import supported_ia32_instruction_length
+from .foundation import sha256_bytes
 from .registers import (
     _IA32_ATOMS_OF,
     _IA32_REGISTER_NUMBERS,

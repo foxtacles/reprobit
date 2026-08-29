@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import re
-from .coff import _coff_table_bytes, coff_unpack, function_symbol
-from .foundation import ADDRESS_RE, ByteIdentityError, exact_audit_keys, require, require_exact_int, require_sha, sha256_bytes
+
+from reprobit.binary import ByteIdentityError, require
+from reprobit.coff import coff_unpack as _coff_unpack
+from reprobit.ia32 import (
+    supported_ia32_instruction_length as _supported_ia32_instruction_length,
+)
+
+from .coff import _coff_table_bytes, function_symbol
+from .foundation import ADDRESS_RE, exact_audit_keys, require_exact_int, require_sha, sha256_bytes
 
 """Classic compiler algorithms: ia32."""
 RETAIL_RELOCATION_ORACLE_KEYS = {'offset', 'type', 'addend', 'target', 'target_section', 'target_value', 'target_type', 'target_storage', 'retail_target'}
@@ -43,230 +50,9 @@ SAME_TU_INSTRUCTION_HYBRID_RESIZE_CLASS = 'retail_exact_same_tu_instruction_hybr
 CROSS_TU_COMPLETE_TARGET_RESIZE_CLASS = 'retail_exact_cross_tu_complete_target_resize'
 RETAIL_EXACT_SOURCE_EQUAL_BODY_CLASS = 'retail_exact_source_equal_body'
 CROSS_TU_INSTRUCTION_HYBRID_RANGE_KEYS = {'kind', 'target_start', 'target_end', 'target_sha256', 'instruction_donor_start', 'instruction_donor_end', 'instruction_donor_sha256'}
-_IA32_PREFIXES = {38, 46, 54, 62, 100, 101, 102, 240, 242, 243}
-
-def _ia32_one_byte_table() -> dict:
-    table = {}
-    for base in range(0, 64, 8):
-        if base in (0, 8, 16, 24, 32, 40, 48, 56):
-            table[base] = ('M',)
-            table[base + 1] = ('M',)
-            table[base + 2] = ('M',)
-            table[base + 3] = ('M',)
-            table[base + 4] = ('Ib',)
-            table[base + 5] = ('Iz',)
-    for opcode in (6, 7, 14, 22, 23, 30, 31, 39, 47, 55, 63):
-        table[opcode] = ()
-    for opcode in range(64, 98):
-        table[opcode] = ()
-    table[98] = ('M',)
-    table[99] = ('M',)
-    table[104] = ('Iz',)
-    table[105] = ('M', 'Iz')
-    table[106] = ('Ib',)
-    table[107] = ('M', 'Ib')
-    for opcode in range(108, 112):
-        table[opcode] = ()
-    for opcode in range(112, 128):
-        table[opcode] = ('Jb',)
-    table[128] = ('M', 'Ib')
-    table[129] = ('M', 'Iz')
-    table[130] = ('M', 'Ib')
-    table[131] = ('M', 'Ib')
-    for opcode in range(132, 144):
-        table[opcode] = ('M',)
-    for opcode in range(144, 154):
-        table[opcode] = ()
-    table[154] = ('Ap',)
-    for opcode in range(155, 160):
-        table[opcode] = ()
-    for opcode in range(160, 164):
-        table[opcode] = ('Ov',)
-    for opcode in range(164, 168):
-        table[opcode] = ()
-    table[168] = ('Ib',)
-    table[169] = ('Iz',)
-    for opcode in range(170, 176):
-        table[opcode] = ()
-    for opcode in range(176, 184):
-        table[opcode] = ('Ib',)
-    for opcode in range(184, 192):
-        table[opcode] = ('Iz',)
-    table[192] = ('M', 'Ib')
-    table[193] = ('M', 'Ib')
-    table[194] = ('Iw',)
-    table[195] = ()
-    table[196] = ('M',)
-    table[197] = ('M',)
-    table[198] = ('M', 'Ib')
-    table[199] = ('M', 'Iz')
-    table[200] = ('Iw', 'Ib')
-    table[201] = ()
-    table[202] = ('Iw',)
-    table[203] = ()
-    table[204] = ()
-    table[205] = ('Ib',)
-    table[206] = ()
-    table[207] = ()
-    for opcode in range(208, 212):
-        table[opcode] = ('M',)
-    table[212] = ('Ib',)
-    table[213] = ('Ib',)
-    table[215] = ()
-    for opcode in range(216, 224):
-        table[opcode] = ('M',)
-    for opcode in range(224, 228):
-        table[opcode] = ('Jb',)
-    for opcode in range(228, 232):
-        table[opcode] = ('Ib',)
-    table[232] = ('Jz',)
-    table[233] = ('Jz',)
-    table[234] = ('Ap',)
-    table[235] = ('Jb',)
-    for opcode in range(236, 240):
-        table[opcode] = ()
-    table[244] = ()
-    table[245] = ()
-    table[246] = ('M', 'F6')
-    table[247] = ('M', 'F7')
-    for opcode in range(248, 254):
-        table[opcode] = ()
-    table[254] = ('M',)
-    table[255] = ('M',)
-    return table
-
-def _ia32_two_byte_table() -> dict:
-    table = {}
-    for opcode in (0, 1, 2, 3, 13, 24, 31):
-        table[opcode] = ('M',)
-    for opcode in (6, 8, 9, 11, 48, 49, 50, 51, 119, 160, 161, 162, 168, 169, 170):
-        table[opcode] = ()
-    for opcode in range(16, 24):
-        table[opcode] = ('M',)
-    for opcode in range(32, 36):
-        table[opcode] = ('M',)
-    for opcode in range(40, 48):
-        table[opcode] = ('M',)
-    for opcode in range(64, 80):
-        table[opcode] = ('M',)
-    for opcode in range(80, 112):
-        table[opcode] = ('M',)
-    table[112] = ('M', 'Ib')
-    table[113] = ('M', 'Ib')
-    table[114] = ('M', 'Ib')
-    table[115] = ('M', 'Ib')
-    for opcode in range(116, 119):
-        table[opcode] = ('M',)
-    table[126] = ('M',)
-    table[127] = ('M',)
-    for opcode in range(128, 144):
-        table[opcode] = ('Jz',)
-    for opcode in range(144, 160):
-        table[opcode] = ('M',)
-    table[163] = ('M',)
-    table[164] = ('M', 'Ib')
-    table[165] = ('M',)
-    table[171] = ('M',)
-    table[172] = ('M', 'Ib')
-    table[173] = ('M',)
-    table[174] = ('M',)
-    table[175] = ('M',)
-    for opcode in range(176, 184):
-        table[opcode] = ('M',)
-    table[185] = ('M',)
-    table[186] = ('M', 'Ib')
-    for opcode in range(187, 194):
-        table[opcode] = ('M',)
-    table[194] = ('M', 'Ib')
-    table[195] = ('M',)
-    table[196] = ('M', 'Ib')
-    table[197] = ('M', 'Ib')
-    table[198] = ('M', 'Ib')
-    table[199] = ('M',)
-    for opcode in range(200, 208):
-        table[opcode] = ()
-    for opcode in range(208, 256):
-        table[opcode] = ('M',)
-    return table
-IA32_ONE_BYTE_OPCODES = _ia32_one_byte_table()
-IA32_TWO_BYTE_OPCODES = _ia32_two_byte_table()
-
-def supported_ia32_instruction_length(encoded: bytes, context: str) -> int:
-    """Decode the length of one flat 32-bit IA-32 instruction.
-
-    This is a fail-closed length decoder, not a disassembler: it knows the
-    legacy prefixes, the complete one-byte opcode map and the two-byte 0F map
-    of the 32-bit code the 1997 compiler emits, and derives ModRM, SIB,
-    displacement and immediate widths from the bytes.  Repeated or address-
-    size prefixes, undefined opcode slots, three-byte escapes and truncated
-    encodings fail.  Every accepted length is cross-checked against an
-    independent disassembler by the boundary-regression tests.
-    """
-    require(isinstance(encoded, bytes) and encoded, f'{context}: instruction encoding is missing')
-    cursor = 0
-    operand_size_16 = False
-    seen_prefixes = set()
-    while cursor < len(encoded) and encoded[cursor] in _IA32_PREFIXES:
-        prefix = encoded[cursor]
-        require(prefix not in seen_prefixes, f'{context}: unsupported repeated instruction prefix')
-        seen_prefixes.add(prefix)
-        if prefix == 102:
-            operand_size_16 = True
-        cursor += 1
-    require(cursor < len(encoded), f'{context}: unsupported or truncated instruction prefix')
-    require(cursor <= 4, f'{context}: unsupported instruction prefix run')
-    opcode = encoded[cursor]
-    cursor += 1
-    if opcode == 15:
-        require(cursor < len(encoded), f'{context}: unsupported or truncated two-byte IA-32 opcode')
-        opcode = encoded[cursor]
-        cursor += 1
-        operands = IA32_TWO_BYTE_OPCODES.get(opcode)
-        require(operands is not None, f'{context}: unsupported two-byte IA-32 opcode')
-    else:
-        operands = IA32_ONE_BYTE_OPCODES.get(opcode)
-        require(operands is not None, f'{context}: unsupported IA-32 instruction opcode')
-    for token in operands:
-        if token == 'M':
-            require(cursor < len(encoded), f'{context}: IA-32 instruction lacks ModRM')
-            modrm = encoded[cursor]
-            cursor += 1
-            mode = modrm >> 6
-            rm = modrm & 7
-            if mode != 3 and rm == 4:
-                require(cursor < len(encoded), f'{context}: IA-32 instruction lacks SIB')
-                sib = encoded[cursor]
-                cursor += 1
-                if mode == 0 and sib & 7 == 5:
-                    cursor += 4
-            elif mode == 0 and rm == 5:
-                cursor += 4
-            if mode == 1:
-                cursor += 1
-            elif mode == 2:
-                cursor += 4
-        elif token in ('F6', 'F7'):
-            if modrm >> 3 & 7 in (0, 1):
-                cursor += 1 if token == 'F6' else 2 if operand_size_16 else 4
-        elif token in ('Ib', 'Jb'):
-            cursor += 1
-        elif token == 'Iw':
-            cursor += 2
-        elif token in ('Iz', 'Jz'):
-            cursor += 2 if operand_size_16 else 4
-        elif token == 'Ov':
-            cursor += 4
-        elif token == 'Ap':
-            cursor += 6
-        else:
-            raise ByteIdentityError(f'{context}: decoder table error')
-    require(cursor <= len(encoded), f'{context}: supported IA-32 instruction is truncated')
-    require(cursor <= 15, f'{context}: IA-32 instruction exceeds 15 bytes')
-    return cursor
-
 def require_supported_complete_ia32_instruction(encoded: bytes, context: str) -> int:
     """Require that an isolated range is exactly one supported instruction."""
-    length = supported_ia32_instruction_length(encoded, context)
+    length = _supported_ia32_instruction_length(encoded, context)
     require(length == len(encoded), f'{context}: encoding is not one complete supported IA-32 instruction')
     return length
 
@@ -275,13 +61,13 @@ def require_coff_line_certified_ia32_boundaries(coff, section: dict, body: bytes
     require(role in {'target', 'instruction_donor', 'seed', 'donor'}, f'{context}: IA-32 range role differs')
     line_bytes = _coff_table_bytes(coff, section, 'lines')
     require(len(line_bytes) == section['line_count'] * 6 and len(line_bytes) >= 12, f'{context}: compiler line-boundary certificate is missing')
-    marker_index, marker_line = coff_unpack('<IH', line_bytes, 0, context + ' line sentinel')
+    marker_index, marker_line = _coff_unpack('<IH', line_bytes, 0, context + ' line sentinel')
     function_index, _ = function_symbol(coff, mangled, section['number'])
     require(marker_line == 0 and marker_index == function_index, f'{context}: compiler line sentinel differs')
     line_offsets = []
     previous = -1
     for index in range(1, section['line_count']):
-        offset, line = coff_unpack('<IH', line_bytes, index * 6, f'{context} line row {index}')
+        offset, line = _coff_unpack('<IH', line_bytes, index * 6, f'{context} line row {index}')
         require(line != 0 and previous <= offset < len(body), f'{context}: compiler line boundary is invalid')
         previous = offset
         line_offsets.append(offset)
@@ -299,7 +85,7 @@ def require_coff_line_certified_ia32_boundaries(coff, section: dict, body: bytes
         in_range_lengths = []
         while cursor < end:
             instruction_start = cursor
-            length = supported_ia32_instruction_length(body[cursor:], f'{context} range {index} at {cursor}')
+            length = _supported_ia32_instruction_length(body[cursor:], f'{context} range {index} at {cursor}')
             cursor += length
             require(cursor <= len(body), f'{context}: decoded instruction escapes the COMDAT')
             boundaries.add(cursor)

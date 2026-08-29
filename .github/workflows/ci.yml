@@ -72,6 +72,13 @@ jobs:
               f"{license_root}/NOTICE",
               "share/reprobit/cmake/ReproBit.cmake",
               "share/reprobit/runtime/ReproBitPathProxy.sh",
+              "share/reprobit/runtime/msvc42-wine/README.md",
+              "share/reprobit/runtime/msvc42-wine/cl",
+              "share/reprobit/runtime/msvc42-wine/lib",
+              "share/reprobit/runtime/msvc42-wine/link",
+              "share/reprobit/runtime/msvc42-wine/msvcenv.sh",
+              "share/reprobit/runtime/msvc42-wine/rc",
+              "share/reprobit/runtime/msvc42-wine/wine-msvc.sh",
               "share/reprobit/schemas/build-plan-v3.schema.json",
               "share/reprobit/schemas/catalog-v3.schema.json",
               "share/reprobit/schemas/intervention-document-v3.schema.json",
@@ -125,7 +132,7 @@ jobs:
           --toolchain-profile msvc_4_2
           --toolchain-root "$env:REPROBIT_MSVC_4_2_ROOT"
           --execute-probe
-      - name: Exercise native DeviceMap, process ownership, and compiler chain
+      - name: Exercise native lineage drive, process ownership, and compiler chain
         run: >-
           python -m pytest -q
           --junitxml="$env:RUNNER_TEMP\native-tests.xml"
@@ -135,6 +142,7 @@ jobs:
           tests/test_process.py
           tests/test_backends.py
           tests/test_toolchains.py
+          tests/test_msvc_discovery_integration.py
       - name: Upload native diagnostics only
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

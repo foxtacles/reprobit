@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -10,17 +12,18 @@ from reprobit.artifacts import digest_bytes
 from reprobit.build import BuildPlan, BuildStep
 from reprobit.classic_overlay import render_classic_overlay_declarations
 from reprobit.engine import (
-    BuildExecutionReceipt,
     BuildPlanExecutor,
-    EngineError,
     EngineRequest,
-    EvidenceAuditor,
-    EvidenceClaim,
+    ReportDestinations,
+    ReproductionEngine,
+)
+from reprobit.evidence_audit import EvidenceAuditor, EvidenceClaim
+from reprobit.execution import (
+    BuildExecutionReceipt,
+    EngineError,
     FileReceipt,
     ProducerAttestation,
     ProducerKind,
-    ReportDestinations,
-    ReproductionEngine,
     RuntimeEvidence,
     RuntimeEvidenceContext,
     TargetOracle,
@@ -111,6 +114,44 @@ class _FixtureEvidenceProvider:
                 if artifact.producer is not None
             ),
         )
+
+
+def _builtin_identity_request(*, paired: bool) -> EngineRequest:
+    from reprobit.classic_runtime import (
+        ClassicProducerGraphBuildExecutor,
+        ClassicProducerGraphRuntimeEvidenceProvider,
+    )
+
+    executor = object.__new__(ClassicProducerGraphBuildExecutor)
+    provider = object.__new__(ClassicProducerGraphRuntimeEvidenceProvider)
+    executor.evidence_provider = (
+        provider
+        if paired
+        else object.__new__(ClassicProducerGraphRuntimeEvidenceProvider)
+    )
+    request = cast(
+        EngineRequest,
+        SimpleNamespace(
+            build_executor=executor,
+            evidence_providers=(provider,),
+        ),
+    )
+    return request
+
+
+def test_builtin_identity_accepts_the_executor_owned_evidence_provider() -> None:
+    request = _builtin_identity_request(paired=True)
+
+    identity = engine_module._resolve_builtin_identity(request)
+
+    assert identity.providers[0].id == "classic-msvc-producer-graph-v1"
+
+
+def test_builtin_identity_rejects_an_evidence_provider_from_another_executor() -> None:
+    request = _builtin_identity_request(paired=False)
+
+    with pytest.raises(EngineError, match="not paired with its executor"):
+        engine_module._resolve_builtin_identity(request)
 
 
 def _bundle(
@@ -305,6 +346,101 @@ def test_report_publication_removes_stale_commit_when_target_changes_mid_commit(
     assert not report_html.exists()
 
 
+def test_package_identity_is_revalidated_before_build_side_effects(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = b"exact output"
+    reference = tmp_path / "reference.bin"
+    reference.write_bytes(expected)
+    bundle, provider = _bundle(tmp_path, expected)
+
+    with seal_file_oracle(reference) as oracle:
+        request = EngineRequest(
+            bundle=bundle,
+            build_plan=_write_plan(tmp_path, expected),
+            project_root=tmp_path,
+            run_root=tmp_path / "state/run",
+            oracles=(TargetOracle("program", oracle),),
+            evidence_providers=(provider,),
+        )
+        unsafe = engine_module._resolve_unsafe_identity(request)
+        identity = engine_module._ExecutionIdentity(
+            adapter=unsafe.adapter,
+            providers=unsafe.providers,
+            package=unsafe.package,
+        )
+        received: list[Digest] = []
+
+        def reject_changed_package(digest: Digest) -> None:
+            received.append(digest)
+            raise RuntimeError("ReproBit package implementation changed during execution")
+
+        monkeypatch.setattr(
+            engine_module,
+            "revalidate_package_implementation",
+            reject_changed_package,
+        )
+
+        with pytest.raises(EngineError, match="implementation changed"):
+            ReproductionEngine()._run(request, identity)
+
+    assert received == [identity.package.digest]
+    assert not (tmp_path / "out/program.bin").exists()
+
+
+def test_package_identity_change_during_report_commit_rolls_reports_back(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    expected = b"exact output"
+    reference = tmp_path / "reference.bin"
+    reference.write_bytes(expected)
+    reports = ReportDestinations(tmp_path / "report.json", tmp_path / "report.html")
+    bundle, provider = _bundle(tmp_path, expected)
+
+    with seal_file_oracle(reference) as oracle:
+        request = EngineRequest(
+            bundle=bundle,
+            build_plan=_write_plan(tmp_path, expected),
+            project_root=tmp_path,
+            run_root=tmp_path / "state/run",
+            oracles=(TargetOracle("program", oracle),),
+            evidence_providers=(provider,),
+            reports=reports,
+        )
+        unsafe = engine_module._resolve_unsafe_identity(request)
+        identity = engine_module._ExecutionIdentity(
+            adapter=unsafe.adapter,
+            providers=unsafe.providers,
+            package=unsafe.package,
+        )
+        received: list[Digest] = []
+
+        def reject_after_report_publish(digest: Digest) -> None:
+            received.append(digest)
+            if len(received) == 3:
+                raise RuntimeError("ReproBit package implementation changed during execution")
+
+        monkeypatch.setattr(
+            engine_module,
+            "revalidate_package_implementation",
+            reject_after_report_publish,
+        )
+        monkeypatch.setattr(
+            engine_module,
+            "_resolve_builtin_identity",
+            lambda _request: identity,
+        )
+
+        with pytest.raises(EngineError, match="implementation changed"):
+            ReproductionEngine()._run(request, identity)
+
+    assert received == [identity.package.digest] * 3
+    assert reports.json is not None and not reports.json.exists()
+    assert reports.html is not None and not reports.html.exists()
+
+
 def test_toolchain_header_root_is_bound_to_complete_portable_tree_lock(
     tmp_path: Path,
 ) -> None:
@@ -422,7 +558,7 @@ def test_engine_runs_build_verifies_evidence_and_materializes_reports(tmp_path: 
     assert result.report.proof.providers[0].id == provider.name
     assert result.report.proof.package.id == "reprobit"
     assert reports.json is not None and reports.json.read_bytes().endswith(b"\n")
-    assert reports.html is not None and "Total cost" in reports.html.read_text()
+    assert reports.html is not None and "Cost overview" in reports.html.read_text()
 
 
 def test_high_assurance_entrypoint_rejects_a_name_spoofed_provider(

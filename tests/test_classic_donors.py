@@ -45,9 +45,7 @@ def _intervention(
     return ClassicRecipeIntervention(
         id="donor_sample",
         scope=Scope(target="sample", translation_unit="unit"),
-        rationale=(
-            "Framework-owned declaration-only compiler state changes no program payload."
-        ),
+        rationale=("Framework-owned declaration-only compiler state changes no program payload."),
         family=family,
         role=ClassicRecipeRole.DONOR,
         build_target="sample",
@@ -106,9 +104,7 @@ def _ordinary_cases(source: bytes) -> list[ClassicRecipeIntervention]:
     header = generate_extern_run("g_head", 2, 2)
     seat = generate_extern_run("g_tail", 2, 2)
     stacked_forward = generate_forward_run("Stacked", 2, 2)
-    triple = b"".join(
-        generate_forward_run(prefix, 1, 1) for prefix in ("Pre", "Post", "End")
-    )
+    triple = b"".join(generate_forward_run(prefix, 1, 1) for prefix in ("Pre", "Post", "End"))
     mixed_forward = generate_forward_run("Mixed", 2, 2)
     mixed_extern = generate_extern_run("g_mixed", 2, 2)
     mixed_rendered = mixed_forward + source.split(b"#include", maxsplit=1)[0]
@@ -130,9 +126,7 @@ def _ordinary_cases(source: bytes) -> list[ClassicRecipeIntervention]:
         ),
         _intervention(
             ClassicRecipeFamily.FORWARD_DECLARATION_RUN,
-            _carrier_parameters(
-                forward, placement="prefix", prefix="Spare", count=3, width=2
-            ),
+            _carrier_parameters(forward, placement="prefix", prefix="Spare", count=3, width=2),
         ),
         _intervention(
             ClassicRecipeFamily.EXTERN_RUN_PAIR,
@@ -192,8 +186,7 @@ def _ordinary_cases(source: bytes) -> list[ClassicRecipeIntervention]:
 def test_all_declaration_carrier_families_produce_closed_requests() -> None:
     source = (
         b"// prefix witness with enough bytes to authenticate the exact first seat\n"
-        b'#include "sample.h"\n'
-        + b"int sample_value = 0;\n" * 8
+        b'#include "sample.h"\n' + b"int sample_value = 0;\n" * 8
     )
     interventions = _ordinary_cases(source)
 
@@ -227,9 +220,9 @@ def test_all_declaration_carrier_families_produce_closed_requests() -> None:
             "FunctionPad01x01",
         }
     )
-    assert by_family[
-        ClassicRecipeFamily.FORWARD_DECLARATION_RUN
-    ].carrier_identifiers == frozenset({"Spare00", "Spare01", "Spare02"})
+    assert by_family[ClassicRecipeFamily.FORWARD_DECLARATION_RUN].carrier_identifiers == frozenset(
+        {"Spare00", "Spare01", "Spare02"}
+    )
     assert all(isinstance(request.carrier_identifiers, frozenset) for request in requests)
     assert all(request.carrier_identifiers for request in requests)
     force_include_families = {
@@ -241,8 +234,7 @@ def test_all_declaration_carrier_families_produce_closed_requests() -> None:
         request.family for request in requests if request.compiler_additions.force_includes
     } == force_include_families
     assert all(
-        request.compiler_additions.force_includes == ("run.h",)
-        and "run.h" in request.files
+        request.compiler_additions.force_includes == ("run.h",) and "run.h" in request.files
         for request in requests
         if request.family in force_include_families
     )
@@ -301,9 +293,7 @@ def test_donor_private_overlay_uses_the_shared_typed_renderer() -> None:
             "rendered_sha256": _digest(effective_header),
         },
     ]
-    identity = _digest(
-        (json.dumps(identity_claim, indent=2, sort_keys=True) + "\n").encode()
-    )
+    identity = _digest((json.dumps(identity_claim, indent=2, sort_keys=True) + "\n").encode())
     intervention = _intervention(
         ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
         {
@@ -372,9 +362,7 @@ def _overlay_carrier_request(carrier: dict[str, Any]) -> DonorCompileRequest:
         "renderings": [rendering],
         "compiler_state_carrier": carrier,
     }
-    identity = _digest(
-        (json.dumps(identity_claim, indent=2, sort_keys=True) + "\n").encode()
-    )
+    identity = _digest((json.dumps(identity_claim, indent=2, sort_keys=True) + "\n").encode())
     intervention = _intervention(
         ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
         {
@@ -423,8 +411,7 @@ def _overlay_carrier_request(carrier: dict[str, Any]) -> DonorCompileRequest:
                 "kind": "extern_run_pair_v1",
                 "placement": "after_includes_and_eof_v1",
                 "generated_declarations_sha256": _digest(
-                    generate_extern_run("Head", 2, 2)
-                    + generate_extern_run("Seat", 1, 2)
+                    generate_extern_run("Head", 2, 2) + generate_extern_run("Seat", 1, 2)
                 ),
                 "width": 2,
                 "header_prefix": "Head",
@@ -496,17 +483,13 @@ def test_expected_values_merge_deeply_and_remain_immutable() -> None:
         constraints.values["new"] = 1  # type: ignore[index]
     observations[0]["expected_count"] = 4
     rematerialized = constraints.materialize()
-    assert cast(list[dict[str, Any]], rematerialized["observations"])[0][
-        "expected_count"
-    ] == 3
+    assert cast(list[dict[str, Any]], rematerialized["observations"])[0]["expected_count"] == 3
 
 
 def test_constraint_receipt_cross_checks_identity_family_and_payloads() -> None:
     intervention = _intervention(
         ClassicRecipeFamily.DECLARATION_SHAPE,
-        _carrier_parameters(
-            generate_declaration_shape(1, 1), classes=1, functions=1
-        ),
+        _carrier_parameters(generate_declaration_shape(1, 1), classes=1, functions=1),
     )
     wrong_family = _receipt(ClassicRecipeFamily.PAD_SHAPE)
     with pytest.raises(DonorSourceError, match="family differs"):
@@ -532,7 +515,9 @@ def test_every_migrated_donor_record_matches_a_closed_family_grammar() -> None:
     source = _large_v2_manifest()
     if source is None:
         pytest.skip("large schema-v2 integration fixture is not present")
-    output = migration_output(source)
+    claims_path = source.with_name("reprobit_migration_semantic_claims.once.json")
+    assert claims_path.is_file()
+    output = migration_output(source, semantic_claims_path=claims_path)
     interventions: list[ClassicRecipeIntervention] = []
     receipts: list[ClassicProofReceipt] = []
     for path, data in output.files.items():

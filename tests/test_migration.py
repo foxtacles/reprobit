@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import tomllib
+from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
 
-from reprobit.costs import CostModelV1, calculate_cost
+from reprobit.costs import CostModel, calculate_cost
 from reprobit.migration import (
     MigrationError,
     MigrationOutput,
@@ -15,7 +16,8 @@ from reprobit.migration import (
     load_legacy_manifest,
     migration_output,
 )
-from reprobit.schema import ClassicRecipeFamily, load_project_tree
+from reprobit.project_loader import load_project_tree
+from reprobit.schema import ClassicRecipeFamily
 from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES
 
 
@@ -162,22 +164,15 @@ def test_convert_v2_manifest_splits_intent_and_expected_pins() -> None:
         "build": r"Z:\workspace\sample-build\build",
         "toolchain": r"Z:\opt\compiler",
     }
-    toolchain_lock = json.loads(
-        result.files[PurePosixPath("reprobit/toolchain.lock.json")]
-    )
-    sources = {
-        source["repository"]: source
-        for source in toolchain_lock["profile_sources"]
-    }
+    toolchain_lock = json.loads(result.files[PurePosixPath("reprobit/toolchain.lock.json")])
+    sources = {source["repository"]: source for source in toolchain_lock["profile_sources"]}
     assert sources["https://github.com/archaic-msvc/msvc420.git"]["revision"] == (
         "b42c244f0a83ba15ba2ffb62b0dc240d7b2dea50"
     )
     assert sources["https://github.com/archaic-msvc/msvc500.git"]["revision"] == (
         "8abf95ce980161ad87b0b02402269cce76988953"
     )
-    assert "bin/RCDLL.DLL" in sources[
-        "https://github.com/archaic-msvc/msvc420.git"
-    ]["paths"]
+    assert "bin/RCDLL.DLL" in sources["https://github.com/archaic-msvc/msvc420.git"]["paths"]
     assert set(sources["https://github.com/archaic-msvc/msvc500.git"]["paths"]) == {
         "bin/MSVCRT40.dll",
         "bin/msvcrt20.dll",
@@ -195,9 +190,187 @@ def test_convert_v2_manifest_accepts_a_leading_digit_cmake_target() -> None:
     assert build_plan["translation_units"][0]["build_target"] == "3dmanager"
     intervention = json.loads(result.files[_tu_path(result, "interventions")])
     assert intervention["build_target"] == "3dmanager"
-    assert {item["build_target"] for item in intervention["interventions"]} == {
-        "3dmanager"
+    assert {item["build_target"] for item in intervention["interventions"]} == {"3dmanager"}
+
+
+def test_migration_partitions_source_overlay_semantic_claims_with_their_operations(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest()
+    manifest["source_overlay"] = {
+        "schema": 2,
+        "outputs": [
+            {
+                "path": "sample/unit.cpp",
+                "clean": "0" * 64,
+                "clean_size": 0,
+                "effective": "1" * 64,
+                "size": 1,
+                "ops": [
+                    {
+                        "id": "op_sample_claim",
+                        "op": "insert",
+                        "anchor": {"at": "start", "b": 0, "ctx": "2" * 64},
+                        "gen": {"k": "empty_scopes", "scope_count": 1},
+                    }
+                ],
+            }
+        ],
+        "graph": {"generated_tus": [], "link_admissions": []},
     }
+    claims = {
+        "schema": 1,
+        "bindings": [
+            {
+                "kind": "function_scope",
+                "operation": "op_sample_claim",
+                "leaf": 0,
+                "function": "sample",
+                "range_sha256": "3" * 64,
+                "range_size": 1,
+                "bindings": [],
+            }
+        ],
+    }
+    claims_path = tmp_path / "claims.json"
+    claims_path.write_text(json.dumps(claims), encoding="utf-8")
+
+    result = convert_v2_manifest(
+        manifest,
+        "2" * 64,
+        semantic_claims_path=claims_path,
+    )
+    shared = json.loads(result.files[PurePosixPath("reprobit/interventions/shared-sample.json")])
+    overlay = next(
+        item for item in shared["interventions"] if item["family"] == "source_overlay_graph"
+    )
+    fields = {item["name"]: item["value"] for item in overlay["parameters"]}
+
+    assert fields["semantic_claims"] == claims
+
+
+def test_migration_rejects_a_semantic_claim_for_an_unknown_overlay_operation(
+    tmp_path: Path,
+) -> None:
+    manifest = _manifest()
+    claims_path = tmp_path / "claims.json"
+    claims_path.write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "bindings": [
+                    {
+                        "kind": "logical_header",
+                        "operation": "op_missing",
+                        "leaf": 0,
+                        "logical_path": "sample/header.h",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MigrationError, match="unknown operation"):
+        convert_v2_manifest(
+            manifest,
+            "2" * 64,
+            semantic_claims_path=claims_path,
+        )
+
+
+def test_migration_rejects_claims_embedded_in_the_historical_manifest() -> None:
+    manifest = _manifest()
+    manifest["source_overlay"]["semantic_claims"] = {"schema": 1, "bindings": []}
+
+    with pytest.raises(MigrationError, match=r"must remain immutable.*--semantic-claims"):
+        convert_v2_manifest(manifest, "2" * 64)
+
+
+def test_migration_rejects_a_non_closed_semantic_claims_sidecar(tmp_path: Path) -> None:
+    claims_path = tmp_path / "claims.json"
+    claims_path.write_text(
+        json.dumps({"schema": 1, "bindings": [], "unreviewed": True}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(MigrationError, match="must be exactly"):
+        convert_v2_manifest(
+            _manifest(),
+            "2" * 64,
+            semantic_claims_path=claims_path,
+        )
+
+
+def test_migration_requires_explicit_claims_for_ambiguous_overlay_generators() -> None:
+    manifest = _manifest()
+    manifest["source_overlay"] = {
+        "schema": 2,
+        "outputs": [
+            {
+                "path": "sample/unit.cpp",
+                "clean": "0" * 64,
+                "clean_size": 0,
+                "effective": "1" * 64,
+                "size": 1,
+                "ops": [
+                    {
+                        "id": "op_sample_claim",
+                        "op": "insert",
+                        "anchor": {"at": "start", "b": 0, "ctx": "2" * 64},
+                        "gen": {"k": "empty_scopes", "scope_count": 1},
+                    }
+                ],
+            }
+        ],
+        "graph": {"generated_tus": [], "link_admissions": []},
+    }
+
+    with pytest.raises(
+        MigrationError,
+        match=r"requires an explicit semantic-claims sidecar.*op_sample_claim\[0\]"
+        r"=function_scope",
+    ):
+        convert_v2_manifest(manifest, "2" * 64)
+
+
+def test_migration_emits_empty_claims_when_no_generator_requires_one() -> None:
+    manifest = _manifest()
+    manifest["source_overlay"] = {
+        "schema": 2,
+        "outputs": [
+            {
+                "path": "sample/unit.cpp",
+                "clean": "0" * 64,
+                "clean_size": 0,
+                "effective": "1" * 64,
+                "size": 1,
+                "ops": [
+                    {
+                        "id": "op_size_assert",
+                        "op": "insert",
+                        "anchor": {"at": "start", "b": 0, "ctx": "2" * 64},
+                        "gen": {
+                            "k": "size_asserts",
+                            "assertions": [{"size": 4, "type": "Sample"}],
+                            "at": [1],
+                            "lines": 2,
+                        },
+                    }
+                ],
+            }
+        ],
+        "graph": {"generated_tus": [], "link_admissions": []},
+    }
+
+    result = convert_v2_manifest(manifest, "2" * 64)
+    shared = json.loads(result.files[PurePosixPath("reprobit/interventions/shared-sample.json")])
+    overlay = next(
+        item for item in shared["interventions"] if item["family"] == "source_overlay_graph"
+    )
+    fields = {item["name"]: item["value"] for item in overlay["parameters"]}
+
+    assert fields["semantic_claims"] == {"schema": 1, "bindings": []}
 
 
 def test_migration_preserves_linker_payload_metadata_but_redacts_bytes() -> None:
@@ -244,9 +417,7 @@ def test_migration_rejects_overlapping_compiler_visible_seats() -> None:
 
 def test_migration_rejects_noncanonical_legacy_path_contract() -> None:
     manifest = _manifest()
-    manifest["toolchain"]["codegen_path_contract"]["build_root"] = (
-        "/workspace/../sample-build"
-    )
+    manifest["toolchain"]["codegen_path_contract"]["build_root"] = "/workspace/../sample-build"
 
     with pytest.raises(MigrationError, match="build root is not canonical"):
         convert_v2_manifest(manifest, "2" * 64)
@@ -283,7 +454,22 @@ def test_real_v2_manifest_round_trips_through_strict_v3(tmp_path: Path) -> None:
     source = _large_v2_manifest()
     if source is None:
         pytest.skip("large schema-v2 integration fixture is not present")
-    result = migration_output(source)
+    legacy_manifest, _source_sha256 = load_legacy_manifest(source)
+    assert "semantic_claims" not in legacy_manifest["source_overlay"]
+    claims_path = source.with_name("reprobit_migration_semantic_claims.once.json")
+    assert claims_path.is_file()
+    claims_document = json.loads(claims_path.read_bytes())
+    assert set(claims_document) == {"bindings", "schema"}
+    expected_claims = claims_document["bindings"]
+    assert len(expected_claims) == 14
+    assert (
+        sha256(
+            json.dumps(expected_claims, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        == "5dab2c6a7bbffd4963c76805d350707ece04f0325c9f86598bc8e1e763d9af81"
+    )
+
+    result = migration_output(source, semantic_claims_path=claims_path)
     build_plan = json.loads(result.files[PurePosixPath("reprobit/build-plan.json")])
     dialect = build_plan["toolchain_policy"]["classic_overlay_dialect"]
     assert set(dialect) == {"qualified_member_probe_return_type"}
@@ -303,8 +489,27 @@ def test_real_v2_manifest_round_trips_through_strict_v3(tmp_path: Path) -> None:
     assert sum(item.byte_count for item in legacy) == 572
     assert len(bundle.spec.authenticity.legacy_allowlist) == 2
     assert sum(len(data) for data in result.files.values()) < source.stat().st_size
-    assert set(CostModelV1._classic_classes) == set(ClassicRecipeFamily)
+    assert set(CostModel._classic_classes) == set(ClassicRecipeFamily) - {
+        ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION
+    }
     assert calculate_cost(bundle.interventions).project_total > 0
+
+    migrated_claims: list[dict[str, object]] = []
+    for relative, data in result.files.items():
+        if not str(relative).startswith("reprobit/interventions/shared-"):
+            continue
+        document = json.loads(data)
+        for intervention in document["interventions"]:
+            if intervention.get("family") != "source_overlay_graph":
+                continue
+            fields = {item["name"]: item["value"] for item in intervention["parameters"]}
+            migrated_claims.extend(fields["semantic_claims"]["bindings"])
+    claim_key = lambda item: (  # noqa: E731 - concise canonical parity key
+        str(item["operation"]).casefold(),
+        int(item["leaf"]),
+        str(item["kind"]),
+    )
+    assert sorted(migrated_claims, key=claim_key) == sorted(expected_claims, key=claim_key)
 
     redactions = [
         redaction
@@ -319,18 +524,13 @@ def test_real_v2_manifest_round_trips_through_strict_v3(tmp_path: Path) -> None:
         receipt
         for document in bundle.proof_documents
         for receipt in document.expected_observations
-        if "instruction_self_permutation.expected_linker_payload_count"
-        in receipt.expected_values
+        if "instruction_self_permutation.expected_linker_payload_count" in receipt.expected_values
     ]
     assert len(self_permutations) == 2
     assert {
         (
-            receipt.expected_values[
-                "instruction_self_permutation.expected_linker_payload_count"
-            ],
-            receipt.expected_values[
-                "instruction_self_permutation.expected_linker_payload_sha256"
-            ],
+            receipt.expected_values["instruction_self_permutation.expected_linker_payload_count"],
+            receipt.expected_values["instruction_self_permutation.expected_linker_payload_sha256"],
         )
         for receipt in self_permutations
     } == {

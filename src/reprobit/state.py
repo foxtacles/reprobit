@@ -12,18 +12,16 @@ import json
 import os
 import re
 import shutil
-import stat
 import time
 import uuid
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from types import TracebackType
-from typing import Any, Self
+from typing import Self
 
-
-class StateError(RuntimeError):
-    """Local state is unsafe, busy, or cannot be managed."""
+from reprobit.state_lock import AdvisoryFileLock as _AdvisoryFileLock
+from reprobit.state_lock import StateError as _StateError
 
 
 class KeepWorkspace(StrEnum):
@@ -97,132 +95,12 @@ _OUTCOME_FILE = ".outcome.json"
 _LEASE_FILE = ".lease"
 
 
-class _FileLock:
-    """Small cross-platform advisory lock around one held byte."""
-
-    def __init__(self, path: Path, *, create: bool = True) -> None:
-        if create:
-            path.parent.mkdir(parents=True, exist_ok=True)
-        self.path = path
-        flags = (
-            os.O_RDWR
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-        )
-        if create:
-            flags |= os.O_CREAT
-        descriptor = os.open(path, flags, 0o600)
-        self.stream = os.fdopen(descriptor, "r+b", buffering=0)
-        if self.stream.seek(0, os.SEEK_END) == 0:
-            if not create:
-                self.stream.close()
-                raise StateError(f"existing state lock is empty: {path}")
-            self.stream.write(b"\0")
-        self.stream.seek(0)
-        self.locked = False
-
-    def acquire(self, *, nonblocking: bool) -> bool:
-        if self.locked:
-            raise StateError(f"state lock is already held: {self.path}")
-        if os.name == "nt":
-            import msvcrt
-
-            native_msvcrt: Any = msvcrt
-            mode = native_msvcrt.LK_NBLCK if nonblocking else native_msvcrt.LK_LOCK
-            try:
-                native_msvcrt.locking(self.stream.fileno(), mode, 1)
-            except OSError:
-                if nonblocking:
-                    return False
-                raise
-        else:
-            import fcntl
-
-            operation = fcntl.LOCK_EX | (fcntl.LOCK_NB if nonblocking else 0)
-            try:
-                fcntl.flock(self.stream.fileno(), operation)
-            except BlockingIOError:
-                return False
-        self.locked = True
-        return True
-
-    def read_locked(self, *, maximum: int) -> bytes:
-        """Read a small marker through the handle that owns the lock.
-
-        Windows byte-range locks are mandatory, so reopening the same marker
-        while it is locked fails even in the owning process.  Reading through
-        this held descriptor works on every supported platform and also lets
-        us confirm that the named path still identifies the locked file.
-        """
-
-        if not self.locked:
-            raise StateError(f"state lock is not held: {self.path}")
-        if maximum < 0:
-            raise ValueError("locked read maximum cannot be negative")
-        held_before = os.fstat(self.stream.fileno())
-        named_before = os.stat(self.path, follow_symlinks=False)
-        if not stat.S_ISREG(named_before.st_mode) or not os.path.samestat(
-            held_before, named_before
-        ):
-            raise StateError(f"state lock path changed while held: {self.path}")
-        self.stream.seek(0)
-        payload = self.stream.read(maximum + 1)
-        self.stream.seek(0)
-        held_after = os.fstat(self.stream.fileno())
-        named_after = os.stat(self.path, follow_symlinks=False)
-        if (
-            not stat.S_ISREG(named_after.st_mode)
-            or not os.path.samestat(held_before, held_after)
-            or not os.path.samestat(held_after, named_after)
-        ):
-            raise StateError(f"state lock path changed while held: {self.path}")
-        if len(payload) > maximum:
-            raise StateError(f"state lock marker is oversized: {self.path}")
-        return payload
-
-    def close(self) -> None:
-        if self.locked:
-            if os.name == "nt":
-                import msvcrt
-
-                native_msvcrt: Any = msvcrt
-                self.stream.seek(0)
-                native_msvcrt.locking(
-                    self.stream.fileno(), native_msvcrt.LK_UNLCK, 1
-                )
-            else:
-                import fcntl
-
-                fcntl.flock(self.stream.fileno(), fcntl.LOCK_UN)
-            self.locked = False
-        self.stream.close()
-
-    def __enter__(self) -> Self:
-        if not self.acquire(nonblocking=False):  # pragma: no cover - blocking lock
-            raise AssertionError("blocking state lock unexpectedly failed")
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        del exc_type, exc, traceback
-        self.close()
-
-
-# Cache and run-state maintenance share this small primitive so garbage
-# collection and active operations follow one cross-platform locking contract.
-AdvisoryFileLock = _FileLock
-
-
 def _require_real_directory(path: Path, label: str) -> Path:
     if not path.is_absolute():
-        raise StateError(f"{label} must be absolute: {path}")
+        raise _StateError(f"{label} must be absolute: {path}")
     if os.path.lexists(path):
         if path.is_symlink() or not path.is_dir():
-            raise StateError(f"{label} is not a real directory: {path}")
+            raise _StateError(f"{label} is not a real directory: {path}")
     else:
         path.mkdir(parents=True)
     return path.resolve(strict=True)
@@ -261,12 +139,12 @@ def _tree_usage(root: Path) -> tuple[int, int, int]:
         try:
             entries = tuple(os.scandir(directory))
         except OSError as exc:
-            raise StateError(f"cannot inspect state directory {directory}: {exc}") from exc
+            raise _StateError(f"cannot inspect state directory {directory}: {exc}") from exc
         for entry in entries:
             try:
                 stat_result = entry.stat(follow_symlinks=False)
             except OSError as exc:
-                raise StateError(f"cannot inspect state entry {entry.path}: {exc}") from exc
+                raise _StateError(f"cannot inspect state entry {entry.path}: {exc}") from exc
             newest = max(newest, stat_result.st_mtime_ns)
             if entry.is_dir(follow_symlinks=False):
                 pending.append(Path(entry.path))
@@ -300,35 +178,35 @@ class RunArena:
         run_id: str | None = None,
     ) -> None:
         if not _RUN_KIND.fullmatch(kind):
-            raise StateError(f"invalid run kind: {kind!r}")
+            raise _StateError(f"invalid run kind: {kind!r}")
         self.state_root = _require_real_directory(state_root, "state root")
         self.runs_root = self.state_root / "runs"
         if os.path.lexists(self.runs_root):
             if self.runs_root.is_symlink() or not self.runs_root.is_dir():
-                raise StateError(f"runs root is not a real directory: {self.runs_root}")
+                raise _StateError(f"runs root is not a real directory: {self.runs_root}")
         else:
             self.runs_root.mkdir()
         identifier = run_id or uuid.uuid4().hex
         if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,95}", identifier):
-            raise StateError(f"invalid run id: {identifier!r}")
+            raise _StateError(f"invalid run id: {identifier!r}")
         self.path = self.runs_root / f"{kind}-{identifier}"
         self.keep = KeepWorkspace(keep)
-        self._lease: _FileLock | None = None
+        self._lease: _AdvisoryFileLock | None = None
         self._entered = False
         self._finished = False
 
     def __enter__(self) -> Self:
         if self._entered:
-            raise StateError("run arena is single-use")
+            raise _StateError("run arena is single-use")
         self._entered = True
         try:
             self.path.mkdir(exist_ok=False)
         except FileExistsError as exc:
-            raise StateError(f"run arena already exists: {self.path}") from exc
-        lease = _FileLock(self.path / _LEASE_FILE)
+            raise _StateError(f"run arena already exists: {self.path}") from exc
+        lease = _AdvisoryFileLock(self.path / _LEASE_FILE)
         try:
             if not lease.acquire(nonblocking=True):  # freshly-created path
-                raise StateError(f"cannot lease fresh run arena: {self.path}")
+                raise _StateError(f"cannot lease fresh run arena: {self.path}")
             self._lease = lease
             _atomic_json(
                 self.path / _OUTCOME_FILE,
@@ -348,7 +226,7 @@ class RunArena:
 
     def finish(self, *, succeeded: bool) -> None:
         if not self._entered or self._finished:
-            raise StateError("run arena is not active")
+            raise _StateError("run arena is not active")
         self._finished = True
         outcome = "succeeded" if succeeded else "failed"
         _atomic_json(
@@ -372,9 +250,9 @@ class RunArena:
 
     def _remove(self) -> None:
         if self.path.is_symlink() or not self.path.is_dir():
-            raise StateError(f"run arena changed type before cleanup: {self.path}")
+            raise _StateError(f"run arena changed type before cleanup: {self.path}")
         if self.path.parent.resolve(strict=True) != self.runs_root.resolve(strict=True):
-            raise StateError("run arena escaped the runs root")
+            raise _StateError("run arena escaped the runs root")
         shutil.rmtree(self.path)
 
     def __exit__(
@@ -396,10 +274,10 @@ class StateStore:
             self.root = _require_real_directory(root, "state root")
         else:
             if not root.is_absolute():
-                raise StateError(f"state root must be absolute: {root}")
+                raise _StateError(f"state root must be absolute: {root}")
             if os.path.lexists(root):
                 if root.is_symlink() or not root.is_dir():
-                    raise StateError(f"state root is not a real directory: {root}")
+                    raise _StateError(f"state root is not a real directory: {root}")
                 self.root = root.resolve(strict=True)
             else:
                 self.root = root.resolve(strict=False)
@@ -410,7 +288,7 @@ class StateStore:
         if not os.path.lexists(self.runs_root):
             return ()
         if self.runs_root.is_symlink() or not self.runs_root.is_dir():
-            raise StateError(f"runs root is not a real directory: {self.runs_root}")
+            raise _StateError(f"runs root is not a real directory: {self.runs_root}")
         paths: list[Path] = []
         for item in self.runs_root.iterdir():
             if item.is_symlink() or not item.is_dir():
@@ -425,7 +303,7 @@ class StateStore:
             return True
         if not lease_path.is_file():
             return False
-        lock = _FileLock(lease_path)
+        lock = _AdvisoryFileLock(lease_path)
         try:
             return not lock.acquire(nonblocking=True)
         finally:
@@ -448,7 +326,7 @@ class StateStore:
             )
         if os.path.lexists(self.cache_root):
             if self.cache_root.is_symlink() or not self.cache_root.is_dir():
-                raise StateError(f"cache root is not a real directory: {self.cache_root}")
+                raise _StateError(f"cache root is not a real directory: {self.cache_root}")
             from reprobit.cache import IncrementalCache
 
             cache_status = IncrementalCache(
@@ -483,7 +361,7 @@ class StateStore:
         dry_run: bool = False,
     ) -> GCResult:
         if older_than_seconds < 0:
-            raise StateError("GC age cannot be negative")
+            raise _StateError("GC age cannot be negative")
         cutoff_ns = time.time_ns() - int(older_than_seconds * 1_000_000_000)
         removed: list[Path] = []
         skipped_active: list[Path] = []
@@ -495,7 +373,7 @@ class StateStore:
             if lease_path.is_symlink():
                 skipped_active.append(path)
                 continue
-            lease = _FileLock(lease_path)
+            lease = _AdvisoryFileLock(lease_path)
             if not lease.acquire(nonblocking=True):
                 lease.close()
                 skipped_active.append(path)
@@ -508,7 +386,7 @@ class StateStore:
                     skipped_recent.append(path)
                     continue
                 if path.is_symlink() or path.parent.resolve(strict=True) != self.runs_root:
-                    raise StateError(f"run escaped state root during GC: {path}")
+                    raise _StateError(f"run escaped state root during GC: {path}")
                 # Windows cannot remove the held lease file. Close only after
                 # ownership has been established and immediately remove it.
                 lease.close()
@@ -524,7 +402,7 @@ class StateStore:
         cache_skipped_recent_records = 0
         if os.path.lexists(self.cache_root):
             if self.cache_root.is_symlink() or not self.cache_root.is_dir():
-                raise StateError(f"cache root is not a real directory: {self.cache_root}")
+                raise _StateError(f"cache root is not a real directory: {self.cache_root}")
             from reprobit.cache import IncrementalCache
 
             cache_result = IncrementalCache(
@@ -568,12 +446,10 @@ def human_bytes(value: int) -> str:
 
 
 __all__ = [
-    "AdvisoryFileLock",
     "GCResult",
     "KeepWorkspace",
     "RunArena",
     "RunState",
-    "StateError",
     "StateStatus",
     "StateStore",
     "human_bytes",

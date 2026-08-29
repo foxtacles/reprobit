@@ -13,7 +13,8 @@ import reprobit.cli as cli_module
 import reprobit.engine as engine_module
 from reprobit.action_summary import main, publish_action_completion
 from reprobit.build import BuildPlan
-from reprobit.cli import _command_verify, _Output
+from reprobit.cli import _command_verify
+from reprobit.cli_output import CLIOutput
 from reprobit.costs import CostBreakdown
 from reprobit.model import (
     Artifact,
@@ -43,9 +44,8 @@ from reprobit.report import (
     TargetComparisonSummary,
     TargetSummary,
     ToolchainSummary,
-    write_report_html,
-    write_report_json,
 )
+from reprobit.report_io import write_report_html, write_report_json
 from reprobit.schema import MsvcRelease, ProducerGraphBuildAdapter
 from reprobit.strict_json import canonical_json
 
@@ -203,8 +203,8 @@ def _fixture_report() -> Report:
             quarantines=(quarantine,),
         ),
         costs=CostBreakdown(
-            model_version=1,
-            project_total=10_000,
+            model_version=2,
+            project_total=0,
             unallocated_shared_cost=0,
             by_class=(),
             by_target=(),
@@ -364,9 +364,7 @@ def test_policy_rejection_still_publishes_current_negative_report(
     assert "quarantined=true" in received
 
 
-def test_action_refuses_tampered_authorized_quarantine(
-    tmp_path: Path, monkeypatch: object
-) -> None:
+def test_action_refuses_tampered_authorized_quarantine(tmp_path: Path, monkeypatch: object) -> None:
     report_path = tmp_path / "report.json"
     receipt_path = tmp_path / "completion.json"
     report = _fixture_report()
@@ -427,9 +425,7 @@ def test_composite_action_preserves_reports_when_verification_fails() -> None:
 def test_action_completion_is_outside_prepared_cleanup_scope() -> None:
     tree = ast.parse(inspect.getsource(_command_verify))
     parents: dict[ast.AST, ast.AST] = {
-        child: parent
-        for parent in ast.walk(tree)
-        for child in ast.iter_child_nodes(parent)
+        child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
     }
     publication = next(
         node
@@ -448,10 +444,7 @@ def test_action_completion_is_outside_prepared_cleanup_scope() -> None:
                         and isinstance(item.context_expr.func, ast.Name)
                         and item.context_expr.func.id == "ExitStack"
                     )
-                    or (
-                        isinstance(item.context_expr, ast.Name)
-                        and item.context_expr.id == "arena"
-                    )
+                    or (isinstance(item.context_expr, ast.Name) and item.context_expr.id == "arena")
                 )
                 for item in ancestor.items
             )
@@ -520,7 +513,7 @@ def test_prepared_cleanup_failure_never_publishes_action_completion(
         keep_workspace="on-failure",
         jobs=1,
     )
-    output = _Output("text", StringIO(), StringIO())
+    output = CLIOutput("text", StringIO(), StringIO())
     with pytest.raises(RuntimeError, match="fixture cleanup failure"):
         _command_verify(arguments, output)
     assert not published

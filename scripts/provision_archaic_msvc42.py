@@ -3,9 +3,9 @@
 
 The compiler payload remains external to ReproBit.  This script checks out two
 immutable Archaic MSVC revisions, copies only the admitted files and input
-trees, applies the required C2 patch, and authenticates the result before an
-atomic publication.  It intentionally does not cache or redistribute the
-result.
+trees, applies the required C2 patch, adds ReproBit's redistributable POSIX
+transport snapshot, and authenticates the result before an atomic publication.
+It intentionally does not cache or redistribute the Microsoft payload.
 """
 
 from __future__ import annotations
@@ -27,6 +27,9 @@ MSVC420_REPOSITORY = _MSVC420_SOURCE.repository
 MSVC420_REVISION = _MSVC420_SOURCE.revision
 MSVC500_REPOSITORY = _MSVC500_SOURCE.repository
 MSVC500_REVISION = _MSVC500_SOURCE.revision
+_TRANSPORT_ASSET_ROOT = (
+    Path(__file__).resolve(strict=True).parents[1] / "runtime" / "msvc42-wine"
+)
 
 
 class ProvisionError(RuntimeError):
@@ -88,6 +91,40 @@ _FILES = {
         517_150, "9aa05fde8340c02f5365ee04a0d7b4e782abc26e5439772a8efe80c79c17c9f4"
     ),
 }
+
+# These are host-side, permissively licensed shell transports versioned and
+# distributed with ReproBit.  They are deliberately outside profile_sources:
+# compiler/runtime/header/library payload still comes only from the two pinned
+# archaic-msvc repositories above.  Keeping their installed bytes fixed lets a
+# project use one toolchain lock on POSIX and native Windows.
+_TRANSPORT_FILES = {
+    "wine/x86/cl": FileAuthority(
+        2_900, "01f87f5c7532cc8d0a1fefcbb28031924b718d31c8172949630b5384a51c232d"
+    ),
+    "wine/x86/rc": FileAuthority(
+        940, "185d8d83fa318273a02a50dfa8fbbadc2f02607d0da8d81263e740747485e58d"
+    ),
+    "wine/x86/link": FileAuthority(
+        944, "e1a319a1c69d3b4718d26bae58b3369e37a9275cf03dcf1c61ae339cb08a3014"
+    ),
+    "wine/x86/lib": FileAuthority(
+        942, "666710820b68ead0c5be94f2b53f1737146ab59b125719c3ed8333ea71b80d67"
+    ),
+    "wine/x86/wine-msvc.sh": FileAuthority(
+        4_086, "13663766b596946d429c9340976ff75cf9955b7664f5d59ffd49edaf30fe5b8d"
+    ),
+}
+
+# The locked selector scripts source this during one-off CMake graph
+# configuration.  Direct authenticated builds execute wine-msvc.sh through
+# ReproBit's own proxy, so projects do not need to add this support file to
+# their portable lock; the provisioner still authenticates it.
+_TRANSPORT_SUPPORT_FILES = {
+    "wine/x86/msvcenv.sh": FileAuthority(
+        2_476, "6b0bb938c6132039ca2e754528b8a0ecb87af14002ccb19c420b33c00dc71c22"
+    )
+}
+_PROVISIONED_TRANSPORT_FILES = {**_TRANSPORT_FILES, **_TRANSPORT_SUPPORT_FILES}
 
 _TREES = {
     "include": TreeAuthority(
@@ -196,6 +233,28 @@ def _copy_tree(source_root: Path, destination_root: Path, relative: str) -> None
     shutil.copytree(source, destination, symlinks=True)
 
 
+def _transport_asset(relative: str, authority: FileAuthority) -> Path:
+    asset_root = _TRANSPORT_ASSET_ROOT
+    if asset_root.is_symlink() or not asset_root.is_dir():
+        raise ProvisionError(f"transport asset directory is absent or redirected: {asset_root}")
+    source = asset_root / Path(relative).name
+    _require_file(source, authority)
+    return source
+
+
+def _install_transport_assets(destination_root: Path) -> None:
+    for relative, authority in _PROVISIONED_TRANSPORT_FILES.items():
+        source = _transport_asset(relative, authority)
+        destination = destination_root.joinpath(*relative.split("/"))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        if destination.exists() or destination.is_symlink():
+            raise ProvisionError(f"transport destination already exists: {destination}")
+        with source.open("rb") as input_stream, destination.open("xb") as output_stream:
+            shutil.copyfileobj(input_stream, output_stream)
+        destination.chmod(0o755)
+        _require_file(destination, authority)
+
+
 def _patch_c2(path: Path) -> None:
     _require_file(path, _C2_UPSTREAM)
     payload = bytearray(path.read_bytes())
@@ -214,6 +273,8 @@ def _patch_c2(path: Path) -> None:
 def verify(root: Path) -> None:
     for relative, file_authority in _FILES.items():
         _require_file(root.joinpath(*relative.split("/")), file_authority)
+    for relative, file_authority in _PROVISIONED_TRANSPORT_FILES.items():
+        _require_file(root.joinpath(*relative.split("/")), file_authority)
     for relative, tree_authority in _TREES.items():
         receipt = portable_tree_receipt(root.joinpath(*relative.split("/")), relative)
         received = TreeAuthority(
@@ -230,7 +291,12 @@ def verify(root: Path) -> None:
 
 
 def provision(destination: Path) -> None:
-    destination = destination.expanduser().resolve(strict=False)
+    requested_destination = destination.expanduser()
+    if requested_destination.is_symlink():
+        raise ProvisionError(
+            f"toolchain destination must not be a redirected path: {requested_destination}"
+        )
+    destination = requested_destination.resolve(strict=False)
     if destination == Path(destination.anchor):
         raise ProvisionError("toolchain destination must not be a filesystem root")
     if destination.exists() or destination.is_symlink():
@@ -279,6 +345,9 @@ def provision(destination: Path) -> None:
         _copy_file(checkout_50, payload, "redist/msvcrt20.dll")
         (payload / "redist" / "msvcrt20.dll").replace(payload / "bin" / "msvcrt20.dll")
         (payload / "redist").rmdir()
+
+        _progress("installing authenticated cross-host transport files")
+        _install_transport_assets(payload)
 
         _progress("applying the authenticated C2 patch")
         _patch_c2(payload / "bin" / "C2.EXE")

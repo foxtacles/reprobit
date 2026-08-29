@@ -294,6 +294,11 @@ def test_schema_v3_simulated_elision_fetches_only_declared_va_material(
     assert not result.clean
     assert result.byte_count == 2
     assert result.oracle_payload_bytes_read == 11
+    assert result.evidence_detail["candidate"] == {
+        "digest": Digest.from_bytes(result.output).model_dump(mode="json"),
+        "size": len(result.output),
+    }
+    assert result.evidence_detail["output_size"] == len(result.output)
     assert received["main_body"] == payloads[0x1000]
     assert received["auxiliary"] == {
         "?callee@@YAXXZ": payloads[0x1020],

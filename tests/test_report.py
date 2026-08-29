@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from reprobit.costs import CostClass, FunctionCost, RationalCost
+from reprobit.costs import CostClass, FunctionCost, RationalCost, calculate_cost
 from reprobit.model import (
     Artifact,
     ArtifactKind,
@@ -63,6 +63,7 @@ from reprobit.schema import (
     ProjectBundle,
     ProjectSpec,
     ProofDocument,
+    StateCarrierIntervention,
     TargetSpec,
     ToolchainLock,
     ToolchainRef,
@@ -295,6 +296,49 @@ def bundle(artifact: str = "build/program.exe") -> ProjectBundle:
             ),
         ),
     )
+
+
+def test_report_rejects_costs_for_a_target_outside_its_receipts() -> None:
+    proof = proof_report()
+    baseline = Report.from_bundle(
+        bundle(),
+        Verdict(
+            cold=True,
+            byte_exact=True,
+            logic_certified=True,
+            toolchain_origin=True,
+        ),
+        evidence=proof.summary,
+        proof=proof,
+        target_results={"program": True},
+        target_artifacts={"program": (100, digest(b"oracle"))},
+    )
+    ghost_costs = calculate_cost(
+        (
+            StateCarrierIntervention(
+                id="ghost-cost",
+                scope=Scope(target="ghost"),
+                rationale="target-membership fixture",
+                carrier="declaration",
+            ),
+        )
+    )
+
+    with pytest.raises(ValidationError, match="costs name unknown targets"):
+        Report.create(
+            project_id=baseline.project_id,
+            runtime_binding=baseline.runtime_binding,
+            toolchain=baseline.toolchain,
+            paths=baseline.paths,
+            verdict=baseline.verdict,
+            costs=ghost_costs,
+            targets=baseline.targets,
+            evidence=baseline.evidence,
+            proof=baseline.proof,
+            timings=baseline.timings,
+            cache=baseline.cache,
+            previous=baseline.previous,
+        )
 
 
 def test_report_is_deterministic_and_canonical(tmp_path: Path) -> None:

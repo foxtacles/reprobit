@@ -30,7 +30,10 @@ from reprobit.schema import (
 from reprobit.strict_json import JsonValue, canonical_json
 
 if TYPE_CHECKING:
-    from reprobit.classic_overlay import ClassicOverlayDialect
+    from reprobit.classic_overlay import (
+        ClassicOverlayDialect,
+        ClassicOverlayOutputReceipt,
+    )
 
 
 class DonorSourceError(ValueError):
@@ -280,7 +283,7 @@ class CandidateConstraints:
     digest: Digest
 
     def materialize(self) -> dict[str, JsonValue]:
-        """Return an isolated native-JSON copy for a legacy producer facade."""
+        """Return an isolated native-JSON copy for the candidate producer."""
 
         return cast(dict[str, JsonValue], _thaw(self.values))
 
@@ -465,6 +468,7 @@ class DonorCompileRequest:
     compiler_additions: DonorCompilerAdditions
     carrier_identifiers: frozenset[str]
     receipt: DonorCompileReceipt
+    overlay_receipts: tuple[ClassicOverlayOutputReceipt, ...] = ()
 
 
 def _legacy_identity(value: object) -> str:
@@ -1179,6 +1183,7 @@ def prepare_donor_compile_request(
     }
     logical_outputs: dict[str, bytes]
     files: dict[str, bytes]
+    overlay_receipts: tuple[ClassicOverlayOutputReceipt, ...] = ()
     include_directories: tuple[str, ...] = ()
     rendering_material: dict[str, JsonValue]
     if intervention.family is ClassicRecipeFamily.DONOR_SOURCE_OVERLAY:
@@ -1246,6 +1251,7 @@ def prepare_donor_compile_request(
                 dialect=overlay_dialect,
             )
         logical_outputs = dict(result.outputs)
+        overlay_receipts = result.receipts
         _require(source_path in logical_outputs, "donor overlay does not render its source")
         carrier_value = parameters.get("compiler_state_carrier")
         if carrier_value is not None:
@@ -1344,6 +1350,7 @@ def prepare_donor_compile_request(
         compiler_additions,
         carrier_identifiers,
         receipt,
+        overlay_receipts,
     )
 
 

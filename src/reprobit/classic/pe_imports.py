@@ -8,10 +8,11 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from itertools import pairwise
 
+from reprobit.binary import require
+
 from .foundation import (
     canonical_json_bytes,
     exact_audit_keys,
-    require,
     require_exact_int,
     require_payload_free_declaration,
     require_sha,

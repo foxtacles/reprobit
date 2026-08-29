@@ -12,12 +12,11 @@ from enum import StrEnum
 from pathlib import Path
 from threading import Lock
 from types import MappingProxyType
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeAlias, TypeVar
 
 from reprobit.cache import CacheLease, CacheOutput, CacheRecord, IncrementalCache
 from reprobit.incremental import IncrementalBuildSummary
 from reprobit.process import CancellationToken
-from reprobit.progress import ProgressKind
 from reprobit.secure_paths import SecureFileSnapshot, SecurePathError, digest_relative_file
 from reprobit.strict_json import JsonValue
 
@@ -78,7 +77,15 @@ NodePreStore = Callable[[RuntimeT, Mapping[str, NodeOutcome]], None]
 NodeInputMaterializer = Callable[
     [CacheLease, Mapping[str, NodeOutcome]], PreparedNodeInputs
 ]
-IncrementalProgress = Callable[[ProgressKind, int, int, str, str, str | None], None]
+IncrementalProgressEventKind: TypeAlias = Literal[
+    "cache_hit",
+    "cache_miss",
+    "unit_finished",
+]
+IncrementalProgress = Callable[
+    [IncrementalProgressEventKind, int, int, str, str, str | None],
+    None,
+]
 
 
 class IncrementalPhase(StrEnum):
@@ -286,7 +293,7 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
         staged_lock = Lock()
 
         def announce(
-            kind: ProgressKind,
+            kind: IncrementalProgressEventKind,
             node: IncrementalNode[RuntimeT],
             reason: str | None,
             *,
@@ -374,7 +381,7 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                                 allowed_root=self.workspace_root,
                             )
                             announce(
-                                ProgressKind.CACHE_HIT,
+                                "cache_hit",
                                 node,
                                 None,
                                 complete=True,
@@ -387,7 +394,7 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                         # not completion: the producer, publication, and
                         # integrity checks still remain.
                         announce(
-                            ProgressKind.CACHE_MISS,
+                            "cache_miss",
                             node,
                             reason,
                             complete=False,
@@ -434,7 +441,7 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                         with staged_lock:
                             staged_records.append((node, staged))
                         announce(
-                            ProgressKind.UNIT_FINISHED,
+                            "unit_finished",
                             node,
                             None,
                             complete=True,
@@ -538,7 +545,7 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                 progress_count += 1
                 if self.progress is not None:
                     self.progress(
-                        ProgressKind.UNIT_FINISHED,
+                        "unit_finished",
                         progress_count,
                         progress_total,
                         "publication",
@@ -590,6 +597,7 @@ __all__ = [
     "IncrementalNode",
     "IncrementalPhase",
     "IncrementalProgress",
+    "IncrementalProgressEventKind",
     "NodeAction",
     "NodeCacheProbe",
     "NodeInputMaterializer",

@@ -4,7 +4,8 @@ import struct
 
 import pytest
 
-from reprobit import classic
+import reprobit.classic.pe_imports as pe_import_algorithms
+from reprobit.binary import ByteIdentityError
 
 PE = 0x80
 OPTIONAL = PE + 24
@@ -99,15 +100,15 @@ def test_import_order_uses_locked_identities_and_candidate_thunks() -> None:
     beta = _named("Beta")
     ordinal = _ordinal(17)
     candidate = _image([alpha, ordinal, beta])
-    declaration = classic.capture_pe_import_order(_image([beta, alpha, ordinal]))
+    declaration = pe_import_algorithms.capture_pe_import_order(_image([beta, alpha, ordinal]))
 
-    output, proof = classic.apply_pe_import_order_candidate(candidate, declaration)
+    output, proof = pe_import_algorithms.apply_pe_import_order_candidate(candidate, declaration)
 
     assert proof["total_slots"] == 3
     assert proof["moved_slots"] == 3
     assert proof["rewritten_operands"] == 3
     assert proof["candidate_only"] is True
-    assert classic.capture_pe_import_order(output)["imports"] == declaration["imports"]
+    assert pe_import_algorithms.capture_pe_import_order(output)["imports"] == declaration["imports"]
 
 
 def test_duplicate_import_occurrences_are_not_collapsed() -> None:
@@ -115,9 +116,11 @@ def test_duplicate_import_occurrences_are_not_collapsed() -> None:
     duplicate_1 = _named("Duplicate", 1)
     beta = _named("Beta")
     candidate = _image([duplicate_0, duplicate_1, beta])
-    declaration = classic.capture_pe_import_order(_image([duplicate_1, beta, duplicate_0]))
+    declaration = pe_import_algorithms.capture_pe_import_order(
+        _image([duplicate_1, beta, duplicate_0])
+    )
 
-    _, proof = classic.apply_pe_import_order_candidate(candidate, declaration)
+    _, proof = pe_import_algorithms.apply_pe_import_order_candidate(candidate, declaration)
 
     assert proof["total_slots"] == 3
     assert proof["moved_slots"] == 2
@@ -128,17 +131,17 @@ def test_unrelocated_iat_looking_operand_refuses() -> None:
     beta = _named("Beta")
     candidate = bytearray(_image([alpha, beta]))
     struct.pack_into("<H", candidate, RELOC_RAW + 8, 0x0010)
-    declaration = classic.capture_pe_import_order(_image([beta, alpha]))
+    declaration = pe_import_algorithms.capture_pe_import_order(_image([beta, alpha]))
 
-    with pytest.raises(classic.ByteIdentityError, match="lack HIGHLOW"):
-        classic.apply_pe_import_order_candidate(bytes(candidate), declaration)
+    with pytest.raises(ByteIdentityError, match="lack HIGHLOW"):
+        pe_import_algorithms.apply_pe_import_order_candidate(bytes(candidate), declaration)
 
 
 def test_import_order_declaration_carries_no_reference_payload() -> None:
-    declaration = classic.capture_pe_import_order(_image([_named("Alpha")]))
+    declaration = pe_import_algorithms.capture_pe_import_order(_image([_named("Alpha")]))
     assert "payload" not in repr(declaration).casefold()
-    with pytest.raises(classic.ByteIdentityError, match="payload"):
-        classic.apply_pe_import_order_candidate(
+    with pytest.raises(ByteIdentityError, match="payload"):
+        pe_import_algorithms.apply_pe_import_order_candidate(
             _image([_named("Alpha")]),
             {**declaration, "reference_payload": "AAAA"},
         )
