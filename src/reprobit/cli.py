@@ -1,4 +1,4 @@
-"""Production command-line interface for ReproBit project workflows."""
+"""Rebuild old binaries exactly and explain why the result can be trusted."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
@@ -60,7 +61,12 @@ from reprobit.schema import (
 )
 from reprobit.state import KeepWorkspace, RunArena, StateStore, human_bytes
 from reprobit.strict_json import canonical_json, strict_load
-from reprobit.toolchains import TOOLCHAIN_PROFILES, ClassicMSVCToolchain, ToolchainLock
+from reprobit.toolchains import (
+    MSVC_42,
+    TOOLCHAIN_PROFILES,
+    ClassicMSVCToolchain,
+    ToolchainLock,
+)
 from reprobit.transactions import CASTransaction
 
 if TYPE_CHECKING:
@@ -114,6 +120,17 @@ def _render_initial_project(spec: ProjectSpec) -> bytes:
     return "\n".join(lines).encode("utf-8")
 
 
+def _derived_project_id(root: Path) -> str:
+    """Derive a stable, schema-safe default from a project directory name."""
+
+    value = re.sub(r"[^a-z0-9._-]+", "-", root.name.casefold()).strip("._-")
+    if not value:
+        return "project"
+    if not value[0].isalpha():
+        value = f"project-{value}"
+    return value[:128].rstrip("._-") or "project"
+
+
 def _command_init(args: argparse.Namespace, output: CLIOutput) -> int:
     root = Path(args.path).expanduser().resolve(strict=False)
     if root.exists() and (not root.is_dir() or root.is_symlink()):
@@ -121,7 +138,7 @@ def _command_init(args: argparse.Namespace, output: CLIOutput) -> int:
     root.mkdir(parents=True, exist_ok=True)
     spec = ProjectSpec(
         schema_version=3,
-        project_id=args.project_id,
+        project_id=args.project_id or _derived_project_id(root),
         build=ProducerGraphBuildAdapter(),
         toolchain=ToolchainRef(profile=args.profile),
         paths=LogicalPathProfile(
@@ -153,9 +170,12 @@ def _command_init(args: argparse.Namespace, output: CLIOutput) -> int:
     result = transaction.commit()
     output.emit(
         "initialized",
-        f"initialized schema-v3 project at {root}",
+        f"Created ReproBit project {spec.project_id!r} at {root}\n"
+        f"Next: rbit setup {root}",
         project_root=root,
+        project_id=spec.project_id,
         changed_paths=result.changed_paths,
+        next_command=f"rbit setup {root}",
     )
     return 0
 
@@ -528,8 +548,11 @@ def _command_toolchain_lock(args: argparse.Namespace, output: CLIOutput) -> int:
     identifier = args.profile or (spec.toolchain.profile if spec is not None else None)
     if identifier is None:
         raise CLIError("toolchain profile is required without reprobit.toml")
+    from reprobit.user_config import resolve_toolchain_root
+
     installation = ClassicMSVCToolchain(
-        identifier, Path(args.root).expanduser().resolve(strict=True)
+        identifier,
+        resolve_toolchain_root(identifier, args.root),
     )
     with output.activity("hashing toolchain producers and input trees"):
         runtime_lock = installation.create_lock(
@@ -556,6 +579,18 @@ def _command_toolchain_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         transaction_id=result.transaction_id,
     )
     return 0
+
+
+def _command_setup(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.onboarding import command_setup
+
+    return command_setup(args, output)
+
+
+def _command_toolchain_provision(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.onboarding import command_toolchain_provision
+
+    return command_toolchain_provision(args, output)
 
 
 def _migration_existing_schema_additions(
@@ -838,6 +873,26 @@ def _command_cost(args: argparse.Namespace, output: CLIOutput) -> int:
     return 0
 
 
+def _command_status(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.project_readiness import (
+        inspect_project_readiness,
+        render_project_readiness,
+    )
+
+    root = project_root(args.project)
+    readiness = inspect_project_readiness(root)
+    output.emit(
+        "project_readiness",
+        render_project_readiness(readiness, include_ready=args.all),
+        ready=readiness.ready,
+        completed=readiness.completed,
+        total=len(readiness.items),
+        next_command=readiness.next_command,
+        checks=readiness.items,
+    )
+    return 0 if readiness.ready else 1
+
+
 def _host_environment(programs: Sequence[str], temporary: Path) -> tuple[tuple[str, str], ...]:
     directories = [str(Path(item).parent) for item in programs]
     directories.extend(os.defpath.split(os.pathsep))
@@ -901,27 +956,24 @@ def _prepare_producer_graph_run(
     ) -> None:
         progress(completed, total, phase, node_id, ProgressKind(kind), reason)
 
-    if args.toolchain_root is None:
-        raise CLIError("producer-graph execution requires --toolchain-root")
-    if (args.compiler_transport is None) != (args.resource_transport is None):
-        raise CLIError("--compiler-transport and --resource-transport must be supplied together")
+    from reprobit.cli_environment import resolve_classic_execution_inputs
+
+    execution = resolve_classic_execution_inputs(
+        profile=bundle.spec.toolchain.profile,
+        explicit_toolchain_root=args.toolchain_root,
+        backend=_selected_backend(args),
+        compiler_transport=args.compiler_transport,
+        resource_transport=args.resource_transport,
+    )
     return prepare_classic_producer_graph_run(
         bundle,
         project_root=project_root,
         session_root=session_root,
-        toolchain_root=Path(args.toolchain_root).expanduser().resolve(strict=True),
-        backend=_selected_backend(args),
+        toolchain_root=execution.toolchain_root,
+        backend=execution.backend,
         jobs=args.jobs,
-        compiler_transport=(
-            Path(args.compiler_transport).expanduser()
-            if args.compiler_transport is not None
-            else None
-        ),
-        resource_transport=(
-            Path(args.resource_transport).expanduser()
-            if args.resource_transport is not None
-            else None
-        ),
+        compiler_transport=execution.compiler_transport,
+        resource_transport=execution.resource_transport,
         initialization_timeout=args.initialization_timeout,
         compile_timeout=args.compile_timeout,
         link_timeout=args.link_timeout,
@@ -1025,15 +1077,19 @@ def _command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                     incremental_summary = None
                 else:
                     assert developer_authority is not None
-                    if args.toolchain_root is None:
-                        raise CLIError("producer-graph execution requires --toolchain-root")
-                    if (args.compiler_transport is None) != (args.resource_transport is None):
-                        raise CLIError(
-                            "--compiler-transport and --resource-transport must be supplied "
-                            "together"
-                        )
                     from reprobit.classic_incremental import (
                         execute_classic_incremental_build,
+                    )
+                    from reprobit.cli_environment import (
+                        resolve_classic_execution_inputs,
+                    )
+
+                    execution = resolve_classic_execution_inputs(
+                        profile=bundle.spec.toolchain.profile,
+                        explicit_toolchain_root=args.toolchain_root,
+                        backend=_selected_backend(args),
+                        compiler_transport=args.compiler_transport,
+                        resource_transport=args.resource_transport,
                     )
 
                     with output.producer_activity(
@@ -1062,21 +1118,11 @@ def _command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                             project_root=root,
                             session_root=run_root / "incremental",
                             state_root=state,
-                            toolchain_root=Path(args.toolchain_root)
-                            .expanduser()
-                            .resolve(strict=True),
-                            backend=_selected_backend(args),
+                            toolchain_root=execution.toolchain_root,
+                            backend=execution.backend,
                             jobs=args.jobs,
-                            compiler_transport=(
-                                Path(args.compiler_transport).expanduser()
-                                if args.compiler_transport is not None
-                                else None
-                            ),
-                            resource_transport=(
-                                Path(args.resource_transport).expanduser()
-                                if args.resource_transport is not None
-                                else None
-                            ),
+                            compiler_transport=execution.compiler_transport,
+                            resource_transport=execution.resource_transport,
                             initialization_timeout=args.initialization_timeout,
                             compile_timeout=args.compile_timeout,
                             link_timeout=args.link_timeout,
@@ -1502,55 +1548,59 @@ def _add_execution_options(
         default=KeepWorkspace.ON_FAILURE.value,
         help=("retain run-private diagnostics never, on failure, or always (default: on-failure)"),
     )
-    command.add_argument(
+    advanced = command.add_argument_group(
+        "advanced execution options",
+        "Defaults are suitable for people; these controls are mainly for CI and unusual hosts.",
+    )
+    advanced.add_argument(
         "--backend",
         choices=("auto", POSIX_WINE_BACKEND, WINDOWS_NATIVE_BACKEND),
         default="auto",
         help="execution backend (default: select from the host platform)",
     )
-    command.add_argument("--wine", default="wine", help="POSIX Wine executable or PATH name")
-    command.add_argument(
+    advanced.add_argument("--wine", default="wine", help="POSIX Wine executable or PATH name")
+    advanced.add_argument(
         "--wineserver",
         default="wineserver",
         help="POSIX wineserver executable or PATH name",
     )
-    command.add_argument(
+    advanced.add_argument(
         "--toolchain-root",
         metavar="DIRECTORY",
         help="physical root of the locally provisioned locked toolchain",
     )
-    command.add_argument(
+    advanced.add_argument(
         "--compiler-transport",
         metavar="PATH",
         help="POSIX transport selector for the locked compiler (paired with resource transport)",
     )
-    command.add_argument(
+    advanced.add_argument(
         "--resource-transport",
         metavar="PATH",
         help="POSIX transport selector for the locked resource compiler",
     )
-    command.add_argument(
+    advanced.add_argument(
         "--initialization-timeout",
         type=_positive_seconds,
         default=600.0,
         metavar="SECONDS",
         help="limit for each isolated execution-lane initialization (default: 600)",
     )
-    command.add_argument(
+    advanced.add_argument(
         "--compile-timeout",
         type=_positive_seconds,
         default=600.0,
         metavar="SECONDS",
         help="limit for each compiler or resource producer (default: 600)",
     )
-    command.add_argument(
+    advanced.add_argument(
         "--link-timeout",
         type=_positive_seconds,
         default=900.0,
         metavar="SECONDS",
         help="limit for each librarian or linker producer (default: 900)",
     )
-    command.add_argument(
+    advanced.add_argument(
         "--cleanup-timeout",
         type=_positive_seconds,
         default=10.0,
@@ -1562,20 +1612,77 @@ def _add_execution_options(
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="rbit", description=__doc__)
     parser.add_argument("--version", action="version", version=f"%(prog)s {_VERSION}")
-    parser.add_argument("--format", choices=("text", "ndjson"), default="text")
+    parser.add_argument(
+        "--format",
+        choices=("text", "ndjson"),
+        default="text",
+        help="human-readable text or stable machine events (default: text)",
+    )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
-    init = subcommands.add_parser("init", help="create a minimal schema-v3 project entry point")
-    init.add_argument("path", nargs="?", default=".")
-    init.add_argument("--project-id", required=True)
-    init.add_argument("--profile", choices=tuple(TOOLCHAIN_PROFILES), default="msvc_4_2")
-    init.add_argument("--target", default="program")
-    init.add_argument("--artifact", default="build/program.exe")
-    init.add_argument("--oracle", default="reference/program.exe")
-    init.add_argument("--logical-source", default=r"R:\source")
-    init.add_argument("--logical-build", default=r"R:\build")
-    init.add_argument("--logical-toolchain", default=r"R:\toolchain")
+    init = subcommands.add_parser("init", help="start a ReproBit project")
+    init.add_argument("path", nargs="?", default=".", help="project directory (default: .)")
+    init.add_argument(
+        "--project-id",
+        help="portable project name (default: derive it from the directory)",
+    )
+    init.add_argument(
+        "--profile",
+        choices=tuple(TOOLCHAIN_PROFILES),
+        default="msvc_4_2",
+        help="compiler profile (default: msvc_4_2)",
+    )
+    init.add_argument("--target", default="program", help="first target name")
+    init.add_argument(
+        "--artifact",
+        default="build/program.exe",
+        help="candidate output path (default: build/program.exe)",
+    )
+    init.add_argument(
+        "--oracle",
+        default="reference/program.exe",
+        help="protected reference path (default: reference/program.exe)",
+    )
+    init_advanced = init.add_argument_group("advanced logical path options")
+    init_advanced.add_argument("--logical-source", default=r"R:\source")
+    init_advanced.add_argument("--logical-build", default=r"R:\build")
+    init_advanced.add_argument("--logical-toolchain", default=r"R:\toolchain")
     init.set_defaults(handler=_command_init)
+
+    setup = subcommands.add_parser(
+        "setup",
+        help="prepare the compiler and this machine for a project",
+    )
+    setup.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
+    setup.add_argument(
+        "--toolchain-root",
+        metavar="DIRECTORY",
+        help="use an existing compiler installation instead of the remembered/default path",
+    )
+    setup.add_argument(
+        "--no-provision",
+        action="store_true",
+        help="fail instead of downloading a missing supported compiler",
+    )
+    setup.add_argument(
+        "--no-save",
+        action="store_true",
+        help="do not remember this machine's compiler location",
+    )
+    setup.add_argument(
+        "--skip-probe",
+        action="store_true",
+        help="skip the bounded execution probe (faster, but less complete)",
+    )
+    setup_advanced = setup.add_argument_group("advanced host options")
+    setup_advanced.add_argument(
+        "--backend",
+        choices=("auto", POSIX_WINE_BACKEND, WINDOWS_NATIVE_BACKEND),
+        default="auto",
+    )
+    setup_advanced.add_argument("--wine", default="wine")
+    setup_advanced.add_argument("--wineserver", default="wineserver")
+    setup.set_defaults(handler=_command_setup)
 
     doctor = subcommands.add_parser("doctor", help="inspect backend and toolchain capabilities")
     doctor.add_argument("project", nargs="?", default=".")
@@ -1593,10 +1700,36 @@ def _parser() -> argparse.ArgumentParser:
 
     toolchain = subcommands.add_parser("toolchain", help="manage classic toolchain receipts")
     toolchain_commands = toolchain.add_subparsers(dest="toolchain_command", required=True)
+    provision = toolchain_commands.add_parser(
+        "provision",
+        aliases=("install",),
+        help="download and authenticate a supported compiler",
+    )
+    provision.add_argument(
+        "profile",
+        nargs="?",
+        choices=tuple(TOOLCHAIN_PROFILES),
+        default=MSVC_42,
+        help="compiler profile (default: msvc_4_2)",
+    )
+    provision.add_argument(
+        "--destination",
+        metavar="DIRECTORY",
+        help="installation directory (default: this platform's standard user location)",
+    )
+    provision.add_argument(
+        "--no-save",
+        action="store_true",
+        help="do not remember the installed compiler location",
+    )
+    provision.set_defaults(handler=_command_toolchain_provision)
     lock = toolchain_commands.add_parser("lock", help="write the canonical schema-v3 lock")
     lock.add_argument("--project", default=".")
     lock.add_argument("--profile", choices=tuple(TOOLCHAIN_PROFILES))
-    lock.add_argument("--root", required=True)
+    lock.add_argument(
+        "--root",
+        help="compiler installation override (normally remembered by `rbit setup`)",
+    )
     lock.add_argument(
         "--runtime-file",
         action="append",
@@ -1756,6 +1889,18 @@ def _parser() -> argparse.ArgumentParser:
         command.add_argument("project", nargs="?", default=".")
         command.set_defaults(handler=handler)
 
+    status = subcommands.add_parser(
+        "status",
+        help="show what is ready and the next project setup step",
+    )
+    status.add_argument("project", nargs="?", default=".")
+    status.add_argument(
+        "--all",
+        action="store_true",
+        help="include checks that already pass",
+    )
+    status.set_defaults(handler=_command_status)
+
     explain = subcommands.add_parser("explain", help="explain committed interventions")
     explain.add_argument("project", nargs="?", default=".")
     explain.add_argument("--intervention")
@@ -1802,13 +1947,46 @@ def _parser() -> argparse.ArgumentParser:
     )
     discover.add_argument(
         "request",
-        help="strict discovery request JSON; relative inputs resolve beside this file",
+        help="request JSON to run, or 'init' to create a small starter request",
+    )
+    discover_init = discover.add_argument_group(
+        "starter request options",
+        "Use with `rbit discover init`; paths are relative to the request file.",
+    )
+    discover_init.add_argument("--source", help="translation-unit source path")
+    discover_init.add_argument(
+        "--reference",
+        action="append",
+        default=[],
+        metavar="SYMBOL=OBJECT_PATH",
+        help="symbol and matching reference object (repeatable)",
+    )
+    discover_init.add_argument(
+        "--target",
+        dest="discovery_target",
+        default="program",
+        help="target name (default: program)",
+    )
+    discover_init.add_argument(
+        "--translation-unit",
+        help="translation-unit name (default: derive it from --source)",
+    )
+    discover_init.add_argument(
+        "--request-file",
+        default="discovery-request.json",
+        metavar="PATH",
+        help="new request path (default: discovery-request.json)",
+    )
+    discover_init.add_argument(
+        "--compiler-argument",
+        action="append",
+        metavar="OPTION",
+        help="replace the safe default compiler options (repeatable; advanced)",
     )
     discover.add_argument(
         "--toolchain-root",
-        required=True,
         metavar="DIRECTORY",
-        help="archaic-msvc 4.2 installation to fingerprint and use",
+        help="compiler installation override (normally remembered by `rbit setup`)",
     )
     discover.add_argument(
         "--report-json",
