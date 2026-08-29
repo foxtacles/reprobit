@@ -1762,6 +1762,7 @@ def test_donor_source_mirror_header_edit_invalidates_only_its_transform_closure(
     )
     request = DonorCompileRequest(
         intervention_id=intervention.id,
+        compiler_seat="d_0123456789ab",
         family=intervention.family,
         build_target="app",
         logical_source="shared.cpp",
@@ -1788,7 +1789,7 @@ def test_donor_source_mirror_header_edit_invalidates_only_its_transform_closure(
     runtime_calls: list[_FakePrepared] = []
 
     def patch(header_payload: bytes, unrelated_payload: bytes) -> None:
-        arena = r"R:\donors\composed-app-shared.cpp-donor_recipe"
+        arena = r"R:\donors\composed-app-shared.cpp-d_0123456789ab"
         mirror_header = arena + r"\inc\source\donor-only.h"
         executor = _FakeWarmExecutor(sources)
         trace = MsvcSbrTrace(

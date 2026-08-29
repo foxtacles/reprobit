@@ -431,6 +431,7 @@ class DonorCompilerAdditions:
 class DonorRecipeValidation:
     family: ClassicRecipeFamily
     parameters: Mapping[str, object]
+    compiler_seat: str
     include_projection: DonorIncludeProjection
     generated_declarations: bytes | None
     force_include_payload: bytes | None
@@ -453,6 +454,7 @@ class DonorCompileRequest:
     """A complete, private donor compile input; all byte fields are fresh or derived."""
 
     intervention_id: str
+    compiler_seat: str
     family: ClassicRecipeFamily
     build_target: str
     logical_source: str
@@ -471,12 +473,19 @@ def _legacy_identity(value: object) -> str:
     return _digest((json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n").encode())
 
 
-def _carrier_identity(parameters: Mapping[str, object], generated: bytes) -> None:
+def _compiler_seat(identity: str) -> str:
+    """Derive the compiler-visible working-directory seat from carrier identity."""
+
+    return f"d_{identity[:12]}"
+
+
+def _carrier_identity(parameters: Mapping[str, object], generated: bytes) -> str:
     digest = _sha(
         parameters.get("generated_header_sha256"),
         "generated_header_sha256 must be a lowercase SHA-256",
     )
     _require(_digest(generated) == digest, "generated declarations differ from their pin")
+    return digest
 
 
 def _include_projection(parameters: Mapping[str, object]) -> DonorIncludeProjection:
@@ -573,6 +582,7 @@ def _validated_overlay(
     return DonorRecipeValidation(
         intervention.family,
         cast(Mapping[str, object], _freeze(parameters)),
+        _compiler_seat(identity),
         _include_projection(parameters),
         None,
         force_payload,
@@ -855,7 +865,7 @@ def validate_donor_recipe(
             minimum=1,
         )
         generated = forward + extern
-    _carrier_identity(parameters, generated)
+    carrier_identity = _carrier_identity(parameters, generated)
     carrier_identifiers = _generated_identifiers(generated)
     _require(
         bool(carrier_identifiers),
@@ -864,6 +874,7 @@ def validate_donor_recipe(
     return DonorRecipeValidation(
         family,
         cast(Mapping[str, object], _freeze(parameters)),
+        _compiler_seat(carrier_identity),
         DonorIncludeProjection.NONE,
         generated,
         force_payload,
@@ -1282,6 +1293,7 @@ def prepare_donor_compile_request(
     )
     carrier_identifiers = validation.carrier_identifiers
     additions_material = {
+        "compiler_seat": validation.compiler_seat,
         "force_includes": list(compiler_additions.force_includes),
         "include_directories": list(compiler_additions.include_directories),
         "include_projection": compiler_additions.include_projection.value,
@@ -1300,6 +1312,7 @@ def prepare_donor_compile_request(
     )
     return DonorCompileRequest(
         intervention.id,
+        validation.compiler_seat,
         intervention.family,
         intervention.build_target,
         source_path,

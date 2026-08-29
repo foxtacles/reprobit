@@ -523,10 +523,10 @@ class ClassicDonorComposition:
         donor_root = self.build_root.parent / "donors"
         if donor_root.is_symlink() or not donor_root.is_dir():
             raise ClassicProjectError("classic donor arena root is absent or redirected")
-        intervention_id = _safe_relative(donor.request.intervention_id)
-        if len(PurePosixPath(intervention_id).parts) != 1:
-            raise ClassicProjectError("classic donor intervention ID is not one path component")
-        arena = donor_root / f"{marker_stem}-{intervention_id}"
+        compiler_seat = _safe_relative(donor.request.compiler_seat)
+        if len(PurePosixPath(compiler_seat).parts) != 1:
+            raise ClassicProjectError("classic donor compiler seat is not one path component")
+        arena = donor_root / f"{marker_stem}-{compiler_seat}"
         arena.mkdir(exist_ok=False)
         if donor.request.compiler_additions.include_projection is not DonorIncludeProjection.NONE:
             shutil.copytree(self.effective_root, arena / "inc" / "source")

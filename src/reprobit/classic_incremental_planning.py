@@ -416,6 +416,15 @@ def _projected_donor_resolution_contexts(
             raise ClassicIncrementalError(
                 f"projected donor {donor.intervention.id!r} source path is unsafe"
             )
+        compiler_seat = PurePosixPath(request.compiler_seat)
+        if (
+            compiler_seat.is_absolute()
+            or len(compiler_seat.parts) != 1
+            or any(part in {"", ".", ".."} for part in compiler_seat.parts)
+        ):
+            raise ClassicIncrementalError(
+                f"projected donor {donor.intervention.id!r} compiler seat is unsafe"
+            )
         matches: list[tuple[ProducerNode, dict[str, object]]] = []
         for node_id, node in compiler_nodes.items():
             if (
@@ -460,7 +469,7 @@ def _projected_donor_resolution_contexts(
         marker_stem = f"composed-{unit.plan.build_target}-{unit.plan.source.replace('/', '_')}"
         donor_root = PureWindowsPath(normalized_build_root).parent / "donors"
         arena = normalize_logical_path(
-            str(donor_root / f"{marker_stem}-{request.intervention_id}")
+            str(donor_root / f"{marker_stem}-{request.compiler_seat}")
         )
         record_source = logical_join(normalized_source_root, request.logical_source)
         private_includes = [

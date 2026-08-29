@@ -204,6 +204,16 @@ def test_all_declaration_carrier_families_produce_closed_requests() -> None:
     }
     assert all(request.staged_source == "s.cpp" for request in requests)
     assert all(request.intervention_id == "donor_sample" for request in requests)
+    for intervention, request in zip(interventions, requests, strict=True):
+        carrier_identity = cast(
+            str,
+            next(
+                field.value
+                for field in intervention.parameters
+                if field.name == "generated_header_sha256"
+            ),
+        )
+        assert request.compiler_seat == f"d_{carrier_identity[:12]}"
     assert all("s.cpp" in request.files for request in requests)
     assert all("source.cpp" not in request.files for request in requests)
     assert all(request.receipt.output_digests for request in requests)
@@ -365,6 +375,7 @@ def test_donor_private_overlay_uses_the_shared_typed_renderer() -> None:
     )
     assert request.compiler_additions.include_directories == ("inc", "inc/source/src")
     assert request.carrier_identifiers == frozenset()
+    assert request.compiler_seat == f"d_{identity[:12]}"
 
 
 def _overlay_carrier_request(carrier: dict[str, Any]) -> DonorCompileRequest:

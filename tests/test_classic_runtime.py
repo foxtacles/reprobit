@@ -3826,6 +3826,7 @@ def _runtime_donor_request(
         files["run.h"] = b"class DonorCarrier {};\n"
     return DonorCompileRequest(
         intervention_id="donor_modern_identity",
+        compiler_seat="d_0123456789ab",
         family=family,
         build_target="program",
         logical_source=source,
@@ -4246,7 +4247,7 @@ def test_donor_invocation_uses_private_arena_layout_and_relative_outputs(
         del timeout, log, cancellation
         assert windows_lineage_planner is None
         captured.append((argv, cwd))
-        assert cwd.name.endswith("-donor_modern_identity")
+        assert cwd.name.endswith("-d_0123456789ab")
         assert (cwd / "s.cpp").read_bytes() == b"rendered source\n"
         assert (cwd / "run.h").read_bytes() == b"class DonorCarrier {};\n"
         assert (cwd / "inc/source/src/unit.cpp").read_bytes() == b"effective source\n"
@@ -4289,7 +4290,7 @@ def test_donor_invocation_uses_private_arena_layout_and_relative_outputs(
 
     assert len(captured) == 2
     assert captured[0][1] == build_root.parent / "donors" / (
-        "composed-program-owner_unit.cpp-donor_modern_identity"
+        "composed-program-owner_unit.cpp-d_0123456789ab"
     )
     assert captured[0][0][-5:] == (
         "/FIrun.h",
