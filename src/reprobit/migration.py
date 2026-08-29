@@ -559,6 +559,13 @@ def _legacy_workspace_root(
     return workspace
 
 
+def _legacy_compiler_path(value: str) -> PurePosixPath | PureWindowsPath:
+    compiler = _parse_legacy_absolute_path(value)
+    if compiler is None:
+        raise MigrationError("legacy path contract compiler path is not canonical")
+    return compiler
+
+
 def _compile_record_path(value: str, *, directory: Path) -> Path:
     path = Path(value)
     if not path.is_absolute():
@@ -940,7 +947,7 @@ def _toolchain_lock(manifest: Mapping[str, Any]) -> ToolchainLock:
     codegen = legacy.get("codegen_path_contract")
     if isinstance(codegen, dict) and isinstance(codegen.get("compiler"), str):
         compiler = codegen["compiler"]
-        normalized_compiler = compiler.replace("\\", "/")
+        normalized_compiler = _legacy_compiler_path(compiler).as_posix()
         marker = "/wine/"
         relative_compiler = (
             "wine/" + normalized_compiler.split(marker, 1)[1]
@@ -1437,7 +1444,7 @@ def _legacy_compiler_seats(contract: Mapping[str, Any]) -> dict[str, str]:
 
 
 def _toolchain_root(compiler: str) -> str:
-    normalized = compiler.replace("\\", "/")
+    normalized = _legacy_compiler_path(compiler).as_posix()
     marker = "/wine/"
     if marker not in normalized:
         raise MigrationError("cannot derive toolchain root from compiler path")

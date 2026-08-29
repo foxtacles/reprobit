@@ -613,6 +613,21 @@ def test_migration_rejects_noncanonical_windows_path_contract(build_root: str) -
         convert_v2_manifest(manifest, "2" * 64)
 
 
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        ("source_root", r"D:\workspace/sample"),
+        ("compiler", r"D:\opt/compiler\wine\x86\cl"),
+    ),
+)
+def test_migration_rejects_mixed_windows_path_spellings(field: str, value: str) -> None:
+    manifest = _manifest()
+    manifest["toolchain"]["codegen_path_contract"][field] = value
+
+    with pytest.raises(MigrationError, match="canonical"):
+        convert_v2_manifest(manifest, "2" * 64)
+
+
 def test_duplicate_donor_ids_are_canonicalized() -> None:
     manifest = _manifest()
     unit = manifest["translation_units"][0]
