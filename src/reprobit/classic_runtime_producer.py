@@ -597,7 +597,6 @@ class ClassicProducerExecution:
         for raw in (
             *self.wrapper_runtime_files,
             *self.authority_inputs,
-            *self.role_commands.values(),
         ):
             path = raw.resolve(strict=True)
             if path.is_symlink() or not path.is_file():

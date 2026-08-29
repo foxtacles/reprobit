@@ -3589,6 +3589,89 @@ def test_lazy_lane_pool_rejects_close_with_borrowed_lane_then_cleans() -> None:
     assert closed == [True]
 
 
+def test_native_logical_role_commands_stay_in_projected_toolchain_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The controller must not resolve a drive visible only to producer lineages."""
+
+    logical_root = tmp_path / "logical-drive"
+    source_root = logical_root / "source"
+    build_root = logical_root / "build"
+    toolchain_root = logical_root / "toolchain"
+    for directory in (source_root, build_root, toolchain_root / "bin"):
+        directory.mkdir(parents=True, exist_ok=True)
+    role_relatives = {
+        ProducerRole.COMPILER: "CL.EXE",
+        ProducerRole.RESOURCE: "RC.EXE",
+        ProducerRole.LIBRARIAN: "LIB.EXE",
+        ProducerRole.LINKER: "LINK.EXE",
+    }
+    for relative in role_relatives.values():
+        (toolchain_root / "bin" / relative).write_bytes(relative.encode("ascii"))
+
+    bundle = cast(
+        ProjectBundle,
+        SimpleNamespace(
+            spec=SimpleNamespace(
+                paths=SimpleNamespace(
+                    source=r"R:\source",
+                    build=r"R:\build",
+                    toolchain=r"R:\toolchain",
+                )
+            )
+        ),
+    )
+    graph = cast(ProducerGraphDocument, object())
+    monkeypatch.setattr(
+        classic_runtime_producer,
+        "classic_compiler_path_profile_digest",
+        lambda _bundle, _graph: Digest.from_bytes(b"path-profile"),
+    )
+    lane_pool = cast(
+        classic_runtime_environment._LazyExecutionLanePool,
+        SimpleNamespace(
+            maximum=1,
+            compiler_environment_digest=Digest.from_bytes(b"environment"),
+            created_count=0,
+            close=lambda: None,
+        ),
+    )
+    role_commands = {
+        role: Path(rf"R:\toolchain\bin\{relative}")
+        for role, relative in role_relatives.items()
+    }
+
+    producer = classic_runtime_producer.ClassicProducerExecution(
+        bundle=bundle,
+        session_root=tmp_path,
+        build_root=build_root,
+        effective_root=source_root,
+        toolchain_root=toolchain_root,
+        graph=graph,
+        role_commands=role_commands,
+        role_tool_ids={role: role.value for role in ProducerRole},
+        wrapper_runtime_files=(),
+        authority_inputs=(),
+        analysis_link_options=(),
+        lane_pool=lane_pool,
+        jobs=1,
+        compile_timeout=30,
+        link_timeout=30,
+        progress=classic_runtime_producer.ClassicProgressReporter(1, None),
+    )
+    try:
+        assert producer.role_commands == role_commands
+        assert producer.initialized_lane_count == 0
+        assert producer._namespace_authority_files == ()
+        with producer.authority_namespace_lease() as authority:
+            assert {
+                item.relative_path for item in authority.snapshot.files_for("toolchain")
+            } == {f"bin/{relative}" for relative in role_relatives.values()}
+    finally:
+        producer.close()
+
+
 def test_discarded_warm_dependency_replay_erases_arena_after_parse_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
