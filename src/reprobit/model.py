@@ -3,18 +3,27 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from enum import StrEnum
 from itertools import pairwise
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Literal, TypeGuard
 
 from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 from reprobit.strict_json import canonical_json, strict_loads
 
-Identifier = Annotated[str, Field(pattern=r"^[a-z][a-z0-9._-]{0,127}$")]
+IDENTIFIER_PATTERN = r"^[a-z][a-z0-9._-]{0,127}$"
+_IDENTIFIER_RE = re.compile(IDENTIFIER_PATTERN)
+Identifier = Annotated[str, Field(pattern=IDENTIFIER_PATTERN)]
 BuildTarget = Annotated[str, Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")]
 Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
+
+def is_identifier(value: object) -> TypeGuard[str]:
+    """Return whether a value is one canonical ReproBit identifier."""
+
+    return isinstance(value, str) and _IDENTIFIER_RE.fullmatch(value) is not None
 
 
 class StrictModel(BaseModel):
@@ -395,6 +404,7 @@ class Verdict(StrictModel):
 
 
 __all__ = [
+    "IDENTIFIER_PATTERN",
     "Artifact",
     "ArtifactKind",
     "ArtifactOrigin",
@@ -413,5 +423,6 @@ __all__ = [
     "SemanticProof",
     "StrictModel",
     "Verdict",
+    "is_identifier",
     "quarantine_proof_binding",
 ]

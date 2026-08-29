@@ -505,35 +505,49 @@ def test_duplicate_donor_ids_are_canonicalized() -> None:
 
 def test_migration_rewrites_named_donor_selectors_to_intervention_ids() -> None:
     manifest = _manifest()
-    function = manifest["translation_units"][0]["functions"][0]
+    unit = manifest["translation_units"][0]
+    unit["donors"].append(
+        {
+            "id": "donor_b",
+            "status": "fresh",
+            "authenticity": "compiler",
+            "recipe": {
+                "kind": "donor_source_overlay",
+                "expected_size": 13,
+            },
+        }
+    )
+    function = unit["functions"][0]
     function.update(
         {
-            "target_donor": "donor_a",
+            "target_donor": "donor_b",
             "complete_donor": "donor_a",
-            "instruction_donor": "donor_a",
+            "instruction_donor": "donor_b",
             "instruction_ranges": [
                 {"start": 0, "end": 1, "donor": "donor_a"},
-                {"start": 1, "end": 2},
+                {"start": 1, "end": 2, "donor": "donor_b"},
             ],
-            "donor_variants": [{"donor": "donor_a", "offsets": [0]}],
+            "donor_variants": [{"donor": "donor_b", "offsets": [0]}],
         }
     )
 
     result = convert_v2_manifest(manifest, "2" * 64)
     shard = json.loads(result.files[_tu_path(result, "interventions")])
-    donor = next(item for item in shard["interventions"] if item["role"] == "donor")
+    donors = [item for item in shard["interventions"] if item["role"] == "donor"]
     migrated = next(item for item in shard["interventions"] if item["role"] == "function")
     fields = {item["name"]: item["value"] for item in migrated["parameters"]}
+    assert len(donors) == 2
+    primary_id = migrated["dependencies"][0]
+    variant_id = next(item["id"] for item in donors if item["id"] != primary_id)
 
-    assert migrated["dependencies"] == [donor["id"]]
-    assert fields["target_donor"] == donor["id"]
-    assert fields["complete_donor"] == donor["id"]
-    assert fields["instruction_donor"] == donor["id"]
+    assert fields["target_donor"] == variant_id
+    assert fields["complete_donor"] == primary_id
+    assert fields["instruction_donor"] == variant_id
     assert fields["instruction_ranges"] == [
-        {"donor": donor["id"], "end": 1, "start": 0},
-        {"end": 2, "start": 1},
+        {"donor": primary_id, "end": 1, "start": 0},
+        {"donor": variant_id, "end": 2, "start": 1},
     ]
-    assert fields["donor_variants"] == [{"donor": donor["id"], "offsets": [0]}]
+    assert fields["donor_variants"] == [{"donor": variant_id, "offsets": [0]}]
 
 
 def test_unknown_recipe_family_fails_closed() -> None:

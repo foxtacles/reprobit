@@ -309,6 +309,27 @@ def test_classic_recipe_role_requires_its_authoritative_scope(
         )
 
 
+@pytest.mark.parametrize("dependencies", [(), ("first", "second")])
+def test_classic_function_recipe_requires_one_primary_donor(
+    dependencies: tuple[str, ...],
+) -> None:
+    with pytest.raises(ValidationError, match="requires one primary donor"):
+        ClassicRecipeIntervention(
+            id="classic",
+            scope=Scope(
+                target="program",
+                translation_unit="main",
+                function="work()",
+            ),
+            rationale="primary donor contract fixture",
+            dependencies=dependencies,
+            family=ClassicRecipeFamily.EQUAL_BODY_STRICT,
+            role=ClassicRecipeRole.FUNCTION,
+            build_target="program",
+            symbol="work()",
+        )
+
+
 def test_classic_donor_beneficiaries_are_exact_dependency_consumers(
     tmp_path: Path,
 ) -> None:

@@ -658,6 +658,8 @@ class ClassicRecipeIntervention(InterventionBase):
                 raise ValueError(
                     "classic function recipe scope must name its exact symbol"
                 )
+            if len(self.dependencies) != 1:
+                raise ValueError("classic function recipe requires one primary donor")
         else:
             if self.symbol is not None:
                 raise ValueError("only classic function recipes may name a symbol")

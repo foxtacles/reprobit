@@ -272,10 +272,15 @@ class ClassicFamilyDispatcher:
                     _required_bytes(materials.seed_source, "seed source"),
                     _required_bytes(materials.donor_source, "donor source"),
                     dict(materials.additional_donor_objects),
+                    primary_donor_id=intervention.dependencies[0],
                 )
             else:
                 output, proof = composition.produce_instruction_mosaic_candidate(
-                    seed, donor, function, dict(materials.additional_donor_objects)
+                    seed,
+                    donor,
+                    function,
+                    dict(materials.additional_donor_objects),
+                    primary_donor_id=intervention.dependencies[0],
                 )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION:
             output, proof = registers.produce_register_bijection_candidate(

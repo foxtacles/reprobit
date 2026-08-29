@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import re
-
 from reprobit.binary import ByteIdentityError, require
 from reprobit.coff import coff_unpack as _coff_unpack
 from reprobit.ia32 import (
     supported_ia32_instruction_length as _supported_ia32_instruction_length,
 )
+from reprobit.model import is_identifier
 
 from .coff import _coff_table_bytes, function_symbol
 from .foundation import ADDRESS_RE, exact_audit_keys, require_exact_int, require_sha, sha256_bytes
@@ -303,7 +302,7 @@ def validate_instruction_mosaic_ranges(value: object, context: str, body_length:
         normalized_item = {'kind': kind, 'start': start, 'end': end, 'seed_sha256': seed_sha, 'donor_sha256': donor_sha}
         if 'donor' in item:
             donor_id = item.get('donor')
-            require(isinstance(donor_id, str) and re.fullmatch('d_[0-9a-f]{12}', donor_id), f'{item_context}.donor is invalid')
+            require(is_identifier(donor_id), f'{item_context}.donor is invalid')
             normalized_item['donor'] = donor_id
         reseat_keys = {'relocation_reseat', 'seed_relocation_offsets', 'donor_relocation_offsets'}
         if reseat_keys & set(item):

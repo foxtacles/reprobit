@@ -156,35 +156,29 @@ def test_mosaic_declarations_reject_legacy_literal_instruction_fields() -> None:
         ia32_algorithms.validate_instruction_mosaic_ranges(declaration, "adversarial", 1)
 
 
-def test_mosaic_trace_labels_a_migrated_primary_donor_without_legacy_identity() -> None:
+def test_mosaic_ranges_use_current_reprobit_donor_identifiers() -> None:
+    declaration = [
+        {
+            "kind": "same_offset_complete_x86_instruction_v1",
+            "start": 0,
+            "end": 1,
+            "seed_sha256": "0" * 64,
+            "donor_sha256": "1" * 64,
+            "donor": "donor_2611b2229ba41e75",
+        }
+    ]
+    assert ia32_algorithms.validate_instruction_mosaic_ranges(
+        declaration, "mosaic", 1
+    )[0]["donor"] == "donor_2611b2229ba41e75"
+    declaration[0]["donor"] = "Legacy Donor"
+    with pytest.raises(ByteIdentityError, match="donor is invalid"):
+        ia32_algorithms.validate_instruction_mosaic_ranges(declaration, "mosaic", 1)
+
+
+def test_mosaic_trace_labels_use_the_explicit_primary_dependency() -> None:
     label = composition_algorithms._instruction_mosaic_range_donor_label
-    primary = composition_algorithms._instruction_mosaic_primary_donor_label
-    assert primary({}) == "primary"
-    assert primary({"donor": "legacy-primary"}) == "legacy-primary"
-    assert (
-        primary(
-            {
-                "donor_variants": [{"donor": "variant"}],
-                "instruction_ranges": [
-                    {"donor": "migrated-primary"},
-                    {"donor": "variant"},
-                ],
-            }
-        )
-        == "migrated-primary"
-    )
-    with pytest.raises(ByteIdentityError, match="primary donor is ambiguous"):
-        primary(
-            {
-                "instruction_ranges": [
-                    {"donor": "first"},
-                    {"donor": "second"},
-                ]
-            }
-        )
-    assert label({}, {}) == "primary"
-    assert label({"donor": "legacy-primary"}, {}) == "legacy-primary"
-    assert label({"donor": "legacy-primary"}, {"donor": "variant"}) == "variant"
+    assert label({}, "donor_primary") == "donor_primary"
+    assert label({"donor": "donor_variant"}, "donor_primary") == "donor_variant"
 
 
 def test_classic_package_has_no_oracle_capability_import_or_raw_body_api() -> None:

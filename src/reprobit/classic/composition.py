@@ -1039,23 +1039,7 @@ def _validate_instruction_mosaic_source_variant(seed: CoffObject, seed_primary: 
     require(len(lines) >= 6 and lines[4:6] == b'\x00\x00' and (donor.symbols.get(int.from_bytes(lines[:4], 'little'), {}).get('name') == function['mangled']), f'{context} line marker changed identity')
     return (donor, primary, body)
 
-def _instruction_mosaic_primary_donor_label(function: dict) -> str:
-    """Name the primary donor after legacy donor identities are migrated away."""
-    donor = function.get('donor')
-    if donor is not None:
-        require(isinstance(donor, str) and donor, 'instruction-mosaic primary donor is invalid')
-        return donor
-    variants = function.get('donor_variants', [])
-    variant_labels = {item.get('donor') for item in variants if isinstance(item, dict)}
-    range_labels = {item.get('donor') for item in function.get('instruction_ranges', []) if isinstance(item, dict) and item.get('donor') is not None}
-    require(all((isinstance(item, str) and item for item in (*variant_labels, *range_labels))), 'instruction-mosaic donor label is invalid')
-    candidates = range_labels - variant_labels
-    if range_labels:
-        require(len(candidates) == 1, 'instruction-mosaic primary donor is ambiguous')
-        return next(iter(candidates))
-    return 'primary'
-
-def _compose_instruction_mosaic_variant_object(seed_bytes: bytes, main_donor_bytes: bytes, additional_donor_bytes: dict[str, bytes], function: dict) -> tuple[bytes, dict]:
+def _compose_instruction_mosaic_variant_object(seed_bytes: bytes, main_donor_bytes: bytes, additional_donor_bytes: dict[str, bytes], function: dict, *, primary_donor_id: str) -> tuple[bytes, dict]:
     """Build one provenance-checked donor view from same-COMDAT variants.
 
     The returned object is an internal view only.  Every copied instruction
@@ -1066,22 +1050,21 @@ def _compose_instruction_mosaic_variant_object(seed_bytes: bytes, main_donor_byt
     require(variants, 'instruction mosaic has no additional donor variants')
     expected_ids = {item['donor'] for item in variants}
     require(set(additional_donor_bytes) == expected_ids, 'instruction-mosaic additional donor set differs')
-    primary_label = _instruction_mosaic_primary_donor_label(function)
-    require(primary_label not in expected_ids, 'instruction-mosaic primary donor repeats a variant')
+    require(primary_donor_id not in expected_ids, 'instruction-mosaic primary donor repeats a variant')
     seed = CoffObject(seed_bytes)
     seed_primary = seed.function_section(function['mangled'])
-    records = {primary_label: {'expected_body_length': function['expected_donor_body_length'], 'expected_line_count': function['expected_donor_line_count'], 'expected_body_sha256': function['expected_donor_body_sha256'], 'expected_metadata_sha256': function['expected_donor_metadata_sha256']}, **{item['donor']: item for item in variants}}
-    objects = {primary_label: main_donor_bytes, **additional_donor_bytes}
+    records = {primary_donor_id: {'expected_body_length': function['expected_donor_body_length'], 'expected_line_count': function['expected_donor_line_count'], 'expected_body_sha256': function['expected_donor_body_sha256'], 'expected_metadata_sha256': function['expected_donor_metadata_sha256']}, **{item['donor']: item for item in variants}}
+    objects = {primary_donor_id: main_donor_bytes, **additional_donor_bytes}
     ranges = validate_instruction_mosaic_ranges(function['instruction_ranges'], 'instruction mosaic ranges', function['expected_body_length'])
     reseat_windows = [(item['start'], item['end']) for item in ranges if item.get('relocation_reseat')]
     parsed = {}
     for donor_id, record in records.items():
         parsed[donor_id] = _validate_instruction_mosaic_source_variant(seed, seed_primary, objects[donor_id], function, record, f'instruction-mosaic variant {donor_id}', reseat_windows=reseat_windows)
-    main = parsed[primary_label]
+    main = parsed[primary_donor_id]
     hybrid = bytearray(main_donor_bytes)
     used = set()
     for index, item in enumerate(ranges):
-        donor_id = item.get('donor', primary_label)
+        donor_id = item.get('donor', primary_donor_id)
         require(donor_id in parsed, f'instruction-mosaic range {index} donor is not declared')
         used.add(donor_id)
         variant_coff, primary, body = parsed[donor_id]
@@ -1090,7 +1073,7 @@ def _compose_instruction_mosaic_variant_object(seed_bytes: bytes, main_donor_byt
         require(sha256_bytes(body[start:end]) == item['donor_sha256'], f'instruction-mosaic range {index} donor provenance differs')
         at = main[1]['raw_offset'] + start
         hybrid[at:at + end - start] = body[start:end]
-        if item.get('relocation_reseat') and donor_id != primary_label:
+        if item.get('relocation_reseat') and donor_id != primary_donor_id:
             for row in detailed_relocations(variant_coff, primary):
                 if start <= row['offset'] and row['offset'] + row['width'] <= end:
                     record_offset = main[1]['relocation_offset'] + 10 * row['ordinal']
@@ -1103,13 +1086,11 @@ def _compose_instruction_mosaic_variant_object(seed_bytes: bytes, main_donor_byt
     require(sha256_bytes(hybrid_body) == function['expected_mosaic_donor_body_sha256'], 'instruction-mosaic combined donor view differs from its pin')
     return (hybrid, {'variant_donors': sorted(records), 'combined_donor_body_sha256': sha256_bytes(hybrid_body)})
 
-def _instruction_mosaic_range_donor_label(function: dict, item: dict) -> str:
-    """Name a range's donor without requiring a migrated legacy identity."""
-    if 'donor' in item:
-        return item['donor']
-    return _instruction_mosaic_primary_donor_label(function)
+def _instruction_mosaic_range_donor_label(item: dict, primary_donor_id: str) -> str:
+    """Name a range's donor from current typed intervention authority."""
+    return item.get('donor', primary_donor_id)
 
-def _produce_instruction_mosaic_candidate_core(seed_bytes: bytes, donor_bytes: bytes, function: dict, *, source_permutation: bool) -> tuple[bytes, dict]:
+def _produce_instruction_mosaic_candidate_core(seed_bytes: bytes, donor_bytes: bytes, function: dict, *, source_permutation: bool, primary_donor_id: str) -> tuple[bytes, dict]:
     """Import pinned complete instructions into an otherwise canonical COMDAT.
 
     Both objects are fresh compiler outputs of the same checked-in source;
@@ -1133,6 +1114,10 @@ def _produce_instruction_mosaic_candidate_core(seed_bytes: bytes, donor_bytes: b
     expected_length = function['expected_body_length']
     donor_expected_length = function.get('expected_donor_body_length', expected_length)
     ranges = validate_instruction_mosaic_ranges(function.get('instruction_ranges'), 'instruction mosaic ranges', expected_length)
+    variant_ids = {item['donor'] for item in function.get('donor_variants', [])}
+    require(primary_donor_id not in variant_ids, 'instruction-mosaic primary donor repeats a variant')
+    declared_donor_ids = {primary_donor_id, *variant_ids}
+    require(all((item.get('donor', primary_donor_id) in declared_donor_ids for item in ranges)), 'instruction-mosaic range names an undeclared donor')
     reseat_windows = [(item['start'], item['end']) for item in ranges if item.get('relocation_reseat')]
     reseated = bool(reseat_windows)
     require(not reseated or not (source_fpo or self_permutation or source_permutation or permuted_relocations), 'relocation reseat requires the plain or ordinary-FPO declaration-carrier mosaic class')
@@ -1275,7 +1260,7 @@ def _produce_instruction_mosaic_candidate_core(seed_bytes: bytes, donor_bytes: b
             operand_start, width = (left['offset'], left['width'])
             require(seed_body[operand_start:operand_start + width] == donor_body[operand_start:operand_start + width], f'instruction-mosaic range {index} relocation operand bytes differ')
         mosaic[start:end] = donor_instruction
-        range_detail.append({'start': start, 'end': end, 'donor': _instruction_mosaic_range_donor_label(function, item), 'seed_sha256': item['seed_sha256'], 'donor_sha256': item['donor_sha256']})
+        range_detail.append({'start': start, 'end': end, 'donor': _instruction_mosaic_range_donor_label(item, primary_donor_id), 'seed_sha256': item['seed_sha256'], 'donor_sha256': item['donor_sha256']})
     permutation_detail = []
     if self_permutation:
         source_start = permutation['source_start']
@@ -1345,7 +1330,7 @@ def _produce_instruction_mosaic_candidate_core(seed_bytes: bytes, donor_bytes: b
         require(coff_body(checked, child) == coff_body(seed, left) and _coff_table_bytes(checked, child, 'relocations') == _coff_table_bytes(seed, left, 'relocations') and (_coff_table_bytes(checked, child, 'lines') == _coff_table_bytes(seed, left, 'lines')), f"instruction-mosaic seed {left['name']} changed")
     return (output, {'mangled': mangled, 'splice_class': 'retail_exact_instruction_mosaic', 'section_number': cp['number'], 'body_length': cp['raw_size'], 'instruction_ranges': range_detail, 'instruction_self_permutation': permutation_detail, 'body_changed_offsets': sorted((offset - sp['raw_offset'] for offset in changed_file_offsets - reseat_file_offsets)), 'relocations': len(seed_rows), 'relocation_reseats': reseat_detail, 'line_count': cp['line_count'], 'closure': list(closure[1]), 'ordinary_fpo_identity': ordinary_fpo, 'source_fpo_identity': source_fpo, 'code_relocation_renames': code_relocation_renames, 'closure_relocation_renames': closure_relocation_renames, 'relocation_order': MOSAIC_PERMUTED_RELOCATION_ORDER if permuted_relocations else 'ordinal', 'candidate_only': True, **semantic_detail})
 
-def produce_instruction_mosaic_candidate(seed_bytes: bytes, donor_bytes: bytes, function: dict, additional_donor_bytes: dict[str, bytes] | None=None) -> tuple[bytes, dict]:
+def produce_instruction_mosaic_candidate(seed_bytes: bytes, donor_bytes: bytes, function: dict, additional_donor_bytes: dict[str, bytes] | None=None, *, primary_donor_id: str) -> tuple[bytes, dict]:
     """Compose a declaration-carrier instruction mosaic.
 
     With ``donor_variants`` the mosaic may draw its same-offset complete
@@ -1363,7 +1348,7 @@ def produce_instruction_mosaic_candidate(seed_bytes: bytes, donor_bytes: bytes, 
     effective_function = function
     if function.get('donor_variants'):
         require(instruction_mosaic_metadata_sha256(CoffObject(seed_bytes), CoffObject(seed_bytes).function_section(function['mangled'])) == function['expected_seed_metadata_sha256'], 'instruction-mosaic seed metadata differs from its pin')
-        effective_donor, variant_detail = _compose_instruction_mosaic_variant_object(seed_bytes, donor_bytes, additional_donor_bytes or {}, function)
+        effective_donor, variant_detail = _compose_instruction_mosaic_variant_object(seed_bytes, donor_bytes, additional_donor_bytes or {}, function, primary_donor_id=primary_donor_id)
         effective_function = dict(function)
         effective_function['expected_donor_body_sha256'] = function['expected_mosaic_donor_body_sha256']
         if 'instruction_self_permutation' in function:
@@ -1376,10 +1361,10 @@ def produce_instruction_mosaic_candidate(seed_bytes: bytes, donor_bytes: bytes, 
             require(len(main_body) == len(combined_body) and main_body[start:end] == combined_body[start:end], "instruction self-permutation window is not the source-authentic main donor's own output")
     else:
         require(not additional_donor_bytes, 'instruction mosaic names undeclared donor variants')
-    composed, detail = _produce_instruction_mosaic_candidate_core(seed_bytes, effective_donor, effective_function, source_permutation=False)
+    composed, detail = _produce_instruction_mosaic_candidate_core(seed_bytes, effective_donor, effective_function, source_permutation=False, primary_donor_id=primary_donor_id)
     return (composed, {**detail, **variant_detail})
 
-def produce_source_instruction_mosaic_candidate(seed_bytes: bytes, donor_bytes: bytes, function: dict, seed_source: bytes, donor_source: bytes, additional_donor_bytes: dict[str, bytes] | None=None) -> tuple[bytes, dict]:
+def produce_source_instruction_mosaic_candidate(seed_bytes: bytes, donor_bytes: bytes, function: dict, seed_source: bytes, donor_source: bytes, additional_donor_bytes: dict[str, bytes] | None=None, *, primary_donor_id: str) -> tuple[bytes, dict]:
     """Compose a mosaic from one authenticated source permutation."""
     require_payload_free_declaration(function, 'source instruction-mosaic declaration')
     require(function.get('splice_class') == 'retail_exact_instruction_mosaic' and 'target_source_refactor' in function, 'source-permutation mosaic contract is missing')
@@ -1392,10 +1377,10 @@ def produce_source_instruction_mosaic_candidate(seed_bytes: bytes, donor_bytes: 
     effective_donor = donor_bytes
     effective_function = function
     if function.get('donor_variants'):
-        effective_donor, variant_detail = _compose_instruction_mosaic_variant_object(seed_bytes, donor_bytes, additional_donor_bytes or {}, function)
+        effective_donor, variant_detail = _compose_instruction_mosaic_variant_object(seed_bytes, donor_bytes, additional_donor_bytes or {}, function, primary_donor_id=primary_donor_id)
         effective_function = dict(function)
         effective_function['expected_donor_body_sha256'] = function['expected_mosaic_donor_body_sha256']
-    composed, detail = _produce_instruction_mosaic_candidate_core(seed_bytes, effective_donor, effective_function, source_permutation=True)
+    composed, detail = _produce_instruction_mosaic_candidate_core(seed_bytes, effective_donor, effective_function, source_permutation=True, primary_donor_id=primary_donor_id)
     return (composed, {**detail, **source_detail, **variant_detail})
 
 def _produce_instruction_hybrid_resize_candidate_core(seed_bytes: bytes, target_donor_bytes: bytes, instruction_donor_bytes: bytes, function: dict, *, source_aware: bool, same_tu_source_identical: bool=False) -> tuple[bytes, dict]:
