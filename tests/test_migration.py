@@ -161,7 +161,9 @@ def _write_legacy_compile_database(
     build = workspace / "build"
     build.mkdir(parents=True)
     (build / "compile_commands.json").write_text(json.dumps(records), encoding="utf-8")
-    manifest["toolchain"]["codegen_path_contract"]["build_root"] = workspace.as_posix()
+    contract = manifest["toolchain"]["codegen_path_contract"]
+    contract["build_root"] = workspace.as_posix()
+    contract["compiler"] = (workspace.parent / "compiler/wine/x86/cl").as_posix()
 
 
 def test_convert_v2_manifest_splits_intent_and_expected_pins() -> None:
@@ -557,6 +559,55 @@ def test_migration_rejects_overlapping_compiler_visible_seats() -> None:
 def test_migration_rejects_noncanonical_legacy_path_contract() -> None:
     manifest = _manifest()
     manifest["toolchain"]["codegen_path_contract"]["build_root"] = "/workspace/../sample-build"
+
+    with pytest.raises(MigrationError, match="build root is not canonical"):
+        convert_v2_manifest(manifest, "2" * 64)
+
+
+def test_migration_accepts_canonical_windows_path_spellings() -> None:
+    outputs: list[dict[str, Any]] = []
+    for source_root, build_root, compiler in (
+        (
+            "D:/workspace/sample",
+            "D:/workspace/sample-build",
+            "D:/opt/compiler/wine/x86/cl",
+        ),
+        (
+            r"D:\workspace\sample",
+            r"D:\workspace\sample-build",
+            r"D:\opt\compiler\wine\x86\cl",
+        ),
+    ):
+        manifest = _manifest()
+        manifest["toolchain"]["codegen_path_contract"].update(
+            {
+                "source_root": source_root,
+                "build_root": build_root,
+                "compiler": compiler,
+            }
+        )
+        result = convert_v2_manifest(manifest, "2" * 64)
+        outputs.append(
+            tomllib.loads(result.files[PurePosixPath("reprobit.toml")].decode())["paths"]
+        )
+
+    assert outputs == [
+        {
+            "id": "migrated-pinned-v1",
+            "source": r"D:\workspace\sample-build\src",
+            "build": r"D:\workspace\sample-build\build",
+            "toolchain": r"D:\opt\compiler",
+        }
+    ] * 2
+
+
+@pytest.mark.parametrize(
+    "build_root",
+    (r"D:\workspace/sample-build", r"D:\workspace\..\sample-build", r"\\host\share\build"),
+)
+def test_migration_rejects_noncanonical_windows_path_contract(build_root: str) -> None:
+    manifest = _manifest()
+    manifest["toolchain"]["codegen_path_contract"]["build_root"] = build_root
 
     with pytest.raises(MigrationError, match="build root is not canonical"):
         convert_v2_manifest(manifest, "2" * 64)

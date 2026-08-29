@@ -14,7 +14,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from itertools import pairwise
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Literal, cast
 
 from pydantic import ValidationError
@@ -522,16 +522,39 @@ def _migrate_donor_compile_lane(
     return required_define
 
 
-def _legacy_workspace_root(contract: Mapping[str, Any]) -> Path:
+def _parse_legacy_absolute_path(value: str) -> PurePosixPath | PureWindowsPath | None:
+    """Parse one canonical POSIX or drive-absolute Windows migration path."""
+
+    if "\x00" in value:
+        return None
+    posix = PurePosixPath(value)
+    if (
+        posix.is_absolute()
+        and posix.root == "/"
+        and posix.as_posix() == value
+        and all(part not in {"", ".", ".."} for part in posix.parts[1:])
+    ):
+        return posix
+    windows = PureWindowsPath(value)
+    if (
+        windows.is_absolute()
+        and re.fullmatch(r"[A-Za-z]:", windows.drive) is not None
+        and windows.root == "\\"
+        and value in {str(windows), windows.as_posix()}
+        and all(part not in {"", ".", ".."} for part in windows.parts[1:])
+    ):
+        return windows
+    return None
+
+
+def _legacy_workspace_root(
+    contract: Mapping[str, Any],
+) -> PurePosixPath | PureWindowsPath:
     value = contract.get("build_root")
     if not isinstance(value, str):
         raise MigrationError("legacy path contract lacks its build root")
-    workspace = Path(value)
-    if (
-        not workspace.is_absolute()
-        or workspace.as_posix() != value
-        or any(part in {"", ".", ".."} for part in workspace.parts[1:])
-    ):
+    workspace = _parse_legacy_absolute_path(value)
+    if workspace is None:
         raise MigrationError("legacy path contract build root is not canonical")
     return workspace
 
@@ -571,7 +594,10 @@ def _legacy_compile_lane_owners(
     if not isinstance(contract, dict):
         raise MigrationError("legacy toolchain lacks compiler-visible path contract")
     workspace = _legacy_workspace_root(contract)
-    workspace_path = workspace.resolve(strict=False)
+    workspace_path = Path(workspace.as_posix())
+    if not workspace_path.is_absolute():
+        raise MigrationError("legacy path contract build root is not native to this host")
+    workspace_path = workspace_path.resolve(strict=False)
     build_root = (workspace_path / "build").resolve(strict=False)
     source_root = (workspace_path / "src").resolve(strict=False)
     database_path = build_root / "compile_commands.json"
@@ -914,9 +940,12 @@ def _toolchain_lock(manifest: Mapping[str, Any]) -> ToolchainLock:
     codegen = legacy.get("codegen_path_contract")
     if isinstance(codegen, dict) and isinstance(codegen.get("compiler"), str):
         compiler = codegen["compiler"]
+        normalized_compiler = compiler.replace("\\", "/")
         marker = "/wine/"
         relative_compiler = (
-            "wine/" + compiler.split(marker, 1)[1] if marker in compiler else Path(compiler).name
+            "wine/" + normalized_compiler.split(marker, 1)[1]
+            if marker in normalized_compiler
+            else PurePosixPath(normalized_compiler).name
         )
         producer_items.append(
             {
@@ -1357,15 +1386,16 @@ def _canonical_semantic_claims(
 def _logical_dos_path(value: Any) -> str:
     if not isinstance(value, str):
         raise MigrationError("legacy path contract lacks an absolute pinned path")
-    path = PurePosixPath(value)
-    if (
-        not path.is_absolute()
-        or path.as_posix() != value
-        or any(part in {"", ".", ".."} for part in path.parts[1:])
-    ):
+    path = _parse_legacy_absolute_path(value)
+    if path is None:
         raise MigrationError("legacy path contract lacks a canonical absolute pinned path")
     try:
-        return normalize_logical_path("Z:" + value.replace("/", "\\"))
+        logical = (
+            "Z:" + path.as_posix().replace("/", "\\")
+            if isinstance(path, PurePosixPath)
+            else path.as_posix().replace("/", "\\")
+        )
+        return normalize_logical_path(logical)
     except ValueError as exc:
         raise MigrationError("legacy path contract cannot form a safe DOS seat") from exc
 
@@ -1427,7 +1457,9 @@ def _toml(
     _logical_dos_path(source_root)
     values = _legacy_compiler_seats(contract)
     assert isinstance(source_root, str)
-    project_id = _slug(PurePosixPath(source_root).name)
+    parsed_source_root = _parse_legacy_absolute_path(source_root)
+    assert parsed_source_root is not None
+    project_id = _slug(parsed_source_root.name)
     terminal = manifest.get("terminal_producers")
     link = terminal.get("link") if isinstance(terminal, dict) else None
     standard_libraries = (
