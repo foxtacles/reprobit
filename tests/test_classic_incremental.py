@@ -1866,6 +1866,199 @@ def test_donor_source_mirror_header_edit_invalidates_only_its_transform_closure(
     assert changed.summary.misses == 3
 
 
+def test_cross_target_donor_header_edit_invalidates_owning_transform_closure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    bundle, units, sources = _fixture_bundle(root, targets=("app", "config"))
+    app_compiler = next(
+        node
+        for node in bundle.producer_graph.nodes
+        if node.role is ProducerRole.COMPILER and node.owner == "app"
+    )
+    config_compiler = next(
+        node
+        for node in bundle.producer_graph.nodes
+        if node.role is ProducerRole.COMPILER and node.owner == "config"
+    )
+    bundle.producer_graph = bundle.producer_graph.model_copy(
+        update={
+            "nodes": tuple(
+                node.model_copy(
+                    update={
+                        "arguments": (
+                            node.arguments[0],
+                            "-I${SOURCE}/config-only",
+                            *node.arguments[1:],
+                        )
+                    }
+                )
+                if node.id == config_compiler.id
+                else node
+                for node in bundle.producer_graph.nodes
+            )
+        }
+    )
+    intervention = _project_recipe(
+        "cross_target_donor_recipe",
+        ClassicRecipeFamily.DECLARATION_SHAPE,
+        {"declarations": True},
+    ).model_copy(update={"build_target": "config"})
+    receipt = DonorCompileReceipt(
+        intervention.id,
+        intervention.family,
+        Digest.from_bytes(b"constraints"),
+        MappingProxyType({}),
+        MappingProxyType({}),
+        Digest.from_bytes(b"additions"),
+        Digest.from_bytes(b"rendering"),
+    )
+    request = DonorCompileRequest(
+        intervention_id=intervention.id,
+        compiler_seat="d_0123456789ab",
+        family=intervention.family,
+        build_target="config",
+        logical_source="shared.cpp",
+        staged_source="s.cpp",
+        files=MappingProxyType(
+            {
+                "s.cpp": b"rendered donor source\n",
+                "run.h": b"struct DonorCarrier {};\n",
+            }
+        ),
+        logical_outputs=MappingProxyType({}),
+        compiler_additions=DonorCompilerAdditions(force_includes=("run.h",)),
+        carrier_identifiers=frozenset({"DonorCarrier"}),
+        receipt=receipt,
+    )
+    same_target_unit = replace(
+        units[0],
+        donors=(
+            ClassicPreparedDonor(
+                intervention.model_copy(update={"build_target": "app"}),
+                replace(request, build_target="app"),
+            ),
+        ),
+    )
+    assert (
+        incremental_planning._donor_dependency_resolution_contexts(
+            same_target_unit,
+            compiler_nodes={},
+            compiler_sources={},
+            node_arguments=lambda _node: (),
+            source_root=r"R:\source",
+            build_root=r"R:\build",
+            environment={"INCLUDE": r"R:\toolchain\include"},
+            authority=SealedIncludeAuthority((r"R:\source", r"R:\toolchain"), ()),
+        )
+        == ()
+    )
+    donor_units = (
+        replace(
+            units[0],
+            donors=(ClassicPreparedDonor(intervention, request),),
+        ),
+        units[1],
+    )
+    config_directory = root / "config-only"
+    config_directory.mkdir()
+    header = config_directory / "config.h"
+    header.write_bytes(b"#define CONFIG_VALUE 1\n")
+    unrelated = root / "unrelated.h"
+    unrelated.write_bytes(b"#define UNRELATED_VALUE 1\n")
+    runtime_calls: list[_FakePrepared] = []
+
+    def patch(header_payload: bytes, unrelated_payload: bytes) -> None:
+        arena = r"R:\donors\composed-app-shared.cpp-d_0123456789ab"
+        config_header = r"R:\source\config-only\config.h"
+        executor = _FakeWarmExecutor(sources)
+        trace = MsvcSbrTrace(
+            arena,
+            (
+                MsvcSbrSource("s.cpp", None),
+                MsvcSbrSource("run.h", 0),
+                MsvcSbrSource("config.h", 0),
+            ),
+        )
+        executor.donor_dependencies[app_compiler.id] = (
+            ClassicWarmDonorDependencyReplay(
+                intervention.id,
+                trace,
+                (
+                    ResolvedInclude(
+                        "s.cpp",
+                        arena + r"\s.cpp",
+                        Digest.from_bytes(b"rendered donor source\n"),
+                        len(b"rendered donor source\n"),
+                        IncludeOrigin.DONOR_ARENA,
+                        None,
+                    ),
+                    ResolvedInclude(
+                        "run.h",
+                        arena + r"\run.h",
+                        Digest.from_bytes(b"struct DonorCarrier {};\n"),
+                        len(b"struct DonorCarrier {};\n"),
+                        IncludeOrigin.DONOR_ARENA,
+                        0,
+                    ),
+                    ResolvedInclude(
+                        "config.h",
+                        config_header,
+                        Digest.from_bytes(header_payload),
+                        len(header_payload),
+                        IncludeOrigin.PROJECT_SOURCE,
+                        0,
+                    ),
+                ),
+                None,
+            ),
+        )
+        _patch_planner(
+            monkeypatch,
+            bundle=bundle,
+            units=donor_units,
+            sources=sources,
+            project_root=root,
+            runtime_calls=runtime_calls,
+            source_payloads={
+                "shared.cpp": (root / "shared.cpp").read_bytes(),
+                "config-only/config.h": header_payload,
+                "unrelated.h": unrelated_payload,
+            },
+            warm_executor=executor,
+        )
+
+    patch(header.read_bytes(), unrelated.read_bytes())
+    first = _run(bundle, root=root, state=state, session=tmp_path / "run-1")
+    assert first.summary.misses == 8
+
+    patch(header.read_bytes(), unrelated.read_bytes())
+    unchanged = _run(bundle, root=root, state=state, session=tmp_path / "run-2")
+    assert unchanged.summary.hits == 8
+    assert unchanged.summary.misses == 0
+
+    unrelated.write_bytes(b"#define UNRELATED_VALUE 2\n")
+    patch(header.read_bytes(), unrelated.read_bytes())
+    unrelated_changed = _run(
+        bundle,
+        root=root,
+        state=state,
+        session=tmp_path / "run-unrelated",
+    )
+    assert unrelated_changed.summary.hits == 8
+    assert unrelated_changed.summary.misses == 0
+
+    header.write_bytes(b"#define CONFIG_VALUE 2\n")
+    patch(header.read_bytes(), unrelated.read_bytes())
+    changed = _run(bundle, root=root, state=state, session=tmp_path / "run-3")
+    assert changed.summary.hits == 5
+    assert changed.summary.misses == 3
+
+
 def test_intervention_free_compiler_stays_raw_and_reaches_its_linker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

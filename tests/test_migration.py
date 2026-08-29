@@ -131,6 +131,39 @@ def _tu_path(result: MigrationOutput, section: str) -> PurePosixPath:
     return next(path for path in result.files if str(path).startswith(f"reprobit/{section}/tus/"))
 
 
+def _legacy_compile_record(
+    workspace: Path,
+    *,
+    source: str = "src/sample.cpp",
+    target: str = "sample",
+    define: str = "SAMPLE_BUILD",
+) -> dict[str, str]:
+    build = workspace / "build"
+    staged_source = workspace.joinpath("src", *PurePosixPath(source).parts)
+    output = f"CMakeFiles/{target}.dir/{source}.obj"
+    return {
+        "directory": build.as_posix(),
+        "command": (
+            f"/opt/compiler/wine/x86/cl -D{define} /Fo{output} "
+            f"-c {staged_source.as_posix()}"
+        ),
+        "file": staged_source.as_posix(),
+        "output": output,
+    }
+
+
+def _write_legacy_compile_database(
+    tmp_path: Path,
+    manifest: dict[str, Any],
+    records: list[dict[str, str]],
+) -> None:
+    workspace = tmp_path / "legacy-build"
+    build = workspace / "build"
+    build.mkdir(parents=True)
+    (build / "compile_commands.json").write_text(json.dumps(records), encoding="utf-8")
+    manifest["toolchain"]["codegen_path_contract"]["build_root"] = workspace.as_posix()
+
+
 def test_convert_v2_manifest_splits_intent_and_expected_pins() -> None:
     manifest = _manifest()
     manifest["translation_units"][0]["command_policy"] = {"ignored": True}
@@ -231,21 +264,59 @@ def test_migration_rejects_group_order_without_a_known_operation() -> None:
         convert_v2_manifest(manifest, "2" * 64)
 
 
-def test_migration_drops_legacy_donor_selector_and_promotes_overlay_projection() -> None:
+def test_migration_resolves_legacy_donor_lane_and_promotes_overlay_projection(
+    tmp_path: Path,
+) -> None:
     manifest = _manifest()
     recipe = manifest["translation_units"][0]["donors"][0]["recipe"]
     recipe["compile_lane"] = {
         "required_define": "SAMPLE_BUILD",
         "include_projection": "source_root_mirror_only_v1",
     }
+    workspace = tmp_path / "legacy-build"
+    _write_legacy_compile_database(
+        tmp_path,
+        manifest,
+        [_legacy_compile_record(workspace, target="config")],
+    )
 
     result = convert_v2_manifest(manifest, "2" * 64)
 
     shard = json.loads(result.files[_tu_path(result, "interventions")])
     donor = next(item for item in shard["interventions"] if item["role"] == "donor")
+    assert donor["build_target"] == "config"
     parameters = {item["name"]: item["value"] for item in donor["parameters"]}
     assert "compile_lane" not in parameters
     assert parameters["include_projection"] == "source_root_mirror_only_v1"
+
+
+def test_migration_rejects_missing_legacy_donor_compile_lane(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest["translation_units"][0]["donors"][0]["recipe"]["compile_lane"] = {
+        "required_define": "SAMPLE_BUILD"
+    }
+    workspace = tmp_path / "legacy-build"
+    _write_legacy_compile_database(
+        tmp_path,
+        manifest,
+        [_legacy_compile_record(workspace, define="OTHER_BUILD")],
+    )
+
+    with pytest.raises(MigrationError, match="with -DSAMPLE_BUILD, found 0"):
+        convert_v2_manifest(manifest, "2" * 64)
+
+
+def test_migration_rejects_ambiguous_legacy_donor_compile_lane(tmp_path: Path) -> None:
+    manifest = _manifest()
+    manifest["translation_units"][0]["donors"][0]["recipe"]["compile_lane"] = {
+        "required_define": "SAMPLE_BUILD"
+    }
+    workspace = tmp_path / "legacy-build"
+    record = _legacy_compile_record(workspace)
+    _write_legacy_compile_database(tmp_path, manifest, [record, dict(record)])
+
+    with pytest.raises(MigrationError, match="with -DSAMPLE_BUILD, found 2"):
+        convert_v2_manifest(manifest, "2" * 64)
 
 
 def test_convert_v2_manifest_accepts_a_leading_digit_cmake_target() -> None:
@@ -587,6 +658,39 @@ def test_real_v2_manifest_round_trips_through_strict_v3(tmp_path: Path) -> None:
     result = migration_output(source, semantic_claims_path=claims_path)
     build_plan = json.loads(result.files[PurePosixPath("reprobit/build-plan.json")])
     assert "toolchain_policy" not in build_plan
+    migrated_donors: list[tuple[str, str, dict[str, object]]] = []
+    for relative, data in result.files.items():
+        if not str(relative).startswith("reprobit/interventions/tus/"):
+            continue
+        document = json.loads(data)
+        migrated_donors.extend(
+            (document["source"], document["build_target"], intervention)
+            for intervention in document["interventions"]
+            if intervention.get("role") == "donor"
+        )
+    assert len(migrated_donors) == 319
+    exceptional_material = {
+        "legacy_id": "d_a9a90ebc7b08",
+        "target": "mxdirectx",
+        "source": "LEGO1/mxdirectx/mxdirectxinfo.cpp",
+    }
+    exceptional_id = "donor_" + sha256(
+        (
+            json.dumps(exceptional_material, sort_keys=True, separators=(",", ":"))
+            + "\n"
+        ).encode()
+    ).hexdigest()[:16]
+    exceptional = next(item for item in migrated_donors if item[2]["id"] == exceptional_id)
+    assert exceptional[:2] == (
+        "LEGO1/mxdirectx/mxdirectxinfo.cpp",
+        "mxdirectx",
+    )
+    assert exceptional[2]["build_target"] == "config"
+    assert all(
+        intervention["build_target"] == owning_target
+        for _source, owning_target, intervention in migrated_donors
+        if intervention["id"] != exceptional_id
+    )
     member_probe_return_types: list[str] = []
 
     def collect_member_probe_return_types(value: object) -> None:

@@ -7,6 +7,7 @@ import json
 import ntpath
 import os
 import re
+import shlex
 import stat
 import tempfile
 from collections import defaultdict
@@ -50,7 +51,7 @@ from reprobit.schema import (
     ToolchainProfileSource,
     source_manifest_digest,
 )
-from reprobit.strict_json import JsonValue, canonical_json
+from reprobit.strict_json import JsonValue, StrictJSONError, canonical_json, strict_load
 from reprobit.toolchains import (
     MSVC_42,
     TOOLCHAIN_PROFILES,
@@ -492,18 +493,18 @@ def _migrate_donor_compile_lane(
     family: ClassicRecipeFamily,
     *,
     context: str,
-) -> None:
-    """Discard the v2 lane marker and retain only real overlay authority.
+) -> str | None:
+    """Consume the v2 lane marker and return its one-shot define selector.
 
     The runtime has one current donor schema and never interprets the old
-    selector.  This one-way converter checks the historical shape so malformed
-    input cannot be silently normalized, then promotes the independently
+    selector.  This converter uses it only to recover current build-target
+    authority from the legacy compile database, while promoting the independently
     meaningful include projection used by source-overlay donors.
     """
 
     raw = values.pop("compile_lane", None)
     if raw is None:
-        return
+        return None
     if not isinstance(raw, dict) or set(raw) - {"required_define", "include_projection"}:
         raise MigrationError(f"{context} compile_lane has an unsupported legacy shape")
     required_define = raw.get("required_define")
@@ -511,13 +512,145 @@ def _migrate_donor_compile_lane(
         raise MigrationError(f"{context} compile_lane lacks its historical required_define")
     projection = raw.get("include_projection")
     if projection is None:
-        return
+        return required_define
     if family is not ClassicRecipeFamily.DONOR_SOURCE_OVERLAY:
         raise MigrationError(f"{context} attaches include_projection to a non-overlay donor")
     existing = values.get("include_projection")
     if existing is not None and existing != projection:
         raise MigrationError(f"{context} has conflicting include_projection authority")
     values["include_projection"] = projection
+    return required_define
+
+
+def _legacy_workspace_root(contract: Mapping[str, Any]) -> PurePosixPath:
+    value = contract.get("build_root")
+    if not isinstance(value, str):
+        raise MigrationError("legacy path contract lacks its build root")
+    workspace = PurePosixPath(value)
+    if (
+        not workspace.is_absolute()
+        or workspace.as_posix() != value
+        or any(part in {"", ".", ".."} for part in workspace.parts[1:])
+    ):
+        raise MigrationError("legacy path contract build root is not canonical")
+    return workspace
+
+
+def _compile_record_path(value: str, *, directory: Path) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = directory / path
+    return path.resolve(strict=False)
+
+
+def _cmake_compile_owner(output: Path, *, build_root: Path, context: str) -> str:
+    try:
+        relative = output.relative_to(build_root)
+    except ValueError as exc:
+        raise MigrationError(f"{context} object output escapes the legacy CMake build") from exc
+    parts = relative.parts
+    matches = [
+        parts[index + 1][:-4]
+        for index in range(len(parts) - 1)
+        if parts[index].casefold() == "cmakefiles"
+        and parts[index + 1].casefold().endswith(".dir")
+        and len(parts[index + 1]) > 4
+    ]
+    if len(matches) != 1:
+        raise MigrationError(f"{context} object output has no unique CMake target owner")
+    return matches[0]
+
+
+def _legacy_compile_lane_owners(
+    manifest: Mapping[str, Any],
+) -> dict[tuple[str, str], tuple[str, ...]]:
+    """Index the compile lanes that the schema-v2 runner selected by define."""
+
+    toolchain = manifest.get("toolchain")
+    contract = toolchain.get("codegen_path_contract") if isinstance(toolchain, dict) else None
+    if not isinstance(contract, dict):
+        raise MigrationError("legacy toolchain lacks compiler-visible path contract")
+    workspace = _legacy_workspace_root(contract)
+    workspace_path = Path(workspace.as_posix()).resolve(strict=False)
+    build_root = (workspace_path / "build").resolve(strict=False)
+    source_root = (workspace_path / "src").resolve(strict=False)
+    database_path = build_root / "compile_commands.json"
+    try:
+        raw_database = strict_load(database_path)
+    except StrictJSONError as exc:
+        raise MigrationError(f"cannot load legacy compile database {database_path}: {exc}") from exc
+    if not isinstance(raw_database, list):
+        raise MigrationError("legacy compile_commands.json must be an array")
+
+    owners: defaultdict[tuple[str, str], list[str]] = defaultdict(list)
+    for index, raw_record in enumerate(raw_database):
+        context = f"legacy compile record {index}"
+        if not isinstance(raw_record, dict):
+            raise MigrationError(f"{context} is not an object")
+        raw_directory = raw_record.get("directory")
+        raw_source = raw_record.get("file")
+        command = raw_record.get("command")
+        record_values = (raw_directory, raw_source, command)
+        if not all(isinstance(value, str) and value for value in record_values):
+            raise MigrationError(f"{context} lacks directory, file, or command")
+        assert isinstance(raw_directory, str)
+        assert isinstance(raw_source, str)
+        assert isinstance(command, str)
+        directory = _compile_record_path(raw_directory, directory=build_root)
+        if directory != build_root:
+            raise MigrationError(f"{context} uses an unexpected working directory")
+        source_path = _compile_record_path(raw_source, directory=directory)
+        try:
+            logical_source = source_path.relative_to(source_root).as_posix()
+        except ValueError as exc:
+            raise MigrationError(f"{context} source escapes the legacy staged source root") from exc
+        try:
+            arguments = tuple(shlex.split(command))
+        except ValueError as exc:
+            raise MigrationError(f"{context} command cannot be parsed: {exc}") from exc
+        output_value = raw_record.get("output")
+        if not isinstance(output_value, str) or not output_value:
+            output_value = next(
+                (
+                    argument[3:]
+                    for argument in arguments
+                    if argument.casefold().startswith(("/fo", "-fo"))
+                    and len(argument) > 3
+                ),
+                None,
+            )
+        if output_value is None:
+            raise MigrationError(f"{context} lacks its object output")
+        output = _compile_record_path(output_value, directory=directory)
+        owner = _cmake_compile_owner(
+            output,
+            build_root=build_root,
+            context=context,
+        )
+        defines = {
+            argument[2:]
+            for argument in arguments
+            if argument.startswith("-D") and len(argument) > 2
+        }
+        for required_define in defines:
+            owners[(logical_source, required_define)].append(owner)
+    return {key: tuple(value) for key, value in owners.items()}
+
+
+def _legacy_compile_lane_owner(
+    owners: Mapping[tuple[str, str], tuple[str, ...]],
+    *,
+    source: str,
+    required_define: str,
+    context: str,
+) -> str:
+    matches = owners.get((source, required_define), ())
+    if len(matches) != 1:
+        raise MigrationError(
+            f"{context} expected one legacy compile command for "
+            f"{source!r} with -D{required_define}, found {len(matches)}"
+        )
+    return matches[0]
 
 
 def _migrate_donor_references(
@@ -1247,16 +1380,7 @@ def _legacy_compiler_seats(contract: Mapping[str, Any]) -> dict[str, str]:
     retaining observations measured under different paths.
     """
 
-    workspace_value = contract.get("build_root")
-    if not isinstance(workspace_value, str):
-        raise MigrationError("legacy path contract lacks its build root")
-    workspace = PurePosixPath(workspace_value)
-    if (
-        not workspace.is_absolute()
-        or workspace.as_posix() != workspace_value
-        or any(part in {"", ".", ".."} for part in workspace.parts[1:])
-    ):
-        raise MigrationError("legacy path contract build root is not canonical")
+    workspace = _legacy_workspace_root(contract)
     compiler = contract.get("compiler")
     if not isinstance(compiler, str):
         raise MigrationError("legacy path contract lacks compiler path")
@@ -1472,6 +1596,7 @@ def _convert_v2_manifest(
     plan_units: list[ClassicTranslationUnitPlan] = []
     shared_interventions: defaultdict[str, list[Intervention]] = defaultdict(list)
     shared_receipts: defaultdict[str, list[ClassicProofReceipt]] = defaultdict(list)
+    compile_lane_owners: dict[tuple[str, str], tuple[str, ...]] | None = None
 
     for unit in units:
         if not isinstance(unit, dict):
@@ -1626,11 +1751,26 @@ def _convert_v2_manifest(
                 raise MigrationError("oracle installation cannot be disguised as a donor recipe")
             pins = _ProofPins({}, {})
             values = {key: value for key, value in recipe.items() if key != "kind"}
-            _migrate_donor_compile_lane(
+            required_define = _migrate_donor_compile_lane(
                 values,
                 family,
                 context=f"donor {legacy_id!r}",
             )
+            donor_build_target = build_target
+            if required_define is not None:
+                if compile_lane_owners is None:
+                    compile_lane_owners = _legacy_compile_lane_owners(manifest)
+                raw_donor_source = values.get("donor_source", source)
+                donor_source = _relative(
+                    raw_donor_source,
+                    f"donor {legacy_id!r} compile source",
+                )
+                donor_build_target = _legacy_compile_lane_owner(
+                    compile_lane_owners,
+                    source=donor_source,
+                    required_define=required_define,
+                    context=f"donor {legacy_id!r}",
+                )
             rationale = values.pop("authenticity_rationale", "Migrated compiler donor.")
             if not isinstance(rationale, str) or not rationale:
                 rationale = "Migrated compiler donor."
@@ -1639,7 +1779,7 @@ def _convert_v2_manifest(
                 id=donor_id,
                 family=family,
                 role=ClassicRecipeRole.DONOR,
-                build_target=build_target,
+                build_target=donor_build_target,
                 scope=Scope(target=target_id, translation_unit=tu_id),
                 parameters=_recipe_fields(values, pins, ""),
                 rationale=rationale,

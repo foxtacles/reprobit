@@ -268,6 +268,38 @@ def test_donor_authority_rejects_the_removed_define_lane_selector() -> None:
         )
 
 
+def test_donor_compiler_target_is_bound_into_its_receipt() -> None:
+    source = b"int fixture;\n"
+    generated = generate_declaration_shape(1, 1)
+    intervention = _intervention(
+        ClassicRecipeFamily.DECLARATION_SHAPE,
+        _carrier_parameters(generated, classes=1, functions=1),
+    )
+    cross_target = intervention.model_copy(update={"build_target": "config"})
+
+    owner_request = prepare_donor_compile_request(
+        intervention,
+        source_path="src/unit.cpp",
+        clean_source=source,
+        effective_source=source,
+        receipts=[_receipt(intervention.family)],
+    )
+    cross_target_request = prepare_donor_compile_request(
+        cross_target,
+        source_path="src/unit.cpp",
+        clean_source=source,
+        effective_source=source,
+        receipts=[_receipt(cross_target.family)],
+    )
+
+    assert owner_request.compiler_seat == cross_target_request.compiler_seat
+    assert owner_request.files == cross_target_request.files
+    assert (
+        owner_request.receipt.compiler_additions_digest
+        != cross_target_request.receipt.compiler_additions_digest
+    )
+
+
 def test_donor_authority_rejects_the_removed_legacy_recipe_identity() -> None:
     generated = generate_declaration_shape(1, 1)
     parameters = _carrier_parameters(generated, classes=1, functions=1)

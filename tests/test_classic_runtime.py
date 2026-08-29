@@ -3904,20 +3904,41 @@ def test_donor_compile_record_binds_exact_target_source_identity(tmp_path: Path)
     assert all(not argument.startswith("-D") for argument in selected.arguments)
 
 
-def test_donor_compile_record_rejects_target_outside_its_owning_tu(
+def test_donor_compile_record_can_use_another_target_for_the_same_source(
     tmp_path: Path,
 ) -> None:
     effective_root = tmp_path / "source"
     source = effective_root / "unit.cpp"
     effective_root.mkdir()
     source.write_bytes(b"int fixture;\n")
+    build_root = tmp_path / "build"
+    build_root.mkdir()
+
+    def record(owner: str) -> classic_runtime_graph.ClassicCompileRecord:
+        return classic_runtime_graph.ClassicCompileRecord(
+            f"compiler.{owner}.0000",
+            build_root,
+            source,
+            build_root / f"{owner}.obj",
+            build_root / f"{owner}.pdb",
+            (
+                "/nologo",
+                "/Zi",
+                f"/Fo{build_root / f'{owner}.obj'}",
+                f"/Fd{build_root / f'{owner}.pdb'}",
+                "-c",
+                str(source),
+            ),
+            owner,
+        )
+
     request = replace(
         _runtime_donor_request(
             source="unit.cpp",
             projection=DonorIncludeProjection.NONE,
             force_include=True,
         ),
-        build_target="other-target",
+        build_target="config",
     )
     unit = SimpleNamespace(
         plan=SimpleNamespace(build_target="program"),
@@ -3930,10 +3951,14 @@ def test_donor_compile_record_rejects_target_outside_its_owning_tu(
     )
     executor = object.__new__(classic_runtime_donor.ClassicDonorComposition)
     executor.effective_root = effective_root
-    executor.compile_records = ()
+    owner_record = record("program")
+    donor_record = record("config")
+    executor.compile_records = (owner_record, donor_record)
 
-    with pytest.raises(ClassicProjectError, match="target differs from its owning TU"):
-        executor.record_for_donor(unit, 0)
+    selected = executor.record_for_donor(unit, 0)
+
+    assert selected is donor_record
+    assert selected.node_id == "compiler.config.0000"
 
 
 @pytest.mark.parametrize(
@@ -4109,9 +4134,21 @@ def test_donor_compiler_command_preserves_committed_visible_path_contract(
     assert command[-len(expected_tail) :] == expected_tail
 
 
-def test_donor_invocation_uses_private_arena_layout_and_relative_outputs(
+@pytest.mark.parametrize(
+    ("projection", "compiler_target", "expect_replay"),
+    (
+        (DonorIncludeProjection.SOURCE_ROOT_MIRROR_ONLY, "program", True),
+        (DonorIncludeProjection.NONE, "config", True),
+        (DonorIncludeProjection.NONE, "program", False),
+    ),
+    ids=("projected", "ordinary-cross-target", "ordinary-same-target"),
+)
+def test_donor_invocation_replays_only_dependency_tracked_donors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    projection: DonorIncludeProjection,
+    compiler_target: str,
+    expect_replay: bool,
 ) -> None:
     drive = tmp_path / "drive"
     effective_root = drive / "Users/project/source"
@@ -4126,14 +4163,17 @@ def test_donor_invocation_uses_private_arena_layout_and_relative_outputs(
     (build_root.parent / "donors").mkdir()
     session_root = tmp_path / "session"
     session_root.mkdir()
-    request = _runtime_donor_request(
-        source="src/unit.cpp",
-        projection=DonorIncludeProjection.SOURCE_ROOT_MIRROR_ONLY,
-        force_include=True,
-        overlay=True,
+    request = replace(
+        _runtime_donor_request(
+            source="src/unit.cpp",
+            projection=projection,
+            force_include=True,
+            overlay=projection is not DonorIncludeProjection.NONE,
+        ),
+        build_target=compiler_target,
     )
     record = classic_runtime_graph.ClassicCompileRecord(
-        "compiler.program.0000",
+        f"compiler.{compiler_target}.0000",
         build_root,
         source,
         build_root / "unit.obj",
@@ -4148,12 +4188,12 @@ def test_donor_invocation_uses_private_arena_layout_and_relative_outputs(
             "/c",
             r"Z:\Users\project\source\src\unit.cpp",
         ),
-        "program",
+        compiler_target,
     )
     node = ProducerNode(
         id=record.node_id,
         role=ProducerRole.COMPILER,
-        owner="program",
+        owner=compiler_target,
         arguments=(
             "/Zi",
             "-I${SOURCE}/include",
@@ -4250,20 +4290,27 @@ def test_donor_invocation_uses_private_arena_layout_and_relative_outputs(
         assert cwd.name.endswith("-d_0123456789ab")
         assert (cwd / "s.cpp").read_bytes() == b"rendered source\n"
         assert (cwd / "run.h").read_bytes() == b"class DonorCarrier {};\n"
-        assert (cwd / "inc/source/src/unit.cpp").read_bytes() == b"effective source\n"
-        assert (cwd / "inc/source/src/rendered.h").read_bytes() == b"rendered header\n"
+        if projection is not DonorIncludeProjection.NONE:
+            assert (cwd / "inc/source/src/unit.cpp").read_bytes() == b"effective source\n"
+            assert (cwd / "inc/source/src/rendered.h").read_bytes() == b"rendered header\n"
+        else:
+            assert not (cwd / "inc").exists()
         if any(item.casefold().startswith(("/fr", "-fr")) for item in argv):
             assert (cwd / "o.obj").read_bytes() == b"object"
             assert (cwd / "o.pdb").read_bytes() == b"pdb"
             (cwd / ".reprobit-donor-dependencies.obj").write_bytes(b"discard object")
             (cwd / ".reprobit-donor-dependencies.pdb").write_bytes(b"discard pdb")
             working = producer.logical_for_host_path(cwd)
-            mirror_header = working + r"\inc\source\include\rendered.h"
+            dependency_header = (
+                working + r"\inc\source\include\rendered.h"
+                if projection is not DonorIncludeProjection.NONE
+                else r"Z:\Users\project\source\include\rendered.h"
+            )
             sbr = bytearray(b"\x00\x02\x00\x07\x00")
             sbr.extend(working.encode("ascii") + b"\0")
             sbr.extend(b"\x01s.cpp\0")
             sbr.extend(b"\x01run.h\0\x0a")
-            sbr.extend(b"\x01" + mirror_header.encode("ascii") + b"\0\x0a\x0a")
+            sbr.extend(b"\x01" + dependency_header.encode("ascii") + b"\0\x0a\x0a")
             (cwd / ".reprobit-donor-dependencies.sbr").write_bytes(sbr)
         else:
             (cwd / "o.obj").write_bytes(b"object")
@@ -4288,7 +4335,7 @@ def test_donor_invocation_uses_private_arena_layout_and_relative_outputs(
             capture_dependencies=True,
         )
 
-    assert len(captured) == 2
+    assert len(captured) == (2 if expect_replay else 1)
     assert captured[0][1] == build_root.parent / "donors" / (
         "composed-program-owner_unit.cpp-d_0123456789ab"
     )
@@ -4300,36 +4347,51 @@ def test_donor_invocation_uses_private_arena_layout_and_relative_outputs(
         "s.cpp",
     )
     assert all(not item.casefold().startswith(("/fr", "-fr")) for item in captured[0][0])
-    assert any(item.casefold().startswith(("/fr", "-fr")) for item in captured[1][0])
-    assert captured[1][0][-1] == "s.cpp"
-    replay_command = list(captured[1][0])
-    replay_command.pop(
-        next(
-            index
-            for index, item in enumerate(replay_command)
-            if item.casefold().startswith(("/fr", "-fr"))
+    if expect_replay:
+        assert any(item.casefold().startswith(("/fr", "-fr")) for item in captured[1][0])
+        assert captured[1][0][-1] == "s.cpp"
+        replay_command = list(captured[1][0])
+        replay_command.pop(
+            next(
+                index
+                for index, item in enumerate(replay_command)
+                if item.casefold().startswith(("/fr", "-fr"))
+            )
         )
-    )
-    for prefix in ("/fo", "/fd"):
-        canonical_index = next(
-            index for index, item in enumerate(captured[0][0]) if item.casefold().startswith(prefix)
-        )
-        replay_index = next(
-            index for index, item in enumerate(replay_command) if item.casefold().startswith(prefix)
-        )
-        replay_command[replay_index] = captured[0][0][canonical_index]
-    assert tuple(replay_command) == captured[0][0]
+        for prefix in ("/fo", "/fd"):
+            canonical_index = next(
+                index
+                for index, item in enumerate(captured[0][0])
+                if item.casefold().startswith(prefix)
+            )
+            replay_index = next(
+                index
+                for index, item in enumerate(replay_command)
+                if item.casefold().startswith(prefix)
+            )
+            replay_command[replay_index] = captured[0][0][canonical_index]
+        assert tuple(replay_command) == captured[0][0]
     assert invocation.object_path == captured[0][1] / "o.obj"
     assert invocation.pdb_path == captured[0][1] / "o.pdb"
     assert invocation.object_payload == b"object"
     assert invocation.pdb_payload == b"pdb"
-    assert invocation.dependency_replay is not None
-    assert invocation.dependency_replay.reason is None
-    assert [item.logical_path for item in invocation.dependency_replay.reads] == [
-        producer.logical_for_host_path(captured[0][1] / "s.cpp"),
-        producer.logical_for_host_path(captured[0][1] / "run.h"),
-        producer.logical_for_host_path(captured[0][1] / "inc/source/include/rendered.h"),
-    ]
+    if expect_replay:
+        assert invocation.dependency_replay is not None
+        assert invocation.dependency_replay.reason is None
+        expected_header = (
+            producer.logical_for_host_path(
+                captured[0][1] / "inc/source/include/rendered.h"
+            )
+            if projection is not DonorIncludeProjection.NONE
+            else r"Z:\Users\project\source\include\rendered.h"
+        )
+        assert [item.logical_path for item in invocation.dependency_replay.reads] == [
+            producer.logical_for_host_path(captured[0][1] / "s.cpp"),
+            producer.logical_for_host_path(captured[0][1] / "run.h"),
+            expected_header,
+        ]
+    else:
+        assert invocation.dependency_replay is None
     assert not tuple(
         item
         for item in captured[0][1].iterdir()
@@ -4377,7 +4439,7 @@ def test_projected_donor_dependency_parse_failure_is_discarded(
 
     monkeypatch.setattr(classic_runtime_donor, "_run", run)
     with ProcessSupervisor() as supervisor:
-        replay = executor._replay_projected_donor_dependencies(
+        replay = executor._replay_donor_dependencies(
             supervisor,
             donor_id="donor.fixture",
             command=(

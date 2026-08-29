@@ -120,7 +120,7 @@ class _DonorCompilerInvocation:
 
 @dataclass(frozen=True, slots=True)
 class ClassicWarmDonorDependencyReplay:
-    """Non-certifying dependency result from one projected donor replay."""
+    """Non-certifying dependency result from one tracked donor replay."""
 
     donor_id: str
     trace: MsvcSbrTrace | None
@@ -259,11 +259,6 @@ class ClassicDonorComposition:
 
     def record_for_donor(self, unit: ClassicPreparedUnit, donor_index: int) -> ClassicCompileRecord:
         donor = unit.donors[donor_index]
-        if donor.request.build_target != unit.plan.build_target:
-            raise ClassicProjectError(
-                f"donor {donor.intervention.id!r} target differs from its owning TU: "
-                f"{donor.request.build_target!r} != {unit.plan.build_target!r}"
-            )
         source = (self.effective_root / donor.request.logical_source).resolve(strict=True)
         matches = [
             item
@@ -384,7 +379,7 @@ class ClassicDonorComposition:
                 command.append(token)
         return tuple(command)
 
-    def _replay_projected_donor_dependencies(
+    def _replay_donor_dependencies(
         self,
         supervisor: ProcessSupervisor,
         *,
@@ -587,10 +582,12 @@ class ClassicDonorComposition:
                     cancellation=cancellation,
                     windows_lineage_planner=lane.windows_lineage_planner,
                 )
-                if capture_dependencies and (
+                dependency_tracked = (
                     donor.request.compiler_additions.include_projection
                     is not DonorIncludeProjection.NONE
-                ):
+                    or donor.request.build_target != unit.plan.build_target
+                )
+                if capture_dependencies and dependency_tracked:
                     self.producer.require_regular(
                         donor_object,
                         label=f"donor {donor.intervention.id!r} canonical object",
@@ -601,7 +598,7 @@ class ClassicDonorComposition:
                     )
                     canonical_object = donor_object.read_bytes()
                     canonical_pdb = donor_pdb.read_bytes()
-                    dependency_replay = self._replay_projected_donor_dependencies(
+                    dependency_replay = self._replay_donor_dependencies(
                         supervisor,
                         donor_id=donor.intervention.id,
                         command=command,
@@ -693,13 +690,14 @@ class ClassicDonorComposition:
             compiler_epoch=compiler_epoch,
             capture_dependencies=dependency_replays is not None,
         )
-        projected = (
+        dependency_tracked = (
             donor.request.compiler_additions.include_projection is not DonorIncludeProjection.NONE
+            or donor.request.build_target != unit.plan.build_target
         )
-        if dependency_replays is not None and projected:
+        if dependency_replays is not None and dependency_tracked:
             if invocation.dependency_replay is None:
                 raise ClassicProjectError(
-                    f"projected donor {donor.intervention.id!r} omitted its warm replay"
+                    f"dependency-tracked donor {donor.intervention.id!r} omitted its warm replay"
                 )
             dependency_replays.append(invocation.dependency_replay)
         elif invocation.dependency_replay is not None:

@@ -366,7 +366,7 @@ def _logical_relative(path: str, *, root: str) -> str | None:
     return PureWindowsPath(relative).as_posix()
 
 
-def _projected_donor_resolution_contexts(
+def _donor_dependency_resolution_contexts(
     unit: ClassicPreparedUnit,
     *,
     compiler_nodes: Mapping[str, ProducerNode],
@@ -377,35 +377,36 @@ def _projected_donor_resolution_contexts(
     environment: Mapping[str, str],
     authority: SealedIncludeAuthority,
 ) -> tuple[DonorDependencyResolutionContext, ...]:
-    """Reconstruct exact projected donor reads without materializing a runtime."""
+    """Reconstruct exact dependency-tracked donor reads without a runtime."""
 
-    projected = tuple(
+    tracked = tuple(
         sorted(
             (
                 donor
                 for donor in unit.donors
                 if donor.request.compiler_additions.include_projection
                 is not DonorIncludeProjection.NONE
+                or donor.request.build_target != unit.plan.build_target
             ),
             key=lambda item: item.intervention.id.casefold(),
         )
     )
-    if not projected:
+    if not tracked:
         return ()
     normalized_source_root = normalize_logical_path(source_root)
     normalized_build_root = normalize_logical_path(build_root)
     environment_directories = tuple(item for item in environment["INCLUDE"].split(";") if item)
     contexts: list[DonorDependencyResolutionContext] = []
-    for donor in projected:
+    for donor in tracked:
         request = donor.request
-        if request.build_target != unit.plan.build_target:
+        is_overlay = request.family is ClassicRecipeFamily.DONOR_SOURCE_OVERLAY
+        mirror_active = (
+            request.compiler_additions.include_projection is not DonorIncludeProjection.NONE
+        )
+        if mirror_active and not is_overlay:
             raise ClassicIncrementalError(
-                f"projected donor {donor.intervention.id!r} target differs from its "
-                f"owning TU: {request.build_target!r} != {unit.plan.build_target!r}"
-            )
-        if request.family is not ClassicRecipeFamily.DONOR_SOURCE_OVERLAY:
-            raise ClassicIncrementalError(
-                f"projected donor {donor.intervention.id!r} is not a source overlay"
+                f"dependency-tracked donor {donor.intervention.id!r} requests a source "
+                "mirror without being a source overlay"
             )
         source_path = PurePosixPath(request.logical_source)
         if (
@@ -414,7 +415,7 @@ def _projected_donor_resolution_contexts(
             or any(part in {"", ".", ".."} for part in source_path.parts)
         ):
             raise ClassicIncrementalError(
-                f"projected donor {donor.intervention.id!r} source path is unsafe"
+                f"dependency-tracked donor {donor.intervention.id!r} source path is unsafe"
             )
         compiler_seat = PurePosixPath(request.compiler_seat)
         if (
@@ -423,7 +424,7 @@ def _projected_donor_resolution_contexts(
             or any(part in {"", ".", ".."} for part in compiler_seat.parts)
         ):
             raise ClassicIncrementalError(
-                f"projected donor {donor.intervention.id!r} compiler seat is unsafe"
+                f"dependency-tracked donor {donor.intervention.id!r} compiler seat is unsafe"
             )
         matches: list[tuple[ProducerNode, dict[str, object]]] = []
         for node_id, node in compiler_nodes.items():
@@ -437,22 +438,27 @@ def _projected_donor_resolution_contexts(
                 parsed = validate_compile_arguments(list(node_arguments(node)))
             except Exception as exc:
                 raise ClassicIncrementalError(
-                    f"projected donor compiler lane {node_id!r} is invalid: {exc}"
+                    f"donor compiler lane {node_id!r} is invalid: {exc}"
                 ) from exc
             matches.append((node, parsed))
         if len(matches) != 1:
             raise ClassicIncrementalError(
-                f"projected donor {donor.intervention.id!r} has {len(matches)} "
+                f"dependency-tracked donor {donor.intervention.id!r} has {len(matches)} "
                 "committed compiler lanes for its target/source identity: "
                 f"{request.build_target}/{request.logical_source}"
             )
         _record_node, parsed = matches[0]
         parent = source_path.parent.as_posix()
-        expected_directories = ["inc"]
-        expected_directories.append("inc/source" if parent == "." else f"inc/source/{parent}")
+        expected_directories: list[str] = []
+        if is_overlay:
+            expected_directories.append("inc")
+            if mirror_active:
+                expected_directories.append(
+                    "inc/source" if parent == "." else f"inc/source/{parent}"
+                )
         if tuple(expected_directories) != request.compiler_additions.include_directories:
             raise ClassicIncrementalError(
-                f"projected donor {donor.intervention.id!r} include layout differs"
+                f"dependency-tracked donor {donor.intervention.id!r} include layout differs"
             )
         force_includes = request.compiler_additions.force_includes
         if (
@@ -463,7 +469,7 @@ def _projected_donor_resolution_contexts(
             or bool(force_includes) != ("run.h" in request.files)
         ):
             raise ClassicIncrementalError(
-                f"projected donor {donor.intervention.id!r} staging layout differs"
+                f"dependency-tracked donor {donor.intervention.id!r} staging layout differs"
             )
 
         marker_stem = f"composed-{unit.plan.build_target}-{unit.plan.source.replace('/', '_')}"
@@ -472,46 +478,54 @@ def _projected_donor_resolution_contexts(
             str(donor_root / f"{marker_stem}-{request.compiler_seat}")
         )
         record_source = logical_join(normalized_source_root, request.logical_source)
-        private_includes = [
-            logical_join(arena, "inc"),
-            logical_join(
-                arena,
-                "inc/source" if parent == "." else f"inc/source/{parent}",
-            ),
-            normalize_logical_path(str(PureWindowsPath(record_source).parent)),
-        ]
+        private_includes: list[str] = []
+        if is_overlay:
+            private_includes.append(logical_join(arena, "inc"))
+            if mirror_active:
+                private_includes.append(
+                    logical_join(
+                        arena,
+                        "inc/source" if parent == "." else f"inc/source/{parent}",
+                    )
+                )
+        private_includes.append(
+            normalize_logical_path(str(PureWindowsPath(record_source).parent))
+        )
         include_directories = list(private_includes)
         for item in cast(Sequence[object], parsed["include_paths"]):
             raw = cast(tuple[int, str, bool], item)[1]
-            visible = _logical_absolute(raw, working_directory=normalized_build_root)
-            relative = _logical_relative(visible, root=normalized_source_root)
-            if relative is not None:
-                include_directories.append(
-                    logical_join(
-                        arena,
-                        "inc/source" if not relative else f"inc/source/{relative}",
+            if mirror_active:
+                visible = _logical_absolute(raw, working_directory=normalized_build_root)
+                relative = _logical_relative(visible, root=normalized_source_root)
+                if relative is not None:
+                    include_directories.append(
+                        logical_join(
+                            arena,
+                            "inc/source" if not relative else f"inc/source/{relative}",
+                        )
                     )
-                )
             include_directories.append(raw)
 
         arena_files: dict[str, SealedIncludeFile] = {}
         mirrored_sources: dict[str, tuple[str, str]] = {}
-        for item in authority.files:
-            if item.origin is not IncludeOrigin.PROJECT_SOURCE:
-                continue
-            relative = _logical_relative(item.logical_path, root=normalized_source_root)
-            if relative is None:
-                raise ClassicIncrementalError(
-                    f"projected donor source authority is outside its root: {item.logical_path!r}"
+        if mirror_active:
+            for item in authority.files:
+                if item.origin is not IncludeOrigin.PROJECT_SOURCE:
+                    continue
+                relative = _logical_relative(item.logical_path, root=normalized_source_root)
+                if relative is None:
+                    raise ClassicIncrementalError(
+                        "dependency-tracked donor source authority is outside its root: "
+                        f"{item.logical_path!r}"
+                    )
+                mirrored = logical_join(arena, f"inc/source/{relative}")
+                arena_files[mirrored.casefold()] = SealedIncludeFile(
+                    mirrored,
+                    item.digest,
+                    item.size,
+                    IncludeOrigin.DONOR_ARENA,
                 )
-            mirrored = logical_join(arena, f"inc/source/{relative}")
-            arena_files[mirrored.casefold()] = SealedIncludeFile(
-                mirrored,
-                item.digest,
-                item.size,
-                IncludeOrigin.DONOR_ARENA,
-            )
-            mirrored_sources[mirrored.casefold()] = (mirrored, item.logical_path)
+                mirrored_sources[mirrored.casefold()] = (mirrored, item.logical_path)
         for relative, payload in request.files.items():
             path = PurePosixPath(relative)
             if (
@@ -520,14 +534,14 @@ def _projected_donor_resolution_contexts(
                 or any(part in {"", ".", ".."} for part in path.parts)
             ):
                 raise ClassicIncrementalError(
-                    f"projected donor {donor.intervention.id!r} input path is unsafe"
+                    f"dependency-tracked donor {donor.intervention.id!r} input path is unsafe"
                 )
             logical = logical_join(arena, path.as_posix())
             folded = logical.casefold()
             existing = arena_files.get(folded)
             if existing is not None and existing.logical_path != logical:
                 raise ClassicIncrementalError(
-                    f"projected donor {donor.intervention.id!r} has a DOS path collision"
+                    f"dependency-tracked donor {donor.intervention.id!r} has a DOS path collision"
                 )
             arena_files[folded] = SealedIncludeFile(
                 logical,

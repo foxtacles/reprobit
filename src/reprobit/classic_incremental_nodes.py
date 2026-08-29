@@ -57,7 +57,7 @@ from reprobit.classic_incremental_keys import (
 )
 from reprobit.classic_incremental_planning import (
     _compiler_parameters,
-    _projected_donor_resolution_contexts,
+    _donor_dependency_resolution_contexts,
 )
 from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
@@ -669,7 +669,7 @@ def add_transform_nodes(plan: ClassicIncrementalPlan) -> None:
         raw_outputs = output_paths[compiler_id]
         transformed_outputs = transform_paths[compiler_id]
         transform_id = transform_ids[compiler_id]
-        transform_contexts = _projected_donor_resolution_contexts(
+        transform_contexts = _donor_dependency_resolution_contexts(
             transform_unit,
             compiler_nodes=compiler_nodes,
             compiler_sources=compiler_sources,
@@ -745,7 +745,7 @@ def add_transform_nodes(plan: ClassicIncrementalPlan) -> None:
         ) -> CacheProbeDecision:
             if current_state is None:
                 raise ClassicIncrementalError(
-                    "projected transform probe lacks mutable dependency state"
+                    "dependency-tracked transform probe lacks mutable dependency state"
                 )
             material = current_material(dependencies)
             current_state.base_material = material
@@ -813,7 +813,7 @@ def add_transform_nodes(plan: ClassicIncrementalPlan) -> None:
             replay_ids = tuple(item.donor_id for item in replays)
             if replay_ids != expected_ids:
                 current_state.replay_failure = (
-                    "runtime projected-donor universe differs from the planner"
+                    "runtime donor-dependency universe differs from the planner"
                 )
             else:
                 traces: list[DonorDependencyTrace] = []
@@ -845,7 +845,7 @@ def add_transform_nodes(plan: ClassicIncrementalPlan) -> None:
                     else:
                         if resolved != tuple(runtime_dependencies):
                             current_state.replay_failure = (
-                                "runtime projected-donor reads differ from planner resolution"
+                                "runtime donor-dependency reads differ from planner resolution"
                             )
                         else:
                             logical_paths = donor_transform_authority_paths(
@@ -882,7 +882,7 @@ def add_transform_nodes(plan: ClassicIncrementalPlan) -> None:
                 ):
                     interventions = authority.protected_sources[current_unit.plan.source.casefold()]
                     raise ClassicIncrementalError(
-                        "cannot revalidate projected donor inputs for protected "
+                        "cannot revalidate donor inputs for protected "
                         f"translation unit {current_unit.plan.id!r}: "
                         f"{current_state.replay_failure}; affected reviewed "
                         f"intervention(s): {', '.join(interventions)}"
@@ -921,7 +921,7 @@ def add_transform_nodes(plan: ClassicIncrementalPlan) -> None:
         ) -> str:
             if current_state is None:
                 raise ClassicIncrementalError(
-                    "projected transform final key lacks dependency state"
+                    "dependency-tracked transform final key lacks dependency state"
                 )
             if current_state.final_key is None:
                 raise ClassicIncrementalError(

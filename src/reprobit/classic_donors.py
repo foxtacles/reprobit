@@ -1293,6 +1293,7 @@ def prepare_donor_compile_request(
     )
     carrier_identifiers = validation.carrier_identifiers
     additions_material = {
+        "build_target": intervention.build_target,
         "compiler_seat": validation.compiler_seat,
         "force_includes": list(compiler_additions.force_includes),
         "include_directories": list(compiler_additions.include_directories),
