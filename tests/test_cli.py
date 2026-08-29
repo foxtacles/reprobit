@@ -1451,7 +1451,8 @@ def test_interactive_producer_progress_leaves_durable_failure_context() -> None:
         raise RuntimeError("producer failed")
 
     summary = human.getvalue().splitlines()[-1]
-    assert summary.startswith("build: failed after 1/10")
+    # Rich may prefix the durable line with terminal cursor-clear controls.
+    assert "build: failed after 1/10" in summary
     assert "s elapsed" in summary
     assert "last failure: audit: projection.unit.one: projection mismatch" in summary
     assert "error: producer failed" in summary
@@ -1471,7 +1472,8 @@ def test_interactive_activity_is_transient_on_success_and_durable_on_failure() -
     ):
         raise RuntimeError("invalid project")
     failed_summary = failure.getvalue().splitlines()[-1]
-    assert failed_summary.startswith("loading project: failed (")
+    # Rich may prefix the durable line with terminal cursor-clear controls.
+    assert "loading project: failed (" in failed_summary
     assert "s elapsed; error: invalid project" in failed_summary
 
 
@@ -2024,8 +2026,11 @@ def test_manifest_preview_and_apply_use_the_cas_transaction(
     )
     preview = capsys.readouterr().out
     assert "1 managed removal(s)" in preview
-    assert str(stale_graph.relative_to(destination)) in preview
-    assert all(f"preserve {path.relative_to(destination)}" in preview for path in preserved_paths)
+    assert stale_graph.relative_to(destination).as_posix() in preview
+    assert all(
+        f"preserve {path.relative_to(destination).as_posix()}" in preview
+        for path in preserved_paths
+    )
     assert all(path.is_file() for path in (*preserved_paths, stale_graph))
     assert not (destination / "reprobit.toml").exists()
     assert (
