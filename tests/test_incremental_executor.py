@@ -470,6 +470,13 @@ def test_concurrent_same_final_key_publishers_ignore_local_reasons(
     state.mkdir()
     final = _node_key("concurrent-stable-final")
     barrier = threading.Barrier(2)
+    # Initialize both views before measuring concurrent publication.  On
+    # Windows, first-use layout publication can be delayed by filesystem
+    # scanning and is unrelated to the record-convergence behavior under test.
+    caches = (
+        IncrementalCache(state, implementation="dag-test-v1"),
+        IncrementalCache(state, implementation="dag-test-v1"),
+    )
 
     def run(index: int) -> str:
         workspace = tmp_path / f"concurrent-{index}"
@@ -485,7 +492,7 @@ def test_concurrent_same_final_key_publishers_ignore_local_reasons(
             barrier.wait(timeout=5)
 
         result = IncrementalDAGExecutor(
-            cache=IncrementalCache(state, implementation="dag-test-v1"),
+            cache=caches[index - 1],
             workspace_root=workspace,
             runtime_factory=object,
             runtime_close=lambda _runtime: None,
