@@ -536,6 +536,26 @@ def _migrate_donor_references(
             raise MigrationError(f"{context} names unknown {name} {legacy_id!r}")
         values[name] = donor_ids[legacy_id]
 
+    ranges = values.get("instruction_ranges")
+    if ranges is not None:
+        if not isinstance(ranges, list):
+            raise MigrationError(f"{context} instruction_ranges is not an array")
+        migrated_ranges: list[dict[str, Any]] = []
+        for index, raw in enumerate(ranges):
+            if not isinstance(raw, dict):
+                raise MigrationError(f"{context} instruction_ranges[{index}] is not an object")
+            legacy_id = raw.get("donor")
+            if legacy_id is None:
+                migrated_ranges.append(raw)
+                continue
+            if not isinstance(legacy_id, str) or legacy_id not in donor_ids:
+                raise MigrationError(
+                    f"{context} instruction_ranges[{index}] names unknown donor "
+                    f"{legacy_id!r}"
+                )
+            migrated_ranges.append({**raw, "donor": donor_ids[legacy_id]})
+        values["instruction_ranges"] = migrated_ranges
+
     variants = values.get("donor_variants")
     if variants is None:
         return

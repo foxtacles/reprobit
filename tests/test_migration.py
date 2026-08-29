@@ -511,6 +511,10 @@ def test_migration_rewrites_named_donor_selectors_to_intervention_ids() -> None:
             "target_donor": "donor_a",
             "complete_donor": "donor_a",
             "instruction_donor": "donor_a",
+            "instruction_ranges": [
+                {"start": 0, "end": 1, "donor": "donor_a"},
+                {"start": 1, "end": 2},
+            ],
             "donor_variants": [{"donor": "donor_a", "offsets": [0]}],
         }
     )
@@ -525,6 +529,10 @@ def test_migration_rewrites_named_donor_selectors_to_intervention_ids() -> None:
     assert fields["target_donor"] == donor["id"]
     assert fields["complete_donor"] == donor["id"]
     assert fields["instruction_donor"] == donor["id"]
+    assert fields["instruction_ranges"] == [
+        {"donor": donor["id"], "end": 1, "start": 0},
+        {"end": 2, "start": 1},
+    ]
     assert fields["donor_variants"] == [{"donor": donor["id"], "offsets": [0]}]
 
 
