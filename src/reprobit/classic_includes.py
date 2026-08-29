@@ -301,7 +301,7 @@ def parse_msvc_sbr(payload: bytes) -> MsvcSbrTrace:
                     continue
                 if parent_opcode in {0x0902, 0x0904}:
                     break
-                if parent_opcode in {0x0203, 0x0204, 0x0205, 0x0208}:
+                if parent_opcode in {0x0202, 0x0203, 0x0204, 0x0205, 0x0208}:
                     reader.word()
                     break
                 raise ClassicIncludeTraceError(

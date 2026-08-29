@@ -88,6 +88,33 @@ def test_vc4_sbr_parser_accepts_0208_parent_record_and_preserves_alignment() -> 
     assert trace.sources == (MsvcSbrSource(r"R:\source\main.cpp", None),)
 
 
+def test_vc4_sbr_parser_accepts_0202_parent_record_and_preserves_alignment() -> None:
+    payload = _sbr_with_main(
+        # Define the observed three-byte identifier for the parent-class record.
+        b"\x43\x01\x00\x00\x87\x2d\x01Base\0",
+        # VC4 emits 0x0202 with one trailing word in the extended-width 0x4c form.
+        b"\x4c\x87\x2d\x01\x02\x02\x2e\x00",
+        # The observed next-record form proves the trailing word kept alignment.
+        b"\x43\x10\x40\x00\xe5\x2e\x01Next\0",
+    )
+
+    trace = parse_msvc_sbr(payload)
+
+    assert trace.sources == (MsvcSbrSource(r"R:\source\main.cpp", None),)
+
+
+def test_vc4_sbr_parser_rejects_truncated_0202_parent_record() -> None:
+    payload = (
+        b"\x00\x02\x00\x07\x00R:\\build\0"
+        b"\x01R:\\source\\main.cpp\0"
+        b"\x43\x01\x00\x00\x87\x2d\x01Base\0"
+        b"\x4c\x87\x2d\x01\x02\x02"
+    )
+
+    with pytest.raises(ClassicIncludeTraceError, match="truncated"):
+        parse_msvc_sbr(payload)
+
+
 def test_vc4_sbr_parser_rejects_truncated_0208_parent_record() -> None:
     payload = (
         b"\x00\x02\x00\x07\x00R:\\build\0"
