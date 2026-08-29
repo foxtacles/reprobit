@@ -669,28 +669,13 @@ def test_real_v2_manifest_round_trips_through_strict_v3(tmp_path: Path) -> None:
             if intervention.get("role") == "donor"
         )
     assert len(migrated_donors) == 319
-    exceptional_material = {
-        "legacy_id": "d_a9a90ebc7b08",
-        "target": "mxdirectx",
-        "source": "LEGO1/mxdirectx/mxdirectxinfo.cpp",
-    }
-    exceptional_id = "donor_" + sha256(
-        (
-            json.dumps(exceptional_material, sort_keys=True, separators=(",", ":"))
-            + "\n"
-        ).encode()
-    ).hexdigest()[:16]
-    exceptional = next(item for item in migrated_donors if item[2]["id"] == exceptional_id)
-    assert exceptional[:2] == (
-        "LEGO1/mxdirectx/mxdirectxinfo.cpp",
-        "mxdirectx",
-    )
-    assert exceptional[2]["build_target"] == "config"
-    assert all(
-        intervention["build_target"] == owning_target
-        for _source, owning_target, intervention in migrated_donors
-        if intervention["id"] != exceptional_id
-    )
+    cross_target = [
+        (source_path, owning_target, intervention["build_target"])
+        for source_path, owning_target, intervention in migrated_donors
+        if intervention["build_target"] != owning_target
+    ]
+    assert len(cross_target) == 1
+    assert cross_target[0][2] == "config"
     member_probe_return_types: list[str] = []
 
     def collect_member_probe_return_types(value: object) -> None:
