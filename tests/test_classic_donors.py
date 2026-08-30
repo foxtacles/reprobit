@@ -574,7 +574,12 @@ def test_constraint_receipt_cross_checks_identity_family_and_payloads() -> None:
 def _large_v2_manifest() -> Path | None:
     for candidate in sorted(Path.cwd().parent.glob("*/tools/byte_identity_manifest.json")):
         project_root = candidate.parent.parent
-        if candidate.stat().st_size > 1_000_000 and (project_root / ".git").exists():
+        claims = candidate.with_name("reprobit_migration_semantic_claims.once.json")
+        if (
+            candidate.stat().st_size > 1_000_000
+            and (project_root / ".git").exists()
+            and claims.is_file()
+        ):
             return candidate
     return None
 
