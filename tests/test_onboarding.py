@@ -65,7 +65,7 @@ def test_setup_creates_and_rechecks_the_project_toolchain_lock(
     assert setup["environment_ready"] is True
     assert setup["project_ready"] is False
     assert setup["readiness"][0] == {
-        "detail": "sample uses schema 3",
+        "detail": "project ID sample",
         "id": "project",
         "label": "Project",
         "next_command": None,
