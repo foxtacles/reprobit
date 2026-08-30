@@ -2605,7 +2605,7 @@ def test_incremental_summary_is_complete_in_text_and_ndjson() -> None:
     assert "99 reused, 1 rebuilt (99.0% reused)" in rendered
     assert "compiler environment started 1 time" in rendered
     assert "1.25s" in rendered
-    assert "exact targets: 1 unchanged, 0 updated" in rendered
+    assert "target outputs: 1 unchanged, 0 updated" in rendered
     assert "comparison pairs: 2 unchanged, 1 updated" in rendered
     assert "Why steps were rebuilt:" in rendered
     assert "compile.unit: recursive header changed" in rendered

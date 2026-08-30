@@ -250,7 +250,7 @@ class CLIOutput:
         )
         if summary.published_targets or summary.unchanged_targets:
             message += (
-                f"; exact targets: {summary.unchanged_targets} unchanged, "
+                f"; target outputs: {summary.unchanged_targets} unchanged, "
                 f"{summary.published_targets} updated"
             )
         if summary.published_comparison_pairs or summary.unchanged_comparison_pairs:
