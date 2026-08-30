@@ -582,11 +582,15 @@ def hold_wine_prefix(
                 boot_environment["WINEDLLOVERRIDES"] = ";".join(
                     item for item in (overrides, "winemenubuilder.exe=d") if item
                 )
+            # No pipes: the held server and its services inherit them and
+            # never close their ends, which would stall the wait until the
+            # timeout even after wineboot itself has finished.
             boot = subprocess.run(
                 (wine_executable, "wineboot", "--init"),
                 env=boot_environment,
                 stdin=subprocess.DEVNULL,
-                capture_output=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 timeout=timeout_seconds,
                 start_new_session=True,
                 check=False,
