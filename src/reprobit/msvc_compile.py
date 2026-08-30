@@ -552,7 +552,14 @@ def hold_wine_prefix(
     if os.name == "nt":
         yield
         return
-    executable = os.fspath(wineserver) if wineserver is not None else shutil.which("wineserver")
+    # Resolve against the compile environment's PATH: the process's own PATH
+    # can name a symlinked wineserver that cannot find its data files.
+    search_path = environment.get("PATH")
+    executable = (
+        os.fspath(wineserver)
+        if wineserver is not None
+        else shutil.which("wineserver", path=search_path) or shutil.which("wineserver")
+    )
     if executable is None:
         raise DiscoveryError("wineserver is required to hold a Wine prefix")
     # wineserver requires the prefix directory to exist; wine normally
@@ -581,7 +588,10 @@ def hold_wine_prefix(
         wine_executable = (
             os.fspath(wine)
             if wine is not None
-            else environment.get("WINE") or environment.get("WINELOADER") or shutil.which("wine")
+            else environment.get("WINE")
+            or environment.get("WINELOADER")
+            or shutil.which("wine", path=search_path)
+            or shutil.which("wine")
         )
         if wine_executable is not None:
             boot_environment = dict(environment)
