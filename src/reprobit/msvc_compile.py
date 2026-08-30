@@ -537,13 +537,17 @@ def hold_wine_prefix(
     environment: Mapping[str, str],
     *,
     wineserver: str | os.PathLike[str] | None = None,
+    wine: str | os.PathLike[str] | None = None,
     timeout_seconds: float = 60.0,
 ) -> Iterator[None]:
     """Hold one foreground wineserver for the prefix in ``environment``.
 
-    A Wine-transported compile on a cold prefix otherwise spawns the server
-    and its services inside the compiler's own process group, and the drain
-    invariant correctly refuses the compile. No-op on native Windows."""
+    A Wine-transported compile on a cold prefix otherwise spawns the server,
+    its services, and the implicit prefix bootstrap inside the compiler's own
+    process group, and the drain invariant correctly refuses the compile.
+    When a ``wine`` executable can be resolved, the prefix is additionally
+    initialized with ``wineboot --init`` up front, so no later command has to
+    perform the bootstrap implicitly. No-op on native Windows."""
 
     if os.name == "nt":
         yield
@@ -566,6 +570,29 @@ def hold_wine_prefix(
     else:
         raise DiscoveryError(f"wineserver exited during startup: {held.returncode}")
     try:
+        wine_executable = (
+            os.fspath(wine)
+            if wine is not None
+            else environment.get("WINE") or environment.get("WINELOADER") or shutil.which("wine")
+        )
+        if wine_executable is not None:
+            boot_environment = dict(environment)
+            overrides = boot_environment.get("WINEDLLOVERRIDES", "")
+            if "winemenubuilder" not in overrides.casefold():
+                boot_environment["WINEDLLOVERRIDES"] = ";".join(
+                    item for item in (overrides, "winemenubuilder.exe=d") if item
+                )
+            boot = subprocess.run(
+                (wine_executable, "wineboot", "--init"),
+                env=boot_environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=timeout_seconds,
+                start_new_session=True,
+                check=False,
+            )
+            if boot.returncode != 0:
+                raise DiscoveryError(f"wineboot --init failed with exit code {boot.returncode}")
         yield
     finally:
         stop = subprocess.run(

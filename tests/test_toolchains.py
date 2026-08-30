@@ -12,6 +12,7 @@ from pydantic import ValidationError
 from reprobit.backends import POSIX_WINE_BACKEND
 from reprobit.context import CompileContext
 from reprobit.model import Digest
+from reprobit.msvc_compile import hold_wine_prefix
 from reprobit.paths import LogicalPathSkeleton, LogicalSeat
 from reprobit.process import CommandSpec, ProcessSupervisor
 from reprobit.schema import LockedTool, MsvcRelease, ToolchainProfileSource
@@ -652,7 +653,7 @@ def test_opt_in_profile_compiler_smoke(
         timeout_seconds=60,
         log_path=output_root / "compile.log",
     )
-    with ProcessSupervisor() as supervisor:
+    with hold_wine_prefix(host_environment, wine=wine), ProcessSupervisor() as supervisor:
         supervisor.run(command)
     assert object_file.is_file() and object_file.stat().st_size > 0
     assert len(hashlib.sha256(object_file.read_bytes()).hexdigest()) == 64
