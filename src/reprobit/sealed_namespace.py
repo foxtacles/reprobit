@@ -18,9 +18,11 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Mapping, Sequence
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from threading import Lock
 from types import MappingProxyType
 from typing import Any, Protocol, Self
 
@@ -578,6 +580,60 @@ class _WindowsDirectoryWatcher:
     _ERROR_OPERATION_ABORTED = 995
     _BUFFER_SIZE = 1024 * 1024
     _NOTIFY_FILTER = 0x1 | 0x2 | 0x4 | 0x8 | 0x10 | 0x40 | 0x100
+    _configuration_lock = Lock()
+    _overlapped_type: type[Any] | None = None
+
+    @classmethod
+    def _configure_api(cls, api: _WindowsHandles) -> type[Any]:
+        ctypes = api.ctypes
+        wintypes = api.wintypes
+        with cls._configuration_lock:
+            if cls._overlapped_type is None:
+                cls._overlapped_type = type(
+                    "ReproBitOverlapped",
+                    (ctypes.Structure,),
+                    {
+                        "_fields_": [
+                            ("internal", ctypes.c_size_t),
+                            ("internal_high", ctypes.c_size_t),
+                            ("offset", wintypes.DWORD),
+                            ("offset_high", wintypes.DWORD),
+                            ("event", wintypes.HANDLE),
+                        ]
+                    },
+                )
+            overlapped_type = cls._overlapped_type
+            api.kernel32.CreateEventW.argtypes = [
+                ctypes.c_void_p,
+                wintypes.BOOL,
+                wintypes.BOOL,
+                wintypes.LPCWSTR,
+            ]
+            api.kernel32.CreateEventW.restype = wintypes.HANDLE
+            api.kernel32.ReadDirectoryChangesW.argtypes = [
+                wintypes.HANDLE,
+                ctypes.c_void_p,
+                wintypes.DWORD,
+                wintypes.BOOL,
+                wintypes.DWORD,
+                ctypes.POINTER(wintypes.DWORD),
+                ctypes.POINTER(overlapped_type),
+                ctypes.c_void_p,
+            ]
+            api.kernel32.ReadDirectoryChangesW.restype = wintypes.BOOL
+            api.kernel32.GetOverlappedResult.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(overlapped_type),
+                ctypes.POINTER(wintypes.DWORD),
+                wintypes.BOOL,
+            ]
+            api.kernel32.GetOverlappedResult.restype = wintypes.BOOL
+            api.kernel32.CancelIoEx.argtypes = [
+                wintypes.HANDLE,
+                ctypes.POINTER(overlapped_type),
+            ]
+            api.kernel32.CancelIoEx.restype = wintypes.BOOL
+            return overlapped_type
 
     def __init__(
         self,
@@ -589,51 +645,7 @@ class _WindowsDirectoryWatcher:
         self.path = path
         ctypes = api.ctypes
         wintypes = api.wintypes
-
-        Overlapped = type(
-            "Overlapped",
-            (ctypes.Structure,),
-            {
-                "_fields_": [
-                    ("internal", ctypes.c_size_t),
-                    ("internal_high", ctypes.c_size_t),
-                    ("offset", wintypes.DWORD),
-                    ("offset_high", wintypes.DWORD),
-                    ("event", wintypes.HANDLE),
-                ]
-            },
-        )
-
-        api.kernel32.CreateEventW.argtypes = [
-            ctypes.c_void_p,
-            wintypes.BOOL,
-            wintypes.BOOL,
-            wintypes.LPCWSTR,
-        ]
-        api.kernel32.CreateEventW.restype = wintypes.HANDLE
-        api.kernel32.ReadDirectoryChangesW.argtypes = [
-            wintypes.HANDLE,
-            ctypes.c_void_p,
-            wintypes.DWORD,
-            wintypes.BOOL,
-            wintypes.DWORD,
-            ctypes.POINTER(wintypes.DWORD),
-            ctypes.POINTER(Overlapped),
-            ctypes.c_void_p,
-        ]
-        api.kernel32.ReadDirectoryChangesW.restype = wintypes.BOOL
-        api.kernel32.GetOverlappedResult.argtypes = [
-            wintypes.HANDLE,
-            ctypes.POINTER(Overlapped),
-            ctypes.POINTER(wintypes.DWORD),
-            wintypes.BOOL,
-        ]
-        api.kernel32.GetOverlappedResult.restype = wintypes.BOOL
-        api.kernel32.CancelIoEx.argtypes = [
-            wintypes.HANDLE,
-            ctypes.POINTER(Overlapped),
-        ]
-        api.kernel32.CancelIoEx.restype = wintypes.BOOL
+        overlapped_type = self._configure_api(api)
 
         handle = api.kernel32.CreateFileW(
             str(path),
@@ -650,6 +662,8 @@ class _WindowsDirectoryWatcher:
             )
         self.handle = handle
         self.event: Any = None
+        self.armed = False
+        self.observed = False
         try:
             received = api.strong_identity(handle)
             if received != expected_identity:
@@ -662,10 +676,14 @@ class _WindowsDirectoryWatcher:
                     f"cannot create native namespace watcher event: {api.get_last_error()}"
                 )
             self.event = event
-            self.overlapped = Overlapped()
+            self.overlapped = overlapped_type()
             self.overlapped.event = event
             self.buffer = ctypes.create_string_buffer(self._BUFFER_SIZE)
             immediate = wintypes.DWORD()
+            # Mark the request before entering the interruptible native call;
+            # closing its directory handle remains safe even if Python regains
+            # control before the return value can be inspected.
+            self.armed = True
             if not api.kernel32.ReadDirectoryChangesW(
                 handle,
                 self.buffer,
@@ -678,11 +696,15 @@ class _WindowsDirectoryWatcher:
             ):
                 error = int(api.get_last_error())
                 if error != self._ERROR_IO_PENDING:
+                    self.armed = False
                     raise SealedNamespaceError(
                         f"cannot arm native namespace watcher for {path}: {error}"
                     )
-        except BaseException:
-            self._discard()
+        except BaseException as exc:
+            try:
+                self._discard()
+            except BaseException as close_error:
+                exc.add_note(f"native namespace watcher cleanup also failed: {close_error}")
             raise
 
     def changed(self) -> bool:
@@ -695,39 +717,53 @@ class _WindowsDirectoryWatcher:
         ):
             # A completed zero-byte notification means the kernel overflowed
             # the caller's buffer.  It is still a namespace change.
+            self.observed = True
             return True
         error = int(self.api.get_last_error())
         if error == self._ERROR_IO_INCOMPLETE:
             return False
         raise SealedNamespaceError(f"native namespace watcher failed for {self.path}: {error}")
 
-    def _discard(self) -> None:
+    def _discard(self) -> bool:
         handle = getattr(self, "handle", None)
         event = getattr(self, "event", None)
         overlapped = getattr(self, "overlapped", None)
-        if handle and overlapped is not None:
-            self.api.kernel32.CancelIoEx(handle, self.api.ctypes.byref(overlapped))
-            transferred = self.api.wintypes.DWORD()
-            if not self.api.kernel32.GetOverlappedResult(
-                handle,
-                self.api.ctypes.byref(overlapped),
-                self.api.ctypes.byref(transferred),
-                True,
-            ):
-                error = int(self.api.get_last_error())
-                if error not in {self._ERROR_OPERATION_ABORTED, self._ERROR_IO_INCOMPLETE}:
-                    raise SealedNamespaceError(
-                        f"cannot reap native namespace watcher for {self.path}: {error}"
-                    )
-        if event:
-            self.api.close(event)
-            self.event = None
-        if handle:
-            self.api.close(handle)
-            self.handle = None
+        reap_error: SealedNamespaceError | None = None
+        late_change = False
+        try:
+            if handle and overlapped is not None and self.armed:
+                self.api.kernel32.CancelIoEx(handle, self.api.ctypes.byref(overlapped))
+                transferred = self.api.wintypes.DWORD()
+                # Cancellation races the pending notification: TRUE means the
+                # change completed first; FALSE+995 means our cancellation won.
+                if self.api.kernel32.GetOverlappedResult(
+                    handle,
+                    self.api.ctypes.byref(overlapped),
+                    self.api.ctypes.byref(transferred),
+                    True,
+                ):
+                    if not self.observed:
+                        late_change = True
+                else:
+                    error = int(self.api.get_last_error())
+                    if error != self._ERROR_OPERATION_ABORTED:
+                        reap_error = SealedNamespaceError(
+                            f"cannot reap native namespace watcher for {self.path}: {error}"
+                        )
+        finally:
+            self.armed = False
+            if event:
+                self.api.close(event)
+                self.event = None
+            if handle:
+                self.api.close(handle)
+                self.handle = None
+        if reap_error is not None:
+            raise reap_error
+        return late_change
 
-    def close(self) -> None:
-        self._discard()
+    def close(self) -> bool:
+        return self._discard()
 
 
 class _WindowsNamespaceLease:
@@ -749,16 +785,43 @@ class _WindowsNamespaceLease:
         self._closed = False
         self._retain_payload_labels = retain_payload_labels
         self._require_handle_capacity(trees, files)
+        # Windows cancels asynchronous I/O when its issuing thread exits.  A
+        # lease can outlive the short DAG worker that lazily creates it, so
+        # every watcher operation has one lease-scoped owner instead.
+        self._watcher_owner = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="reprobit-namespace-watcher",
+        )
         try:
             for tree in sorted(trees, key=lambda item: (item.label, str(item.root))):
                 root = self._open_tree_root(tree.anchor, tree.root)
-                watcher = _WindowsDirectoryWatcher(self.api, root.path, root.metadata)
-                self._watchers.append(watcher)
+                # Registration happens on the owner before the future can
+                # complete.  An interruption while waiting therefore cannot
+                # strand a live but caller-unreachable watcher.
+                self._watcher_owner.submit(
+                    self._register_watcher,
+                    root.path,
+                    root.metadata,
+                ).result()
                 self._walk_tree(tree.label, root, PurePosixPath())
             for item in sorted(files, key=lambda value: (value.label, str(value.path))):
                 self._open_standalone_file(item)
-        except BaseException:
-            self._close_handles()
+        except BaseException as exc:
+            try:
+                self._close_handles()
+            except BaseException as close_error:
+                exc.add_note(f"native namespace cleanup also failed: {close_error}")
+            raise
+
+    def _register_watcher(self, path: Path, metadata: _WindowsMetadata) -> None:
+        watcher = _WindowsDirectoryWatcher(self.api, path, metadata)
+        try:
+            self._watchers.append(watcher)
+        except BaseException as exc:
+            try:
+                watcher.close()
+            except BaseException as close_error:
+                exc.add_note(f"native namespace watcher cleanup also failed: {close_error}")
             raise
 
     def _require_handle_capacity(
@@ -1030,9 +1093,8 @@ class _WindowsNamespaceLease:
 
     def verify(self) -> None:
         failures: list[str] = []
-        for watcher in self._watchers:
-            if watcher.changed():
-                failures.append(f"{watcher.path} (directory change/overflow)")
+        changed_paths = self._watcher_owner.submit(self._changed_watcher_paths).result()
+        failures.extend(f"{path} (directory change/overflow)" for path in changed_paths)
         for directory in self._directories.values():
             try:
                 received = self.api.strong_identity(directory.handle)
@@ -1091,24 +1153,53 @@ class _WindowsNamespaceLease:
                 + ", ".join(sorted(set(failures), key=str.casefold)[:12])
             )
 
+    def _changed_watcher_paths(self) -> tuple[Path, ...]:
+        return tuple(watcher.path for watcher in self._watchers if watcher.changed())
+
+    def _reap_watchers(self) -> None:
+        late_changes: list[Path] = []
+        errors: list[BaseException] = []
+        for watcher in reversed(self._watchers):
+            try:
+                if watcher.close():
+                    late_changes.append(watcher.path)
+            except BaseException as exc:
+                errors.append(exc)
+        if late_changes:
+            error = SealedNamespaceError(
+                "producer-readable native namespace changed while held: "
+                + ", ".join(
+                    f"{path} (directory change/overflow during teardown)"
+                    for path in sorted(set(late_changes), key=lambda item: str(item).casefold())[
+                        :12
+                    ]
+                )
+            )
+            for cleanup_error in errors:
+                error.add_note(f"native namespace watcher cleanup also failed: {cleanup_error}")
+            raise error
+        if errors:
+            raise SealedNamespaceError(
+                f"failed to reap {len(errors)} native namespace watcher(s)"
+            ) from errors[0]
+
     def _close_handles(self) -> None:
         if self._closed:
             return
         self._closed = True
-        watcher_errors: list[BaseException] = []
-        for watcher in reversed(self._watchers):
-            try:
-                watcher.close()
-            except BaseException as exc:
-                watcher_errors.append(exc)
+        watcher_error: BaseException | None = None
+        try:
+            self._watcher_owner.submit(self._reap_watchers).result()
+        except BaseException as exc:
+            watcher_error = exc
+        finally:
+            self._watcher_owner.shutdown(wait=True, cancel_futures=True)
         for item in reversed(self._files):
             self.api.close(item.handle)
         for directory in reversed(tuple(self._directories.values())):
             self.api.close(directory.handle)
-        if watcher_errors:
-            raise SealedNamespaceError(
-                f"failed to reap {len(watcher_errors)} native namespace watcher(s)"
-            ) from watcher_errors[0]
+        if watcher_error is not None:
+            raise watcher_error
 
     def close(self) -> None:
         try:
