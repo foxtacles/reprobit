@@ -95,6 +95,47 @@ def test_windows_job_process_handle_close_is_idempotent() -> None:
     assert closes == 1
 
 
+@pytest.mark.parametrize(("drains", "leaked"), [(True, False), (False, True)])
+def test_windows_child_waits_before_classifying_a_job_leak(
+    monkeypatch: pytest.MonkeyPatch,
+    drains: bool,
+    leaked: bool,
+) -> None:
+    events: list[object] = []
+
+    class Process:
+        pid = 4312
+        returncode = 0
+
+    class Job:
+        @staticmethod
+        def close_process_handle(process: object) -> None:
+            assert process is child_process
+            events.append("close-process-handle")
+
+        @staticmethod
+        def wait_empty(timeout: float) -> bool:
+            events.append(("wait-empty", timeout))
+            return drains
+
+        @staticmethod
+        def terminate_and_drain(timeout: float) -> None:
+            events.append(("terminate-and-drain", timeout))
+
+    monkeypatch.setattr(process_module.os, "name", "nt")
+    child_process = Process()
+    child = process_module._OwnedChild(  # type: ignore[arg-type]
+        child_process,
+        Job(),
+    )
+
+    assert child.drain_after_leader_exit(2.0) is leaked
+    expected: list[object] = ["close-process-handle", ("wait-empty", 2.0)]
+    if leaked:
+        expected.append(("terminate-and-drain", 2.0))
+    assert events == expected
+
+
 def test_windows_job_close_retains_handle_after_close_failure() -> None:
     class Kernel32:
         @staticmethod

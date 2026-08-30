@@ -319,6 +319,34 @@ def test_lineage_lease_does_not_map_the_controller_drive(tmp_path: Path) -> None
 
 
 @pytest.mark.skipif(not _WINDOWS, reason="requires native Windows lineage namespace")
+def test_repeated_short_lineage_commands_drain_without_false_leaks(
+    tmp_path: Path,
+) -> None:
+    """Exercise the Job-accounting handoff that follows a fast broker exit."""
+
+    drive = _free_drive()
+    root = tmp_path / "private-root"
+    root.mkdir()
+    environment = {"SYSTEMROOT": os.environ["SYSTEMROOT"]}
+
+    with (
+        NativeDeviceMapLease(root, drive) as lease,
+        ProcessSupervisor() as supervisor,
+    ):
+        for _ in range(32):
+            result = supervisor.run(
+                CommandSpec.create(
+                    (sys.executable, "-c", "pass"),
+                    cwd=root,
+                    environment=environment,
+                    timeout_seconds=20,
+                ),
+                windows_lineage_planner=lease,
+            )
+            assert result.succeeded
+
+
+@pytest.mark.skipif(not _WINDOWS, reason="requires native Windows lineage namespace")
 def test_lineage_drive_reaches_producer_and_descendant(
     tmp_path: Path,
 ) -> None:

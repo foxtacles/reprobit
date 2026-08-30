@@ -579,7 +579,11 @@ class _OwnedChild:
 
         if os.name == "nt" and self.job is not None:
             self.job.close_process_handle(self.process)
-            if self.job.active_processes() == 0:
+            # Job accounting may remain transiently nonzero after the leader
+            # handle becomes signalled, even when its nested producer tree has
+            # already drained. Give normal teardown one bounded grace period
+            # before classifying anything that remains as a leak.
+            if self.job.wait_empty(grace_seconds):
                 return False
             self.job.terminate_and_drain(grace_seconds)
             return True
