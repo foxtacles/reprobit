@@ -43,12 +43,15 @@ from reprobit.report import (
     EvidenceSummary,
     ExecutionFileReceipt,
     ExecutionStepReceipt,
+    NormalizationCategorySummary,
     ProducerSummary,
     ProofReport,
     Report,
     RuntimeBindingPreimage,
     RuntimeProofBinding,
     StageTiming,
+    SupplementalOutputFileSummary,
+    SupplementalOutputSummary,
     TargetComparisonSummary,
 )
 from reprobit.report_html import _scope_key
@@ -265,6 +268,135 @@ def proof_report(seed: bytes = b"proof", *, logical_path: str = "build/program.e
             version="fixture",
             digest=digest(seed + b"package"),
         ),
+    )
+
+
+def proof_report_with_debug_companion() -> ProofReport:
+    base = proof_report()
+    base_preimage = base.runtime.preimage
+    publish_step = "publish-analysis.program"
+    image_path = "/work/sample/build/reprobit-debug/program.exe"
+    pdb_path = "/work/sample/build/reprobit-debug/program.pdb"
+    image_digest = digest(b"stable debug image")
+    pdb_digest = digest(b"stable debug pdb")
+    runtime = RuntimeProofBinding.create(
+        RuntimeBindingPreimage(
+            build=base_preimage.build.model_copy(
+                update={
+                    "outputs": tuple(
+                        sorted(
+                            (
+                                *base_preimage.build.outputs,
+                                ExecutionFileReceipt(
+                                    path=image_path,
+                                    digest=image_digest,
+                                    size=200,
+                                    fresh=True,
+                                    producer_step=publish_step,
+                                    device=2,
+                                    inode=3,
+                                ),
+                                ExecutionFileReceipt(
+                                    path=pdb_path,
+                                    digest=pdb_digest,
+                                    size=300,
+                                    fresh=True,
+                                    producer_step=publish_step,
+                                    device=2,
+                                    inode=4,
+                                ),
+                            ),
+                            key=lambda item: (item.path.casefold(), item.path),
+                        )
+                    ),
+                    "steps": tuple(
+                        sorted(
+                            (
+                                *base_preimage.build.steps,
+                                ExecutionStepReceipt(
+                                    id="analysis-link.program",
+                                    returncode=0,
+                                    attempts=1,
+                                    duration_seconds=0,
+                                    output_digest=digest(b"analysis output"),
+                                    command_digest=digest(b"analysis command"),
+                                ),
+                                ExecutionStepReceipt(
+                                    id=publish_step,
+                                    returncode=0,
+                                    attempts=1,
+                                    duration_seconds=0,
+                                    output_digest=digest(b"publication output"),
+                                    command_digest=digest(b"publication command"),
+                                ),
+                            ),
+                            key=lambda item: (item.id.casefold(), item.id),
+                        )
+                    ),
+                }
+            ),
+            targets=base_preimage.targets,
+        )
+    )
+    supplemental = SupplementalOutputSummary(
+        id="debug-companion.program",
+        target_id="program",
+        policy="msvc42-debug-pair-v1",
+        source_step_id="analysis-link.program",
+        publish_step_id=publish_step,
+        files=(
+            SupplementalOutputFileSummary(
+                role="image",
+                logical_path="build/reprobit-debug/program.exe",
+                path=image_path,
+                digest=image_digest,
+                size=200,
+                raw_digest=digest(b"raw debug image"),
+                raw_size=200,
+                changed_bytes=1,
+                categories=(
+                    NormalizationCategorySummary(
+                        category="pe.coff_timestamp",
+                        normalized_bytes=4,
+                        changed_bytes=1,
+                        changed_range_count=1,
+                        changed_ranges=(ByteRange(offset=10, length=1),),
+                    ),
+                ),
+            ),
+            SupplementalOutputFileSummary(
+                role="pdb",
+                logical_path="build/reprobit-debug/program<symbols>.pdb",
+                path=pdb_path,
+                digest=pdb_digest,
+                size=300,
+                raw_digest=digest(b"raw debug pdb"),
+                raw_size=300,
+                changed_bytes=2,
+                categories=(
+                    NormalizationCategorySummary(
+                        category="pdb.signature",
+                        normalized_bytes=4,
+                        changed_bytes=2,
+                        changed_range_count=9,
+                        changed_ranges=(ByteRange(offset=20, length=2),),
+                        omitted_changed_ranges=8,
+                    ),
+                ),
+            ),
+        ),
+    )
+    return ProofReport.create(
+        runtime=runtime,
+        artifacts=base.artifacts,
+        provenance=base.provenance,
+        certificates=base.certificates,
+        producers=base.producers,
+        supplemental_outputs=(supplemental,),
+        audit_issues=base.audit_issues,
+        adapter=base.adapter,
+        providers=base.providers,
+        package=base.package,
     )
 
 
@@ -1137,6 +1269,110 @@ def test_html_is_self_contained_escaped_and_warns_for_quarantine(tmp_path: Path)
     payload["verdict"]["quarantines"][0]["ranges"][0]["offset"] = 9
     with pytest.raises(ValidationError, match="coordinates differ"):
         Report.model_validate_json(canonical_json(payload))
+
+
+def test_debug_companion_is_receipt_bound_but_outside_authenticity_artifacts() -> None:
+    proof = proof_report_with_debug_companion()
+    report = Report.from_bundle(
+        bundle(),
+        Verdict(
+            cold=True,
+            byte_exact=True,
+            logic_certified=True,
+            toolchain_origin=True,
+        ),
+        evidence=proof.summary,
+        proof=proof,
+        target_results={"program": True},
+        target_artifacts={"program": (100, digest(b"oracle"))},
+    )
+
+    assert len(proof.artifacts) == 1
+    assert all("reprobit-debug" not in item.logical_path for item in proof.artifacts)
+    rendered = render_report_html(report)
+    collapsed_text = " ".join(rendered.split())
+    assert (
+        "Debug companion: reproducible — bookkeeping stabilized; symbols, types, "
+        "addresses, and source lines preserved."
+    ) in collapsed_text
+    assert (
+        "For comparison and analysis only; not a byte-identity target or release artifact."
+        in collapsed_text
+    )
+    assert "Comparison files" in rendered
+    assert "Matched image + symbols" in rendered
+    assert '<details class="advanced" id="debug-companion-details">' in rendered
+    assert "Receipt-bound debug companion files" in rendered
+    assert "Current-run output receipt bindings" in rendered
+    assert "Named bookkeeping normalization categories" in rendered
+    assert "<code>build/reprobit-debug/program&lt;symbols&gt;.pdb</code>" in rendered
+    assert '<code class="identifier">pdb.signature</code>' in rendered
+    assert '<code class="ranges">[0x14, 0x16) + 8 more</code>' in rendered
+    assert digest(b"stable debug pdb").value in rendered
+    assert digest(b"raw debug pdb").value in rendered
+
+
+def test_debug_companion_rejects_unbound_or_target_aliasing_outputs() -> None:
+    proof = proof_report_with_debug_companion()
+    supplemental = proof.supplemental_outputs[0]
+    image, pdb = supplemental.files
+
+    with pytest.raises(ValidationError, match="differs from its build receipt"):
+        ProofReport.create(
+            runtime=proof.runtime,
+            artifacts=proof.artifacts,
+            provenance=proof.provenance,
+            certificates=proof.certificates,
+            producers=proof.producers,
+            supplemental_outputs=(
+                supplemental.model_copy(
+                    update={
+                        "files": (
+                            image.model_copy(update={"digest": digest(b"unbound output")}),
+                            pdb,
+                        )
+                    }
+                ),
+            ),
+            audit_issues=proof.audit_issues,
+            adapter=proof.adapter,
+            providers=proof.providers,
+            package=proof.package,
+        )
+
+    target = proof.runtime.preimage.targets[0]
+    exact_output = next(
+        item
+        for item in proof.runtime.preimage.build.outputs
+        if item.path == target.artifact
+    )
+    aliased_image = image.model_copy(
+        update={
+            "logical_path": target.logical_artifact,
+            "path": target.artifact,
+            "digest": exact_output.digest,
+            "size": exact_output.size,
+            "raw_digest": exact_output.digest,
+            "raw_size": exact_output.size,
+            "changed_bytes": 0,
+            "categories": (),
+        }
+    )
+    with pytest.raises(ValidationError, match="aliases a byte-identity target"):
+        ProofReport.create(
+            runtime=proof.runtime,
+            artifacts=proof.artifacts,
+            provenance=proof.provenance,
+            certificates=proof.certificates,
+            producers=proof.producers,
+            supplemental_outputs=(
+                supplemental.model_copy(update={"files": (aliased_image, pdb)}),
+            ),
+            audit_issues=proof.audit_issues,
+            adapter=proof.adapter,
+            providers=proof.providers,
+            package=proof.package,
+        )
 
 
 def test_html_uses_only_the_json_link_its_caller_published(tmp_path: Path) -> None:

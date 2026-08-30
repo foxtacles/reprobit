@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from enum import StrEnum
+from itertools import pairwise
 from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -120,6 +121,94 @@ class ProducerSummary(StrictModel):
     artifact_size: Annotated[int, Field(ge=0)]
     ranges: tuple[ByteRange, ...] = ()
     captured_before_overwrite: bool = False
+
+
+class NormalizationCategorySummary(StrictModel):
+    """Compact, bounded detail for one named normalization category."""
+
+    category: Annotated[str, Field(min_length=1, max_length=256)]
+    normalized_bytes: Annotated[int, Field(ge=0)]
+    changed_bytes: Annotated[int, Field(ge=0)]
+    changed_range_count: Annotated[int, Field(ge=0)]
+    changed_ranges: tuple[ByteRange, ...] = ()
+    omitted_changed_ranges: Annotated[int, Field(ge=0)] = 0
+
+    @model_validator(mode="after")
+    def ranges_are_canonical(self) -> NormalizationCategorySummary:
+        if self.changed_bytes > self.normalized_bytes:
+            raise ValueError("normalization changed bytes exceed eligible bytes")
+        if self.changed_range_count != len(self.changed_ranges) + self.omitted_changed_ranges:
+            raise ValueError("normalization range summary is incomplete")
+        ordered = tuple(sorted(self.changed_ranges, key=lambda item: (item.offset, item.length)))
+        if self.changed_ranges != ordered:
+            raise ValueError("normalization ranges must be in canonical order")
+        for left, right in pairwise(self.changed_ranges):
+            if left.overlaps(right):
+                raise ValueError("normalization ranges overlap")
+        return self
+
+
+class SupplementalOutputFileSummary(StrictModel):
+    """One noncertifying file bound to a current build output receipt."""
+
+    role: Annotated[str, Field(min_length=1, max_length=128)]
+    logical_path: Annotated[str, Field(min_length=1, max_length=4096)]
+    path: Annotated[str, Field(min_length=1, max_length=8192)]
+    digest: Digest
+    size: Annotated[int, Field(ge=0)]
+    raw_digest: Digest
+    raw_size: Annotated[int, Field(ge=0)]
+    changed_bytes: Annotated[int, Field(ge=0)]
+    categories: tuple[NormalizationCategorySummary, ...] = ()
+
+    @model_validator(mode="after")
+    def normalization_is_closed(self) -> SupplementalOutputFileSummary:
+        if "\x00" in self.path or "\x00" in self.logical_path:
+            raise ValueError("supplemental output path contains NUL")
+        logical_parts = self.logical_path.replace("\\", "/").split("/")
+        if any(part == ".." for part in logical_parts):
+            raise ValueError("supplemental logical output escapes its root")
+        if self.size != self.raw_size:
+            raise ValueError("supplemental normalization must preserve file size")
+        if self.changed_bytes > self.size:
+            raise ValueError("supplemental changed-byte count exceeds file size")
+        if (self.changed_bytes == 0) != (self.digest == self.raw_digest):
+            raise ValueError("supplemental raw/final identity contradicts changed-byte count")
+        ordered = tuple(sorted(self.categories, key=lambda item: item.category))
+        if self.categories != ordered:
+            raise ValueError("supplemental normalization categories must be canonical")
+        if len({item.category for item in self.categories}) != len(self.categories):
+            raise ValueError("supplemental normalization categories must be unique")
+        if sum(item.changed_bytes for item in self.categories) != self.changed_bytes:
+            raise ValueError("supplemental category bytes differ from the file total")
+        if any(
+            item.end > self.size
+            for category in self.categories
+            for item in category.changed_ranges
+        ):
+            raise ValueError("supplemental normalization range exceeds the file")
+        return self
+
+
+class SupplementalOutputSummary(StrictModel):
+    """Receipt-bound output set kept outside authenticity artifacts and certificates."""
+
+    id: Annotated[str, Field(min_length=1, max_length=1024)]
+    target_id: Identifier
+    policy: Annotated[str, Field(min_length=1, max_length=256)]
+    source_step_id: Annotated[str, Field(min_length=1, max_length=1024)]
+    publish_step_id: Annotated[str, Field(min_length=1, max_length=1024)]
+    files: Annotated[tuple[SupplementalOutputFileSummary, ...], Field(min_length=1)]
+
+    @model_validator(mode="after")
+    def files_are_canonical(self) -> SupplementalOutputSummary:
+        if self.source_step_id == self.publish_step_id:
+            raise ValueError("supplemental source and publication steps must differ")
+        if self.files != tuple(sorted(self.files, key=lambda item: item.role)):
+            raise ValueError("supplemental output files must be in canonical order")
+        if len({item.role for item in self.files}) != len(self.files):
+            raise ValueError("supplemental output roles must be unique")
+        return self
 
 
 class ExecutionFileReceipt(StrictModel):
@@ -333,6 +422,7 @@ class ProofReport(StrictModel):
     provenance: tuple[ProvenanceNode, ...]
     certificates: tuple[Certificate, ...]
     producers: tuple[ProducerSummary, ...]
+    supplemental_outputs: tuple[SupplementalOutputSummary, ...] = ()
     audit_issues: tuple[AuditIssueSummary, ...]
     adapter: ComponentIdentity
     providers: tuple[ComponentIdentity, ...]
@@ -357,6 +447,7 @@ class ProofReport(StrictModel):
             ("provenance", self.provenance),
             ("certificates", self.certificates),
             ("producers", self.producers),
+            ("supplemental outputs", self.supplemental_outputs),
             ("audit issues", self.audit_issues),
             ("providers", self.providers),
         )
@@ -368,6 +459,7 @@ class ProofReport(StrictModel):
             ("provenance", self.provenance),
             ("certificates", self.certificates),
             ("producers", self.producers),
+            ("supplemental outputs", self.supplemental_outputs),
             ("providers", self.providers),
         )
         for label, values in identified_collections:
@@ -387,6 +479,55 @@ class ProofReport(StrictModel):
         nodes = {item.id: item for item in self.provenance}
         certificates = {item.id: item for item in self.certificates}
         steps = {item.id for item in self.runtime.preimage.build.steps}
+        build_outputs = {item.path: item for item in self.runtime.preimage.build.outputs}
+        runtime_targets = {item.id: item for item in self.runtime.preimage.targets}
+        target_artifacts = {item.artifact.casefold() for item in runtime_targets.values()}
+        target_logical_artifacts = {
+            item.logical_artifact.casefold() for item in runtime_targets.values()
+        }
+        if self.supplemental_outputs:
+            supplemental_targets = [item.target_id for item in self.supplemental_outputs]
+            if len(supplemental_targets) != len(set(supplemental_targets)) or set(
+                supplemental_targets
+            ) != set(runtime_targets):
+                raise ValueError(
+                    "proof-report supplemental outputs differ from the exact target set"
+                )
+        supplemental_paths: set[str] = set()
+        supplemental_logical_paths: set[str] = set()
+        for supplemental in self.supplemental_outputs:
+            if (
+                supplemental.source_step_id not in steps
+                or supplemental.publish_step_id not in steps
+            ):
+                raise ValueError("proof-report supplemental output names a missing build step")
+            for file in supplemental.files:
+                path_identity = file.path.casefold()
+                logical_identity = file.logical_path.casefold()
+                if (
+                    path_identity in supplemental_paths
+                    or logical_identity in supplemental_logical_paths
+                ):
+                    raise ValueError("proof-report supplemental output path is repeated")
+                supplemental_paths.add(path_identity)
+                supplemental_logical_paths.add(logical_identity)
+                if (
+                    path_identity in target_artifacts
+                    or logical_identity in target_logical_artifacts
+                ):
+                    raise ValueError(
+                        "proof-report supplemental output aliases a byte-identity target"
+                    )
+                receipt = build_outputs.get(file.path)
+                if receipt is None or (
+                    receipt.digest != file.digest
+                    or receipt.size != file.size
+                    or not receipt.fresh
+                    or receipt.producer_step != supplemental.publish_step_id
+                ):
+                    raise ValueError(
+                        "proof-report supplemental output differs from its build receipt"
+                    )
         producers_by_artifact: dict[str, list[ProducerSummary]] = {}
         for producer in self.producers:
             artifact = artifacts.get(producer.artifact_id)
@@ -519,6 +660,7 @@ class ProofReport(StrictModel):
         adapter: ComponentIdentity,
         providers: tuple[ComponentIdentity, ...],
         package: ComponentIdentity,
+        supplemental_outputs: tuple[SupplementalOutputSummary, ...] = (),
     ) -> ProofReport:
         """Canonicalize a runtime proof payload and bind it to one digest."""
 
@@ -526,6 +668,7 @@ class ProofReport(StrictModel):
         ordered_provenance = tuple(sorted(provenance, key=_canonical_item_key))
         ordered_certificates = tuple(sorted(certificates, key=_canonical_item_key))
         ordered_producers = tuple(sorted(producers, key=_canonical_item_key))
+        ordered_supplemental = tuple(sorted(supplemental_outputs, key=_canonical_item_key))
         ordered_issues = tuple(sorted(audit_issues, key=_canonical_item_key))
         ordered_providers = tuple(sorted(providers, key=_canonical_item_key))
         digest = Digest.from_bytes(
@@ -536,6 +679,7 @@ class ProofReport(StrictModel):
                     "provenance": ordered_provenance,
                     "certificates": ordered_certificates,
                     "producers": ordered_producers,
+                    "supplemental_outputs": ordered_supplemental,
                     "audit_issues": ordered_issues,
                     "adapter": adapter,
                     "providers": ordered_providers,
@@ -550,6 +694,7 @@ class ProofReport(StrictModel):
             provenance=ordered_provenance,
             certificates=ordered_certificates,
             producers=ordered_producers,
+            supplemental_outputs=ordered_supplemental,
             audit_issues=ordered_issues,
             adapter=adapter,
             providers=ordered_providers,
@@ -1042,6 +1187,7 @@ __all__ = [
     "ExecutionFileReceipt",
     "ExecutionStepReceipt",
     "LogicalPathSummary",
+    "NormalizationCategorySummary",
     "PreviousComparison",
     "ProducerSummary",
     "ProofReport",
@@ -1049,6 +1195,8 @@ __all__ = [
     "RuntimeBindingPreimage",
     "RuntimeProofBinding",
     "StageTiming",
+    "SupplementalOutputFileSummary",
+    "SupplementalOutputSummary",
     "TargetComparisonSummary",
     "TargetSummary",
     "ToolSummary",

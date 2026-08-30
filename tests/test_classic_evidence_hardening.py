@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
@@ -71,6 +72,104 @@ def test_semantic_receipt_cache_is_keyed_by_statement_digest() -> None:
         {(Digest.from_bytes(b"second").value, 6)}
     )
     assert len(assembler.semantic_receipt_keys) == 2
+
+
+def _debug_companion_assembler(*, pdb_changed_bytes: int = 10) -> object:
+    raw_image_digest = Digest.from_bytes(b"raw image")
+    image_digest = Digest.from_bytes(b"stable image")
+    raw_pdb_digest = Digest.from_bytes(b"raw pdb")
+    pdb_digest = Digest.from_bytes(b"stable pdb")
+    image_snapshot = SimpleNamespace(
+        path=Path("/work/build/reprobit-debug/program.exe"),
+        digest=image_digest,
+        size=64,
+    )
+    pdb_snapshot = SimpleNamespace(
+        path=Path("/work/build/reprobit-debug/program.pdb"),
+        digest=pdb_digest,
+        size=64,
+    )
+    pdb_ranges = tuple(
+        SimpleNamespace(start=20 + index * 2, end=21 + index * 2)
+        for index in range(10)
+    )
+    audit = SimpleNamespace(
+        policy_version="msvc42-debug-pair-v1",
+        image_debug=SimpleNamespace(
+            changed_bytes=1,
+            writes=(
+                SimpleNamespace(
+                    category=SimpleNamespace(value="pe.coff_timestamp"),
+                    file_offset=4,
+                    before=1,
+                    after=2,
+                ),
+            ),
+        ),
+        image_metadata_writes=(
+            SimpleNamespace(file_offset=8, before=3, after=4),
+        ),
+        pdb=SimpleNamespace(
+            changed_bytes=pdb_changed_bytes,
+            stats=(
+                SimpleNamespace(
+                    category=SimpleNamespace(value="pdb.signature"),
+                    normalized_bytes=40,
+                    changed_ranges=pdb_ranges,
+                ),
+            ),
+        ),
+    )
+    companion = SimpleNamespace(
+        target_id="program",
+        image_logical_path="build/reprobit-debug/program.exe",
+        pdb_logical_path="build/reprobit-debug/program.pdb",
+        raw_image_digest=raw_image_digest,
+        raw_image_size=64,
+        raw_pdb_digest=raw_pdb_digest,
+        raw_pdb_size=64,
+        link_step_id="analysis-link.program",
+        publish_step_id="publish-analysis.program",
+        image_snapshot=image_snapshot,
+        pdb_snapshot=pdb_snapshot,
+        audit=audit,
+    )
+    assembler = object.__new__(classic_evidence._ClassicEvidenceAssembler)
+    assembler.record = SimpleNamespace(debug_companions=(companion,))
+    return assembler
+
+
+def test_debug_companion_audit_becomes_bounded_receipt_attestation() -> None:
+    assembler = cast(classic_evidence._ClassicEvidenceAssembler, _debug_companion_assembler())
+
+    attestation = assembler._supplemental_output_attestations()[0]
+
+    assert attestation.target_id == "program"
+    assert attestation.policy == "msvc42-debug-pair-v1"
+    image, pdb = attestation.files
+    assert image.role == "image"
+    assert image.raw_digest == Digest.from_bytes(b"raw image")
+    assert image.changed_bytes == 2
+    assert tuple(item.category for item in image.categories) == (
+        "pe.coff_timestamp",
+        "pe.metadata_timestamp",
+    )
+    assert pdb.role == "pdb"
+    assert pdb.raw_digest == Digest.from_bytes(b"raw pdb")
+    assert pdb.changed_bytes == 10
+    assert pdb.categories[0].changed_range_count == 10
+    assert len(pdb.categories[0].changed_ranges) == 8
+    assert pdb.categories[0].omitted_changed_ranges == 2
+
+
+def test_debug_companion_rejects_inconsistent_audit_byte_counts() -> None:
+    assembler = cast(
+        classic_evidence._ClassicEvidenceAssembler,
+        _debug_companion_assembler(pdb_changed_bytes=9),
+    )
+
+    with pytest.raises(ClassicProjectError, match="inconsistent changed-byte accounting"):
+        assembler._supplemental_output_attestations()
 
 
 def test_typed_semantic_stage_rejects_an_unbound_current_artifact() -> None:

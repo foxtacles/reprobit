@@ -23,18 +23,22 @@ from reprobit.classic_runtime_graph import (
 from reprobit.costs import calculate_intervention_cost, intervention_cost_row_digest
 from reprobit.execution import (
     FileReceipt,
+    NormalizationCategoryAttestation,
     ObjectTransformAttestation,
     ObjectTransformOperation,
     ProducerAttestation,
     ProducerKind,
     RuntimeEvidence,
     RuntimeEvidenceContext,
+    SupplementalOutputAttestation,
+    SupplementalOutputFileAttestation,
     classic_semantic_obligation_name,
 )
 from reprobit.model import (
     Artifact,
     ArtifactKind,
     ArtifactOrigin,
+    ByteRange,
     Certificate,
     Digest,
     ProofObligation,
@@ -58,6 +62,48 @@ from reprobit.schema import (
 from reprobit.strict_json import canonical_json
 
 CLASSIC_RUNTIME_EVIDENCE_PROVIDER_ID = "classic-msvc-producer-graph-v1"
+_NORMALIZATION_RANGE_PREVIEW_LIMIT = 8
+
+
+def _changed_integer_ranges(offset: int, before: int, after: int) -> tuple[tuple[int, int], ...]:
+    """Return exact changed subranges for one little-endian 32-bit write."""
+
+    before_bytes = before.to_bytes(4, "little")
+    after_bytes = after.to_bytes(4, "little")
+    ranges: list[tuple[int, int]] = []
+    start: int | None = None
+    for index, (left, right) in enumerate(zip(before_bytes, after_bytes, strict=True)):
+        if left != right and start is None:
+            start = offset + index
+        elif left == right and start is not None:
+            ranges.append((start, offset + index))
+            start = None
+    if start is not None:
+        ranges.append((start, offset + 4))
+    return tuple(ranges)
+
+
+def _normalization_category(
+    category: str,
+    *,
+    normalized_bytes: int,
+    changed_ranges: Sequence[tuple[int, int]],
+) -> NormalizationCategoryAttestation:
+    """Keep complete counts while bounding the human-facing range preview."""
+
+    ordered = tuple(sorted(changed_ranges))
+    preview = ordered[:_NORMALIZATION_RANGE_PREVIEW_LIMIT]
+    return NormalizationCategoryAttestation(
+        category=category,
+        normalized_bytes=normalized_bytes,
+        changed_bytes=sum(end - start for start, end in ordered),
+        changed_range_count=len(ordered),
+        changed_ranges=tuple(
+            ByteRange(offset=start, length=end - start)
+            for start, end in preview
+        ),
+        omitted_changed_ranges=len(ordered) - len(preview),
+    )
 
 
 def _reference(inputs: ClassicRuntimeEvidenceInputs, value: str) -> Path | None:
@@ -268,7 +314,133 @@ class _ClassicEvidenceAssembler:
             certificates=tuple(self.certificates.values()),
             producers=tuple(self.producers),
             object_transforms=tuple(self.object_transform_attestations),
+            supplemental_outputs=self._supplemental_output_attestations(),
         )
+
+    def _supplemental_output_attestations(
+        self,
+    ) -> tuple[SupplementalOutputAttestation, ...]:
+        """Expose debug companions without adding them to authenticity evidence."""
+
+        attestations: list[SupplementalOutputAttestation] = []
+        for companion in self.record.debug_companions:
+            audit = companion.audit
+            image_ranges: dict[str, list[tuple[int, int]]] = {}
+            image_normalized: dict[str, int] = {}
+            for write in audit.image_debug.writes:
+                category = write.category.value
+                image_normalized[category] = image_normalized.get(category, 0) + 4
+                image_ranges.setdefault(category, []).extend(
+                    _changed_integer_ranges(
+                        write.file_offset,
+                        write.before,
+                        write.after,
+                    )
+                )
+            metadata_category = "pe.metadata_timestamp"
+            image_normalized[metadata_category] = 4 * len(audit.image_metadata_writes)
+            image_ranges[metadata_category] = [
+                changed_range
+                for write in audit.image_metadata_writes
+                for changed_range in _changed_integer_ranges(
+                    write.file_offset,
+                    write.before,
+                    write.after,
+                )
+            ]
+            image_categories = tuple(
+                sorted(
+                    (
+                        _normalization_category(
+                            category,
+                            normalized_bytes=image_normalized[category],
+                            changed_ranges=image_ranges.get(category, ()),
+                        )
+                        for category in image_normalized
+                        if image_normalized[category] > 0
+                    ),
+                    key=lambda item: item.category,
+                )
+            )
+            image_changed_bytes = sum(item.changed_bytes for item in image_categories)
+            if image_changed_bytes != (
+                audit.image_debug.changed_bytes
+                + sum(
+                    end - start
+                    for write in audit.image_metadata_writes
+                    for start, end in _changed_integer_ranges(
+                        write.file_offset,
+                        write.before,
+                        write.after,
+                    )
+                )
+            ):
+                raise ClassicProjectError(
+                    f"debug-companion image audit for {companion.target_id!r} "
+                    "has inconsistent changed-byte accounting"
+                )
+
+            pdb_categories = tuple(
+                sorted(
+                    (
+                        _normalization_category(
+                            stat.category.value,
+                            normalized_bytes=stat.normalized_bytes,
+                            changed_ranges=tuple(
+                                (item.start, item.end) for item in stat.changed_ranges
+                            ),
+                        )
+                        for stat in audit.pdb.stats
+                        if stat.normalized_bytes > 0
+                    ),
+                    key=lambda item: item.category,
+                )
+            )
+            if sum(item.changed_bytes for item in pdb_categories) != audit.pdb.changed_bytes:
+                raise ClassicProjectError(
+                    f"debug-companion PDB audit for {companion.target_id!r} "
+                    "has inconsistent changed-byte accounting"
+                )
+
+            attestations.append(
+                SupplementalOutputAttestation(
+                    id=f"debug-companion.{companion.target_id}",
+                    target_id=companion.target_id,
+                    policy=audit.policy_version,
+                    source_step_id=companion.link_step_id,
+                    publish_step_id=companion.publish_step_id,
+                    files=tuple(
+                        sorted(
+                            (
+                                SupplementalOutputFileAttestation(
+                                    role="image",
+                                    logical_path=companion.image_logical_path,
+                                    path=companion.image_snapshot.path,
+                                    digest=companion.image_snapshot.digest,
+                                    size=companion.image_snapshot.size,
+                                    raw_digest=companion.raw_image_digest,
+                                    raw_size=companion.raw_image_size,
+                                    changed_bytes=image_changed_bytes,
+                                    categories=image_categories,
+                                ),
+                                SupplementalOutputFileAttestation(
+                                    role="pdb",
+                                    logical_path=companion.pdb_logical_path,
+                                    path=companion.pdb_snapshot.path,
+                                    digest=companion.pdb_snapshot.digest,
+                                    size=companion.pdb_snapshot.size,
+                                    raw_digest=companion.raw_pdb_digest,
+                                    raw_size=companion.raw_pdb_size,
+                                    changed_bytes=audit.pdb.changed_bytes,
+                                    categories=pdb_categories,
+                                ),
+                            ),
+                            key=lambda item: item.role,
+                        )
+                    ),
+                )
+            )
+        return tuple(sorted(attestations, key=lambda item: item.id))
 
     def _overlay_intervention_ids(self) -> tuple[str, ...]:
         return tuple(

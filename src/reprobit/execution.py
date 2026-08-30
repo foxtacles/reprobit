@@ -137,6 +137,102 @@ class ObjectTransformAttestation:
 
 
 @dataclass(frozen=True, slots=True)
+class NormalizationCategoryAttestation:
+    """Compact accounting for one named supplemental normalization policy."""
+
+    category: str
+    normalized_bytes: int
+    changed_bytes: int
+    changed_range_count: int
+    changed_ranges: tuple[ByteRange, ...] = ()
+    omitted_changed_ranges: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.category:
+            raise EngineError("normalization category cannot be empty")
+        if self.normalized_bytes < 0 or self.changed_bytes < 0:
+            raise EngineError("normalization byte counts cannot be negative")
+        if self.changed_bytes > self.normalized_bytes:
+            raise EngineError("changed normalization bytes exceed eligible bytes")
+        if self.changed_range_count < 0 or self.omitted_changed_ranges < 0:
+            raise EngineError("normalization range counts cannot be negative")
+        if self.changed_range_count != len(self.changed_ranges) + self.omitted_changed_ranges:
+            raise EngineError("normalization range summary is incomplete")
+        if self.changed_ranges != tuple(
+            sorted(self.changed_ranges, key=lambda item: (item.offset, item.length))
+        ):
+            raise EngineError("normalization ranges must be in canonical order")
+        for left, right in pairwise(self.changed_ranges):
+            if left.overlaps(right):
+                raise EngineError("normalization ranges overlap")
+
+
+@dataclass(frozen=True, slots=True)
+class SupplementalOutputFileAttestation:
+    """One noncertifying output bound to a current build receipt."""
+
+    role: str
+    logical_path: str
+    path: Path
+    digest: Digest
+    size: int
+    raw_digest: Digest
+    raw_size: int
+    changed_bytes: int
+    categories: tuple[NormalizationCategoryAttestation, ...] = ()
+
+    def __post_init__(self) -> None:
+        if not self.role or not self.logical_path:
+            raise EngineError("supplemental output role and logical path cannot be empty")
+        if self.size < 0 or self.raw_size < 0 or self.changed_bytes < 0:
+            raise EngineError("supplemental output sizes cannot be negative")
+        if self.size != self.raw_size:
+            raise EngineError("supplemental normalization must preserve file size")
+        if self.changed_bytes > self.size:
+            raise EngineError("supplemental changed-byte count exceeds file size")
+        if (self.changed_bytes == 0) != (self.digest == self.raw_digest):
+            raise EngineError("supplemental raw/final identity contradicts changed-byte count")
+        if self.categories != tuple(sorted(self.categories, key=lambda item: item.category)):
+            raise EngineError("supplemental normalization categories must be canonical")
+        if len({item.category for item in self.categories}) != len(self.categories):
+            raise EngineError("supplemental normalization categories must be unique")
+        if sum(item.changed_bytes for item in self.categories) != self.changed_bytes:
+            raise EngineError("supplemental category byte counts differ from the output total")
+        if any(
+            span.end > self.size
+            for category in self.categories
+            for span in category.changed_ranges
+        ):
+            raise EngineError("supplemental normalization range exceeds the file")
+
+
+@dataclass(frozen=True, slots=True)
+class SupplementalOutputAttestation:
+    """Receipt-bound evidence for outputs outside the authenticity artifact DAG."""
+
+    id: str
+    target_id: str
+    policy: str
+    source_step_id: str
+    publish_step_id: str
+    files: tuple[SupplementalOutputFileAttestation, ...]
+
+    def __post_init__(self) -> None:
+        if not all(
+            (self.id, self.target_id, self.policy, self.source_step_id, self.publish_step_id)
+        ):
+            raise EngineError("supplemental output identifiers cannot be empty")
+        if self.source_step_id == self.publish_step_id:
+            raise EngineError("supplemental source and publication steps must differ")
+        if not self.files:
+            raise EngineError("supplemental output attestation has no files")
+        if self.files != tuple(sorted(self.files, key=lambda item: item.role)):
+            raise EngineError("supplemental output files must be in canonical order")
+        if len({item.role for item in self.files}) != len(self.files):
+            raise EngineError("supplemental output roles must be unique")
+
+
+@dataclass(frozen=True, slots=True)
 class RuntimeEvidence:
     """Evidence freshly issued by one trusted code-side provider."""
 
@@ -147,6 +243,7 @@ class RuntimeEvidence:
     certificates: tuple[Certificate, ...] = ()
     producers: tuple[ProducerAttestation, ...] = ()
     object_transforms: tuple[ObjectTransformAttestation, ...] = ()
+    supplemental_outputs: tuple[SupplementalOutputAttestation, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.provider_id:
@@ -187,6 +284,7 @@ __all__ = [
     "BuildExecutor",
     "EngineError",
     "FileReceipt",
+    "NormalizationCategoryAttestation",
     "ObjectTransformAttestation",
     "ObjectTransformOperation",
     "ProducerAttestation",
@@ -195,6 +293,8 @@ __all__ = [
     "RuntimeEvidenceContext",
     "RuntimeEvidenceProvider",
     "StepExecutionReceipt",
+    "SupplementalOutputAttestation",
+    "SupplementalOutputFileAttestation",
     "TargetOracle",
     "TargetVerification",
     "classic_semantic_obligation_name",

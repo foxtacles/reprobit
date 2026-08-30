@@ -74,6 +74,95 @@ def _render_outcome_details(report: Report) -> str:
     )
 
 
+def _render_debug_companion_details(report: Report) -> str:
+    files = table(
+        (
+            "Target",
+            "Role",
+            "Project path",
+            "Bytes",
+            "Published SHA-256",
+            "Raw SHA-256",
+            "Changed bytes",
+            "Policy",
+        ),
+        tuple(
+            (
+                code(item.target_id, css_class="identifier"),
+                code(file.role, css_class="identifier"),
+                code(file.logical_path, css_class="path"),
+                format_integer(file.size),
+                code(file.digest.value),
+                code(file.raw_digest.value),
+                format_integer(file.changed_bytes),
+                code(item.policy, css_class="identifier"),
+            )
+            for item in report.proof.supplemental_outputs
+            for file in item.files
+        ),
+        caption="Receipt-bound debug companion files",
+    )
+    bindings = table(
+        ("Target", "Role", "Host path", "Source step", "Publish step"),
+        tuple(
+            (
+                code(item.target_id, css_class="identifier"),
+                code(file.role, css_class="identifier"),
+                code(file.path, css_class="path"),
+                code(item.source_step_id, css_class="identifier"),
+                code(item.publish_step_id, css_class="identifier"),
+            )
+            for item in report.proof.supplemental_outputs
+            for file in item.files
+        ),
+        caption="Current-run output receipt bindings",
+    )
+    categories = table(
+        (
+            "Target",
+            "Role",
+            "Category",
+            "Eligible bytes",
+            "Changed bytes",
+            "Changed ranges",
+            "Range preview",
+        ),
+        tuple(
+            (
+                code(item.target_id, css_class="identifier"),
+                code(file.role, css_class="identifier"),
+                code(category.category, css_class="identifier"),
+                format_integer(category.normalized_bytes),
+                format_integer(category.changed_bytes),
+                format_integer(category.changed_range_count),
+                code(
+                    ", ".join(
+                        f"[0x{span.offset:x}, 0x{span.end:x})"
+                        for span in category.changed_ranges
+                    )
+                    + (
+                        f" + {category.omitted_changed_ranges:,} more"
+                        if category.omitted_changed_ranges
+                        else ""
+                    ),
+                    css_class="ranges",
+                )
+                if category.changed_ranges
+                else "none",
+            )
+            for item in report.proof.supplemental_outputs
+            for file in item.files
+            for category in file.categories
+        ),
+        caption="Named bookkeeping normalization categories",
+    )
+    return f"""
+<p><strong>For comparison and analysis only; not a byte-identity target or release
+  artifact.</strong> Each published hash and size below is bound to a fresh build-output
+  receipt. Range previews are intentionally bounded; complete counts remain in the record.</p>
+{files}{bindings}{categories}"""
+
+
 def _render_quarantine_details(report: Report) -> str:
     rows = tuple(
         (
@@ -422,6 +511,26 @@ def render_advanced(report: Report, *, canonical_json_href: str | None) -> str:
             body=_render_outcome_details(report),
         )
     ]
+    if report.proof.supplemental_outputs:
+        file_count = sum(
+            len(item.files) for item in report.proof.supplemental_outputs
+        )
+        changed_bytes = sum(
+            file.changed_bytes
+            for item in report.proof.supplemental_outputs
+            for file in item.files
+        )
+        sections.append(
+            details(
+                identity="debug-companion-details",
+                title="Debug companion normalization audit",
+                meta=(
+                    f"{count_phrase(file_count, 'file')} · "
+                    f"{count_phrase(changed_bytes, 'changed byte')}"
+                ),
+                body=_render_debug_companion_details(report),
+            )
+        )
     if report.verdict.quarantines:
         range_count = sum(len(item.ranges) for item in report.verdict.quarantines)
         sections.append(

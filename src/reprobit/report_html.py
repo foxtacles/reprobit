@@ -190,6 +190,36 @@ def _render_target_cards(report: Report) -> str:
 </section>"""
 
 
+def _render_debug_companions(report: Report) -> str:
+    if not report.proof.supplemental_outputs:
+        return ""
+    cards = "".join(
+        f"""<article class="card">
+  <p class="eyebrow"><code>{escape(item.target_id)}</code></p>
+  <h3>Matched image + symbols</h3>
+  {''.join(
+      f'<p class="token"><code>{escape(file.role)}</code> '
+      f'<code>{escape(file.logical_path)}</code></p>'
+      for file in item.files
+  )}
+</article>"""
+        for item in report.proof.supplemental_outputs
+    )
+    return f"""
+<section class="section" id="debug-companions" aria-labelledby="debug-companions-title">
+  <div class="section-heading"><div><p class="eyebrow">Symbol-aware analysis files</p>
+    <h2 id="debug-companions-title">Comparison files</h2></div>
+    <p>{count_phrase(len(report.proof.supplemental_outputs), 'matched pair')}</p></div>
+  <aside class="card">
+    <p><strong>Debug companion: reproducible — bookkeeping stabilized; symbols, types,
+      addresses, and source lines preserved.</strong></p>
+    <p>For comparison and analysis only; not a byte-identity target or release artifact.</p>
+    <a href="#debug-companion-details">Review normalization details</a>
+  </aside>
+  <div class="card-grid">{cards}</div>
+</section>"""
+
+
 def _render_costs(report: Report) -> str:
     if report.costs.project_total == 0:
         return """
@@ -486,8 +516,10 @@ def _render_navigation(report: Report) -> str:
     links = [
         ("Overview", "#overview"),
         ("Targets", "#targets"),
-        ("Costs", "#costs"),
     ]
+    if report.proof.supplemental_outputs:
+        links.append(("Comparison files", "#debug-companions"))
+    links.append(("Costs", "#costs"))
     if report.timings:
         links.append(("Timing", "#timing"))
     links.extend((("Next steps", "#next-steps"), ("Advanced", "#advanced")))
@@ -526,6 +558,7 @@ def render_report_html(
 <main>
 {_render_overview(report)}
 {_render_target_cards(report)}
+{_render_debug_companions(report)}
 {_render_costs(report)}
 {_render_timings(report)}
 {_render_next_steps(report)}

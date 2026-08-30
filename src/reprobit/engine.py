@@ -43,12 +43,15 @@ from reprobit.report import (
     ComponentIdentity,
     ExecutionFileReceipt,
     ExecutionStepReceipt,
+    NormalizationCategorySummary,
     ProducerSummary,
     ProofReport,
     Report,
     RuntimeBindingPreimage,
     RuntimeProofBinding,
     StageTiming,
+    SupplementalOutputFileSummary,
+    SupplementalOutputSummary,
     TargetComparisonSummary,
 )
 from reprobit.report_io import render_report_html, report_json_href
@@ -843,6 +846,43 @@ class ReproductionEngine:
                 )
                 for issued in runtime_evidence
                 for item in issued.producers
+            ),
+            supplemental_outputs=tuple(
+                SupplementalOutputSummary(
+                    id=item.id,
+                    target_id=item.target_id,
+                    policy=item.policy,
+                    source_step_id=item.source_step_id,
+                    publish_step_id=item.publish_step_id,
+                    files=tuple(
+                        SupplementalOutputFileSummary(
+                            role=file.role,
+                            logical_path=file.logical_path,
+                            path=str(file.path),
+                            digest=file.digest,
+                            size=file.size,
+                            raw_digest=file.raw_digest,
+                            raw_size=file.raw_size,
+                            changed_bytes=file.changed_bytes,
+                            categories=tuple(
+                                NormalizationCategorySummary(
+                                    category=category.category,
+                                    normalized_bytes=category.normalized_bytes,
+                                    changed_bytes=category.changed_bytes,
+                                    changed_range_count=category.changed_range_count,
+                                    changed_ranges=category.changed_ranges,
+                                    omitted_changed_ranges=(
+                                        category.omitted_changed_ranges
+                                    ),
+                                )
+                                for category in file.categories
+                            ),
+                        )
+                        for file in item.files
+                    ),
+                )
+                for issued in runtime_evidence
+                for item in issued.supplemental_outputs
             ),
             audit_issues=tuple(
                 AuditIssueSummary(
