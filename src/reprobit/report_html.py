@@ -193,28 +193,31 @@ def _render_target_cards(report: Report) -> str:
 def _render_debug_companions(report: Report) -> str:
     if not report.proof.supplemental_outputs:
         return ""
+    role_labels = {"image": "Executable", "pdb": "Debug symbols"}
     cards = "".join(
         f"""<article class="card">
   <p class="eyebrow"><code>{escape(item.target_id)}</code></p>
-  <h3>Matched image + symbols</h3>
-  {''.join(
-      f'<p class="token"><code>{escape(file.role)}</code> '
-      f'<code>{escape(file.logical_path)}</code></p>'
-      for file in item.files
-  )}
+  <h3>Matched executable + symbols</h3>
+  {
+            "".join(
+                f'<p class="token"><strong>{escape(role_labels.get(file.role, file.role))}'
+                f"</strong> <code>{escape(file.logical_path)}</code></p>"
+                for file in item.files
+            )
+        }
 </article>"""
         for item in report.proof.supplemental_outputs
     )
     return f"""
 <section class="section" id="debug-companions" aria-labelledby="debug-companions-title">
-  <div class="section-heading"><div><p class="eyebrow">Symbol-aware analysis files</p>
+  <div class="section-heading"><div><p class="eyebrow">Files for comparison tools</p>
     <h2 id="debug-companions-title">Comparison files</h2></div>
-    <p>{count_phrase(len(report.proof.supplemental_outputs), 'matched pair')}</p></div>
+    <p>{count_phrase(len(report.proof.supplemental_outputs), "matched pair")}</p></div>
   <aside class="card">
     <p><strong>Debug companion: reproducible — bookkeeping stabilized; symbols, types,
       addresses, and source lines preserved.</strong></p>
     <p>For comparison and analysis only; not a byte-identity target or release artifact.</p>
-    <a href="#debug-companion-details">Review normalization details</a>
+    <a href="#debug-companion-details">See what ReproBit adjusted</a>
   </aside>
   <div class="card-grid">{cards}</div>
 </section>"""
@@ -327,7 +330,7 @@ def _render_costs(report: Report) -> str:
 <section class="section" id="costs" aria-labelledby="costs-title">
   <div class="section-heading"><div><p class="eyebrow">Where intervention effort lives</p>
     <h2 id="costs-title">Cost overview</h2></div>
-    <p><strong>{format_integer(report.costs.project_total)}</strong> relative points</p></div>
+    <p><strong>{count_phrase(report.costs.project_total, "relative point")}</strong></p></div>
   <p class="explain"><strong>Cost ranks interventions; it is not elapsed time.</strong>
     Higher scores mean a larger departure from an ordinary build. A TU is one source file as the
     compiler sees it. <code>Oracle install</code> identifies the disclosed reference-byte

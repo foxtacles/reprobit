@@ -199,9 +199,7 @@ class SupplementalOutputFileAttestation:
         if sum(item.changed_bytes for item in self.categories) != self.changed_bytes:
             raise EngineError("supplemental category byte counts differ from the output total")
         if any(
-            span.end > self.size
-            for category in self.categories
-            for span in category.changed_ranges
+            span.end > self.size for category in self.categories for span in category.changed_ranges
         ):
             raise EngineError("supplemental normalization range exceeds the file")
 

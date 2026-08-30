@@ -182,9 +182,7 @@ class SupplementalOutputFileSummary(StrictModel):
         if sum(item.changed_bytes for item in self.categories) != self.changed_bytes:
             raise ValueError("supplemental category bytes differ from the file total")
         if any(
-            item.end > self.size
-            for category in self.categories
-            for item in category.changed_ranges
+            item.end > self.size for category in self.categories for item in category.changed_ranges
         ):
             raise ValueError("supplemental normalization range exceeds the file")
         return self

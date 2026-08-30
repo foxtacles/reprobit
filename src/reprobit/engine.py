@@ -871,9 +871,7 @@ class ReproductionEngine:
                                     changed_bytes=category.changed_bytes,
                                     changed_range_count=category.changed_range_count,
                                     changed_ranges=category.changed_ranges,
-                                    omitted_changed_ranges=(
-                                        category.omitted_changed_ranges
-                                    ),
+                                    omitted_changed_ranges=(category.omitted_changed_ranges),
                                 )
                                 for category in file.categories
                             ),

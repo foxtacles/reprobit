@@ -285,10 +285,7 @@ class ClassicProducerGraphBuildExecutor:
             raise ClassicProjectError("classic analysis-link options are not closed")
         try:
             self.debug_companion_paths = MappingProxyType(
-                {
-                    item.target_id: item
-                    for item in classic_debug_companion_paths(bundle)
-                }
+                {item.target_id: item for item in classic_debug_companion_paths(bundle)}
             )
         except ValueError as exc:
             raise ClassicProjectError(
@@ -835,9 +832,7 @@ class ClassicProducerGraphBuildExecutor:
         pending_debug_companions: list[_ClassicPendingDebugCompanion] = []
         if self.analysis_link_options:
             nodes_by_id = {node.id: node for node in self.graph.nodes}
-            certified_images = {
-                item.target.target_id: item.payload for item in pending_images
-            }
+            certified_images = {item.target.target_id: item.payload for item in pending_images}
             with ProcessSupervisor() as analysis_supervisor:
                 for target in self.targets:
                     node = nodes_by_id.get(target.link_node_id)
@@ -1060,10 +1055,8 @@ class ClassicProducerGraphBuildExecutor:
                     publish_step_id = f"publish-analysis.{target_id}"
                     audit = pending_companion.stabilized.audit
                     if (
-                        audit.certified_image_sha256
-                        != certified_image.final_snapshot.digest.value
-                        or audit.image_metadata_output_sha256
-                        != image_snapshot.digest.value
+                        audit.certified_image_sha256 != certified_image.final_snapshot.digest.value
+                        or audit.image_metadata_output_sha256 != image_snapshot.digest.value
                         or audit.pdb.output_sha256 != pdb_snapshot.digest.value
                     ):
                         raise ClassicProjectError(
@@ -1109,9 +1102,7 @@ class ClassicProducerGraphBuildExecutor:
                             target_id=target_id,
                             image_logical_path=pending_companion.logical_image_path,
                             pdb_logical_path=pending_companion.logical_pdb_path,
-                            raw_image_digest=Digest(
-                                value=audit.image_debug.raw_sha256
-                            ),
+                            raw_image_digest=Digest(value=audit.image_debug.raw_sha256),
                             raw_image_size=audit.image_debug.size,
                             raw_pdb_digest=Digest(value=audit.pdb.raw_sha256),
                             raw_pdb_size=audit.pdb.size,
@@ -1176,9 +1167,7 @@ class ClassicProducerGraphBuildExecutor:
                         ("image", companion.image_snapshot),
                         ("PDB", companion.pdb_snapshot),
                     ):
-                        receipt = output_receipts_by_path.get(
-                            snapshot.path.resolve(strict=False)
-                        )
+                        receipt = output_receipts_by_path.get(snapshot.path.resolve(strict=False))
                         if receipt is None or (
                             receipt.digest != snapshot.digest
                             or receipt.size != snapshot.size

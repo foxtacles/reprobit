@@ -137,8 +137,7 @@ def _render_debug_companion_details(report: Report) -> str:
                 format_integer(category.changed_range_count),
                 code(
                     ", ".join(
-                        f"[0x{span.offset:x}, 0x{span.end:x})"
-                        for span in category.changed_ranges
+                        f"[0x{span.offset:x}, 0x{span.end:x})" for span in category.changed_ranges
                     )
                     + (
                         f" + {category.omitted_changed_ranges:,} more"
@@ -507,18 +506,14 @@ def render_advanced(report: Report, *, canonical_json_href: str | None) -> str:
         details(
             identity="outcome-details",
             title="Verdict and target comparison records",
-            meta=f"{len(report.targets)} targets · full hashes",
+            meta=f"{count_phrase(len(report.targets), 'target')} · full hashes",
             body=_render_outcome_details(report),
         )
     ]
     if report.proof.supplemental_outputs:
-        file_count = sum(
-            len(item.files) for item in report.proof.supplemental_outputs
-        )
+        file_count = sum(len(item.files) for item in report.proof.supplemental_outputs)
         changed_bytes = sum(
-            file.changed_bytes
-            for item in report.proof.supplemental_outputs
-            for file in item.files
+            file.changed_bytes for item in report.proof.supplemental_outputs for file in item.files
         )
         sections.append(
             details(
@@ -549,15 +544,18 @@ def render_advanced(report: Report, *, canonical_json_href: str | None) -> str:
             details(
                 identity="identity-details",
                 title="Run identity and build records",
-                meta=f"{len(report.proof.runtime.preimage.build.steps)} steps",
+                meta=count_phrase(
+                    len(report.proof.runtime.preimage.build.steps),
+                    "step",
+                ),
                 body=_render_identity_details(report, canonical_json_href),
             ),
             details(
                 identity="toolchain-details",
                 title="Locked toolchain",
                 meta=(
-                    f"{len(report.toolchain.tools)} files · "
-                    f"{len(report.toolchain.input_trees)} trees"
+                    f"{count_phrase(len(report.toolchain.tools), 'file')} · "
+                    f"{count_phrase(len(report.toolchain.input_trees), 'tree')}"
                 ),
                 body=_render_toolchain_details(report),
             ),
@@ -565,27 +563,30 @@ def render_advanced(report: Report, *, canonical_json_href: str | None) -> str:
                 identity="evidence-details",
                 title="Evidence coverage, trusted components, and audit",
                 meta=(
-                    f"{report.evidence.artifacts:,} artifacts · "
-                    f"{len(report.proof.audit_issues)} issues"
+                    f"{count_phrase(report.evidence.artifacts, 'artifact')} · "
+                    f"{count_phrase(len(report.proof.audit_issues), 'issue')}"
                 ),
                 body=_render_evidence_details(report),
             ),
             details(
                 identity="cost-details",
                 title="Exact cost totals",
-                meta=f"model v{report.costs.model_version} · {report.costs.project_total:,} points",
+                meta=(
+                    f"model v{report.costs.model_version} · "
+                    f"{count_phrase(report.costs.project_total, 'point')}"
+                ),
                 body=_render_cost_details(report),
             ),
             details(
                 identity="function-details",
                 title="Raw function-cost table",
-                meta=f"{len(report.costs.by_function):,} functions",
+                meta=count_phrase(len(report.costs.by_function), "function"),
                 body=_render_function_details(report),
             ),
             details(
                 identity="intervention-details",
                 title="Raw intervention table",
-                meta=f"{len(report.costs.interventions):,} interventions",
+                meta=count_phrase(len(report.costs.interventions), "intervention"),
                 body=_render_intervention_details(report),
             ),
         )

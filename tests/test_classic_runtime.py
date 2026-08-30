@@ -2737,9 +2737,7 @@ def _cold_debug_publication_fixture(
             raw_sha256=sha256(raw_pdb).hexdigest(),
             size=len(raw_pdb),
             changed_bytes=2,
-            output_sha256=sha256(
-                payloads["build/reprobit-debug/program.PDB"]
-            ).hexdigest(),
+            output_sha256=sha256(payloads["build/reprobit-debug/program.PDB"]).hexdigest(),
         ),
     )
     stabilized = cast(
@@ -2809,9 +2807,7 @@ def _cold_debug_publication_fixture(
     executor.bundle = SimpleNamespace(
         spec=SimpleNamespace(
             state_dir="state",
-            targets=(
-                SimpleNamespace(id="program", artifact="build/program.exe"),
-            ),
+            targets=(SimpleNamespace(id="program", artifact="build/program.exe"),),
         )
     )
     executor.role_tool_ids = MappingProxyType({ProducerRole.LINKER: "linker"})
@@ -2846,10 +2842,7 @@ def test_cold_debug_pair_publication_binds_both_members_without_certifying_them(
     )
 
     project_root = executor.project_root
-    assert {
-        path: (project_root / path).read_bytes()
-        for path in payloads
-    } == payloads
+    assert {path: (project_root / path).read_bytes() for path in payloads} == payloads
     assert receipt.cold
     assert {item.step_id for item in receipt.steps} == {
         "analysis-link.program",
@@ -2867,9 +2860,7 @@ def test_cold_debug_pair_publication_binds_both_members_without_certifying_them(
     }
     assert executor.record is not None
     assert tuple(item.target_id for item in executor.record.images) == ("program",)
-    assert tuple(item.target_id for item in executor.record.debug_companions) == (
-        "program",
-    )
+    assert tuple(item.target_id for item in executor.record.debug_companions) == ("program",)
     companion = executor.record.debug_companions[0]
     assert companion.image_logical_path == "build/reprobit-debug/program.exe"
     assert companion.pdb_logical_path == "build/reprobit-debug/program.PDB"
@@ -2934,10 +2925,7 @@ def test_cold_debug_pair_second_member_failure_rolls_back_exact_and_companion(
             output_steps={},
         )
 
-    assert {
-        relative: (project_root / relative).read_bytes()
-        for relative in originals
-    } == originals
+    assert {relative: (project_root / relative).read_bytes() for relative in originals} == originals
     assert executor.record is None
     assert [item.step_id for item in steps] == ["analysis-link.program"]
     assert payloads != originals

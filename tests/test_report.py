@@ -1300,7 +1300,13 @@ def test_debug_companion_is_receipt_bound_but_outside_authenticity_artifacts() -
         in collapsed_text
     )
     assert "Comparison files" in rendered
-    assert "Matched image + symbols" in rendered
+    assert "Matched executable + symbols" in rendered
+    assert "Files for comparison tools" in rendered
+    assert "See what ReproBit adjusted" in rendered
+    assert "<strong>Executable</strong>" in rendered
+    assert "<strong>Debug symbols</strong>" in rendered
+    assert "1 target · full hashes" in rendered
+    assert "1 targets" not in rendered
     assert '<details class="advanced" id="debug-companion-details">' in rendered
     assert "Receipt-bound debug companion files" in rendered
     assert "Current-run output receipt bindings" in rendered
@@ -1342,9 +1348,7 @@ def test_debug_companion_rejects_unbound_or_target_aliasing_outputs() -> None:
 
     target = proof.runtime.preimage.targets[0]
     exact_output = next(
-        item
-        for item in proof.runtime.preimage.build.outputs
-        if item.path == target.artifact
+        item for item in proof.runtime.preimage.build.outputs if item.path == target.artifact
     )
     aliased_image = image.model_copy(
         update={
@@ -1365,9 +1369,7 @@ def test_debug_companion_rejects_unbound_or_target_aliasing_outputs() -> None:
             provenance=proof.provenance,
             certificates=proof.certificates,
             producers=proof.producers,
-            supplemental_outputs=(
-                supplemental.model_copy(update={"files": (aliased_image, pdb)}),
-            ),
+            supplemental_outputs=(supplemental.model_copy(update={"files": (aliased_image, pdb)}),),
             audit_issues=proof.audit_issues,
             adapter=proof.adapter,
             providers=proof.providers,

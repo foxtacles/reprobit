@@ -90,8 +90,7 @@ def _debug_companion_assembler(*, pdb_changed_bytes: int = 10) -> object:
         size=64,
     )
     pdb_ranges = tuple(
-        SimpleNamespace(start=20 + index * 2, end=21 + index * 2)
-        for index in range(10)
+        SimpleNamespace(start=20 + index * 2, end=21 + index * 2) for index in range(10)
     )
     audit = SimpleNamespace(
         policy_version="msvc42-debug-pair-v1",
@@ -106,9 +105,7 @@ def _debug_companion_assembler(*, pdb_changed_bytes: int = 10) -> object:
                 ),
             ),
         ),
-        image_metadata_writes=(
-            SimpleNamespace(file_offset=8, before=3, after=4),
-        ),
+        image_metadata_writes=(SimpleNamespace(file_offset=8, before=3, after=4),),
         pdb=SimpleNamespace(
             changed_bytes=pdb_changed_bytes,
             stats=(

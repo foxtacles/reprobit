@@ -98,10 +98,7 @@ def _normalization_category(
         normalized_bytes=normalized_bytes,
         changed_bytes=sum(end - start for start, end in ordered),
         changed_range_count=len(ordered),
-        changed_ranges=tuple(
-            ByteRange(offset=start, length=end - start)
-            for start, end in preview
-        ),
+        changed_ranges=tuple(ByteRange(offset=start, length=end - start) for start, end in preview),
         omitted_changed_ranges=len(ordered) - len(preview),
     )
 
