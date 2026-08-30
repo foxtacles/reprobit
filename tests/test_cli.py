@@ -1215,8 +1215,7 @@ def _complete_donor_overlay_project(root: Path) -> Path:
         role=ClassicRecipeRole.DONOR,
         build_target="program",
         parameters=tuple(
-            ClassicField(name=name, value=value)
-            for name, value in sorted(donor_parameters.items())
+            ClassicField(name=name, value=value) for name, value in sorted(donor_parameters.items())
         ),
     )
     function = ClassicRecipeIntervention(

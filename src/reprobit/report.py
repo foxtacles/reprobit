@@ -165,6 +165,7 @@ class SupplementalOutputFileSummary(StrictModel):
     size: Annotated[int, Field(ge=0)]
     raw_digest: Digest
     raw_size: Annotated[int, Field(ge=0)]
+    outside_policy_digest: Digest
     changed_bytes: Annotated[int, Field(ge=0)]
     categories: tuple[NormalizationCategorySummary, ...] = ()
 

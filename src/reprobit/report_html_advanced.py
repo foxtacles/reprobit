@@ -83,6 +83,7 @@ def _render_debug_companion_details(report: Report) -> str:
             "Bytes",
             "Published SHA-256",
             "Raw SHA-256",
+            "Outside-policy SHA-256",
             "Changed bytes",
             "Policy",
         ),
@@ -94,6 +95,7 @@ def _render_debug_companion_details(report: Report) -> str:
                 format_integer(file.size),
                 code(file.digest.value),
                 code(file.raw_digest.value),
+                code(file.outside_policy_digest.value),
                 format_integer(file.changed_bytes),
                 code(item.policy, css_class="identifier"),
             )

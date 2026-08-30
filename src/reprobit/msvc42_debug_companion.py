@@ -44,6 +44,7 @@ class Msvc42DebugPairAudit:
     certified_image_sha256: str
     times: PE32MetadataTimes
     image_debug: DebugCompanionCanonicalizationAudit
+    image_bytes_outside_policy_ranges_sha256: str
     image_metadata_input_sha256: str
     image_metadata_output_sha256: str
     image_metadata_writes: tuple[DebugPairMetadataWrite, ...]
@@ -79,6 +80,27 @@ def _metadata_writes(proof: dict[str, object]) -> tuple[DebugPairMetadataWrite, 
         assert isinstance(after, int)
         writes.append(DebugPairMetadataWrite(offset, before, after))
     return tuple(writes)
+
+
+def _outside_policy_ranges_sha256(
+    raw: bytes,
+    output: bytes,
+    ranges: tuple[tuple[int, int], ...],
+) -> str:
+    """Hash the identical projection outside a closed set of eligible ranges."""
+
+    require(len(raw) == len(output), "debug-companion normalization changed file size")
+    preserved_raw = bytearray(raw)
+    preserved_output = bytearray(output)
+    for start, end in ranges:
+        require(0 <= start < end <= len(raw), "debug-companion policy range exceeds the image")
+        preserved_raw[start:end] = b"\0" * (end - start)
+        preserved_output[start:end] = b"\0" * (end - start)
+    require(
+        preserved_raw == preserved_output,
+        "debug-companion stabilization changed a byte outside its audited ranges",
+    )
+    return sha256(preserved_raw).hexdigest()
 
 
 def stabilize_msvc42_debug_companion(
@@ -129,6 +151,13 @@ def stabilize_msvc42_debug_companion(
         link_time=times.link_time,
         expected_input_identity=raw_pdb_identity,
     )
+    metadata_writes = _metadata_writes(metadata_proof)
+    image_outside_policy_ranges_sha256 = _outside_policy_ranges_sha256(
+        raw_image,
+        image,
+        tuple((write.file_offset, write.file_offset + 4) for write in debug_image.audit.writes)
+        + tuple((write.file_offset, write.file_offset + 4) for write in metadata_writes),
+    )
 
     final_image_identity = read_msvc42_debug_companion_identity(
         image,
@@ -162,14 +191,15 @@ def stabilize_msvc42_debug_companion(
         image,
         pdb.data,
         Msvc42DebugPairAudit(
-            MSVC42_DEBUG_PAIR_POLICY,
-            sha256(certified_image).hexdigest(),
-            times,
-            debug_image.audit,
-            debug_image.audit.output_sha256,
-            output_sha256,
-            _metadata_writes(metadata_proof),
-            pdb.audit,
+            policy_version=MSVC42_DEBUG_PAIR_POLICY,
+            certified_image_sha256=sha256(certified_image).hexdigest(),
+            times=times,
+            image_debug=debug_image.audit,
+            image_bytes_outside_policy_ranges_sha256=(image_outside_policy_ranges_sha256),
+            image_metadata_input_sha256=debug_image.audit.output_sha256,
+            image_metadata_output_sha256=output_sha256,
+            image_metadata_writes=metadata_writes,
+            pdb=pdb.audit,
         ),
     )
 

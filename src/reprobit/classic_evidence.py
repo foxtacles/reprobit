@@ -417,6 +417,9 @@ class _ClassicEvidenceAssembler:
                                     size=companion.image_snapshot.size,
                                     raw_digest=companion.raw_image_digest,
                                     raw_size=companion.raw_image_size,
+                                    outside_policy_digest=Digest(
+                                        value=(audit.image_bytes_outside_policy_ranges_sha256)
+                                    ),
                                     changed_bytes=image_changed_bytes,
                                     categories=image_categories,
                                 ),
@@ -428,6 +431,9 @@ class _ClassicEvidenceAssembler:
                                     size=companion.pdb_snapshot.size,
                                     raw_digest=companion.raw_pdb_digest,
                                     raw_size=companion.raw_pdb_size,
+                                    outside_policy_digest=Digest(
+                                        value=audit.pdb.bytes_outside_policy_ranges_sha256
+                                    ),
                                     changed_bytes=audit.pdb.changed_bytes,
                                     categories=pdb_categories,
                                 ),

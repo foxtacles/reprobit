@@ -94,6 +94,7 @@ def _debug_companion_assembler(*, pdb_changed_bytes: int = 10) -> object:
     )
     audit = SimpleNamespace(
         policy_version="msvc42-debug-pair-v1",
+        image_bytes_outside_policy_ranges_sha256=Digest.from_bytes(b"image outside policy").value,
         image_debug=SimpleNamespace(
             changed_bytes=1,
             writes=(
@@ -107,6 +108,7 @@ def _debug_companion_assembler(*, pdb_changed_bytes: int = 10) -> object:
         ),
         image_metadata_writes=(SimpleNamespace(file_offset=8, before=3, after=4),),
         pdb=SimpleNamespace(
+            bytes_outside_policy_ranges_sha256=Digest.from_bytes(b"pdb outside policy").value,
             changed_bytes=pdb_changed_bytes,
             stats=(
                 SimpleNamespace(
@@ -146,6 +148,7 @@ def test_debug_companion_audit_becomes_bounded_receipt_attestation() -> None:
     image, pdb = attestation.files
     assert image.role == "image"
     assert image.raw_digest == Digest.from_bytes(b"raw image")
+    assert image.outside_policy_digest == Digest.from_bytes(b"image outside policy")
     assert image.changed_bytes == 2
     assert tuple(item.category for item in image.categories) == (
         "pe.coff_timestamp",
@@ -153,6 +156,7 @@ def test_debug_companion_audit_becomes_bounded_receipt_attestation() -> None:
     )
     assert pdb.role == "pdb"
     assert pdb.raw_digest == Digest.from_bytes(b"raw pdb")
+    assert pdb.outside_policy_digest == Digest.from_bytes(b"pdb outside policy")
     assert pdb.changed_bytes == 10
     assert pdb.categories[0].changed_range_count == 10
     assert len(pdb.categories[0].changed_ranges) == 8

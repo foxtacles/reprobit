@@ -87,8 +87,7 @@ def _donor_overlay_input_pins(
             f"donor source-overlay authority {intervention.id!r} is malformed: {exc}"
         ) from exc
     return tuple(
-        _DonorOverlayInputPin(intervention.id, path, digest)
-        for path, digest in pins.items()
+        _DonorOverlayInputPin(intervention.id, path, digest) for path, digest in pins.items()
     )
 
 
@@ -121,11 +120,7 @@ def inspect_source_authority(
         for intervention in classic_interventions
         if intervention.scope.translation_unit is not None
     )
-    if (
-        preflight_classic_recipes
-        and plan is None
-        and tu_classic_interventions
-    ):
+    if preflight_classic_recipes and plan is None and tu_classic_interventions:
         raise SourceAuthorityError(
             "a build plan is required to validate TU-scoped source-derived authority"
         )

@@ -221,6 +221,7 @@ def test_debug_recoupling_precedes_general_pe_metadata_normalization() -> None:
     assert metadata_writes[PE_OFFSET + 8].before == EXACT_LINK_TIME
     assert metadata_writes[PE_OFFSET + 8].after == EXACT_LINK_TIME
     assert result.audit.image_metadata_output_sha256 == sha256(result.image).hexdigest()
+    assert len(result.audit.image_bytes_outside_policy_ranges_sha256) == 64
 
 
 def test_raw_image_and_pdb_must_be_the_same_producer_pair() -> None:
@@ -267,6 +268,10 @@ def test_final_pair_is_recoupled_and_the_whole_composition_is_idempotent() -> No
     assert second.pdb == first.pdb
     assert second.audit.image_debug.changed_bytes == 0
     assert second.audit.pdb.changed_bytes == 0
+    assert (
+        second.audit.image_bytes_outside_policy_ranges_sha256
+        == first.audit.image_bytes_outside_policy_ranges_sha256
+    )
     assert all(write.before == write.after for write in second.audit.image_metadata_writes)
 
 

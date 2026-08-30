@@ -231,6 +231,36 @@ def test_canonicalization_is_idempotent() -> None:
     assert second.audit.normalized_bytes == first.audit.normalized_bytes
 
 
+def test_distinct_process_bookkeeping_converges_to_one_pdb() -> None:
+    raw = _synthetic_pdb()
+    baseline = _canonicalize(raw)
+    variant = bytearray(raw)
+    for stat in baseline.audit.stats:
+        for span in stat.normalized_ranges:
+            for offset in range(span.start, span.end):
+                variant[offset] ^= 0x5A
+
+    changed = _canonicalize(bytes(variant))
+
+    assert changed.audit.raw_sha256 != baseline.audit.raw_sha256
+    assert changed.data == baseline.data
+    assert (
+        changed.audit.bytes_outside_policy_ranges_sha256
+        == baseline.audit.bytes_outside_policy_ranges_sha256
+    )
+
+
+def test_pe_image_is_not_a_pdb_canonicalization_input() -> None:
+    image = b"MZ" + b"\0" * 1022
+
+    with pytest.raises(ByteIdentityError, match="PDB/MSF magic"):
+        canonicalize_msvc42_pdb(
+            image,
+            link_time=LINK_TIME,
+            expected_input_identity=Msvc42PdbIdentity(19950814, LINK_TIME, 0),
+        )
+
+
 def test_semantic_procedure_fields_are_preserved() -> None:
     raw = _synthetic_pdb()
     parsed = SmallMsf(raw)

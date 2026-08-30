@@ -15,6 +15,28 @@ Every artifact has a provenance node. A node names its inputs, transformation ki
 and output digest. Stale or unreceipted artifacts are refused. Object files and compiler PDBs are
 treated as one provenance unit because retained PDB state can change emitted type indices.
 
+## Noncertifying debug companions
+
+The certified executable or library is never normalized. When a project also asks for symbols,
+ReproBit creates a separate private executable/PDB pair for comparison tools. For MSVC 4.2 it
+recouples that private executable's PE timestamp and NB10 identity to the already-certified image,
+then canonicalizes only parsed PDB 2.00 SmallMSF bookkeeping: process-local pointers, ABI padding,
+free pages, the PDB signature, and bytes beyond a length-delimited 255-byte procedure name. Types,
+symbols, addresses, paths, source lines, FPO data, relocations, and section layout are preserved.
+
+The parser admits only the exact old structures it understands. Unknown versions, malformed or
+aliased streams, unexplained record tails, or a mismatched executable/PDB identity fail before any
+output is published. A second parse proves idempotence. The report records raw and published
+hashes, every permitted category, a bounded changed-range summary, and a projection hash proving
+that all bytes outside the complete policy ranges were identical. These files remain explicitly
+noncertifying and cannot enter the release artifact graph. See Microsoft's
+[PE debug-directory format][pe-format] and LLVM's [PDB/MSF format overview][pdb-format] for the
+surrounding container structures; ReproBit's SmallMSF parser further restricts that grammar to the
+1 KiB-page MSPDB41 variant.
+
+[pe-format]: https://learn.microsoft.com/en-us/windows/win32/debug/pe-format
+[pdb-format]: https://llvm.org/docs/PDB/index.html
+
 Semantic certificates are consumable proof objects rather than opaque proof hashes. Each carries
 its canonical input and output statements, the digests of those statements, and explicit artifact
 claims that identify the statement relation, artifact id, digest, and size. The report validator

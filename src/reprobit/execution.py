@@ -185,6 +185,7 @@ class SupplementalOutputFileAttestation:
     size: int
     raw_digest: Digest
     raw_size: int
+    outside_policy_digest: Digest
     changed_bytes: int
     categories: tuple[NormalizationCategoryAttestation, ...] = ()
 

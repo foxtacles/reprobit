@@ -863,6 +863,7 @@ class ReproductionEngine:
                             size=file.size,
                             raw_digest=file.raw_digest,
                             raw_size=file.raw_size,
+                            outside_policy_digest=file.outside_policy_digest,
                             changed_bytes=file.changed_bytes,
                             categories=tuple(
                                 NormalizationCategorySummary(

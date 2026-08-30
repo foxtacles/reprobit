@@ -353,6 +353,7 @@ def proof_report_with_debug_companion() -> ProofReport:
                 size=200,
                 raw_digest=digest(b"raw debug image"),
                 raw_size=200,
+                outside_policy_digest=digest(b"image outside policy"),
                 changed_bytes=1,
                 categories=(
                     NormalizationCategorySummary(
@@ -372,6 +373,7 @@ def proof_report_with_debug_companion() -> ProofReport:
                 size=300,
                 raw_digest=digest(b"raw debug pdb"),
                 raw_size=300,
+                outside_policy_digest=digest(b"pdb outside policy"),
                 changed_bytes=10,
                 categories=(
                     NormalizationCategorySummary(
@@ -1316,6 +1318,7 @@ def test_debug_companion_is_receipt_bound_but_outside_authenticity_artifacts() -
     assert '<code class="ranges">[0x14, 0x16) + 8 more</code>' in rendered
     assert digest(b"stable debug pdb").value in rendered
     assert digest(b"raw debug pdb").value in rendered
+    assert digest(b"pdb outside policy").value in rendered
 
 
 def test_debug_companion_rejects_unbound_or_target_aliasing_outputs() -> None:
