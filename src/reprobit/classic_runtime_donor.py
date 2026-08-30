@@ -72,6 +72,7 @@ from reprobit.execution import (
 from reprobit.model import Digest
 from reprobit.process import (
     CancellationToken,
+    CommandFailed,
     CommandSpec,
     ProcessResult,
     ProcessSupervisor,
@@ -443,7 +444,7 @@ class ClassicDonorComposition:
                     cancellation=cancellation,
                     windows_lineage_planner=lane.windows_lineage_planner,
                 )
-            except Exception as exc:
+            except CommandFailed as exc:
                 cancellation.raise_if_cancelled()
                 return ClassicWarmDonorDependencyReplay(
                     donor_id,

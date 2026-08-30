@@ -73,9 +73,11 @@ from reprobit.model import ByteRange, Digest, Scope
 from reprobit.paths import MaterializedSkeleton
 from reprobit.process import (
     CancellationToken,
+    CommandFailed,
     CommandSpec,
     ProcessResult,
     ProcessSupervisor,
+    ProcessTimedOut,
 )
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole
 from reprobit.schema import (
@@ -258,6 +260,19 @@ def test_classic_logical_workspace_reserves_temporary_seat(tmp_path: Path) -> No
             session_root=tmp_path / "session",
             toolchain_root=tmp_path / "toolchain",
         )
+
+
+def test_classic_logical_workspace_materializes_declared_build_root(tmp_path: Path) -> None:
+    toolchain_root = tmp_path / "toolchain"
+    toolchain_root.mkdir()
+
+    workspace = classic_runtime_environment._materialize_direct_logical_workspace(
+        _prepare_bundle(tmp_path),
+        session_root=tmp_path / "session",
+        toolchain_root=toolchain_root,
+    )
+
+    assert workspace.build_root.is_dir()
 
 
 def test_prepared_unit_binds_only_the_exact_msvc42_win32_i386_target(
@@ -3457,13 +3472,17 @@ def test_compiler_environment_digest_rejects_ambiguous_paths(value: str) -> None
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Wine lanes are POSIX-only")
-def test_parallel_wine_lanes_use_private_prefixes_and_one_canonical_temporary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+@pytest.mark.parametrize("initialization_fails", (False, True), ids=("success", "failure"))
+def test_parallel_wine_lanes_share_one_private_prefix_or_fail_together(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    initialization_fails: bool,
 ) -> None:
     backend = PosixWineBackend(wine=sys.executable, wineserver=sys.executable)
     initialized: list[str] = []
     bound: list[str] = []
     configured: list[tuple[str, str]] = []
+    unbound_closed: list[str] = []
 
     class Binding:
         def __init__(self, worker_id: str) -> None:
@@ -3479,6 +3498,8 @@ def test_parallel_wine_lanes_use_private_prefixes_and_one_canonical_temporary(
     def initialize(worker: WorkerSandbox, *, timeout_seconds: float) -> None:
         assert timeout_seconds == 30
         initialized.append(worker.worker_id)
+        if initialization_fails:
+            raise BackendError("fixture initialization failed")
 
     def bind(worker: WorkerSandbox, skeleton: MaterializedSkeleton) -> Binding:
         assert skeleton.drive_letter == "R"
@@ -3502,6 +3523,11 @@ def test_parallel_wine_lanes_use_private_prefixes_and_one_canonical_temporary(
     monkeypatch.setattr(backend, "bind_skeleton", bind)
     monkeypatch.setattr(backend, "verify_worker_drive_mappings", verify)
     monkeypatch.setattr(backend, "configure_worker_temporary_environment", configure)
+    monkeypatch.setattr(
+        classic_runtime_environment,
+        "_close_unbound_wine_worker",
+        lambda _backend, worker: unbound_closed.append(worker.worker_id),
+    )
 
     logical_root = tmp_path / "logical-drive"
     build_root = logical_root / "build"
@@ -3588,23 +3614,44 @@ def test_parallel_wine_lanes_use_private_prefixes_and_one_canonical_temporary(
             trees=(),
             files=(NamespaceFile("frontend", authority_file, Path(authority_file.anchor)),),
         ):
-            lanes = tuple(lane_pool.acquire() for _ in range(3))
-            for lane in reversed(lanes):
-                lane_pool.release(lane)
-        assert sorted(initialized) == [
-            "producer-graph-0000",
-            "producer-graph-0001",
-            "producer-graph-0002",
-        ]
-        assert sorted(bound) == sorted(initialized)
-        assert len({lane.environment["WINEPREFIX"] for lane in lanes}) == 3
+            start = Barrier(3)
+            with ThreadPoolExecutor(max_workers=3) as executor:
+                if initialization_fails:
+
+                    def acquire_lane() -> classic_runtime_environment._ExecutionLane:
+                        start.wait(timeout=10)
+                        return lane_pool.acquire()
+
+                    futures = tuple(executor.submit(acquire_lane) for _ in range(3))
+                    failures = tuple(future.exception(timeout=20) for future in futures)
+                    assert all(failure is not None for failure in failures)
+                    assert any(isinstance(failure, BackendError) for failure in failures)
+                    assert initialized == ["producer-graph"]
+                    assert bound == []
+                    assert configured == []
+                    assert unbound_closed == []
+                    assert lane_pool.created_count == 0
+                    return
+
+                acquired = Barrier(3)
+
+                def borrow_lane() -> classic_runtime_environment._ExecutionLane:
+                    start.wait(timeout=10)
+                    lane = lane_pool.acquire()
+                    acquired.wait(timeout=10)
+                    lane_pool.release(lane)
+                    return lane
+
+                futures = tuple(executor.submit(borrow_lane) for _ in range(3))
+                lanes = tuple(future.result(timeout=20) for future in futures)
+        assert initialized == ["producer-graph"]
+        assert bound == initialized
+        assert lane_pool.created_count == 3
+        assert len({lane.environment["WINEPREFIX"] for lane in lanes}) == 1
         assert [lane.environment["TEMP"] for lane in lanes] == [
             r"R:\Users\reprobit\AppData\Local\Temp"
         ] * 3
-        assert sorted(configured) == [
-            (f"producer-graph-{index:04d}", r"R:\Users\reprobit\AppData\Local\Temp")
-            for index in range(3)
-        ]
+        assert configured == [("producer-graph", r"R:\Users\reprobit\AppData\Local\Temp")]
         assert all(lane.environment["INCLUDE"] == r"\toolchain\include" for lane in lanes)
         assert all(lane.environment["LIB"] == r"\toolchain\lib" for lane in lanes)
         assert all(lane.environment["LIBPATH"] == r"\toolchain\lib" for lane in lanes)
@@ -3757,7 +3804,7 @@ def test_native_logical_role_commands_stay_in_projected_toolchain_authority(
     )
     try:
         assert producer.role_commands == role_commands
-        assert producer.initialized_lane_count == 0
+        assert producer.initialized_runtime_count == 0
         assert producer._namespace_authority_files == ()
         with producer.authority_namespace_lease() as authority:
             assert {item.relative_path for item in authority.snapshot.files_for("toolchain")} == {
@@ -3835,6 +3882,39 @@ def test_discarded_warm_dependency_replay_erases_arena_after_parse_failure(
     assert replay.trace is None
     assert replay.reason is not None and "trace is unusable" in replay.reason
     assert pool.releases == 1
+    assert tuple((build_root / ".reprobit-warm-replay").iterdir()) == ()
+
+    def time_out(*_args: object, **_kwargs: object) -> tuple[ProcessResult, object]:
+        spec = CommandSpec.create(
+            ("compiler",),
+            cwd=build_root,
+            environment={},
+            timeout_seconds=30,
+        )
+        raise ProcessTimedOut(spec, b"")
+
+    monkeypatch.setattr(classic_runtime_warm, "_run", time_out)
+    with pytest.raises(ProcessTimedOut):
+        executor.replay_warm_compiler_dependencies(
+            node.id,
+            cancellation=CancellationToken(),
+        )
+    assert pool.releases == 2
+    assert tuple((build_root / ".reprobit-warm-replay").iterdir()) == ()
+
+    def fail(*_args: object, **_kwargs: object) -> tuple[ProcessResult, object]:
+        spec = CommandSpec.create(("compiler",), cwd=build_root, environment={})
+        result = ProcessResult(spec.argv, 2, b"expected replay miss", 1, 0.01)
+        raise CommandFailed(result, spec)
+
+    monkeypatch.setattr(classic_runtime_warm, "_run", fail)
+    replay = executor.replay_warm_compiler_dependencies(
+        node.id,
+        cancellation=CancellationToken(),
+    )
+    assert replay.trace is None
+    assert replay.reason is not None and "discarded compiler replay failed" in replay.reason
+    assert pool.releases == 3
     assert tuple((build_root / ".reprobit-warm-replay").iterdir()) == ()
 
 
@@ -4531,22 +4611,10 @@ def test_projected_donor_dependency_parse_failure_is_discarded(
         windows_lineage_planner=None,
     )
 
-    def run(
-        _supervisor: ProcessSupervisor,
-        argv: tuple[str, ...],
-        **_kwargs: object,
-    ) -> tuple[ProcessResult, CommandSpec]:
-        (arena / ".reprobit-donor-dependencies.obj").write_bytes(b"discard")
-        (arena / ".reprobit-donor-dependencies.pdb").write_bytes(b"discard")
-        (arena / ".reprobit-donor-dependencies.sbr").write_bytes(b"malformed")
-        return (
-            ProcessResult(argv, 0, b"", 1, 0.01),
-            CommandSpec.create(argv, cwd=arena, environment=lane.environment),
-        )
-
-    monkeypatch.setattr(classic_runtime_donor, "_run", run)
-    with ProcessSupervisor() as supervisor:
-        replay = executor._replay_donor_dependencies(
+    def replay_dependencies(
+        supervisor: ProcessSupervisor,
+    ) -> classic_runtime_donor.ClassicWarmDonorDependencyReplay:
+        return executor._replay_donor_dependencies(
             supervisor,
             donor_id="donor.fixture",
             command=(
@@ -4572,9 +4640,56 @@ def test_projected_donor_dependency_parse_failure_is_discarded(
             ),
         )
 
+    def run(
+        _supervisor: ProcessSupervisor,
+        argv: tuple[str, ...],
+        **_kwargs: object,
+    ) -> tuple[ProcessResult, CommandSpec]:
+        (arena / ".reprobit-donor-dependencies.obj").write_bytes(b"discard")
+        (arena / ".reprobit-donor-dependencies.pdb").write_bytes(b"discard")
+        (arena / ".reprobit-donor-dependencies.sbr").write_bytes(b"malformed")
+        return (
+            ProcessResult(argv, 0, b"", 1, 0.01),
+            CommandSpec.create(argv, cwd=arena, environment=lane.environment),
+        )
+
+    monkeypatch.setattr(classic_runtime_donor, "_run", run)
+    with ProcessSupervisor() as supervisor:
+        replay = replay_dependencies(supervisor)
+
     assert replay.trace is None
     assert replay.reads == ()
     assert replay.reason is not None and "trace is unusable" in replay.reason
+    assert tuple(arena.iterdir()) == (arena / "s.cpp",)
+
+    def time_out(
+        _supervisor: ProcessSupervisor,
+        argv: tuple[str, ...],
+        **_kwargs: object,
+    ) -> tuple[ProcessResult, CommandSpec]:
+        spec = CommandSpec.create(argv, cwd=arena, environment=lane.environment)
+        raise ProcessTimedOut(spec, b"")
+
+    monkeypatch.setattr(classic_runtime_donor, "_run", time_out)
+    with ProcessSupervisor() as supervisor, pytest.raises(ProcessTimedOut):
+        replay_dependencies(supervisor)
+    assert tuple(arena.iterdir()) == (arena / "s.cpp",)
+
+    def fail(
+        _supervisor: ProcessSupervisor,
+        argv: tuple[str, ...],
+        **_kwargs: object,
+    ) -> tuple[ProcessResult, CommandSpec]:
+        spec = CommandSpec.create(argv, cwd=arena, environment=lane.environment)
+        result = ProcessResult(spec.argv, 2, b"expected replay miss", 1, 0.01)
+        raise CommandFailed(result, spec)
+
+    monkeypatch.setattr(classic_runtime_donor, "_run", fail)
+    with ProcessSupervisor() as supervisor:
+        replay = replay_dependencies(supervisor)
+    assert replay.trace is None
+    assert replay.reads == ()
+    assert replay.reason is not None and "discarded donor dependency replay failed" in replay.reason
     assert tuple(arena.iterdir()) == (arena / "s.cpp",)
 
 

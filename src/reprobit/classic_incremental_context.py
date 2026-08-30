@@ -217,8 +217,8 @@ class WarmRuntime:
         prepared.warm.bind_warm_staging_root(staging_root)
 
     @property
-    def initialized_lane_count(self) -> int:
-        return self.prepared.producer.initialized_lane_count
+    def initialized_runtime_count(self) -> int:
+        return self.prepared.producer.initialized_runtime_count
 
     def ensure_oracles(self) -> None:
         with self._oracle_lock:

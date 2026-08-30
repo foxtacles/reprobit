@@ -158,7 +158,7 @@ extraction.
 
 Warm `build` stores non-certifying node artifacts in the leased project-local
 CAS. The first run normally misses; an unchanged second run should be all-hit
-with zero Wine lanes. `build --cold` and `verify`, which always builds from
+with zero backend runtime starts. `build --cold` and `verify`, which always builds from
 scratch, bypass the cache entirely.
 
 </details>

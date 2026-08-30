@@ -43,6 +43,7 @@ from reprobit.execution import (
 from reprobit.model import Digest
 from reprobit.process import (
     CancellationToken,
+    CommandFailed,
     ProcessSupervisor,
 )
 from reprobit.producer_graph import (
@@ -697,7 +698,7 @@ class ClassicWarmExecution:
                         cancellation=cancellation,
                         windows_lineage_planner=(lane.windows_lineage_planner),
                     )
-                except Exception as exc:
+                except CommandFailed as exc:
                     cancellation.raise_if_cancelled()
                     return ClassicWarmCompilerReplay(
                         None, f"discarded compiler replay failed: {exc}"

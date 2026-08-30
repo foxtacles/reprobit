@@ -127,16 +127,27 @@ class LogicalPathProfile(StrictModel):
 
     @model_validator(mode="after")
     def roots_do_not_overlap(self) -> LogicalPathProfile:
-        if len({value[:2].casefold() for value in (self.source, self.build, self.toolchain)}) != 1:
+        roots = (self.source, self.build, self.toolchain)
+        if len({value[:2].casefold() for value in roots}) != 1:
             raise ValueError("logical source, build, and toolchain roots must share one drive")
-        normalized = tuple(
-            value.replace("/", "\\").rstrip("\\").casefold()
-            for value in (self.source, self.build, self.toolchain)
-        )
+        normalized = tuple(value.replace("/", "\\").rstrip("\\").casefold() for value in roots)
         for index, left in enumerate(normalized):
             for right in normalized[index + 1 :]:
                 if left == right or left.startswith(right + "\\") or right.startswith(left + "\\"):
                     raise ValueError("logical source, build, and toolchain roots must not overlap")
+        components = tuple(root[3:].split("\\") for root in roots)
+        for index, left_components in enumerate(components):
+            for right_components in components[index + 1 :]:
+                for left_component, right_component in zip(
+                    left_components, right_components, strict=False
+                ):
+                    if left_component.casefold() != right_component.casefold():
+                        break
+                    if left_component != right_component:
+                        raise ValueError(
+                            "logical source, build, and toolchain roots must spell shared "
+                            "DOS path components identically"
+                        )
         return self
 
 

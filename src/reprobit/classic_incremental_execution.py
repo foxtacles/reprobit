@@ -61,9 +61,9 @@ def execute_classic_incremental_plan(
         implementation=producer_cache_implementation(implementation_receipt),
     )
 
-    def lane_count() -> int:
+    def runtime_count() -> int:
         runtime = runtime_holder.get("runtime")
-        return runtime.initialized_lane_count if runtime is not None else 0
+        return runtime.initialized_runtime_count if runtime is not None else 0
 
     def before_record_publication() -> None:
         # This is the single complete invocation census at the cache trust
@@ -97,7 +97,7 @@ def execute_classic_incremental_plan(
         runtime_close=lambda runtime: runtime.close(),
         max_workers=jobs,
         progress=executor_progress,
-        runtime_init_count=lane_count,
+        runtime_init_count=runtime_count,
         before_publish=before_record_publication,
     ).execute(tuple(nodes))
 

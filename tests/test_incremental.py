@@ -47,11 +47,13 @@ from reprobit.schema import (
 from reprobit.source_lock import build_source_manifest
 
 
-def test_incremental_summary_accepts_bounded_parallel_lane_count() -> None:
-    summary = IncrementalBuildSummary(0, 4, 0, 0, 1.5, runtime_init_count=3)
-    assert summary.runtime_init_count == 3
-    with pytest.raises(ValueError, match="cannot be negative"):
+def test_incremental_summary_accepts_single_runtime_initialization() -> None:
+    summary = IncrementalBuildSummary(0, 4, 0, 0, 1.5, runtime_init_count=1)
+    assert summary.runtime_init_count == 1
+    with pytest.raises(ValueError, match="must be zero or one"):
         IncrementalBuildSummary(0, 0, 0, 0, 0, runtime_init_count=-1)
+    with pytest.raises(ValueError, match="must be zero or one"):
+        IncrementalBuildSummary(0, 0, 0, 0, 0, runtime_init_count=2)
 
 
 def test_package_implementation_digest_change_is_a_cache_miss(tmp_path: Path) -> None:

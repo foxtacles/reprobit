@@ -501,6 +501,43 @@ def test_logical_path_profile_rejects_case_insensitive_ancestor_overlap(
         )
 
 
+@pytest.mark.parametrize(
+    ("source", "build", "toolchain"),
+    (
+        (r"R:\Workspace\source", r"R:\workspace\build", r"R:\toolchain"),
+        (
+            r"R:\Workspace\Project\source",
+            r"R:\Workspace\project\build",
+            r"R:\toolchain",
+        ),
+        (
+            r"R:\Workspace\source",
+            r"R:\Workspace\build",
+            r"R:\workspace\toolchain",
+        ),
+    ),
+)
+def test_logical_path_profile_rejects_shared_component_case_mismatch(
+    source: str,
+    build: str,
+    toolchain: str,
+) -> None:
+    with pytest.raises(ValidationError, match="must spell shared DOS path components identically"):
+        LogicalPathProfile(source=source, build=build, toolchain=toolchain)
+
+
+def test_logical_path_profile_preserves_identically_spelled_shared_components() -> None:
+    profile = LogicalPathProfile(
+        source=r"R:\Workspace\Project\source",
+        build=r"R:\Workspace\Project\build",
+        toolchain=r"R:\Workspace\toolchain",
+    )
+
+    assert profile.source == r"R:\Workspace\Project\source"
+    assert profile.build == r"R:\Workspace\Project\build"
+    assert profile.toolchain == r"R:\Workspace\toolchain"
+
+
 def test_logical_path_profile_uses_dos_segment_boundaries_for_overlap() -> None:
     profile = LogicalPathProfile(
         source=r"R:\source",

@@ -98,8 +98,8 @@ class IncrementalBuildSummary:
         )
         if any(item < 0 for item in counts) or self.elapsed_seconds < 0:
             raise ValueError("incremental summary counts and timing cannot be negative")
-        if self.runtime_init_count < 0:
-            raise ValueError("incremental runtime initialization count cannot be negative")
+        if self.runtime_init_count not in {0, 1}:
+            raise ValueError("incremental runtime initialization count must be zero or one")
         if self.published_targets < 0 or self.unchanged_targets < 0:
             raise ValueError("incremental publication counts cannot be negative")
         if self.invalidations != tuple(

@@ -54,12 +54,13 @@ class _ExecutionLane:
 
 
 class _LazyExecutionLanePool:
-    """Grow isolated producer lanes only when concurrent work needs them.
+    """Grow producer scheduling lanes only when concurrent work needs them.
 
     Constructing a prepared run is metadata-only with respect to the backend:
     no Wine prefix, wineserver, or native logical-drive binding exists until a
-    producer actually acquires a lane.  A single miss therefore creates one
-    lane, while concurrent cold work may grow the pool up to ``maximum``.
+    producer actually acquires a lane. Concurrent lanes share that one
+    run-private backend namespace while keeping independently owned producer
+    process trees.
     """
 
     def __init__(
@@ -385,13 +386,17 @@ def _materialize_direct_logical_workspace(
     # would expose unpinned siblings to producer/source-controlled paths.
     toolchain_root.resolve(strict=True)
     root.mkdir(parents=True, exist_ok=False)
+    effective_root = host_path(declared[0])
+    build_root = host_path(declared[1])
+    toolchain_entry = host_path(declared[2])
+    build_root.mkdir(parents=True, exist_ok=False)
     materialized = MaterializedSkeleton(root.resolve(strict=True), drive_letter, ())
     return _DirectLogicalWorkspace(
         root=root,
         drive_letter=drive_letter,
-        effective_root=host_path(declared[0]),
-        build_root=host_path(declared[1]),
-        toolchain_entry=host_path(declared[2]),
+        effective_root=effective_root,
+        build_root=build_root,
+        toolchain_entry=toolchain_entry,
         materialized=materialized,
     )
 
@@ -530,7 +535,12 @@ def _prepare_execution_lanes(
         ),
     )
     binding_lock = Lock()
-    bindings: list[tuple[WorkerSandbox, ExitStack]] = []
+    runtime_binding: tuple[WorkerSandbox, ExitStack] | None = None
+    # MSVC 4.2 derives temporary names from the Windows thread id.  One
+    # run-private wineserver gives concurrent lanes one PID/TID namespace,
+    # just like native Windows, so the canonical shared TEMP remains safe.
+    wine_worker: WorkerSandbox | None = None
+    wine_initialization_failure: BaseException | None = None
     native_worker: WorkerSandbox | None = None
     native_lineage_planner: WindowsLineagePlanner | None = None
 
@@ -579,57 +589,75 @@ def _prepare_execution_lanes(
             stack.close()
             raise
 
-    def create(index: int) -> _ExecutionLane:
-        nonlocal native_lineage_planner, native_worker
-        lane_id = f"lane-{index:04d}"
-        worker: WorkerSandbox
-        stack: ExitStack | None = None
-        attempted_initialization = False
-        if isinstance(backend, PosixWineBackend):
-            worker = backend.create_worker(backend_workers_root, f"producer-graph-{index:04d}")
+    def initialize_wine_runtime() -> WorkerSandbox:
+        nonlocal runtime_binding
+        nonlocal wine_initialization_failure, wine_worker
+        if not isinstance(backend, PosixWineBackend):
+            raise ClassicProjectError("classic Wine runtime requires the POSIX backend")
+        wine_backend = backend
+        with binding_lock:
+            if wine_initialization_failure is not None:
+                raise ClassicProjectError(
+                    "classic Wine runtime initialization previously failed"
+                ) from wine_initialization_failure
+            if wine_worker is not None:
+                return wine_worker
+            candidate = wine_backend.create_worker(backend_workers_root, "producer-graph")
+            stack: ExitStack | None = None
+            prefix_initialized = False
             try:
-                attempted_initialization = True
-                backend.initialize_worker_prefix(
-                    worker,
+                wine_backend.initialize_worker_prefix(
+                    candidate,
                     timeout_seconds=min(initialization_timeout, 300),
                 )
-                stack, lineage_planner = bind_worker(worker)
+                prefix_initialized = True
+                stack, lineage_planner = bind_worker(candidate)
                 if lineage_planner is not None:
                     raise ClassicProjectError(
                         "POSIX backend unexpectedly returned a Windows lineage planner"
                     )
-                backend.configure_worker_temporary_environment(
-                    worker,
+                wine_backend.configure_worker_temporary_environment(
+                    candidate,
                     temporary=logical_temporary,
                     timeout_seconds=min(initialization_timeout, 30),
                 )
-                backend.verify_worker_drive_mappings(
-                    worker,
+                wine_backend.verify_worker_drive_mappings(
+                    candidate,
                     logical_drive=logical_workspace.drive_letter,
                 )
             except BaseException as original:
+                wine_initialization_failure = original
                 cleanup_error: BaseException | None = None
                 try:
                     if stack is not None:
                         _close_backend_runtime(
-                            backend,
-                            worker,
+                            wine_backend,
+                            candidate,
                             stack,
                             logical_drive=logical_workspace.drive_letter,
                             timeout_seconds=cleanup_timeout,
                         )
-                    elif attempted_initialization:
-                        _close_unbound_wine_worker(backend, worker)
+                    elif prefix_initialized:
+                        _close_unbound_wine_worker(wine_backend, candidate)
                 except BaseException as exc:
                     cleanup_error = exc
                 if cleanup_error is not None:
                     original.add_note(
-                        f"classic lane initialization cleanup also failed: {cleanup_error}"
+                        f"classic Wine runtime initialization cleanup also failed: {cleanup_error}"
                     )
                 raise
             assert stack is not None
-            with binding_lock:
-                bindings.append((worker, stack))
+            wine_worker = candidate
+            runtime_binding = (candidate, stack)
+            return candidate
+
+    def create(index: int) -> _ExecutionLane:
+        nonlocal native_lineage_planner, native_worker
+        nonlocal runtime_binding
+        lane_id = f"lane-{index:04d}"
+        worker: WorkerSandbox
+        if isinstance(backend, PosixWineBackend):
+            worker = initialize_wine_runtime()
         else:
             with binding_lock:
                 if native_worker is None:
@@ -641,69 +669,60 @@ def _prepare_execution_lanes(
                         )
                     native_worker = candidate
                     native_lineage_planner = candidate_planner
-                    bindings.append((candidate, candidate_stack))
+                    runtime_binding = (candidate, candidate_stack)
                 worker = native_worker
 
-        try:
-            windows_environment = producer_environment()
-            environment = _host_environment((*host_programs, *role_commands.values()))
-            if isinstance(backend, PosixWineBackend):
-                environment.update(
-                    backend.worker_environment(
-                        worker,
-                        windows_environment=windows_environment,
-                        dll_overrides=installation.profile.wine_dll_overrides,
-                    )
+        windows_environment = producer_environment()
+        environment = _host_environment((*host_programs, *role_commands.values()))
+        if isinstance(backend, PosixWineBackend):
+            environment.update(
+                backend.worker_environment(
+                    worker,
+                    windows_environment=windows_environment,
+                    dll_overrides=installation.profile.wine_dll_overrides,
                 )
-                environment.update(
-                    {
-                        **frontend_environment,
-                        "REPROBIT_PHYSICAL_DRIVE_ROOT": str(logical_workspace.root),
-                        "REPROBIT_LOGICAL_DRIVE_ROOT": (f"{logical_workspace.drive_letter}:"),
-                        "REPROBIT_PHYSICAL_TOOLCHAIN_ROOT": str(installation.root),
-                        "REPROBIT_LOGICAL_TOOLCHAIN_ROOT": (
-                            bundle.spec.paths.toolchain.replace("\\", "/")
-                        ),
-                    }
-                )
-                if wine_alias is None:
-                    raise ClassicProjectError("POSIX execution omitted the pinned Wine alias")
-                environment["PATH"] = os.pathsep.join((str(wine_alias.parent), environment["PATH"]))
-            else:
-                windows_environment["PATH"] = os.pathsep.join(
-                    (windows_environment["PATH"], environment["PATH"])
-                )
-                environment.update(windows_environment)
-            return _ExecutionLane(
-                lane_id,
-                MappingProxyType(environment),
-                worker,
-                native_lineage_planner,
             )
-        except BaseException:
-            # The binding is owned by close_created.  The pool records this
-            # failure and prepare/execution cleanup closes every created lease.
-            raise
+            environment.update(
+                {
+                    **frontend_environment,
+                    "REPROBIT_PHYSICAL_DRIVE_ROOT": str(logical_workspace.root),
+                    "REPROBIT_LOGICAL_DRIVE_ROOT": (f"{logical_workspace.drive_letter}:"),
+                    "REPROBIT_PHYSICAL_TOOLCHAIN_ROOT": str(installation.root),
+                    "REPROBIT_LOGICAL_TOOLCHAIN_ROOT": (
+                        bundle.spec.paths.toolchain.replace("\\", "/")
+                    ),
+                }
+            )
+            if wine_alias is None:
+                raise ClassicProjectError("POSIX execution omitted the pinned Wine alias")
+            environment["PATH"] = os.pathsep.join((str(wine_alias.parent), environment["PATH"]))
+        else:
+            windows_environment["PATH"] = os.pathsep.join(
+                (windows_environment["PATH"], environment["PATH"])
+            )
+            environment.update(windows_environment)
+        return _ExecutionLane(
+            lane_id,
+            MappingProxyType(environment),
+            worker,
+            native_lineage_planner,
+        )
 
     def close_created() -> None:
-        error: BaseException | None = None
+        nonlocal runtime_binding
         with binding_lock:
-            owned = tuple(reversed(bindings))
-            bindings.clear()
-        for worker, stack in owned:
-            try:
-                _close_backend_runtime(
-                    backend,
-                    worker,
-                    stack,
-                    logical_drive=logical_workspace.drive_letter,
-                    timeout_seconds=cleanup_timeout,
-                )
-            except BaseException as exc:
-                if error is None:
-                    error = exc
-        if error is not None:
-            raise error
+            owned = runtime_binding
+            runtime_binding = None
+        if owned is None:
+            return
+        worker, stack = owned
+        _close_backend_runtime(
+            backend,
+            worker,
+            stack,
+            logical_drive=logical_workspace.drive_letter,
+            timeout_seconds=cleanup_timeout,
+        )
 
     return _LazyExecutionLanePool(
         maximum=jobs,

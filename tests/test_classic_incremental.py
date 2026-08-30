@@ -43,6 +43,7 @@ from reprobit.classic_orchestration import (
     classic_terminal_pipeline_authority,
 )
 from reprobit.classic_runtime_donor import ClassicWarmDonorDependencyReplay
+from reprobit.classic_runtime_producer import ClassicProducerExecution
 from reprobit.classic_runtime_warm import (
     ClassicWarmCompilerReplay,
     ClassicWarmCompilerTransformResult,
@@ -98,6 +99,20 @@ class _FakeInstallation:
         }
 
 
+@pytest.mark.parametrize(
+    ("created_lane_count", "expected_runtime_count"),
+    ((0, 0), (1, 1), (4, 1)),
+)
+def test_shared_backend_runtime_count_is_independent_of_scheduling_lanes(
+    created_lane_count: int,
+    expected_runtime_count: int,
+) -> None:
+    producer = object.__new__(ClassicProducerExecution)
+    producer.__dict__["_lane_pool"] = SimpleNamespace(created_count=created_lane_count)
+
+    assert producer.initialized_runtime_count == expected_runtime_count
+
+
 def test_warm_wine_environment_binds_rendered_frontend_paths() -> None:
     class Installation:
         logical_root = r"Z:\Users\builder\MSVC420"
@@ -147,7 +162,7 @@ def test_warm_wine_environment_binds_rendered_frontend_paths() -> None:
 class _FakeWarmExecutor:
     def __init__(self, sources: dict[str, str]) -> None:
         self.sources = sources
-        self.lanes = 0
+        self.runtime_started = False
         self.staging_root: Path | None = None
         self.bound_oracles: tuple[str, ...] = ()
         self.explicit_authority_verifications = 0
@@ -158,8 +173,8 @@ class _FakeWarmExecutor:
         self.staging_root = root
 
     @property
-    def initialized_lane_count(self) -> int:
-        return self.lanes
+    def initialized_runtime_count(self) -> int:
+        return int(self.runtime_started)
 
     def bind_legacy_oracles(self, values: object) -> None:
         self.bound_oracles = tuple(sorted(cast(dict[str, object], values)))
@@ -176,7 +191,7 @@ class _FakeWarmExecutor:
         cancellation: object,
     ) -> tuple[()]:
         del inputs, cancellation
-        self.lanes = max(self.lanes, 1)
+        self.runtime_started = True
         for name, output in outputs.items():
             output.parent.mkdir(parents=True, exist_ok=True)
             output.write_bytes(f"raw:{node_id}:{name}".encode())

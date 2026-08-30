@@ -342,8 +342,10 @@ class ClassicProducerExecution:
         return self._runtime_open
 
     @property
-    def initialized_lane_count(self) -> int:
-        return self._lane_pool.created_count
+    def initialized_runtime_count(self) -> int:
+        """Report whether this run started its single shared backend runtime."""
+
+        return int(self._lane_pool.created_count > 0)
 
     @property
     def logical_drive_root(self) -> Path:

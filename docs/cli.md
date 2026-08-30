@@ -268,9 +268,9 @@ The built-in MSVC adapter requires a valid local compiler installation, but
 normal human runs resolve it from `rbit setup`. Plain `build` is a
 non-certifying incremental developer build: the first run populates an
 immutable project-local CAS, while an unchanged second run restores all nodes
-without preparing the logical workspace or starting a Wine lane. It emits
+without preparing the logical workspace or starting the shared Wine runtime. It emits
 typed per-node hit/miss events in NDJSON and a compact text/NDJSON summary with
-hit, miss, elapsed-time, invalidation, and initialized-lane counts. Use
+hit, miss, elapsed-time, invalidation, and backend-runtime start count. Use
 `build --cold` to bypass and construct no cache state. `verify` always builds
 from scratch, has no warm/cache mode, and never opens the cache. It seals each
 reference binary before execution, builds in a new run directory,

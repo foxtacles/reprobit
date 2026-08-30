@@ -15,10 +15,13 @@ it as a different source tree.
 
 ## macOS and Linux
 
-Wine workers use separate prefixes and process groups so compiler state and descendants cannot
-leak between lanes. The project locks the host launchers used for the compiler and resource
-compiler alongside the toolchain itself. The normal `rbit setup` flow remembers these launchers;
-explicit transport options in the [command-line workflow](cli.md) are advanced one-run overrides.
+Each run uses one private Wine prefix and wineserver for all scheduling lanes. This gives every
+compiler process one Windows process namespace and the same fixed compiler-visible `TEMP` and
+`TMP` path. Each producer still runs in its own bounded host process group, so a timeout cannot
+leave that producer's descendants running. The project locks the host launchers used for the
+compiler and resource compiler alongside the toolchain itself. The normal `rbit setup` flow
+remembers these launchers; explicit transport options in the [command-line workflow](cli.md) are
+advanced one-run overrides.
 
 ## Native Windows
 

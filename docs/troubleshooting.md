@@ -34,9 +34,11 @@ the interpreter is not a compiler payload producer.
 
 ## Wine or a compiler child hangs
 
-Every command has a deadline and belongs to a runner-owned process tree. Wine
-workers use private prefixes, while native Windows exposes bounded Job Object
-primitives. A timeout kills the complete owned tree. Run `rbit doctor
+Every command has a deadline and belongs to a runner-owned process tree. On
+POSIX, one run-private Wine prefix and wineserver serve every scheduling lane,
+while each producer remains in its own bounded host process group. Native
+Windows uses bounded Job Object primitives. A timeout kills the complete owned
+producer tree. Run `rbit doctor
 --execute-probe` before a long campaign: it tests the bounded Wine path on
 POSIX. On Windows it validates the controller's sealed physical root, then
 launches the logical-drive producer path in a fresh, verified logon session whose local
@@ -53,7 +55,10 @@ an unbounded shell command.
 ## Parallel results differ from serial results
 
 Treat this as a failed isolation proof. Object files, compiler PDBs, response
-files, temporary directories, and Wine state must all be worker-private. Reduce
+files, and other producer-owned outputs must not collide. Wine is intentionally
+shared within the run: every lane uses one private prefix and wineserver, one
+Windows process namespace, and one fixed compiler-visible `TEMP` and `TMP`
+path. Each producer still has its own bounded host process group. Reduce
 `--jobs` for diagnosis, but do not accept the serial result until the adapter
 can prove its resource partition. Retained PDB state is a build input, not a
 cache detail.
