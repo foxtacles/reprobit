@@ -3510,7 +3510,12 @@ def test_source_lock_never_admits_host_ci_configuration(tmp_path: Path) -> None:
     workflows = tmp_path / ".github" / "workflows"
     workflows.mkdir(parents=True)
     (workflows / "ci.yml").write_text("name: CI\n", encoding="utf-8")
-    subprocess.run(("git", "add", "-A"), cwd=tmp_path, check=True, capture_output=True)
+    subprocess.run(
+        ("git", "add", "CMakeLists.txt", ".github"),
+        cwd=tmp_path,
+        check=True,
+        capture_output=True,
+    )
 
     assert main(["source", "lock", "--project", os.fspath(tmp_path)]) == 0
     manifest = json.loads((tmp_path / "reprobit" / "source-manifest.json").read_text())
