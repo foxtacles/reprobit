@@ -5,8 +5,10 @@ from __future__ import annotations
 import ast
 import heapq
 import marshal
+import stat
 from collections.abc import Sequence
 from functools import cache
+from importlib.machinery import BYTECODE_SUFFIXES, EXTENSION_SUFFIXES, SOURCE_SUFFIXES
 from pathlib import Path, PurePosixPath
 from types import CodeType
 from typing import Any, cast
@@ -22,6 +24,10 @@ from reprobit.secure_paths import (
     read_relative_file,
 )
 from reprobit.strict_json import canonical_json
+
+_IMPORTABLE_MODULE_SUFFIXES = tuple(
+    sorted(set((*SOURCE_SUFFIXES, *BYTECODE_SUFFIXES, *EXTENSION_SUFFIXES)))
+)
 
 
 def loaded_code_digest(code: CodeType) -> Digest:
@@ -289,7 +295,7 @@ def _static_internal_dependencies(
     modules: dict[str, Path],
     *,
     package: str,
-) -> tuple[str, ...]:
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
     tree = ast.parse(payload, filename=str(path))
     collector = _StaticImportCollector()
     collector.visit(tree)
@@ -325,6 +331,7 @@ def _static_internal_dependencies(
         )
 
     dependencies: set[str] = set()
+    unresolved_candidates: set[str] = set()
     for node in collector.imports:
         if isinstance(node, ast.Import):
             for alias in node.names:
@@ -357,12 +364,19 @@ def _static_internal_dependencies(
             candidate = ".".join(part for part in (base, alias.name) if part)
             if candidate in modules:
                 dependencies.add(candidate)
-    return tuple(sorted(dependencies))
+            elif base in modules and modules[base].name == "__init__.py":
+                # ``from package import name`` may begin importing
+                # ``package.name`` if that submodule appears later. Retain
+                # only that unresolved seat, not unrelated package members.
+                unresolved_candidates.add(candidate)
+    return tuple(sorted(dependencies)), tuple(sorted(unresolved_candidates))
 
 
 def _package_import_closure_entries(
     package_root: Path,
     root_modules: Sequence[str],
+    *,
+    unresolved_candidates: set[str] | None = None,
 ) -> tuple[tuple[Path, bytes, SecureFileSnapshot], ...]:
     """Resolve one deterministic, static package-local import closure."""
 
@@ -403,13 +417,16 @@ def _package_import_closure_entries(
             if ancestor not in visited:
                 heapq.heappush(pending, ancestor)
 
-        for dependency in _static_internal_dependencies(
+        dependencies, unresolved = _static_internal_dependencies(
             module,
             path,
             payload,
             modules,
             package=package,
-        ):
+        )
+        if unresolved_candidates is not None:
+            unresolved_candidates.update(unresolved)
+        for dependency in dependencies:
             if dependency not in visited:
                 heapq.heappush(pending, dependency)
 
@@ -459,11 +476,16 @@ def _import_closure_material_digest(
 def _scoped_package_import_closure_receipt(
     package_root: Path,
     root_modules: Sequence[str],
-) -> tuple[Digest, tuple[str, ...]]:
-    """Resolve and hash a closure once, retaining its canonical file set."""
+) -> tuple[Digest, tuple[str, ...], tuple[str, ...]]:
+    """Resolve and hash a closure, retaining files and unresolved import seats."""
 
     roots = _canonical_root_modules(root_modules)
-    entries = _package_import_closure_entries(package_root, roots)
+    unresolved_candidates: set[str] = set()
+    entries = _package_import_closure_entries(
+        package_root,
+        roots,
+        unresolved_candidates=unresolved_candidates,
+    )
     relative_paths = tuple(
         path.relative_to(package_root).as_posix() for path, _payload, _snapshot in entries
     )
@@ -475,20 +497,76 @@ def _scoped_package_import_closure_receipt(
         }
         for relative, (_path, _payload, snapshot) in zip(relative_paths, entries, strict=True)
     ]
-    return _import_closure_material_digest(roots, material), relative_paths
+    unresolved = tuple(sorted(unresolved_candidates))
+    _require_unresolved_import_candidates(package_root, unresolved)
+    return (
+        _import_closure_material_digest(roots, material),
+        relative_paths,
+        unresolved,
+    )
+
+
+def _require_unresolved_import_candidates(
+    package_root: Path,
+    unresolved_candidates: Sequence[str],
+) -> None:
+    """Fail if a previously absent, directly imported submodule now exists."""
+
+    candidates = tuple(unresolved_candidates)
+    package = package_root.name
+    if candidates != tuple(sorted(set(candidates))) or any(
+        not candidate.startswith(f"{package}.")
+        or any(not part.isidentifier() for part in candidate.split("."))
+        for candidate in candidates
+    ):
+        raise RuntimeError("ReproBit import-closure unresolved candidates must be canonical")
+    for candidate in candidates:
+        parts = candidate.split(".")[1:]
+        parent = package_root.joinpath(*parts[:-1])
+        namespace_path = parent / parts[-1]
+        try:
+            namespace_status = namespace_path.stat()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise RuntimeError(
+                f"ReproBit import-closure candidate is unstable: {candidate}"
+            ) from exc
+        else:
+            if stat.S_ISDIR(namespace_status.st_mode):
+                raise RuntimeError(
+                    "ReproBit import closure changed because a previously absent "
+                    f"module now resolves: {candidate}"
+                )
+        for suffix in _IMPORTABLE_MODULE_SUFFIXES:
+            path = parent / f"{parts[-1]}{suffix}"
+            try:
+                path.lstat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise RuntimeError(
+                    f"ReproBit import-closure candidate is unstable: {candidate}"
+                ) from exc
+            raise RuntimeError(
+                "ReproBit import closure changed because a previously absent "
+                f"module now resolves: {candidate}"
+            )
 
 
 def _rehash_scoped_package_import_closure(
     package_root: Path,
     root_modules: Sequence[str],
     relative_paths: Sequence[str],
+    unresolved_candidates: Sequence[str],
 ) -> Digest:
-    """Rehash a previously resolved closure without reparsing every module."""
+    """Rehash a resolved closure while guarding import-resolution expansion."""
 
     roots = _canonical_root_modules(root_modules)
     paths = tuple(relative_paths)
     if not paths or paths != tuple(sorted(set(paths))):
         raise RuntimeError("ReproBit import-closure file set must be non-empty and canonical")
+    _require_unresolved_import_candidates(package_root, unresolved_candidates)
     material: list[dict[str, object]] = []
     for relative in paths:
         logical = PurePosixPath(relative)
@@ -506,7 +584,9 @@ def _rehash_scoped_package_import_closure(
                 role=relative,
             )
         )
-    return _import_closure_material_digest(roots, material)
+    digest = _import_closure_material_digest(roots, material)
+    _require_unresolved_import_candidates(package_root, unresolved_candidates)
+    return digest
 
 
 def scoped_package_import_closure_digest(root_modules: Sequence[str]) -> Digest:
@@ -518,8 +598,8 @@ def scoped_package_import_closure_digest(root_modules: Sequence[str]) -> Digest:
 
 def scoped_package_import_closure_receipt(
     root_modules: Sequence[str],
-) -> tuple[Digest, tuple[str, ...]]:
-    """Hash an installed import closure and return its canonical file set."""
+) -> tuple[Digest, tuple[str, ...], tuple[str, ...]]:
+    """Hash an installed closure and return its files and unresolved import seats."""
 
     package_root = Path(__file__).resolve(strict=True).parent
     return _scoped_package_import_closure_receipt(package_root, root_modules)
@@ -528,14 +608,16 @@ def scoped_package_import_closure_receipt(
 def rehash_scoped_package_import_closure(
     root_modules: Sequence[str],
     relative_paths: Sequence[str],
+    unresolved_candidates: Sequence[str],
 ) -> Digest:
-    """Rehash a resolved installed closure without repeating static analysis."""
+    """Rehash an installed closure without repeating static analysis."""
 
     package_root = Path(__file__).resolve(strict=True).parent
     return _rehash_scoped_package_import_closure(
         package_root,
         root_modules,
         relative_paths,
+        unresolved_candidates,
     )
 
 

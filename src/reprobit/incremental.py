@@ -36,6 +36,7 @@ _PRODUCER_IMPLEMENTATION_ROOTS = ("reprobit.classic_incremental",)
 (
     _INITIAL_PRODUCER_IMPLEMENTATION_DIGEST,
     _PRODUCER_IMPLEMENTATION_PATHS,
+    _PRODUCER_IMPLEMENTATION_UNRESOLVED_IMPORTS,
 ) = scoped_package_import_closure_receipt(_PRODUCER_IMPLEMENTATION_ROOTS)
 
 
@@ -45,6 +46,7 @@ def producer_implementation_digest() -> Digest:
     return rehash_scoped_package_import_closure(
         _PRODUCER_IMPLEMENTATION_ROOTS,
         _PRODUCER_IMPLEMENTATION_PATHS,
+        _PRODUCER_IMPLEMENTATION_UNRESOLVED_IMPORTS,
     )
 
 

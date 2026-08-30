@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from collections.abc import Sequence
+from importlib.machinery import EXTENSION_SUFFIXES
 from pathlib import Path
 
 import pytest
@@ -491,7 +492,7 @@ def test_resolved_import_closure_rehash_does_not_repeat_static_analysis(
     dependency = package / "dependency.py"
     dependency.write_text("VALUE = 1\n", encoding="utf-8")
     roots = ("reprobit.entry",)
-    baseline, paths = implementation._scoped_package_import_closure_receipt(
+    baseline, paths, unresolved = implementation._scoped_package_import_closure_receipt(
         package,
         roots,
     )
@@ -501,7 +502,71 @@ def test_resolved_import_closure_rehash_does_not_repeat_static_analysis(
         lambda *_args, **_kwargs: pytest.fail("resolved closure was parsed again"),
     )
 
-    assert implementation._rehash_scoped_package_import_closure(package, roots, paths) == baseline
+    assert (
+        implementation._rehash_scoped_package_import_closure(
+            package,
+            roots,
+            paths,
+            unresolved,
+        )
+        == baseline
+    )
 
     dependency.write_text("VALUE = 2\n", encoding="utf-8")
-    assert implementation._rehash_scoped_package_import_closure(package, roots, paths) != baseline
+    assert (
+        implementation._rehash_scoped_package_import_closure(
+            package,
+            roots,
+            paths,
+            unresolved,
+        )
+        != baseline
+    )
+
+
+@pytest.mark.parametrize(
+    ("candidate_path", "is_namespace"),
+    (
+        ("optional.py", False),
+        ("optional.pyc", False),
+        (f"optional{EXTENSION_SUFFIXES[0]}", False),
+        ("optional", True),
+    ),
+)
+def test_resolved_import_closure_rehash_rejects_relevant_membership_expansion(
+    tmp_path: Path,
+    candidate_path: str,
+    is_namespace: bool,
+) -> None:
+    package = _minimal_package(tmp_path, "from reprobit import optional\n")
+    roots = ("reprobit.entry",)
+    baseline, paths, unresolved = implementation._scoped_package_import_closure_receipt(
+        package,
+        roots,
+    )
+    assert unresolved == ("reprobit.optional",)
+
+    (package / "unrelated.py").write_text("VALUE = 1\n", encoding="utf-8")
+    (package / "unrelated").mkdir()
+    assert (
+        implementation._rehash_scoped_package_import_closure(
+            package,
+            roots,
+            paths,
+            unresolved,
+        )
+        == baseline
+    )
+
+    candidate = package / candidate_path
+    if is_namespace:
+        candidate.mkdir()
+    else:
+        candidate.write_bytes(b"candidate module")
+    with pytest.raises(RuntimeError, match="previously absent module now resolves"):
+        implementation._rehash_scoped_package_import_closure(
+            package,
+            roots,
+            paths,
+            unresolved,
+        )
