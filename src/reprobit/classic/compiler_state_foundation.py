@@ -9,7 +9,7 @@ from typing import Any, TypedDict, cast
 from reprobit.binary import ByteIdentityError
 from reprobit.classic.register_semantics import decode_ia32_bijection_body
 from reprobit.classic.semantic_errors import ClassicSemanticError
-from reprobit.coff import RELOCATION_WIDTHS
+from reprobit.coff_format import RELOCATION_WIDTHS
 from reprobit.model import Digest
 from reprobit.strict_json import canonical_json
 

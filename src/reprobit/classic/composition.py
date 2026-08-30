@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import struct
 
-import reprobit.entropy as entropy_generator
+import reprobit.declaration_shapes as entropy_generator
 from reprobit.binary import ByteIdentityError, require
-from reprobit.coff import (
+from reprobit.coff_format import (
     CoffObject,
     coff_auxiliary,
     coff_body,

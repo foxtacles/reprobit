@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 from reprobit.binary import ByteIdentityError, require
-from reprobit.coff import CoffObject, coff_body, detailed_relocations, section_definitions
-from reprobit.ia32 import supported_ia32_instruction_length
+from reprobit.coff_format import CoffObject, coff_body, detailed_relocations, section_definitions
+from reprobit.ia32_decode import supported_ia32_instruction_length
 
 from .coff import (
     _coff_table_bytes,

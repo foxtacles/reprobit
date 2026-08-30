@@ -226,7 +226,7 @@ class WarmRuntime:
                 return
             stack = ExitStack()
             try:
-                from reprobit.legacy import bind_pe32_oracle
+                from reprobit.oracle_pe32 import bind_pe32_oracle
                 from reprobit.verify import seal_file_oracle
 
                 capabilities = {}

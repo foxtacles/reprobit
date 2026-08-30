@@ -11,7 +11,7 @@ from reprobit.classic_donors import (
     merge_candidate_constraints,
     validate_donor_recipe,
 )
-from reprobit.coff import CoffObject, coff_body
+from reprobit.coff_format import CoffObject, coff_body
 from reprobit.costs import calculate_cost
 from reprobit.discovery_authoring import (
     AuthoredClassicRecord,

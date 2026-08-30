@@ -4,7 +4,13 @@ from collections import Counter
 import struct
 
 from reprobit.binary import require
-from reprobit.coff import CoffObject, RELOCATION_WIDTHS, coff_body, coff_table, detailed_relocations
+from reprobit.coff_format import (
+    CoffObject,
+    RELOCATION_WIDTHS,
+    coff_body,
+    coff_table,
+    detailed_relocations,
+)
 
 from .coff import function_multiset
 from .foundation import exact_audit_keys, require_exact_int, require_sha, sha256_bytes

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from reprobit.binary import ByteIdentityError, require
-from reprobit.coff import CoffObject, coff_body
+from reprobit.coff_format import CoffObject, coff_body
 
 from .coff import _comdat_child, _comdat_child_closure
 from .debug import FPO_RECORD_KEYS, parse_fpo_data

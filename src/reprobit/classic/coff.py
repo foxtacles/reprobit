@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import Counter
 
 from reprobit.binary import require
-from reprobit.coff import (
+from reprobit.coff_format import (
     CoffObject as _CoffObject,
     coff_body as _coff_body,
     section_definitions as _section_definitions,
@@ -17,7 +17,7 @@ from .foundation import canonical_json_bytes, sha256_bytes
 def comdat_primary_section(coff: _CoffObject, name: str) -> dict:
     """Return the unique COMDAT primary section defined by symbol ``name``.
 
-    Unlike :meth:`reprobit.coff.CoffObject.function_section` this accepts any section kind
+    Unlike :meth:`reprobit.coff_format.CoffObject.function_section` this accepts any section kind
     (``.text`` functions, ``.rdata`` vftables and literals, ``.data``); the
     symbol must be an external or static definition at offset 0 of a COMDAT
     section that is not an associated (selection 5) child.

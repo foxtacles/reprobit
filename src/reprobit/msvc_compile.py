@@ -14,6 +14,12 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol, cast
 
+from reprobit.declaration_shapes import (
+    generate_extern_run,
+    generate_forward_run,
+    generate_pad_shape,
+    generate_shape,
+)
 from reprobit.discovery_contracts import (
     CompileReceipt,
     DeclarationFamily,
@@ -22,12 +28,6 @@ from reprobit.discovery_contracts import (
     DiscoveryCompileOutput,
     DiscoveryCompilerReceipt,
     DiscoveryError,
-)
-from reprobit.entropy import (
-    generate_extern_run,
-    generate_forward_run,
-    generate_pad_shape,
-    generate_shape,
 )
 from reprobit.model import Digest
 from reprobit.process import CancellationToken, CommandSpec, ProcessSupervisor

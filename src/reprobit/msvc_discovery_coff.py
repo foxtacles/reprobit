@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError
-from reprobit.coff import (
+from reprobit.coff_format import (
     CoffMetadataIndex,
     CoffObject,
     coff_body,

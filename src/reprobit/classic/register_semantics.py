@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from reprobit.binary import ByteIdentityError, require
-from reprobit.ia32 import IA32_PREFIXES, supported_ia32_instruction_length
+from reprobit.ia32_decode import IA32_PREFIXES, supported_ia32_instruction_length
 
 IA32_GENERAL_REGISTER_NAMES = ("eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi")
 _IA32_REGISTER_NUMBERS = {name: number for number, name in enumerate(IA32_GENERAL_REGISTER_NAMES)}

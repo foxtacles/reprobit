@@ -40,7 +40,7 @@ import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.register_bijection as register_algorithms
 import reprobit.classic.register_candidates as register_candidates
 import reprobit.classic.relational as relational_algorithms
-import reprobit.coff as coff_format
+import reprobit.coff_format as coff_format
 from reprobit.binary import ByteIdentityError, require
 
 TARGET_SYMBOL = fixture.TARGET_SYMBOL

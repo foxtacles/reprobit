@@ -98,7 +98,7 @@ from reprobit.secure_paths import (
 from reprobit.strict_json import canonical_json
 
 if TYPE_CHECKING:
-    from reprobit.legacy import PE32VirtualAddressReader
+    from reprobit.oracle_pe32 import PE32VirtualAddressReader
 
 
 from reprobit.classic_runtime_producer import (

@@ -63,7 +63,7 @@ from reprobit.schema import (
 from reprobit.strict_json import canonical_json
 
 if TYPE_CHECKING:
-    from reprobit.legacy import PE32VirtualAddressReader
+    from reprobit.oracle_pe32 import PE32VirtualAddressReader
 
 
 @dataclass(frozen=True, slots=True)
@@ -791,7 +791,7 @@ def compose_classic_unit(
                 raise ClassicProjectError(f"legacy action {action.id!r} requires one proof receipt")
             if len(action.dependencies) != 1:
                 raise ClassicProjectError(f"legacy action {action.id!r} requires one fresh donor")
-            from reprobit.classic_legacy import compose_legacy_simulated_elision
+            from reprobit.classic_quarantine import compose_legacy_simulated_elision
 
             result = compose_legacy_simulated_elision(
                 action,

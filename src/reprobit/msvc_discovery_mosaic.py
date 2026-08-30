@@ -8,7 +8,7 @@ from itertools import combinations, pairwise
 
 from reprobit.binary import ByteIdentityError
 from reprobit.discovery_contracts import DiscoveryError, DiscoveryProduct
-from reprobit.ia32 import supported_ia32_instruction_length
+from reprobit.ia32_decode import supported_ia32_instruction_length
 from reprobit.strict_json import canonical_json
 
 _MAX_MOSAIC_RANGES_PER_DONOR = 256

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from reprobit.entropy import generate_extern_run, generate_forward_run
+from reprobit.declaration_shapes import generate_extern_run, generate_forward_run
 
 
 def test_entropy_prefixes_are_ascii_cpp_identifier_stems() -> None:

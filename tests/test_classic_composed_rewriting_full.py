@@ -56,7 +56,7 @@ import reprobit.classic.register_semantics as register_semantics
 import reprobit.classic.relational as relational_algorithms
 import reprobit.classic.rewriting as rewriting_algorithms
 import reprobit.classic.scheduling as schedule_algorithms
-import reprobit.coff as coff_format
+import reprobit.coff_format as coff_format
 from reprobit.binary import ByteIdentityError
 
 TARGET_SYMBOL = fixture.TARGET_SYMBOL

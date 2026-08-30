@@ -39,7 +39,7 @@ from reprobit.classic.relational_projection import (
     derive_equality_compare_reversals,
 )
 from reprobit.classic.semantic_errors import ClassicSemanticError
-from reprobit.ia32 import supported_ia32_instruction_length
+from reprobit.ia32_decode import supported_ia32_instruction_length
 from reprobit.model import Digest
 from reprobit.strict_json import canonical_json
 

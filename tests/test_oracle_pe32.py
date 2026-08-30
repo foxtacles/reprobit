@@ -5,14 +5,14 @@ from typing import Any
 
 import pytest
 
-from reprobit import classic_legacy
+from reprobit import classic_quarantine as classic_legacy
 from reprobit.artifacts import digest_bytes
-from reprobit.classic_legacy import compose_legacy_simulated_elision
-from reprobit.legacy import (
+from reprobit.classic_quarantine import compose_legacy_simulated_elision
+from reprobit.model import ByteRange, Digest, Scope
+from reprobit.oracle_pe32 import (
     LegacyInstallError,
     bind_pe32_oracle,
 )
-from reprobit.model import ByteRange, Digest, Scope
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeFamily,

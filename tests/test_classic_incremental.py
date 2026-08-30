@@ -2806,7 +2806,7 @@ def test_runtime_factory_binds_all_legacy_oracles_before_donor_use(
         lambda *_args, **_kwargs: prepared,
     )
 
-    import reprobit.legacy as legacy
+    import reprobit.oracle_pe32 as legacy
     import reprobit.verify as verify
 
     by_path = {path: target_id for target_id, path in oracle_paths.items()}

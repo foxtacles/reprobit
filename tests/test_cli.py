@@ -3002,7 +3002,7 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
         lambda **_kwargs: object(),
     )
     monkeypatch.setattr("reprobit.engine.ReproductionEngine.run", verify_run)
-    monkeypatch.setattr("reprobit.legacy.bind_pe32_oracle", lambda _oracle: object())
+    monkeypatch.setattr("reprobit.oracle_pe32.bind_pe32_oracle", lambda _oracle: object())
 
     reference = project / "reference" / "program.bin"
     reference.unlink()

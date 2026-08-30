@@ -213,7 +213,7 @@ def test_classic_package_has_no_oracle_capability_import_or_raw_body_api() -> No
             if isinstance(node, ast.ImportFrom) and node.module is not None
         }
         assert "reprobit.verify" not in imported
-        assert "reprobit.legacy" not in imported
+        assert "reprobit.oracle_pe32" not in imported
 
 
 def test_clean_canonical_imports_do_not_load_legacy_elision() -> None:

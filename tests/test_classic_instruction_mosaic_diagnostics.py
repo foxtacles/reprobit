@@ -11,7 +11,7 @@ from test_classic_instruction_schedule_full import (
 )
 
 import reprobit.classic.composition as composition
-import reprobit.coff as coff_format
+import reprobit.coff_format as coff_format
 from reprobit.binary import ByteIdentityError
 
 

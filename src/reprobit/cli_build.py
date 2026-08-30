@@ -183,7 +183,7 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                         )
                         with ExitStack() as stack:
                             stack.callback(prepared.close)
-                            from reprobit.legacy import bind_pe32_oracle
+                            from reprobit.oracle_pe32 import bind_pe32_oracle
                             from reprobit.verify import seal_file_oracle
 
                             quarantine_targets = _quarantine_oracle_targets(bundle)
@@ -395,7 +395,7 @@ def command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
                         )
                         for target in bundle.spec.targets
                     )
-                    from reprobit.legacy import bind_pe32_oracle
+                    from reprobit.oracle_pe32 import bind_pe32_oracle
 
                     quarantine_targets = _quarantine_oracle_targets(bundle)
                     prepared.donors.bind_legacy_oracles(

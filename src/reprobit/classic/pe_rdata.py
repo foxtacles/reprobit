@@ -9,7 +9,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from reprobit.binary import require
-from reprobit.coff import CoffObject
+from reprobit.coff_format import CoffObject
 
 from .foundation import (
     exact_audit_keys,

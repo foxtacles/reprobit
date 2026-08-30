@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from reprobit.binary import require
-from reprobit.ia32 import supported_ia32_instruction_length
+from reprobit.ia32_decode import supported_ia32_instruction_length
 
 from .foundation import require_payload_free_declaration
 from .relational import ia32_relational_flow_walk

@@ -17,7 +17,7 @@ from pydantic import ValidationError
 import reprobit.msvc_discovery as msvc_discovery
 import reprobit.msvc_discovery_analysis as msvc_discovery_analysis
 import reprobit.msvc_discovery_coff as msvc_discovery_coff
-from reprobit.coff import CoffObject
+from reprobit.coff_format import CoffObject
 from reprobit.discovery_contracts import (
     CompileReceipt,
     DeclarationFamily,

@@ -42,7 +42,7 @@ import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.register_candidates as register_candidates
 import reprobit.classic.register_reencoding as register_algorithms
 import reprobit.classic.register_semantics as register_semantics
-import reprobit.coff as coff_format
+import reprobit.coff_format as coff_format
 from reprobit.binary import ByteIdentityError
 
 TARGET_SYMBOL = "?erase@?$_Tree@PAVFixture@@@@QAE?AViterator@1@V21@@Z"

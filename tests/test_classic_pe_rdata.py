@@ -6,7 +6,7 @@ import pytest
 
 import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.pe_rdata as pe_rdata_algorithms
-import reprobit.coff as coff_format
+import reprobit.coff_format as coff_format
 from reprobit.binary import ByteIdentityError
 
 POOL_CHARACTERISTICS = 0x40400040

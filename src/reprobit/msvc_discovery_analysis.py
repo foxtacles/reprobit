@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 import reprobit.msvc_discovery_coff as msvc_coff
 import reprobit.msvc_discovery_mosaic as mosaic
 import reprobit.msvc_discovery_proposals as proposal_builder
-from reprobit.coff import CoffMetadataIndex, CoffObject
+from reprobit.coff_format import CoffMetadataIndex, CoffObject
 from reprobit.discovery_contracts import (
     DiscoveryError,
     DiscoveryPlan,

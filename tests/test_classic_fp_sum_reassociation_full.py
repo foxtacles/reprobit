@@ -39,7 +39,7 @@ import reprobit.classic.floating as floating_algorithms
 import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.register_semantics as register_algorithms
 import reprobit.classic.rewriting as rewriting_algorithms
-import reprobit.coff as coff_format
+import reprobit.coff_format as coff_format
 from reprobit.binary import ByteIdentityError
 
 PROLOGUE = bytes.fromhex("535633c98b09")

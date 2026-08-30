@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 from reprobit.binary import require
-from reprobit.coff import (
+from reprobit.coff_format import (
     CoffObject,
     coff_body,
     coff_unpack,
     detailed_relocations,
     section_definitions,
 )
-from reprobit.ia32 import supported_ia32_instruction_length
+from reprobit.ia32_decode import supported_ia32_instruction_length
 
 from .coff import (
     _coff_table_bytes,
