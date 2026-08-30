@@ -43,7 +43,7 @@ from reprobit.classic.source_overlay_claims import (
     _validate_include_leaf,
     _validate_unreachable_helper_leaf,
 )
-from reprobit.classic_link_topology import (
+from reprobit.classic.link_topology import (
     ClassicLinkTopologyError,
     terminal_link_input_topology,
 )
@@ -51,7 +51,7 @@ from reprobit.classic_overlay_document import (
     render_classic_overlay,
     render_classic_overlay_leaf_subset,
 )
-from reprobit.classic_overlay_types import ClassicOverlayOutputReceipt
+from reprobit.classic.overlay_types import ClassicOverlayOutputReceipt
 from reprobit.model import Digest
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole
 from reprobit.schema import ClassicRecipeFamily, ClassicRecipeIntervention, ProjectBundle

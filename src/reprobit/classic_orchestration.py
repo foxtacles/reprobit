@@ -37,7 +37,7 @@ from reprobit.classic_donors import (
     matching_candidate_constraints,
     prepare_donor_compile_request,
 )
-from reprobit.classic_link_topology import (
+from reprobit.classic.link_topology import (
     ClassicLinkTopologyError,
     terminal_link_input_topology,
 )

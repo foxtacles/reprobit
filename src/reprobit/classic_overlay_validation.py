@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from pathlib import PurePosixPath
 from typing import NoReturn, cast
 
-from reprobit.classic_overlay_types import SourceEditError, _Layout
+from reprobit.classic.overlay_types import SourceEditError, _Layout
 
 _SHA256_RE = re.compile(r"[0-9a-f]{64}")
 _IDENTIFIER_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

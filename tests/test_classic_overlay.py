@@ -18,7 +18,7 @@ from reprobit.classic_overlay_document import (
 )
 from reprobit.classic_overlay_generator import render_classic_overlay_generator
 from reprobit.classic_overlay_tokens import ClassicOverlayRenderSession
-from reprobit.classic_overlay_types import SourceEditError
+from reprobit.classic.overlay_types import SourceEditError
 
 
 def _seat_digest(tokens: list[str]) -> str:

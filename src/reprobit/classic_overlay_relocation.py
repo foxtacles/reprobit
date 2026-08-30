@@ -12,7 +12,7 @@ from reprobit.classic_overlay_tokens import (
     _token_sequence_digest,
     _tokens,
 )
-from reprobit.classic_overlay_types import _Layout
+from reprobit.classic.overlay_types import _Layout
 from reprobit.classic_overlay_validation import (
     _RANGE_DEPENDENCY_RE,
     _digest,

@@ -19,7 +19,7 @@ from reprobit.classic_overlay_tokens import (
     _anchor_resolver,
     _resolve_anchor,
 )
-from reprobit.classic_overlay_types import (
+from reprobit.classic.overlay_types import (
     ClassicOverlayAnchorReceipt,
     ClassicOverlayOperationReceipt,
     ClassicOverlayOutputReceipt,

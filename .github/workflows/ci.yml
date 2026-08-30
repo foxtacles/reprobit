@@ -7,9 +7,11 @@ on:
 permissions:
   contents: read
 
+# Never cancel an in-flight main build: every main commit must be fully
+# verified.
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   test:
@@ -31,6 +33,22 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
       - run: python -m pip install -e ".[test]"
+      - run: python -m pytest
+
+  lowest-bounds:
+    name: Lowest dependency bounds
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install with minimum resolvable dependency versions
+        run: |
+          python -m pip install uv
+          uv pip install --system --resolution lowest-direct -e ".[test]"
       - run: python -m pytest
 
   quality:

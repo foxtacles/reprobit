@@ -32,7 +32,7 @@ from reprobit.classic.source_proofs import (
     select_source_permutation_window,
     source_overlay_tokens,
 )
-from reprobit.classic_overlay_types import (
+from reprobit.classic.overlay_types import (
     ClassicOverlayOperationReceipt,
     ClassicOverlayOutputReceipt,
 )

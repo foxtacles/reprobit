@@ -12,7 +12,7 @@ from reprobit.classic_overlay_cpp import (
     _render_parameter,
 )
 from reprobit.classic_overlay_generator_common import _generator_contract, _string_array
-from reprobit.classic_overlay_types import _Layout
+from reprobit.classic.overlay_types import _Layout
 from reprobit.classic_overlay_validation import (
     _array,
     _boolean,

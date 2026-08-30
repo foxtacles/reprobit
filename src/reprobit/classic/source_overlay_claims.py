@@ -17,7 +17,7 @@ from reprobit.classic.overlay_declarations import (
 from reprobit.classic.semantic_contracts import CleanSourceInput
 from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.classic.source_proofs import iter_source_overlay_tokens, source_overlay_tokens
-from reprobit.classic_overlay_types import ClassicOverlayOperationReceipt
+from reprobit.classic.overlay_types import ClassicOverlayOperationReceipt
 from reprobit.model import Digest
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole
 from reprobit.schema import ClassicRecipeIntervention

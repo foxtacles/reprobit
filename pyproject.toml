@@ -11,7 +11,7 @@ requires-python = ">=3.11"
 license = "LGPL-3.0-only"
 license-files = ["LICENSE", "NOTICE"]
 dependencies = [
-  "pydantic>=2.10,<3",
+  "pydantic>=2.12,<3",
   "rich>=13.9,<15",
 ]
 

@@ -33,7 +33,7 @@ from reprobit.classic_overlay_relocation import (
     _relocation_spec,
     _render_relocation_range,
 )
-from reprobit.classic_overlay_types import _Layout
+from reprobit.classic.overlay_types import _Layout
 from reprobit.classic_overlay_validation import (
     _array,
     _fail,

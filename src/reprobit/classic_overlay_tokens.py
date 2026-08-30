@@ -12,7 +12,7 @@ from threading import RLock
 from types import MappingProxyType
 
 from reprobit.artifacts import digest_bytes
-from reprobit.classic_overlay_types import (
+from reprobit.classic.overlay_types import (
     ClassicOverlayAnchorReceipt,
     ClassicOverlayRenderSessionStats,
     _Anchor,

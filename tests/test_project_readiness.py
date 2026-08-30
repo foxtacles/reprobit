@@ -114,9 +114,9 @@ def test_valid_project_can_have_no_intervention_or_proof_documents(
 
 
 def test_derived_project_id_is_human_and_schema_safe(tmp_path: Path) -> None:
-    project = tmp_path / "1997 LEGO Island!"
+    project = tmp_path / "1997 Some Game!"
     assert main(["init", str(project)]) == 0
 
     from reprobit.project_loader import load_project
 
-    assert load_project(project).project_id == "project-1997-lego-island"
+    assert load_project(project).project_id == "project-1997-some-game"

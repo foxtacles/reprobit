@@ -30,7 +30,7 @@ from reprobit.schema import (
 from reprobit.strict_json import JsonValue, canonical_json
 
 if TYPE_CHECKING:
-    from reprobit.classic_overlay_types import ClassicOverlayOutputReceipt
+    from reprobit.classic.overlay_types import ClassicOverlayOutputReceipt
 
 
 class DonorSourceError(ValueError):

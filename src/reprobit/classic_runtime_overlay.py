@@ -49,7 +49,7 @@ from reprobit.classic_link_closure import (
     module_definition_material,
     parse_classic_module_definition,
 )
-from reprobit.classic_link_topology import (
+from reprobit.classic.link_topology import (
     ClassicLinkTopologyError,
     terminal_link_input_topology,
 )
