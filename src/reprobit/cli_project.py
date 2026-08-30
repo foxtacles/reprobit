@@ -198,10 +198,15 @@ def _inspect_candidate_source_authority(
     document_digest: Digest,
 ) -> tuple[BuildPlanDocument | None, Any | None]:
     build_plan_path = safe_project_path(root, spec.layout.build_plan)
-    if not build_plan_path.is_file():
+    intervention_root = safe_project_path(root, spec.layout.interventions)
+    if not build_plan_path.is_file() and not any(intervention_root.rglob("*.json")):
         return None, None
-    plan = _load_build_plan(build_plan_path).model_copy(
-        update={"source_manifest_digest": document_digest}
+    plan = (
+        _load_build_plan(build_plan_path).model_copy(
+            update={"source_manifest_digest": document_digest}
+        )
+        if build_plan_path.is_file()
+        else None
     )
     bundle = load_project_tree(
         root,
@@ -217,6 +222,7 @@ def _inspect_candidate_source_authority(
         root,
         source_manifest=document,
         build_plan=plan,
+        preflight_classic_recipes=True,
     )
 
 
@@ -265,9 +271,9 @@ def _source_preview_message(
         )
         lines.append("  project records need regeneration for: " + rendered)
     elif not authority_checked:
-        lines.append("  no build plan; no TU or source-overlay records were checked")
+        lines.append("  no build plan or saved source-derived records to check")
     else:
-        lines.append("  reviewed TU and source-overlay records remain valid")
+        lines.append("  reviewed source-derived records remain valid")
     return "\n".join(lines)
 
 
@@ -282,9 +288,10 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
 
     producer_graph_path = safe_project_path(root, spec.layout.producer_graph)
     authority_error: str | None = None
+    plan: BuildPlanDocument | None = None
     report: Any | None = None
     try:
-        _, report = _inspect_candidate_source_authority(root, spec, document, document_digest)
+        plan, report = _inspect_candidate_source_authority(root, spec, document, document_digest)
     except ValueError as exc:
         from reprobit.source_authority import SourceAuthorityError
 
@@ -323,6 +330,7 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
         producer_graph_invalidation_required=graph_invalidation_required,
         checked_overlay_outputs=(report.overlay_outputs if report is not None else ()),
         authority_checked=report is not None,
+        classic_preflight_checked=plan is not None and report is not None,
         stale_translation_units=stale_units,
         authority_regeneration_required=bool(authority_error or stale_units),
         authority_error=authority_error,
@@ -346,7 +354,7 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         if not isinstance(exc, SourceAuthorityError):
             raise
         raise CLIError(
-            "source lock refused because reviewed source-overlay authority must be "
+            "source lock refused because reviewed source-derived authority must be "
             f"regenerated: {exc}"
         ) from exc
     stale_units = _stale_tu_fields(report)
@@ -426,12 +434,19 @@ def command_source_export(args: argparse.Namespace, output: CLIOutput) -> int:
 
 def command_validate(args: argparse.Namespace, output: CLIOutput) -> int:
     root = project_root(args.project)
-    bundle = load_project_tree(root)
-    if isinstance(bundle.spec.build, ProducerGraphBuildAdapter) and bundle.producer_graph is None:
-        raise CLIError(
-            "producer-graph project has no committed graph; run the migration "
-            "extractor before validation"
-        )
+    with output.activity("checking every saved project file", phase="validate"):
+        bundle = load_project_tree(root, verify_source_authority=False)
+        from reprobit.source_authority import validate_source_authority
+
+        validate_source_authority(bundle, root, preflight_classic_recipes=True)
+        if (
+            isinstance(bundle.spec.build, ProducerGraphBuildAdapter)
+            and bundle.producer_graph is None
+        ):
+            raise CLIError(
+                "producer-graph project has no committed graph; run the migration "
+                "extractor before validation"
+            )
     output.emit(
         "validated",
         f"validated {bundle.spec.project_id}: {len(bundle.spec.targets)} target(s), "

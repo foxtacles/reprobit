@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 from reprobit.model import Digest
 from reprobit.schema import (
     BuildPlanDocument,
+    ClassicProofReceipt,
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ProjectBundle,
@@ -47,6 +48,13 @@ class SourceAuthorityReport:
         return tuple(item for item in self.translation_units if item.stale)
 
 
+@dataclass(frozen=True, slots=True)
+class _DonorOverlayInputPin:
+    intervention_id: str
+    path: str
+    digest: Digest
+
+
 def _relative_path(value: str) -> str:
     rendered = value.replace("\\", "/")
     path = PurePosixPath(rendered)
@@ -64,6 +72,26 @@ def _parameter_map(intervention: ClassicRecipeIntervention) -> dict[str, Any]:
     return {item.name: item.value for item in intervention.parameters}
 
 
+def _donor_overlay_input_pins(
+    intervention: ClassicRecipeIntervention,
+    receipts: tuple[ClassicProofReceipt, ...],
+) -> tuple[_DonorOverlayInputPin, ...]:
+    """Resolve donor-private clean-input pins, including receipt constraints."""
+
+    from reprobit.classic_donors import donor_overlay_clean_input_pins
+
+    try:
+        pins = donor_overlay_clean_input_pins(intervention, receipts)
+    except ValueError as exc:
+        raise SourceAuthorityError(
+            f"donor source-overlay authority {intervention.id!r} is malformed: {exc}"
+        ) from exc
+    return tuple(
+        _DonorOverlayInputPin(intervention.id, path, digest)
+        for path, digest in pins.items()
+    )
+
+
 def inspect_source_authority(
     bundle: ProjectBundle,
     project_root: Path,
@@ -71,8 +99,9 @@ def inspect_source_authority(
     source_manifest: SourceManifestDocument | None = None,
     build_plan: BuildPlanDocument | None = None,
     render_session: ClassicOverlayRenderSession | None = None,
+    preflight_classic_recipes: bool = False,
 ) -> SourceAuthorityReport:
-    """Check current admitted bytes, overlays, and effective TU pins without writing."""
+    """Check admitted bytes and optionally all source-derived recipe pins without writing."""
 
     root = project_root.resolve(strict=True)
     if root != Path(bundle.root).resolve(strict=True):
@@ -82,13 +111,49 @@ def inspect_source_authority(
     if manifest is None or not manifest.complete:
         raise SourceAuthorityError("source authority requires a complete portable manifest")
 
+    classic_interventions = tuple(
+        intervention
+        for intervention in bundle.interventions
+        if isinstance(intervention, ClassicRecipeIntervention)
+    )
+    tu_classic_interventions = tuple(
+        intervention
+        for intervention in classic_interventions
+        if intervention.scope.translation_unit is not None
+    )
+    if (
+        preflight_classic_recipes
+        and plan is None
+        and tu_classic_interventions
+    ):
+        raise SourceAuthorityError(
+            "a build plan is required to validate TU-scoped source-derived authority"
+        )
+
     overlays: list[tuple[ClassicRecipeIntervention, list[object], dict[object, object], int]] = []
+    donor_overlay_pins: list[_DonorOverlayInputPin] = []
+    receipts_by_intervention: dict[str, list[ClassicProofReceipt]] = {}
+    for document in bundle.proof_documents:
+        for expected_receipt in document.expected_observations:
+            receipts_by_intervention.setdefault(expected_receipt.intervention_id, []).append(
+                expected_receipt
+            )
     capture_paths = {unit.source for unit in plan.translation_units} if plan is not None else set()
+    run_classic_preflight = (
+        preflight_classic_recipes and plan is not None and bool(tu_classic_interventions)
+    )
+    if run_classic_preflight:
+        capture_paths.update(entry.path for entry in manifest.entries)
     forbidden_outputs = {
         target.oracle.replace("\\", "/").casefold() for target in bundle.spec.targets
     }
-    for intervention in bundle.interventions:
-        if not isinstance(intervention, ClassicRecipeIntervention):
+    for intervention in classic_interventions:
+        if intervention.family is ClassicRecipeFamily.DONOR_SOURCE_OVERLAY:
+            pins = _donor_overlay_input_pins(
+                intervention,
+                tuple(receipts_by_intervention.get(intervention.id, ())),
+            )
+            donor_overlay_pins.extend(pins)
             continue
         if intervention.family is not ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH:
             continue
@@ -110,6 +175,7 @@ def inspect_source_authority(
                 capture_paths.add(relative)
         overlays.append((intervention, outputs, graph, schema))
 
+    verified_digests: dict[str, Digest] = {}
     effective: dict[str, bytes] = {}
     for entry in manifest.entries:
         try:
@@ -125,8 +191,25 @@ def inspect_source_authority(
                 "source input differs from portable manifest: "
                 f"{entry.path!r} (expected {entry.digest.value}, found {digest.value})"
             )
+        verified_digests[entry.path] = digest
         if data is not None:
             effective[entry.path] = data
+
+    clean_sources = dict(effective)
+
+    for pin in donor_overlay_pins:
+        found_digest = verified_digests.get(pin.path)
+        if found_digest is None:
+            raise SourceAuthorityError(
+                "donor source-overlay authority requires regeneration for "
+                f"{pin.intervention_id!r}: clean input is absent for {pin.path!r}"
+            )
+        if found_digest != pin.digest:
+            raise SourceAuthorityError(
+                "donor source-overlay authority requires regeneration for "
+                f"{pin.intervention_id!r}: clean input differs for {pin.path!r} "
+                f"(expected {pin.digest.value}, found {found_digest.value})"
+            )
 
     overlay_outputs: list[str] = []
     from reprobit.classic_overlay_document import render_classic_overlay
@@ -166,6 +249,21 @@ def inspect_source_authority(
         if owns_render_session:
             active_render_session.close()
 
+    if run_classic_preflight:
+        from reprobit.classic_orchestration import prepare_classic_units
+        from reprobit.classic_project import ClassicProjectError
+
+        try:
+            prepare_classic_units(
+                bundle,
+                clean_sources=clean_sources,
+                effective_sources=effective,
+            )
+        except (ClassicProjectError, ValueError) as exc:
+            raise SourceAuthorityError(
+                f"classic source-derived authority requires regeneration: {exc}"
+            ) from exc
+
     statuses: list[TranslationUnitPinStatus] = []
     for unit in plan.translation_units if plan is not None else ():
         data = effective.get(unit.source)
@@ -190,13 +288,15 @@ def validate_source_authority(
     project_root: Path,
     *,
     render_session: ClassicOverlayRenderSession | None = None,
+    preflight_classic_recipes: bool = False,
 ) -> None:
-    """Fail closed when current effective TU bytes differ from reviewed authority."""
+    """Fail closed when current source bytes differ from reviewed authority."""
 
     report = inspect_source_authority(
         bundle,
         project_root,
         render_session=render_session,
+        preflight_classic_recipes=preflight_classic_recipes,
     )
     stale = report.stale_translation_units
     if not stale:

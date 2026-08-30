@@ -8,6 +8,7 @@ import sys
 from io import StringIO
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -560,6 +561,106 @@ def test_source_preview_reports_stale_tu_and_lock_preserves_reviewed_authority(
     assert all(path.read_bytes() == data for path, data in before.items())
 
 
+@pytest.mark.parametrize("with_build_plan", [True, False], ids=["planned", "onboarding"])
+@pytest.mark.parametrize("candidate_input", ["changed", "absent"])
+def test_source_preview_reports_stale_donor_overlay_input_and_lock_refuses_it(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    with_build_plan: bool,
+    candidate_input: str,
+) -> None:
+    project = tmp_path / "project"
+    header = _complete_donor_overlay_project(project)
+    capsys.readouterr()
+    spec = load_project(project)
+    plan_path = project / spec.layout.build_plan
+    if not with_build_plan:
+        plan_path.unlink()
+    authority_paths = [
+        project / spec.layout.source_manifest,
+        project / spec.layout.interventions / "unit.json",
+        project / spec.layout.proofs / "unit.proof.json",
+    ]
+    if with_build_plan:
+        authority_paths.append(plan_path)
+    before = {path: path.read_bytes() for path in authority_paths}
+    paths = [
+        "notes.txt",
+        "--path",
+        "reprobit.toml",
+        "--path",
+        "src/unit.cpp",
+    ]
+    expected_detail = "clean input is absent for 'include/unit.h'"
+    if candidate_input == "changed":
+        header.write_bytes(b"// harmless source comment\n#define VALUE 1\n")
+        paths[:0] = ["--path", "include/unit.h", "--path"]
+        expected_detail = "clean input differs for 'include/unit.h'"
+    else:
+        paths[:0] = ["--path"]
+    if not with_build_plan:
+        expected_detail = "a build plan is required to validate TU-scoped source-derived authority"
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "source",
+                "preview",
+                "--project",
+                str(project),
+                *paths,
+            ]
+        )
+        == 0
+    )
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["event"] == "source_preview"
+    assert event["authority_regeneration_required"] is True
+    assert event["stale_translation_units"] == []
+    assert event["authority_error"] is not None
+    if with_build_plan:
+        assert "donor.overlay" in event["authority_error"]
+    assert expected_detail in event["authority_error"]
+    assert all(path.read_bytes() == data for path, data in before.items())
+
+    assert main(["source", "lock", "--project", str(project), *paths]) == 2
+    message = capsys.readouterr().err
+    assert "source lock refused" in message
+    if with_build_plan:
+        assert "donor.overlay" in message
+    assert expected_detail in message
+    assert all(path.read_bytes() == data for path, data in before.items())
+    assert plan_path.exists() is with_build_plan
+
+    if not with_build_plan:
+        assert main(["validate", str(project)]) == 2
+        assert expected_detail in capsys.readouterr().err
+
+
+def test_source_authority_preflights_classic_source_semantics(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _complete_donor_overlay_project(project)
+    capsys.readouterr()
+    load_project_tree(project)
+
+    from reprobit import classic_orchestration
+    from reprobit.classic_project import ClassicProjectError
+
+    def reject_stale_semantics(*_args: object, **_kwargs: object) -> None:
+        raise ClassicProjectError("allocation-lift owner header source differs from its pin")
+
+    monkeypatch.setattr(classic_orchestration, "prepare_classic_units", reject_stale_semantics)
+    load_project_tree(project)
+    assert main(["validate", str(project)]) == 2
+    assert "allocation-lift owner header source differs" in capsys.readouterr().err
+
+
 def test_source_export_materializes_the_reviewed_effective_view(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1056,6 +1157,127 @@ def _complete_translation_unit_project(root: Path) -> tuple[str, Digest]:
     unit_path.write_bytes(canonical_json(unit_document))
     load_project_tree(root)
     return unit_id, source_digest
+
+
+def _complete_donor_overlay_project(root: Path) -> Path:
+    unit_id, source_digest = _complete_translation_unit_project(root)
+    header = root / "include/unit.h"
+    header.parent.mkdir()
+    header.write_bytes(b"#define VALUE 1\n")
+    spec = load_project(root)
+    manifest = build_source_manifest(
+        root,
+        ("include/unit.h", "notes.txt", "reprobit.toml", "src/unit.cpp"),
+        spec=spec,
+    )
+    (root / spec.layout.source_manifest).write_bytes(canonical_json(manifest))
+    plan_path = root / spec.layout.build_plan
+    plan = BuildPlanDocument.model_validate_json(plan_path.read_bytes()).model_copy(
+        update={"source_manifest_digest": source_manifest_digest(manifest)}
+    )
+    plan_path.write_bytes(canonical_json(plan))
+
+    symbol = "?main@@YAHXZ"
+    function_scope = Scope(
+        target="program",
+        translation_unit=unit_id,
+        function=symbol,
+    )
+    source = (root / "src/unit.cpp").read_bytes()
+    clean_inputs = (("src/unit.cpp", source), ("include/unit.h", header.read_bytes()))
+    operations = [{"id": "op_append_blank", "op": "append", "gen": {"k": "lines", "n": 1}}]
+    renderings: list[dict[str, Any]] = [
+        {"path": path, "operations": operations} for path, _data in clean_inputs
+    ]
+    pinned_renderings: list[dict[str, Any]] = [
+        {
+            "path": path,
+            "operations": operations,
+            "clean_sha256": Digest.from_bytes(data).value,
+            "rendered_sha256": Digest.from_bytes(data + b"\n").value,
+        }
+        for path, data in clean_inputs
+    ]
+    rendering_identity = Digest.from_bytes(
+        (json.dumps(pinned_renderings, indent=2, sort_keys=True) + "\n").encode()
+    ).value
+    donor_parameters: dict[str, Any] = {
+        "emission_policy": "donor_private_rendering_only",
+        "rendering_identity_sha256": rendering_identity,
+        "renderings": renderings,
+    }
+    donor = ClassicRecipeIntervention(
+        id="donor.overlay",
+        scope=Scope(target="program", translation_unit=unit_id),
+        rationale="Render reviewed source inputs for one private compiler donor.",
+        beneficiaries=(function_scope,),
+        family=ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
+        role=ClassicRecipeRole.DONOR,
+        build_target="program",
+        parameters=tuple(
+            ClassicField(name=name, value=value)
+            for name, value in sorted(donor_parameters.items())
+        ),
+    )
+    function = ClassicRecipeIntervention(
+        id="function.main",
+        scope=function_scope,
+        rationale="Consume the private donor without changing source authority.",
+        dependencies=(donor.id,),
+        family=ClassicRecipeFamily.RETAIL_EXACT_SOURCE_TARGET_CLOSURE,
+        role=ClassicRecipeRole.FUNCTION,
+        build_target="program",
+        symbol=symbol,
+    )
+    unit_path = root / spec.layout.interventions / "unit.json"
+    unit_path.write_bytes(
+        canonical_json(
+            InterventionDocument(
+                schema_version=3,
+                target_id="program",
+                translation_unit_id=unit_id,
+                source="src/unit.cpp",
+                source_digest=source_digest,
+                build_target="program",
+                interventions=(donor, function),
+            )
+        )
+    )
+    expected_values: dict[str, Any] = {
+        f"renderings[{index}].clean_sha256": item["clean_sha256"]
+        for index, item in enumerate(pinned_renderings)
+    }
+    expected_values.update(
+        {
+            f"renderings[{index}].rendered_sha256": item["rendered_sha256"]
+            for index, item in enumerate(pinned_renderings)
+        }
+    )
+    proof_path = root / spec.layout.proofs / "unit.proof.json"
+    proof_path.write_bytes(
+        canonical_json(
+            ProofDocument(
+                schema_version=3,
+                target_id="program",
+                translation_unit_id=unit_id,
+                expected_observations=(
+                    ClassicProofReceipt(
+                        id="proof.donor.overlay",
+                        intervention_id=donor.id,
+                        family=donor.family,
+                        expected_values=expected_values,
+                    ),
+                    ClassicProofReceipt(
+                        id="proof.function.main",
+                        intervention_id=function.id,
+                        family=function.family,
+                    ),
+                ),
+            )
+        )
+    )
+    load_project_tree(root)
+    return header
 
 
 def test_validate_rejects_missing_known_profile_source_mapping(

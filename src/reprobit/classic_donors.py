@@ -890,6 +890,35 @@ def validate_donor_recipe(
     )
 
 
+def donor_overlay_clean_input_pins(
+    intervention: ClassicRecipeIntervention,
+    receipts: Iterable[ClassicProofReceipt],
+) -> Mapping[str, Digest]:
+    """Return validated clean-source pins for one donor-private overlay."""
+
+    _require(
+        intervention.family is ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
+        "classic recipe is not a donor source overlay",
+    )
+    validation = validate_donor_recipe(
+        intervention,
+        matching_candidate_constraints(intervention, receipts),
+    )
+    raw_renderings = validation.parameters.get("renderings")
+    assert isinstance(raw_renderings, tuple)
+    pins: dict[str, Digest] = {}
+    for index, raw in enumerate(raw_renderings):
+        assert isinstance(raw, Mapping)
+        path = _logical_path(raw.get("path"), f"renderings[{index}].path")
+        pins[path] = Digest(
+            value=_sha(
+                raw.get("clean_sha256"),
+                f"renderings[{index}].clean_sha256 differs",
+            )
+        )
+    return MappingProxyType(pins)
+
+
 def _insert_after_includes(source: bytes, declarations: bytes, label: str) -> bytes:
     lines = source.split(b"\n")
     include_rows = [index for index, line in enumerate(lines) if line.startswith(b"#include")]
@@ -1337,6 +1366,7 @@ __all__ = [
     "DonorIncludeProjection",
     "DonorRecipeValidation",
     "DonorSourceError",
+    "donor_overlay_clean_input_pins",
     "donor_requires_dependency_tracking",
     "generate_declaration_shape",
     "generate_extern_run",

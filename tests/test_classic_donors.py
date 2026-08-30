@@ -13,6 +13,7 @@ from reprobit.classic_donors import (
     DonorCompileRequest,
     DonorIncludeProjection,
     DonorSourceError,
+    donor_overlay_clean_input_pins,
     generate_declaration_shape,
     generate_extern_run,
     generate_forward_run,
@@ -385,6 +386,11 @@ def test_donor_private_overlay_uses_the_shared_typed_renderer() -> None:
             "renderings[1].rendered_sha256": _digest(effective_header),
         },
     )
+    pins = donor_overlay_clean_input_pins(intervention, (receipt,))
+    assert {path: item.value for path, item in pins.items()} == {
+        "src/unit.cpp": _digest(source),
+        "src/unit.h": _digest(header),
+    }
 
     request = prepare_donor_compile_request(
         intervention,
