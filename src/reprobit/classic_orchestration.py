@@ -114,10 +114,10 @@ def _receipt_index(bundle: ProjectBundle) -> tuple[ClassicProofReceipt, ...]:
     )
 
 
-def _temporary_classic_legacy_action_authority(
+def _classic_quarantine_action_authority(
     bundle: ProjectBundle,
 ) -> Mapping[str, tuple[LegacyOracleInstallIntervention, ...]]:
-    """Validate and group the one-off classic oracle bridge by planned TU."""
+    """Validate and group quarantined oracle actions by planned TU."""
 
     action_documents = tuple(
         (
@@ -135,7 +135,7 @@ def _temporary_classic_legacy_action_authority(
         return MappingProxyType({})
     plan = bundle.build_plan
     if plan is None:
-        raise ClassicProjectError("temporary classic legacy-action authority requires a build plan")
+        raise ClassicProjectError("classic quarantine authority requires a build plan")
     planned_units = {unit.id: unit for unit in plan.translation_units}
     grouped: dict[str, list[LegacyOracleInstallIntervention]] = {}
     for document, actions in action_documents:
@@ -599,7 +599,7 @@ def prepare_classic_units(
 
     if bundle.build_plan is None:
         raise ClassicProjectError("classic orchestration requires a build plan")
-    legacy_actions = _temporary_classic_legacy_action_authority(bundle)
+    legacy_actions = _classic_quarantine_action_authority(bundle)
     receipts = _receipt_index(bundle)
     documents = {
         document.translation_unit_id: document

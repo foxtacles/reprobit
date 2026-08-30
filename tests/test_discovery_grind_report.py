@@ -108,6 +108,65 @@ def _result(
     )
 
 
+def test_discovery_probe_passes_resolved_execution_inputs_to_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle = SimpleNamespace(spec=SimpleNamespace(toolchain=SimpleNamespace(profile="msvc_4_2")))
+    backend = object()
+    execution = object()
+    args = SimpleNamespace(
+        toolchain_root=tmp_path / "toolchain",
+        backend="auto",
+        wine=None,
+        wineserver=None,
+        compiler_transport=None,
+        resource_transport=None,
+    )
+    resolved: dict[str, object] = {}
+    prepared: dict[str, object] = {}
+
+    monkeypatch.setattr(grind_cli, "load_project_tree", lambda _root: bundle)
+    monkeypatch.setattr(grind_cli, "selected_backend", lambda _args: backend)
+
+    def resolve_execution(**values: object) -> object:
+        resolved.update(values)
+        return execution
+
+    def prepare_run(*values: object, **options: object) -> object:
+        prepared["args"] = values
+        prepared.update(options)
+        return "prepared"
+
+    monkeypatch.setattr(
+        grind_cli,
+        "resolve_classic_execution_inputs",
+        resolve_execution,
+    )
+
+    result, session = grind_cli._prepare_probe(
+        args,
+        staged_root=tmp_path,
+        label="seed",
+        prepare_run=prepare_run,
+    )
+
+    assert result == "prepared"
+    assert session.is_dir()
+    assert resolved == {
+        "profile": "msvc_4_2",
+        "explicit_toolchain_root": tmp_path / "toolchain",
+        "backend": backend,
+        "compiler_transport": None,
+        "resource_transport": None,
+    }
+    assert prepared["args"] == (args, bundle)
+    assert prepared["project_root"] == tmp_path
+    assert prepared["session_root"] == session
+    assert prepared["execution"] is execution
+    assert callable(prepared["progress"])
+
+
 def test_grind_report_layers_success_funnel_decision_and_technical_details() -> None:
     rendered = render_grind_report_html(
         _result(solution=_solution(), published=True),

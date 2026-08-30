@@ -111,14 +111,14 @@ def prepare_producer_graph_run(
     )
 
 
-def _legacy_oracle_targets(bundle: ProjectBundle) -> frozenset[str]:
-    """Return the temporary classic bridge's exact oracle capability set."""
+def _quarantine_oracle_targets(bundle: ProjectBundle) -> frozenset[str]:
+    """Return the classic quarantine path's exact oracle capability set."""
 
     from reprobit.classic_orchestration import (
-        _temporary_classic_legacy_action_authority,
+        _classic_quarantine_action_authority,
     )
 
-    actions_by_unit = _temporary_classic_legacy_action_authority(bundle)
+    actions_by_unit = _classic_quarantine_action_authority(bundle)
     return frozenset(
         action.oracle_target for actions in actions_by_unit.values() for action in actions
     )
@@ -186,7 +186,7 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                             from reprobit.legacy import bind_pe32_oracle
                             from reprobit.verify import seal_file_oracle
 
-                            legacy_targets = _legacy_oracle_targets(bundle)
+                            quarantine_targets = _quarantine_oracle_targets(bundle)
                             prepared.donors.bind_legacy_oracles(
                                 {
                                     target.id: bind_pe32_oracle(
@@ -195,7 +195,7 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                                         )
                                     )
                                     for target in bundle.spec.targets
-                                    if target.id in legacy_targets
+                                    if target.id in quarantine_targets
                                 }
                             )
                             receipt = prepared.executor.execute(
@@ -397,12 +397,12 @@ def command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
                     )
                     from reprobit.legacy import bind_pe32_oracle
 
-                    legacy_targets = _legacy_oracle_targets(bundle)
+                    quarantine_targets = _quarantine_oracle_targets(bundle)
                     prepared.donors.bind_legacy_oracles(
                         {
                             oracle.target_id: bind_pe32_oracle(oracle.capability)
                             for oracle in oracles
-                            if oracle.target_id in legacy_targets
+                            if oracle.target_id in quarantine_targets
                         }
                     )
                     request = EngineRequest(

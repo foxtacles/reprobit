@@ -158,9 +158,24 @@ def test_malformed_user_settings_are_not_ignored(
     settings = tmp_path / "settings.json"
     settings.write_bytes(payload)
     _use_settings(monkeypatch, settings)
+    monkeypatch.delenv("REPROBIT_MSVC_4_2_ROOT", raising=False)
 
     with pytest.raises(UserConfigError):
         resolve_toolchain_root(MSVC_42, require=False)
+
+
+def test_environment_override_does_not_read_unused_saved_settings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    settings = tmp_path / "settings.json"
+    settings.write_bytes(b"{}\n")
+    _use_settings(monkeypatch, settings)
+    environment = tmp_path / "environment"
+    environment.mkdir()
+    monkeypatch.setenv("REPROBIT_MSVC_4_2_ROOT", str(environment))
+
+    assert resolve_toolchain_root(MSVC_42) == environment
 
 
 def test_platform_defaults_use_standard_user_data_locations(

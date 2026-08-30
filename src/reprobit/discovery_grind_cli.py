@@ -12,6 +12,10 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from reprobit.cli_environment import (
+    resolve_classic_execution_inputs,
+    selected_backend,
+)
 from reprobit.cli_output import CLIOutput, human_command
 from reprobit.cli_paths import (
     CLIError,
@@ -144,11 +148,19 @@ def _prepare_probe(
         del completed, total, phase, node_id, kind, reason
 
     try:
+        execution = resolve_classic_execution_inputs(
+            profile=bundle.spec.toolchain.profile,
+            explicit_toolchain_root=args.toolchain_root,
+            backend=selected_backend(args),
+            compiler_transport=args.compiler_transport,
+            resource_transport=args.resource_transport,
+        )
         prepared = prepare_run(
             args,
             bundle,
             project_root=staged_root,
             session_root=session,
+            execution=execution,
             progress=quiet_progress,
         )
     except BaseException:

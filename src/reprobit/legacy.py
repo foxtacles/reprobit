@@ -1,8 +1,8 @@
 """Isolated, opt-in quarantine for frozen oracle-byte installations.
 
-This module exposes only the sealed PE32 read capability required by the two
-explicitly allowlisted quarantine interventions. It cannot copy arbitrary file
-ranges or authorize new actions.
+This module exposes only the sealed PE32 read capability required by explicitly
+allowlisted quarantine interventions. It cannot copy arbitrary file ranges or
+authorize new actions.
 """
 
 from __future__ import annotations

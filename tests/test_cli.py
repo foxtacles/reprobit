@@ -21,7 +21,7 @@ from reprobit.cli import (
     _positive_seconds,
     main,
 )
-from reprobit.cli_build import _legacy_oracle_targets
+from reprobit.cli_build import _quarantine_oracle_targets
 from reprobit.cli_cmake_import import _cmake_import_workspace
 from reprobit.cli_output import CLIOutput, _friendly_incremental_phase, human_command
 from reprobit.cli_paths import CLIError
@@ -1292,7 +1292,7 @@ def test_validate_rejects_missing_known_profile_source_mapping(
     assert "profile-source assignment set differs" in capsys.readouterr().err
 
 
-def test_cli_legacy_oracle_targets_rejects_validated_project_scoped_orphan(
+def test_cli_quarantine_oracle_targets_rejects_validated_project_scoped_orphan(
     tmp_path: Path,
 ) -> None:
     project = tmp_path / "project"
@@ -1370,7 +1370,7 @@ def test_cli_legacy_oracle_targets_rejects_validated_project_scoped_orphan(
         ClassicProjectError,
         match="is outside a planned translation-unit shard",
     ):
-        _legacy_oracle_targets(validated)
+        _quarantine_oracle_targets(validated)
 
 
 def test_graph_configure_exposes_closed_import_receipt(
