@@ -1382,3 +1382,429 @@ def test_fresh_local_allows_siblings_but_rejects_visible_scopes() -> None:
     ancestor = b"void f() { int width; { target(); } }\n"
     with pytest.raises(SourceRefactorSemanticError, match="visible ancestor"):
         _require_identifier_fresh_at_seat(ancestor, ancestor.index(b"target"), "width", "local")
+
+
+def _entropy_only_donor(
+    operations_by_path: dict[str, list[dict[str, object]]],
+) -> ClassicRecipeIntervention:
+    renderings = [{"path": path, "operations": ops} for path, ops in operations_by_path.items()]
+    return _recipe(
+        recipe_id="donor.entropy",
+        role=ClassicRecipeRole.DONOR,
+        family=ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
+        parameters={"renderings": renderings},
+    )
+
+
+def test_entropy_only_donor_may_remove_comment_text() -> None:
+    """Destructive entropy that removes only comments and whitespace is inert."""
+    clean = b"// build note\nint value = 5;\n"
+    rendered = b"\nint value = 5;\n"
+    donor = _entropy_only_donor(
+        {
+            "src/unit.cpp": [
+                {
+                    "id": "op_lines",
+                    "op": "replace",
+                    "gen": {"k": "lines", "n": 1},
+                    "removed": {"sha256": _digest(b"// build note"), "size": 13},
+                }
+            ]
+        }
+    )
+
+    proof = validate_donor_source_semantics(
+        donor,
+        [],
+        owning_source="src/unit.cpp",
+        clean_sources={"src/unit.cpp": clean},
+        rendered_sources={"src/unit.cpp": rendered},
+    )
+
+    assert proof is None
+
+
+def test_entropy_only_donor_may_add_generated_declarations() -> None:
+    """Additions come from the closed generators and preserve every clean token."""
+    clean = b"int value = 5;\n"
+    rendered = b"class Widget;\nint value = 5;\n"
+    donor = _entropy_only_donor(
+        {"src/unit.cpp": [{"id": "op_fwd", "op": "insert", "gen": {"k": "lines", "n": 1}}]}
+    )
+
+    proof = validate_donor_source_semantics(
+        donor,
+        [],
+        owning_source="src/unit.cpp",
+        clean_sources={"src/unit.cpp": clean},
+        rendered_sources={"src/unit.cpp": rendered},
+    )
+
+    assert proof is None
+
+
+def test_entropy_only_donor_must_not_remove_program_text() -> None:
+    """A destructive operation may not drop a significant token of the program."""
+    clean = b"int a = 1;\nint value = 5;\n"
+    rendered = b"\nint value = 5;\n"
+    donor = _entropy_only_donor(
+        {
+            "src/unit.cpp": [
+                {
+                    "id": "op_lines",
+                    "op": "replace",
+                    "gen": {"k": "lines", "n": 1},
+                    "removed": {"sha256": _digest(b"int a = 1;"), "size": 10},
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(SourceRefactorSemanticError, match="non-prototype text"):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/unit.cpp",
+            clean_sources={"src/unit.cpp": clean},
+            rendered_sources={"src/unit.cpp": rendered},
+        )
+
+
+def test_entropy_only_donor_must_not_reorder_program_text() -> None:
+    clean = b"int a;\nint b;\n"
+    rendered = b"int b;\nint a;\n"
+    donor = _entropy_only_donor(
+        {
+            "src/unit.cpp": [
+                {
+                    "id": "op_lines",
+                    "op": "replace",
+                    "gen": {"k": "lines", "n": 1},
+                    "removed": {"sha256": _digest(b"int a;"), "size": 6},
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(SourceRefactorSemanticError, match="non-prototype text"):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/unit.cpp",
+            clean_sources={"src/unit.cpp": clean},
+            rendered_sources={"src/unit.cpp": rendered},
+        )
+
+
+def test_entropy_only_donor_rejects_unadmitted_generator() -> None:
+    donor = _entropy_only_donor(
+        {"src/unit.cpp": [{"id": "op_odd", "op": "insert", "gen": {"k": "mystery"}}]}
+    )
+
+    with pytest.raises(SourceRefactorSemanticError, match="unadmitted generator"):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/unit.cpp",
+            clean_sources={"src/unit.cpp": b"int value = 5;\n"},
+            rendered_sources={"src/unit.cpp": b"int value = 5;\n"},
+        )
+
+
+def test_entropy_only_donor_extra_rendering_must_be_header() -> None:
+    donor = _entropy_only_donor(
+        {"src/extra.cpp": [{"id": "op_lines", "op": "insert", "gen": {"k": "lines", "n": 1}}]}
+    )
+
+    with pytest.raises(SourceRefactorSemanticError, match="not a header"):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/unit.cpp",
+            clean_sources={"src/unit.cpp": b"int value = 5;\n"},
+            rendered_sources={"src/unit.cpp": b"int value = 5;\n"},
+        )
+
+
+def test_entropy_only_donor_rendering_must_be_present() -> None:
+    donor = _entropy_only_donor(
+        {"src/unit.cpp": [{"id": "op_lines", "op": "replace", "gen": {"k": "lines", "n": 1}}]}
+    )
+
+    with pytest.raises(SourceRefactorSemanticError, match="is absent"):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/unit.cpp",
+            clean_sources={"src/unit.cpp": b"int value = 5;\n"},
+            rendered_sources={},
+        )
+
+
+def test_entropy_only_donor_may_exchange_include_directives() -> None:
+    """Removed include directives are the admitted include-seat lever."""
+    clean = b'#include "realtime/vector3d.inl.h"\nint value = 5;\n'
+    rendered = b'#include "realtime/matrix4d.inl.h"\nint value = 5;\n'
+    donor = _entropy_only_donor(
+        {
+            "include/math.h": [
+                {
+                    "id": "op_inc",
+                    "op": "replace",
+                    "gen": {"k": "include", "line": 1},
+                    "removed": {
+                        "sha256": _digest(b'#include "realtime/vector3d.inl.h"'),
+                        "size": 34,
+                    },
+                }
+            ]
+        }
+    )
+
+    proof = validate_donor_source_semantics(
+        donor,
+        [],
+        owning_source="src/unit.cpp",
+        clean_sources={"include/math.h": clean, "src/unit.cpp": b"int main;\n"},
+        rendered_sources={"include/math.h": rendered},
+    )
+
+    assert proof is None
+
+
+def test_entropy_only_donor_may_elide_unreferenced_prototype() -> None:
+    """A non-virtual prototype whose name survives nowhere may be removed."""
+    clean = b"class Actor {\npublic:\n\tfloat GetDistance(float p_time);\n\tvoid Act();\n};\n"
+    rendered = b"class Actor {\npublic:\n\n\tvoid Act();\n};\n"
+    donor = _entropy_only_donor(
+        {
+            "include/actor.h": [
+                {
+                    "id": "op_d1",
+                    "op": "replace",
+                    "gen": {"k": "lines", "n": 1},
+                    "removed": {
+                        "sha256": _digest(b"\tfloat GetDistance(float p_time);\n"),
+                        "size": 34,
+                    },
+                }
+            ]
+        }
+    )
+
+    proof = validate_donor_source_semantics(
+        donor,
+        [],
+        owning_source="src/unit.cpp",
+        clean_sources={"include/actor.h": clean, "src/unit.cpp": b"int main;\n"},
+        rendered_sources={"include/actor.h": rendered},
+    )
+
+    assert proof is None
+
+
+def test_entropy_only_donor_must_not_elide_referenced_prototype() -> None:
+    """The removed declaration's name may not survive in any rendered text."""
+    clean = b"class Actor {\npublic:\n\tfloat GetDistance(float p_time);\n\tvoid Act();\n};\n"
+    rendered = b"class Actor {\npublic:\n\n\tvoid Act();\n};\n"
+    donor = _entropy_only_donor(
+        {
+            "include/actor.h": [
+                {
+                    "id": "op_d1",
+                    "op": "replace",
+                    "gen": {"k": "lines", "n": 1},
+                    "removed": {
+                        "sha256": _digest(b"\tfloat GetDistance(float p_time);\n"),
+                        "size": 34,
+                    },
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(SourceRefactorSemanticError, match="still referenced"):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/unit.cpp",
+            clean_sources={"include/actor.h": clean},
+            rendered_sources={
+                "include/actor.h": rendered,
+                "src/unit.cpp": b"float d = actor->GetDistance(1.0f);\n",
+            },
+        )
+
+
+def test_entropy_only_donor_must_not_elide_virtual_prototype() -> None:
+    """A virtual declaration changes the vtable and is never entropy."""
+    clean = b"class Actor {\npublic:\n\tvirtual float GetDistance(float p_time);\n};\n"
+    rendered = b"class Actor {\npublic:\n\n};\n"
+    donor = _entropy_only_donor(
+        {
+            "include/actor.h": [
+                {
+                    "id": "op_d1",
+                    "op": "replace",
+                    "gen": {"k": "lines", "n": 1},
+                    "removed": {
+                        "sha256": _digest(b"\tvirtual float GetDistance(float p_time);\n"),
+                        "size": 42,
+                    },
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(SourceRefactorSemanticError, match="non-prototype text"):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/unit.cpp",
+            clean_sources={"include/actor.h": clean},
+            rendered_sources={"include/actor.h": rendered},
+        )
+
+
+def test_entropy_only_donor_may_relocate_member_definition() -> None:
+    """A member_sig/reloc pair moves a definition; its tokens must reappear."""
+    clean_header = b"class Entry {\npublic:\n\t~Entry() { Flush(); }\n};\n"
+    rendered_header = b"class Entry {\npublic:\n\t~Entry();\n};\n"
+    rendered_cpp = b'#include "entry.h"\n\nEntry::~Entry() { Flush(); }\n'
+    donor = _entropy_only_donor(
+        {
+            "include/entry.h": [
+                {
+                    "id": "op_move",
+                    "op": "replace",
+                    "gen": {"k": "member_sig", "kind": "destructor"},
+                    "removed": {"sha256": _digest(b"~Entry() { Flush(); }"), "size": 21},
+                }
+            ],
+            "src/entry.cpp": [
+                {"id": "op_dest", "op": "insert", "gen": {"k": "reloc"}},
+            ],
+        }
+    )
+
+    proof = validate_donor_source_semantics(
+        donor,
+        [],
+        owning_source="src/entry.cpp",
+        clean_sources={"include/entry.h": clean_header, "src/entry.cpp": b""},
+        rendered_sources={"include/entry.h": rendered_header, "src/entry.cpp": rendered_cpp},
+    )
+
+    assert proof is None
+
+
+def test_entropy_only_donor_relocation_must_reappear() -> None:
+    """A declared relocation whose tokens vanish is a disguised deletion."""
+    clean_header = b"class Entry {\npublic:\n\t~Entry() { Flush(); }\n};\n"
+    rendered_header = b"class Entry {\npublic:\n\t~Entry();\n};\n"
+    donor = _entropy_only_donor(
+        {
+            "include/entry.h": [
+                {
+                    "id": "op_move",
+                    "op": "replace",
+                    "gen": {"k": "member_sig", "kind": "destructor"},
+                    "removed": {"sha256": _digest(b"~Entry() { Flush(); }"), "size": 21},
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(SourceRefactorSemanticError, match="does not reappear"):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/entry.cpp",
+            clean_sources={"include/entry.h": clean_header, "src/entry.cpp": b""},
+            rendered_sources={"include/entry.h": rendered_header, "src/entry.cpp": b""},
+        )
+
+
+def test_entropy_only_donor_may_elide_unreferenced_definition() -> None:
+    """A complete function definition whose name survives nowhere may be
+    removed (e.g. a beta-only function absent from the retail image)."""
+    removed = b"MxU32 Actor::BetaOnly(int p_x)\n{\n\treturn p_x != 0;\n}\n"
+    clean = b'#include "actor.h"\n\n' + removed + b"\nvoid Keep() {}\n"
+    rendered = b'#include "actor.h"\n\n\nvoid Keep() {}\n'
+    donor = _entropy_only_donor(
+        {
+            "src/unit.cpp": [
+                {
+                    "id": "op_beta",
+                    "op": "replace",
+                    "gen": {"k": "lines", "n": 1},
+                    "removed": {"sha256": _digest(removed), "size": len(removed)},
+                }
+            ]
+        }
+    )
+
+    proof = validate_donor_source_semantics(
+        donor,
+        [],
+        owning_source="src/unit.cpp",
+        clean_sources={"src/unit.cpp": clean},
+        rendered_sources={"src/unit.cpp": rendered},
+    )
+
+    assert proof is None
+
+
+def test_entropy_only_donor_must_not_elide_referenced_definition() -> None:
+    removed = b"MxU32 Actor::BetaOnly(int p_x)\n{\n\treturn p_x != 0;\n}\n"
+    clean = b'#include "actor.h"\n\n' + removed + b"\nvoid Keep() { BetaOnly(1); }\n"
+    rendered = b'#include "actor.h"\n\n\nvoid Keep() { BetaOnly(1); }\n'
+    donor = _entropy_only_donor(
+        {
+            "src/unit.cpp": [
+                {
+                    "id": "op_beta",
+                    "op": "replace",
+                    "gen": {"k": "lines", "n": 1},
+                    "removed": {"sha256": _digest(removed), "size": len(removed)},
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(SourceRefactorSemanticError, match="still referenced"):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/unit.cpp",
+            clean_sources={"src/unit.cpp": clean},
+            rendered_sources={"src/unit.cpp": rendered},
+        )
+
+
+def test_entropy_only_donor_must_not_elide_statement_text() -> None:
+    """Plain statements are never admitted, even in a braced block."""
+    removed = b"value = ComputeValue(5);"
+    clean = b"void Keep() {\n\tvalue = ComputeValue(5);\n}\n"
+    rendered = b"void Keep() {\n}\n"
+    donor = _entropy_only_donor(
+        {
+            "src/unit.cpp": [
+                {
+                    "id": "op_stmt",
+                    "op": "replace",
+                    "gen": {"k": "lines", "n": 1},
+                    "removed": {"sha256": _digest(removed), "size": len(removed)},
+                }
+            ]
+        }
+    )
+
+    with pytest.raises(SourceRefactorSemanticError, match="non-prototype text"):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/unit.cpp",
+            clean_sources={"src/unit.cpp": clean},
+            rendered_sources={"src/unit.cpp": rendered},
+        )
