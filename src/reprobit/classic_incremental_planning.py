@@ -144,7 +144,7 @@ def _render_sources(
     generated_translation_units: set[str] = set()
     generated_outputs: set[str] = set()
     try:
-        from reprobit.classic_overlay_document import render_classic_overlay
+        from reprobit.classic.overlay_document import render_classic_overlay
 
         for intervention in bundle.interventions:
             if not isinstance(intervention, ClassicRecipeIntervention) or (

@@ -30,7 +30,7 @@ project's compatible CMake version on `PATH`. On macOS and Linux, install Wine
 and `wineserver`; native Windows does not use Wine.
 
 ```console
-git clone https://github.com/foxtacles/reprobit.git
+git clone https://github.com/isledecomp/reprobit.git
 cd reprobit
 python -m venv .venv
 source .venv/bin/activate

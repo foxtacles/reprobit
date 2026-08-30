@@ -602,7 +602,7 @@ def materialize_effective_workspace(
                     raise ClassicProjectError(f"overlay clean input is absent: {relative}")
                 clean_inputs[relative] = path.read_bytes()
         try:
-            from reprobit.classic_overlay_document import render_classic_overlay
+            from reprobit.classic.overlay_document import render_classic_overlay
 
             rendered = render_classic_overlay(
                 {"schema": schema, "outputs": outputs, "graph": graph},

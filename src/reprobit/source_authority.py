@@ -18,7 +18,7 @@ from reprobit.schema import (
 from reprobit.source_lock import SourceLockError, receipt_source_input
 
 if TYPE_CHECKING:
-    from reprobit.classic_overlay_tokens import ClassicOverlayRenderSession
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 
 
 class SourceAuthorityError(ValueError):
@@ -207,8 +207,8 @@ def inspect_source_authority(
             )
 
     overlay_outputs: list[str] = []
-    from reprobit.classic_overlay_document import render_classic_overlay
-    from reprobit.classic_overlay_tokens import ClassicOverlayRenderSession
+    from reprobit.classic.overlay_document import render_classic_overlay
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 
     owns_render_session = render_session is None
     active_render_session = render_session or ClassicOverlayRenderSession()

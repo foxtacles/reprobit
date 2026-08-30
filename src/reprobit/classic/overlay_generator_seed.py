@@ -5,9 +5,9 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping
 
-from reprobit.classic_overlay_cpp import _cpp_type, _render_cpp_type, _render_parameter
-from reprobit.classic_overlay_generator_common import _string_array
-from reprobit.classic_overlay_validation import (
+from reprobit.classic.overlay_cpp import _cpp_type, _render_cpp_type, _render_parameter
+from reprobit.classic.overlay_generator_common import _string_array
+from reprobit.classic.overlay_validation import (
     _array,
     _boolean,
     _fail,

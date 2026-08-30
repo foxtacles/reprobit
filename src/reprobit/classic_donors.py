@@ -1252,7 +1252,7 @@ def prepare_donor_compile_request(
                 }
             )
         try:
-            from reprobit.classic_overlay_document import render_classic_overlay_declarations
+            from reprobit.classic.overlay_document import render_classic_overlay_declarations
         except ImportError as exc:  # pragma: no cover - only during partial installations
             raise DonorSourceError("classic overlay renderer is unavailable") from exc
         result = render_classic_overlay_declarations(declarations, normalized_inputs)

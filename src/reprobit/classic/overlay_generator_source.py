@@ -5,14 +5,14 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import cast
 
-from reprobit.classic_overlay_cpp import (
+from reprobit.classic.overlay_cpp import (
     _cpp_type,
     _CppType,
     _parameter,
     _render_cpp_type,
 )
-from reprobit.classic_overlay_generator_common import _generator_contract, _string_array
-from reprobit.classic_overlay_validation import (
+from reprobit.classic.overlay_generator_common import _generator_contract, _string_array
+from reprobit.classic.overlay_validation import (
     _array,
     _fail,
     _identifier,

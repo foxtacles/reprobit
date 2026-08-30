@@ -10,15 +10,15 @@ from pathlib import Path
 import pytest
 
 from reprobit.artifacts import digest_bytes
-from reprobit.classic.overlay_types import SourceEditError
-from reprobit.classic_overlay_document import (
+from reprobit.classic.overlay_document import (
     render_classic_overlay,
     render_classic_overlay_declarations,
     render_classic_overlay_leaf_subset,
     render_classic_overlay_subset,
 )
-from reprobit.classic_overlay_generator import render_classic_overlay_generator
-from reprobit.classic_overlay_tokens import ClassicOverlayRenderSession
+from reprobit.classic.overlay_generator import render_classic_overlay_generator
+from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
+from reprobit.classic.overlay_types import SourceEditError
 
 
 def _seat_digest(tokens: list[str]) -> str:

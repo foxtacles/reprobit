@@ -18,7 +18,7 @@ from reprobit.classic.overlay_types import (
     _Anchor,
     _Output,
 )
-from reprobit.classic_overlay_validation import (
+from reprobit.classic.overlay_validation import (
     _BOUNDARIES,
     _digest,
     _fail,

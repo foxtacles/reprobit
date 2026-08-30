@@ -20,6 +20,10 @@ from reprobit.classic.overlay_declarations import (
     _DeclarationFact,
     _odr_conflict_summary,
 )
+from reprobit.classic.overlay_document import (
+    render_classic_overlay,
+    render_classic_overlay_leaf_subset,
+)
 from reprobit.classic.overlay_types import ClassicOverlayOutputReceipt
 from reprobit.classic.semantic_contracts import (
     CleanSourceInput,
@@ -47,10 +51,6 @@ from reprobit.classic.source_overlay_claims import (
     _validate_function_leaf,
     _validate_include_leaf,
     _validate_unreachable_helper_leaf,
-)
-from reprobit.classic_overlay_document import (
-    render_classic_overlay,
-    render_classic_overlay_leaf_subset,
 )
 from reprobit.model import Digest
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole

@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-from reprobit.classic_overlay_validation import (
+from reprobit.classic.overlay_validation import (
     _fail,
     _identifier,
     _integer,

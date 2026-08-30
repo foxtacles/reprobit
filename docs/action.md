@@ -52,14 +52,14 @@ jobs:
       - name: Install the pinned ReproBit CLI for provisioning
         run: >-
           python -m pip install
-          "git+https://github.com/foxtacles/reprobit.git@0123456789abcdef0123456789abcdef01234567"
+          "git+https://github.com/isledecomp/reprobit.git@0123456789abcdef0123456789abcdef01234567"
       - name: Provision and authenticate MSVC 4.2
         run: >-
           rbit toolchain provision
           --destination "${{ runner.temp }}/msvc42"
           --no-save
       - id: reprobit
-        uses: foxtacles/reprobit@0123456789abcdef0123456789abcdef01234567
+        uses: isledecomp/reprobit@0123456789abcdef0123456789abcdef01234567
         with:
           project-directory: .
           toolchain-root: ${{ runner.temp }}/msvc42

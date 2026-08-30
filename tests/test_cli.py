@@ -3497,3 +3497,22 @@ def test_report_and_cmake_module_commands(
     assert main(["cmake-module", "--file"]) == 0
     module = Path(capsys.readouterr().out.strip().splitlines()[-1])
     assert module.name == "ReproBit.cmake" and module.is_file()
+
+
+def test_source_lock_never_admits_host_ci_configuration(tmp_path: Path) -> None:
+    """Workflow edits must not force a source relock: .github is not a build
+    input and stays outside the manifest."""
+    _initialize(tmp_path)
+    subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
+    (tmp_path / "CMakeLists.txt").write_text(
+        "cmake_minimum_required(VERSION 3.20)\n", encoding="utf-8"
+    )
+    workflows = tmp_path / ".github" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "ci.yml").write_text("name: CI\n", encoding="utf-8")
+    subprocess.run(("git", "add", "-A"), cwd=tmp_path, check=True, capture_output=True)
+
+    assert main(["source", "lock", "--project", os.fspath(tmp_path)]) == 0
+    manifest = json.loads((tmp_path / "reprobit" / "source-manifest.json").read_text())
+    paths = {entry["path"] for entry in manifest["entries"]}
+    assert not any(path.startswith(".github/") for path in paths)

@@ -5,21 +5,20 @@ from __future__ import annotations
 from collections.abc import Mapping
 from pathlib import PurePosixPath
 
-from reprobit.classic.overlay_types import _Layout
-from reprobit.classic_overlay_cpp import _cpp_type, _render_cpp_type, _render_parameter
-from reprobit.classic_overlay_generator_common import _generator_contract, _string_array
-from reprobit.classic_overlay_generator_declarations import (
+from reprobit.classic.overlay_cpp import _cpp_type, _render_cpp_type, _render_parameter
+from reprobit.classic.overlay_generator_common import _generator_contract, _string_array
+from reprobit.classic.overlay_generator_declarations import (
     _condition_expression,
     _render_call_supplier,
     _render_declaration_generator,
     _render_record_header,
     _render_template_supplier,
 )
-from reprobit.classic_overlay_generator_seed import (
+from reprobit.classic.overlay_generator_seed import (
     _render_relocation_ring,
     _render_seed_sequence,
 )
-from reprobit.classic_overlay_generator_source import (
+from reprobit.classic.overlay_generator_source import (
     _render_captured_tail,
     _render_constructor_allocation_lift,
     _render_dead_updates,
@@ -30,11 +29,12 @@ from reprobit.classic_overlay_generator_source import (
     _render_inclusive_extent,
     _render_member_signature,
 )
-from reprobit.classic_overlay_relocation import (
+from reprobit.classic.overlay_relocation import (
     _relocation_spec,
     _render_relocation_range,
 )
-from reprobit.classic_overlay_validation import (
+from reprobit.classic.overlay_types import _Layout
+from reprobit.classic.overlay_validation import (
     _array,
     _fail,
     _identifier,

@@ -145,6 +145,9 @@ def _forbidden(spec: ProjectSpec) -> tuple[set[str], tuple[str, ...]]:
             spec.layout.interventions,
             spec.layout.proofs,
             spec.layout.oracles,
+            # Host CI configuration is never a build input; admitting it only
+            # forces a relock for every workflow edit.
+            ".github",
         )
     )
     return exact, roots

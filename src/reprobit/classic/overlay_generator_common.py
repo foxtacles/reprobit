@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 from reprobit.classic.overlay_types import _Layout
-from reprobit.classic_overlay_validation import (
+from reprobit.classic.overlay_validation import (
     _LAYOUT_KEYS,
     _array,
     _fail,
