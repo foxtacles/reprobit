@@ -292,9 +292,7 @@ def configure_cmake_project(
         with ProcessSupervisor() as supervisor:
             result = supervisor.run(specification)
     except ProcessError as exc:
-        raise CMakeConfigureError(
-            f"CMake import configure failed; inspect {configure_log}"
-        ) from exc
+        raise CMakeConfigureError(f"CMake import configure failed:\n{exc}") from exc
     if effective_source_digest(effective_root) != source_digest:
         raise CMakeConfigureError("CMake configure changed effective source authority")
     for path, label in (

@@ -105,6 +105,55 @@ def test_transport_sibling_rejects_symlink_only_and_two_real_aliases(
         cmake_configure._transport_sibling(tmp_path, "link")
 
 
+@pytest.mark.skipif(os.name != "posix", reason="executable transport fixture is POSIX")
+def test_graph_configure_surfaces_the_bounded_process_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    project_root.mkdir()
+    workspace = tmp_path / "migration"
+    toolchain = tmp_path / "toolchain"
+    transports = toolchain / "wine/x86"
+    transports.mkdir(parents=True)
+    for name in ("cl", "rc", "link", "lib"):
+        _executable(transports / name)
+    module_root = tmp_path / "cmake"
+    module_root.mkdir()
+    (module_root / "ReproBit.cmake").write_text("# fixture\n", encoding="utf-8")
+    fake_cmake = _executable(
+        tmp_path / "cmake-fixture",
+        "#!/bin/sh\necho 'compiler probe failed clearly' >&2\nexit 7\n",
+    )
+
+    def materialize(bundle: ProjectBundle, root: Path, effective: Path) -> tuple[()]:
+        del bundle, root
+        effective.mkdir(parents=True)
+        (effective / "CMakeLists.txt").write_text("# fixture\n", encoding="utf-8")
+        return ()
+
+    monkeypatch.setattr(cmake_configure, "materialize_effective_workspace", materialize)
+    monkeypatch.setattr(cmake_configure, "write_cmake_project_plan", lambda *args: None)
+    monkeypatch.setattr(cmake_configure, "cmake_module_path", lambda: module_root)
+    with pytest.raises(cmake_configure.CMakeConfigureError) as caught:
+        cmake_configure.configure_cmake_project(
+            _bundle(project_root),
+            project_root=project_root,
+            workspace_root=workspace,
+            toolchain_root=toolchain,
+            cmake=fake_cmake,
+            compiler_transport=transports / "cl",
+            resource_transport=transports / "rc",
+            timeout_seconds=30,
+        )
+
+    message = str(caught.value)
+    assert "CMake import configure failed" in message
+    assert "exit code 7" in message
+    assert "compiler probe failed clearly" in message
+    assert f"full output: {workspace / 'build/configure.log'}" in message
+
+
 @pytest.mark.parametrize(
     ("mutate_source", "link_admission"),
     ((False, False), (True, False), (False, True)),

@@ -26,6 +26,49 @@ from reprobit.transactions import CASTransaction
 
 ROOT = Path(__file__).parents[1]
 GRIND_SAMPLE = ROOT / "examples/grind"
+_MAX_FAILURE_LOG_BYTES = 64 * 1024
+
+
+def _retained_failure_logs(project: Path) -> str:
+    runs = project / ".reprobit-state" / "runs"
+    if not runs.is_dir():
+        return "no retained ReproBit run logs were found"
+    paths = tuple(
+        path
+        for path in sorted(runs.rglob("*.log"), key=lambda item: item.as_posix())
+        if path.is_file() and not path.is_symlink()
+    )
+    if not paths:
+        return "no retained ReproBit run logs were found"
+
+    diagnostic_root_value = os.environ.get("REPROBIT_NATIVE_LOG_DIR")
+    diagnostic_root = Path(diagnostic_root_value) if diagnostic_root_value else None
+    if diagnostic_root is not None:
+        diagnostic_root.mkdir(parents=True, exist_ok=True)
+
+    excerpts: list[str] = []
+    for index, path in enumerate(paths, start=1):
+        payload = path.read_bytes()
+        if diagnostic_root is not None:
+            shutil.copyfile(
+                path,
+                diagnostic_root / f"retained-{index:02d}-{path.name}",
+            )
+        relative = path.relative_to(project).as_posix()
+        truncated = len(payload) > _MAX_FAILURE_LOG_BYTES
+        excerpt = payload[-_MAX_FAILURE_LOG_BYTES:].decode("utf-8", errors="replace")
+        prefix = "[earlier bytes omitted]\n" if truncated else ""
+        excerpts.append(f"--- {relative} ---\n{prefix}{excerpt}")
+    return "\n".join(excerpts)
+
+
+def _require_cli_success(project: Path, argv: list[str]) -> None:
+    exit_code = main(argv)
+    if exit_code != 0:
+        pytest.fail(
+            f"ReproBit CLI exited with {exit_code}: {argv!r}\n{_retained_failure_logs(project)}",
+            pytrace=False,
+        )
 
 
 def _seed_timestamp_normalization(project: Path) -> None:
@@ -78,20 +121,18 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
     toolchain = Path(toolchain_value).resolve(strict=True)
     project = tmp_path / "project"
 
-    assert (
-        main(
-            [
-                "init",
-                str(project),
-                "--target",
-                "program",
-                "--artifact",
-                "build/grind.exe",
-                "--oracle",
-                "reference/grind.exe",
-            ]
-        )
-        == 0
+    _require_cli_success(
+        project,
+        [
+            "init",
+            str(project),
+            "--target",
+            "program",
+            "--artifact",
+            "build/grind.exe",
+            "--oracle",
+            "reference/grind.exe",
+        ],
     )
     shutil.copyfile(GRIND_SAMPLE / "transform.cpp", project / "transform.cpp")
     shutil.copyfile(GRIND_SAMPLE / "prepare_reference.py", project / "prepare_reference.py")
@@ -114,35 +155,31 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
         "set_target_properties(grind PROPERTIES OUTPUT_NAME grind)\n",
         encoding="utf-8",
     )
-    assert (
-        main(
-            [
-                "setup",
-                str(project),
-                "--toolchain-root",
-                str(toolchain),
-                "--no-save",
-                "--skip-probe",
-            ]
-        )
-        == 0
+    _require_cli_success(
+        project,
+        [
+            "setup",
+            str(project),
+            "--toolchain-root",
+            str(toolchain),
+            "--no-save",
+            "--skip-probe",
+        ],
     )
-    assert (
-        main(
-            [
-                "source",
-                "lock",
-                "--project",
-                str(project),
-                "--path",
-                "reprobit.toml",
-                "--path",
-                "CMakeLists.txt",
-                "--path",
-                "transform.cpp",
-            ]
-        )
-        == 0
+    _require_cli_success(
+        project,
+        [
+            "source",
+            "lock",
+            "--project",
+            str(project),
+            "--path",
+            "reprobit.toml",
+            "--path",
+            "CMakeLists.txt",
+            "--path",
+            "transform.cpp",
+        ],
     )
     prepared = subprocess.run(
         (
@@ -161,19 +198,17 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
     assert (project / "reference/grind.exe").is_file()
     assert (project / "reference/reference.obj").is_file()
 
-    assert (
-        main(
-            [
-                "import",
-                "cmake",
-                str(project),
-                "--target",
-                "program=grind",
-                "--toolchain-root",
-                str(toolchain),
-            ]
-        )
-        == 0
+    _require_cli_success(
+        project,
+        [
+            "import",
+            "cmake",
+            str(project),
+            "--target",
+            "program=grind",
+            "--toolchain-root",
+            str(toolchain),
+        ],
     )
 
     bundle = load_project_tree(project)
@@ -187,41 +222,35 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
     assert enumerate_project_grind_campaign(project).eligible_units == 1
     _seed_timestamp_normalization(project)
 
-    assert (
-        main(
-            [
-                "build",
-                str(project),
-                "--toolchain-root",
-                str(toolchain),
-            ]
-        )
-        == 0
+    _require_cli_success(
+        project,
+        [
+            "build",
+            str(project),
+            "--toolchain-root",
+            str(toolchain),
+        ],
     )
-    assert (
-        main(
-            [
-                "discover",
-                "grind",
-                str(project),
-                "--project-wide",
-                "--reference-object",
-                f"{unit.id}=reference/reference.obj",
-                "--accept-exact",
-                "--toolchain-root",
-                str(toolchain),
-            ]
-        )
-        == 0
+    _require_cli_success(
+        project,
+        [
+            "discover",
+            "grind",
+            str(project),
+            "--project-wide",
+            "--reference-object",
+            f"{unit.id}=reference/reference.obj",
+            "--accept-exact",
+            "--toolchain-root",
+            str(toolchain),
+        ],
     )
-    assert (
-        main(
-            [
-                "verify",
-                str(project),
-                "--toolchain-root",
-                str(toolchain),
-            ]
-        )
-        == 0
+    _require_cli_success(
+        project,
+        [
+            "verify",
+            str(project),
+            "--toolchain-root",
+            str(toolchain),
+        ],
     )
