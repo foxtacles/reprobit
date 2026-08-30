@@ -204,6 +204,76 @@ def test_one_miss_initializes_one_lazy_runtime_not_the_worker_budget(
     assert lane_initializations == [1]
 
 
+def test_lazy_runtime_owner_survives_dependent_worker_waves(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first = workspace / "first.obj"
+    second = workspace / "second.obj"
+    owner_threads: list[threading.Thread] = []
+    action_owner_states: list[bool] = []
+    close_threads: list[threading.Thread] = []
+
+    class ThreadOwnedRuntime:
+        owner: threading.Thread
+
+    def runtime_factory() -> ThreadOwnedRuntime:
+        runtime = ThreadOwnedRuntime()
+        runtime.owner = threading.current_thread()
+        owner_threads.append(runtime.owner)
+        return runtime
+
+    def execute(output: Path) -> Callable[[ThreadOwnedRuntime, object, PreparedNodeInputs], None]:
+        def run(
+            runtime: ThreadOwnedRuntime,
+            _cancellation: object,
+            _inputs: PreparedNodeInputs,
+        ) -> None:
+            action_owner_states.append(runtime.owner.is_alive())
+            output.write_bytes(b"object")
+
+        return run
+
+    def runtime_close(runtime: ThreadOwnedRuntime) -> None:
+        close_threads.append(threading.current_thread())
+        assert threading.current_thread() is runtime.owner
+
+    IncrementalDAGExecutor(
+        cache=IncrementalCache(state, implementation="dag-test-v1"),
+        workspace_root=workspace,
+        runtime_factory=runtime_factory,
+        runtime_close=runtime_close,
+        max_workers=1,
+    ).execute(
+        (
+            IncrementalNode(
+                id="first",
+                domain="producer",
+                depends_on=(),
+                outputs={"build/first.obj": first},
+                key=lambda _deps: _node_key("lifetime-owner-first"),
+                execute=execute(first),
+                metadata=lambda _deps: {},
+            ),
+            IncrementalNode(
+                id="second",
+                domain="producer",
+                depends_on=("first",),
+                order_only=("first",),
+                outputs={"build/second.obj": second},
+                key=lambda _deps: _node_key("lifetime-owner-second"),
+                execute=execute(second),
+                metadata=lambda _deps: {},
+            ),
+        )
+    )
+
+    assert action_owner_states == [True, True]
+    assert close_threads == owner_threads
+    assert not owner_threads[0].is_alive()
+
+
 def test_typed_probe_reuses_selected_record_without_second_generic_lookup(
     tmp_path: Path,
 ) -> None:
@@ -556,10 +626,12 @@ def test_runtime_factory_failure_is_not_retried_and_needs_no_close(
     workspace.mkdir()
     calls = 0
     closed: list[object] = []
+    factory_threads: list[threading.Thread] = []
 
     def factory() -> object:
         nonlocal calls
         calls += 1
+        factory_threads.append(threading.current_thread())
         raise RuntimeError("factory failed")
 
     executor = IncrementalDAGExecutor(
@@ -588,6 +660,8 @@ def test_runtime_factory_failure_is_not_retried_and_needs_no_close(
         executor.execute(nodes)
     assert calls == 1
     assert closed == []
+    assert len(factory_threads) == 1
+    assert not factory_threads[0].is_alive()
 
 
 def test_output_alias_and_symlink_parent_are_rejected_before_cache_access(
@@ -899,15 +973,21 @@ def test_runtime_close_failure_leaves_staged_record_unpublished(tmp_path: Path) 
     key = _node_key("runtime-close-failure")
     cache = IncrementalCache(state, implementation="dag-test-v1")
     progress: list[ProgressKind] = []
+    owner_threads: list[threading.Thread] = []
+
+    def runtime_factory() -> object:
+        owner_threads.append(threading.current_thread())
+        return object()
 
     def fail_close(_runtime: object) -> None:
+        assert threading.current_thread() is owner_threads[0]
         raise RuntimeError("sealed namespace changed while held")
 
     with pytest.raises(RuntimeError, match="sealed namespace changed while held"):
         IncrementalDAGExecutor(
             cache=cache,
             workspace_root=workspace,
-            runtime_factory=object,
+            runtime_factory=runtime_factory,
             runtime_close=fail_close,
             max_workers=1,
             progress=lambda kind, _done, _total, _phase, _node, _reason: progress.append(kind),
@@ -930,6 +1010,7 @@ def test_runtime_close_failure_leaves_staged_record_unpublished(tmp_path: Path) 
     with cache.lease() as lease:
         assert lease.lookup("producer", key) is None
     assert progress == [ProgressKind.CACHE_MISS, ProgressKind.UNIT_FINISHED]
+    assert not owner_threads[0].is_alive()
 
 
 def test_before_publish_reseal_failure_leaves_record_unpublished(tmp_path: Path) -> None:

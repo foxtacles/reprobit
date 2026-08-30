@@ -139,6 +139,7 @@ class _LazyRuntime(Generic[RuntimeT]):
         self._close = close
         self._value: RuntimeT | None = None
         self._error: BaseException | None = None
+        self._owner: ThreadPoolExecutor | None = None
         self._lock = Lock()
         self.created = False
         self.closed = False
@@ -154,11 +155,22 @@ class _LazyRuntime(Generic[RuntimeT]):
                     raise self._construction_failure(self._error) from self._error
                 raise self._error
             if self._value is None:
+                owner = ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="reprobit-runtime",
+                )
+                self._owner = owner
                 try:
-                    self._value = self._factory()
+                    # Some native resources bind pending asynchronous I/O to
+                    # the thread that creates them.  Keep one owner alive for
+                    # the complete runtime lifetime instead of tying them to a
+                    # short-lived DAG-wave worker.
+                    self._value = owner.submit(self._factory).result()
                     self.created = True
                 except BaseException as exc:
                     self._error = exc
+                    self._owner = None
+                    owner.shutdown(wait=True, cancel_futures=True)
                     if isinstance(exc, Exception):
                         raise self._construction_failure(exc) from exc
                     raise
@@ -169,8 +181,16 @@ class _LazyRuntime(Generic[RuntimeT]):
             value = self._value
             if value is None or self.closed:
                 return
+            owner = self._owner
+            if owner is None:
+                raise IncrementalExecutionError("incremental runtime lost its lifetime owner")
             self.closed = True
-        self._close(value)
+        try:
+            owner.submit(self._close, value).result()
+        finally:
+            owner.shutdown(wait=True, cancel_futures=True)
+            with self._lock:
+                self._owner = None
 
 
 @dataclass(frozen=True, slots=True)
