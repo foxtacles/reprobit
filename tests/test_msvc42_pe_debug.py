@@ -48,12 +48,7 @@ def _fpo_payload() -> bytes:
 
 
 def _nb10_payload(*, path: str = PDB_PATH, age: int = 0, tail: bytes = b"") -> bytes:
-    return (
-        struct.pack("<4sIII", b"NB10", 0, RAW_TIME, age)
-        + path.encode("ascii")
-        + b"\0"
-        + tail
-    )
+    return struct.pack("<4sIII", b"NB10", 0, RAW_TIME, age) + path.encode("ascii") + b"\0" + tail
 
 
 def _synthetic_image(

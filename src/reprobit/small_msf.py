@@ -128,9 +128,7 @@ class SmallMsf:
             self.fpm_page in _FPM_BANK_STARTS,
             "SmallMSF active FPM bank is invalid",
         )
-        self.fpm_pages = tuple(
-            range(self.fpm_page, self.fpm_page + _FPM_BANK_PAGE_COUNT)
-        )
+        self.fpm_pages = tuple(range(self.fpm_page, self.fpm_page + _FPM_BANK_PAGE_COUNT))
         self.reserved_pages = frozenset(range(_DATA_PAGE_MIN))
 
         self.directory_size = _u32(data, 52, "SmallMSF directory size")
@@ -170,8 +168,7 @@ class SmallMsf:
 
     def _read_pages(self, pages: tuple[int, ...], size: int) -> bytes:
         return b"".join(
-            self.data[page * self.page_size : (page + 1) * self.page_size]
-            for page in pages
+            self.data[page * self.page_size : (page + 1) * self.page_size] for page in pages
         )[:size]
 
     def _parse_free_pages(self) -> frozenset[int]:

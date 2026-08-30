@@ -144,11 +144,7 @@ def _synthetic_pdb(
 
 
 def _positions(ranges: tuple[PdbCanonicalizationRange, ...]) -> set[int]:
-    return {
-        offset
-        for item in ranges
-        for offset in range(item.start, item.end)
-    }
+    return {offset for item in ranges for offset in range(item.start, item.end)}
 
 
 def _canonicalize(data: bytes, *, link_time: int = LINK_TIME) -> CanonicalizedMsvc42Pdb:
@@ -168,11 +164,7 @@ def test_canonicalizer_changes_only_audited_bookkeeping() -> None:
         for offset, pair in enumerate(zip(raw, result.data, strict=True))
         if pair[0] != pair[1]
     }
-    audited = {
-        offset
-        for stat in result.audit.stats
-        for offset in _positions(stat.changed_ranges)
-    }
+    audited = {offset for stat in result.audit.stats for offset in _positions(stat.changed_ranges)}
 
     assert changed == audited
     assert result.audit.changed_bytes == len(changed)
@@ -222,9 +214,10 @@ def test_fpm_covers_the_full_sixteen_bit_page_space() -> None:
         _synthetic_pdb(page_count=9000, extra_free_pages=(high_free_page,)),
     )
 
-    assert result.data[
-        high_free_page * PAGE_SIZE : (high_free_page + 1) * PAGE_SIZE
-    ] == b"\0" * PAGE_SIZE
+    assert (
+        result.data[high_free_page * PAGE_SIZE : (high_free_page + 1) * PAGE_SIZE]
+        == b"\0" * PAGE_SIZE
+    )
 
 
 def test_canonicalization_is_idempotent() -> None:

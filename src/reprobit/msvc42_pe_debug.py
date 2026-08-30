@@ -122,8 +122,7 @@ class _ParsedDebugCompanion:
 def _validate_windows_path_bytes(value: bytes, context: str) -> None:
     require(3 <= len(value) <= 259, f"{context} length is outside the VC 4.2 range")
     require(
-        ((65 <= value[0] <= 90) or (97 <= value[0] <= 122))
-        and value[1:3] == b":\\",
+        ((65 <= value[0] <= 90) or (97 <= value[0] <= 122)) and value[1:3] == b":\\",
         f"{context} is not an absolute drive path",
     )
     require(b"/" not in value, f"{context} uses a non-DOS path separator")
@@ -189,9 +188,7 @@ class _Pe32DebugMap:
             )
             require(
                 raw_size == 0
-                or (
-                    raw_offset >= size_of_headers and raw_offset <= len(data) - raw_size
-                ),
+                or (raw_offset >= size_of_headers and raw_offset <= len(data) - raw_size),
                 f"PE section {name!r} raw data is invalid",
             )
             sections.append(_Section(virtual_address, raw_offset, raw_size))
@@ -234,7 +231,8 @@ class _Pe32DebugMap:
             require(characteristics == 0, "PE debug entry characteristics are not zero")
             require(major == 0 and minor == 0, "PE debug entry version is not zero")
             require(
-                kind in {
+                kind
+                in {
                     _IMAGE_DEBUG_TYPE_CODEVIEW,
                     _IMAGE_DEBUG_TYPE_FPO,
                     _IMAGE_DEBUG_TYPE_MISC,
@@ -257,8 +255,7 @@ class _Pe32DebugMap:
                 require(
                     payload_offset >= size_of_headers
                     and all(
-                        payload_end <= section.raw_offset
-                        or payload_offset >= section.raw_end
+                        payload_end <= section.raw_offset or payload_offset >= section.raw_end
                         for section in sections
                         if section.raw_size
                     ),
@@ -269,8 +266,7 @@ class _Pe32DebugMap:
 
         kinds = tuple(entry[0] for entry in entries)
         require(
-            kinds.count(_IMAGE_DEBUG_TYPE_MISC) <= 1
-            and kinds.count(_IMAGE_DEBUG_TYPE_FPO) <= 1,
+            kinds.count(_IMAGE_DEBUG_TYPE_MISC) <= 1 and kinds.count(_IMAGE_DEBUG_TYPE_FPO) <= 1,
             "PE debug data repeats a VC 4.2 MISC or FPO entry",
         )
         require(
@@ -448,9 +444,7 @@ def _canonicalize_once(
         preserved_raw == preserved_output,
         "debug-companion canonicalization changed a byte outside its audited fields",
     )
-    changed_bytes = sum(
-        before != after for before, after in zip(data, result, strict=True)
-    )
+    changed_bytes = sum(before != after for before, after in zip(data, result, strict=True))
     output_identity = Msvc42DebugCompanionIdentity(
         signature=link_time,
         age=parsed.identity.age,

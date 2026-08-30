@@ -282,9 +282,7 @@ def _pdb_stream(msf: SmallMsf, edits: _Edits, link_time: int) -> Msvc42PdbIdenti
 def _tpi_stream(msf: SmallMsf, edits: _Edits) -> int:
     stream = msf.read_stream(2, "TPI")
     require(len(stream) >= _TPI_HEADER_SIZE, "TPI stream is truncated")
-    version, ti_min, ti_mac, record_bytes, hash_stream = struct.unpack_from(
-        "<IHHIH", stream, 0
-    )
+    version, ti_min, ti_mac, record_bytes, hash_stream = struct.unpack_from("<IHHIH", stream, 0)
     hash_stream = int(hash_stream)
     require(version == _TPI_STREAM_VERSION, "unsupported TPI stream version")
     require(stream[14:16] == b"\0\0", "TPI header ABI padding is not canonical")
