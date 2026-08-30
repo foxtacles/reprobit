@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -11,6 +13,18 @@ from reprobit.transactions import CASTransaction, TransactionConflict, Transacti
 
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _create_windows_junction(junction: Path, target: Path) -> None:
+    result = subprocess.run(
+        ["cmd", "/d", "/c", "mklink", "/J", str(junction), str(target)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.skip(f"fixture host cannot create a junction: {result.stdout.strip()}")
 
 
 def test_transaction_atomically_writes_and_deletes(tmp_path: Path) -> None:
@@ -151,6 +165,22 @@ def test_missing_directory_conflicts_with_nonempty_membership(tmp_path: Path) ->
         transaction.commit()
 
 
+def test_missing_directory_membership_rejects_a_first_external_json_write(
+    tmp_path: Path,
+) -> None:
+    transaction = CASTransaction(tmp_path)
+    transaction.assert_json_members("authority", expected_members=())
+    transaction.write("authority/first.json", b"first", expected_sha256=None)
+    authority = tmp_path / "authority"
+    authority.mkdir()
+    (authority / "raced.json").write_bytes(b"raced")
+
+    with pytest.raises(TransactionConflict, match="authority membership conflict"):
+        transaction.commit()
+    assert not (authority / "first.json").exists()
+    assert (authority / "raced.json").read_bytes() == b"raced"
+
+
 def test_directory_membership_assertion_only_transaction_rejects_a_race(
     tmp_path: Path,
 ) -> None:
@@ -248,6 +278,23 @@ def test_transaction_refuses_redirected_state_root(tmp_path: Path) -> None:
     transaction.write("value.txt", b"value", expected_sha256=None)
     with pytest.raises(TransactionError, match="not a real directory"):
         transaction.commit()
+    with pytest.raises(TransactionError, match="not a real directory"):
+        CASTransaction.recover(tmp_path)
+
+
+def test_transaction_refuses_redirected_project_root(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    redirected = tmp_path / "redirected"
+    project.mkdir()
+    try:
+        redirected.symlink_to(project, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"host cannot create a test symlink: {error}")
+
+    with pytest.raises(ValueError, match="existing real directory"):
+        CASTransaction(redirected)
+    with pytest.raises(ValueError, match="existing absolute real directory"):
+        CASTransaction.recover(redirected)
 
 
 def test_transaction_refuses_symlink_targets(tmp_path: Path) -> None:
@@ -255,9 +302,70 @@ def test_transaction_refuses_symlink_targets(tmp_path: Path) -> None:
     outside.write_bytes(b"outside")
     (tmp_path / "link").symlink_to(outside)
     transaction = CASTransaction(tmp_path)
-    with pytest.raises(TransactionError, match="symlink"):
+    with pytest.raises(TransactionError, match="redirected"):
         transaction.write("link", b"bad")
     assert outside.read_bytes() == b"outside"
+
+
+def test_transaction_refuses_redirected_authority_parent(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    project.mkdir()
+    outside.mkdir()
+    try:
+        (project / "authority").symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"host cannot create a test symlink: {error}")
+    transaction = CASTransaction(project)
+    transaction.assert_json_members("authority", expected_members=())
+    transaction.write("authority/first.json", b"first", expected_sha256=None)
+
+    with pytest.raises(TransactionError, match="redirected"):
+        transaction.commit()
+    assert not (outside / "first.json").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
+def test_transaction_refuses_windows_junction_authority(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    outside = tmp_path / "outside"
+    authority = project / "authority"
+    project.mkdir()
+    outside.mkdir()
+    _create_windows_junction(authority, outside)
+    transaction = CASTransaction(project)
+    transaction.assert_json_members("authority", expected_members=())
+    transaction.write("authority/first.json", b"first", expected_sha256=None)
+
+    with pytest.raises(TransactionError, match="redirected"):
+        transaction.commit()
+    assert not (outside / "first.json").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires Windows directory junctions")
+def test_transaction_refuses_windows_junction_boundaries(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    root_junction = tmp_path / "root-junction"
+    project.mkdir()
+    state_target = project / "state-target"
+    state_target.mkdir()
+    _create_windows_junction(root_junction, project)
+
+    with pytest.raises(ValueError, match="existing real directory"):
+        CASTransaction(root_junction)
+    with pytest.raises(ValueError, match="existing absolute real directory"):
+        CASTransaction.recover(root_junction)
+
+    state_junction = project / ".reprobit-transactions"
+    _create_windows_junction(state_junction, state_target)
+    transaction = CASTransaction(project)
+    transaction.write("first.json", b"first", expected_sha256=None)
+    with pytest.raises(TransactionError, match="not a real directory"):
+        transaction.commit()
+    with pytest.raises(TransactionError, match="not a real directory"):
+        CASTransaction.recover(project)
+    assert not (project / "first.json").exists()
+    assert not tuple(state_target.iterdir())
 
 
 def test_transaction_rejects_duplicate_or_escaping_paths(tmp_path: Path) -> None:

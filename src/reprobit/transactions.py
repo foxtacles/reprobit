@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import tempfile
 import uuid
 from dataclasses import dataclass
@@ -90,14 +91,28 @@ def _write_json_atomic(path: Path, value: object) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _is_redirected(path: Path) -> bool:
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except FileNotFoundError:
+        return False
+    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
+    return stat.S_ISLNK(metadata.st_mode) or bool(
+        getattr(metadata, "st_reparse_tag", 0)
+        or getattr(metadata, "st_file_attributes", 0) & reparse_attribute
+    )
+
+
 def _prepare_state_root(root: Path, state_root: Path) -> None:
     if os.path.lexists(state_root):
-        if state_root.is_symlink() or not state_root.is_dir():
+        if _is_redirected(state_root) or not state_root.is_dir():
             raise TransactionError(
                 f"project transaction state is not a real directory: {state_root}"
             )
     else:
         state_root.mkdir()
+    if _is_redirected(state_root):
+        raise TransactionError(f"project transaction state is redirected: {state_root}")
     try:
         state_root.resolve(strict=True).relative_to(root)
     except ValueError as error:
@@ -109,12 +124,12 @@ def _safe_target(root: Path, relative_path: Path) -> Path:
     current = root
     for component in relative_path.parts[:-1]:
         current = current / component
-        if current.is_symlink():
-            raise TransactionError(f"transaction parent is a symlink: {current}")
+        if _is_redirected(current):
+            raise TransactionError(f"transaction parent is redirected: {current}")
         if current.exists() and not current.is_dir():
             raise TransactionError(f"transaction parent is not a directory: {current}")
-    if target.is_symlink():
-        raise TransactionError(f"transaction target is a symlink: {target}")
+    if _is_redirected(target):
+        raise TransactionError(f"transaction target is redirected: {target}")
     return target
 
 
@@ -208,7 +223,7 @@ class CASTransaction:
         candidate = Path(root)
         if not candidate.is_absolute():
             raise ValueError("transaction root must be absolute")
-        if not candidate.is_dir() or candidate.is_symlink():
+        if _is_redirected(candidate) or not candidate.is_dir():
             raise ValueError("transaction root must be an existing real directory")
         self.root = candidate.resolve(strict=True)
         self.state_root = self.root / ".reprobit-transactions"
@@ -309,12 +324,12 @@ class CASTransaction:
         directory = self._target(relative_path)
         if not directory.exists():
             return ()
-        if not directory.is_dir() or directory.is_symlink():
+        if not directory.is_dir() or _is_redirected(directory):
             raise TransactionConflict(
                 f"transaction authority directory changed: {relative_path.as_posix()}"
             )
         entries = tuple(directory.rglob("*"))
-        if any(path.is_symlink() for path in entries):
+        if any(_is_redirected(path) for path in entries):
             raise TransactionConflict(
                 f"transaction authority directory is redirected: {relative_path.as_posix()}"
             )
@@ -444,7 +459,7 @@ class CASTransaction:
     @classmethod
     def recover(cls, root: Path | str, *, nonblocking: bool = False) -> tuple[str, ...]:
         candidate = Path(root)
-        if not candidate.is_absolute() or not candidate.is_dir() or candidate.is_symlink():
+        if not candidate.is_absolute() or _is_redirected(candidate) or not candidate.is_dir():
             raise ValueError("recovery root must be an existing absolute real directory")
         project_root = candidate.resolve(strict=True)
         state_root = project_root / ".reprobit-transactions"
