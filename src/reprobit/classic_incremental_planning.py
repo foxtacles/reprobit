@@ -38,6 +38,7 @@ from reprobit.classic_orchestration import (
 from reprobit.classic_project import ClassicProjectError
 from reprobit.classic_runtime_environment import (
     _classic_producer_environment,
+    _classic_temporary_directory,
     _toolchain_tree_files,
 )
 from reprobit.classic_runtime_graph import (
@@ -304,7 +305,7 @@ def _warm_cache_environment(
 
     values = _classic_producer_environment(
         installation,
-        temp_directory=logical_join(build_root, ".reprobit-tmp/$LANE"),
+        temp_directory=_classic_temporary_directory(build_root),
     )
     if posix_wine:
         path_keys = [key for key in values if key.casefold() == "path"]

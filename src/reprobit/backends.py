@@ -542,6 +542,75 @@ class PosixWineBackend(ExecutionBackend):
             environment["WINEDLLOVERRIDES"] = ";".join(overrides)
         return environment
 
+    def configure_worker_temporary_environment(
+        self,
+        worker: WorkerSandbox,
+        *,
+        temporary: str,
+        timeout_seconds: float = 30,
+    ) -> None:
+        """Set and verify the Windows-visible TEMP/TMP in one live prefix."""
+
+        if worker.wine_prefix is None:
+            raise BackendError("Wine temporary environment requires a private prefix")
+        if self._server_lease(worker) is None:
+            raise BackendError("Wine temporary environment requires a live private server")
+        if not temporary or "\0" in temporary or timeout_seconds <= 0:
+            raise BackendError("Wine temporary environment declaration is invalid")
+        if self.wine_pin is None or not self.wine_pin.verify():
+            raise BackendError("the pinned Wine executable is absent or changed")
+
+        from reprobit.process import CommandSpec, ProcessSupervisor
+
+        environment = self.worker_environment(worker)
+        with ProcessSupervisor() as supervisor:
+            for name in ("TEMP", "TMP"):
+                specification = CommandSpec.create(
+                    (
+                        str(self.wine_pin.path),
+                        r"C:\windows\system32\reg.exe",
+                        "add",
+                        r"HKCU\Environment",
+                        "/v",
+                        name,
+                        "/t",
+                        "REG_SZ",
+                        "/d",
+                        temporary,
+                        "/f",
+                    ),
+                    cwd=worker.root,
+                    environment=environment,
+                    timeout_seconds=timeout_seconds,
+                    log_path=worker.logs / f"wine-environment-{name.casefold()}.log",
+                )
+                supervisor.run(specification)
+
+            probe = CommandSpec.create(
+                (
+                    str(self.wine_pin.path),
+                    r"C:\windows\system32\cmd.exe",
+                    "/d",
+                    "/c",
+                    "set TEMP&set TMP",
+                ),
+                cwd=worker.root,
+                environment=environment,
+                timeout_seconds=timeout_seconds,
+                log_path=worker.logs / "wine-environment-probe.log",
+            )
+            output = supervisor.run(probe).output.decode("utf-8", "replace")
+
+        received: dict[str, str] = {}
+        for line in output.replace("\r", "").splitlines():
+            name, separator, value = line.partition("=")
+            if separator and name.casefold() in {"temp", "tmp"}:
+                received[name.upper()] = value
+        if received != {"TEMP": temporary, "TMP": temporary}:
+            raise BackendError(
+                "Wine child TEMP/TMP differs from the canonical producer environment"
+            )
+
     def bind_skeleton(
         self, worker: WorkerSandbox, skeleton: MaterializedSkeleton
     ) -> WineDriveBinding:

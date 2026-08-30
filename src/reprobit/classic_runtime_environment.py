@@ -193,6 +193,51 @@ def _logical_join(root: str, relative: str) -> str:
 
 
 _CLASSIC_TOOLCHAIN_ENVIRONMENT_VARIABLES = ("PATH", "INCLUDE", "LIB", "LIBPATH")
+_CLASSIC_TEMPORARY_PROFILE = PureWindowsPath(
+    "Users",
+    "reprobit",
+    "AppData",
+    "Local",
+    "Temp",
+)
+
+
+def _classic_temporary_directory(logical_path: str) -> str:
+    """Return the canonical compiler-visible temporary directory."""
+
+    canonical = normalize_logical_path(logical_path)
+    drive = PureWindowsPath(canonical).drive
+    if not drive:
+        raise ClassicProjectError("classic temporary directory requires a logical drive")
+    return normalize_logical_path(str(PureWindowsPath(drive + "\\", _CLASSIC_TEMPORARY_PROFILE)))
+
+
+def _materialize_dos_directory(root: Path, parts: Sequence[str]) -> Path:
+    """Create one directory path without POSIX/DOS case aliases."""
+
+    current = root
+    for part in parts:
+        matches = tuple(
+            child for child in current.iterdir() if child.name.casefold() == part.casefold()
+        )
+        if len(matches) > 1:
+            raise ClassicProjectError("classic logical drive contains a DOS-case collision")
+        if matches:
+            child = matches[0]
+            metadata = child.lstat()
+            if (
+                not stat.S_ISDIR(metadata.st_mode)
+                or stat.S_ISLNK(metadata.st_mode)
+                or int(getattr(metadata, "st_file_attributes", 0)) & 0x400
+            ):
+                raise ClassicProjectError(
+                    "classic temporary directory ancestor is redirected or not a directory"
+                )
+        else:
+            child = current / part
+            child.mkdir()
+        current = child
+    return current
 
 
 def _rooted_toolchain_environment(
@@ -266,7 +311,7 @@ def _compiler_environment_digest(environment: Mapping[str, str]) -> Digest:
     """Validate and bind exact frontend-visible toolchain path presentations."""
 
     variables: dict[str, tuple[dict[str, str], ...]] = {}
-    for name in ("INCLUDE", "LIB", "LIBPATH", "WINEPATH"):
+    for name in ("INCLUDE", "LIB", "LIBPATH", "TEMP", "TMP", "WINEPATH"):
         matches = [value for key, value in environment.items() if key.casefold() == name.casefold()]
         if len(matches) > 1 or (name != "WINEPATH" and len(matches) != 1):
             raise ClassicProjectError(f"compiler environment does not uniquely bind {name}")
@@ -282,6 +327,8 @@ def _compiler_environment_digest(environment: Mapping[str, str]) -> Digest:
             raise ClassicProjectError(
                 f"compiler environment {name} leaves the logical path profile"
             ) from exc
+    if variables["TEMP"] != variables["TMP"]:
+        raise ClassicProjectError("compiler environment TEMP/TMP presentations differ")
     override_matches = [
         value for key, value in environment.items() if key.casefold() == "winedlloverrides"
     ]
@@ -290,7 +337,7 @@ def _compiler_environment_digest(environment: Mapping[str, str]) -> Digest:
     return Digest.from_bytes(
         canonical_json(
             {
-                "schema": 3,
+                "schema": 4,
                 "dll_overrides": override_matches[0] if override_matches else None,
                 "variables": {name: list(values) for name, values in variables.items()},
             }
@@ -322,7 +369,8 @@ def _materialize_direct_logical_workspace(
     if len(drives) != 1:
         raise ClassicProjectError("classic logical seats must share one DOS drive")
     drive_letter = drives.pop()
-    folded = tuple(value.casefold().rstrip("\\") for value in declared)
+    seats = (*declared, _classic_temporary_directory(declared[0]))
+    folded = tuple(value.casefold().rstrip("\\") for value in seats)
     for index, left in enumerate(folded):
         for right in folded[index + 1 :]:
             if left == right or left.startswith(right + "\\") or right.startswith(left + "\\"):
@@ -473,21 +521,26 @@ def _prepare_execution_lanes(
     # session authority after that authority has been sealed.
     backend_workers_root = session_root / "backend-workers"
     backend_workers_root.mkdir(exist_ok=False)
-    temporary_root = logical_workspace.build_root / ".reprobit-tmp"
-    temporary_root.mkdir(parents=True, exist_ok=False)
+    logical_temporary = _classic_temporary_directory(bundle.spec.paths.build)
+    _materialize_dos_directory(
+        logical_workspace.root,
+        _logical_relative_parts(
+            logical_temporary,
+            drive_letter=logical_workspace.drive_letter,
+        ),
+    )
     binding_lock = Lock()
     bindings: list[tuple[WorkerSandbox, ExitStack]] = []
     native_worker: WorkerSandbox | None = None
     native_lineage_planner: WindowsLineagePlanner | None = None
 
-    def producer_environment(lane_id: str) -> dict[str, str]:
-        logical_temporary = _logical_join(bundle.spec.paths.build, f".reprobit-tmp/{lane_id}")
+    def producer_environment() -> dict[str, str]:
         return _classic_producer_environment(
             installation,
             temp_directory=logical_temporary,
         )
 
-    digest_environment = producer_environment("lane-0000")
+    digest_environment = producer_environment()
     if isinstance(backend, PosixWineBackend):
         path_values = [
             value for key, value in digest_environment.items() if key.casefold() == "path"
@@ -545,6 +598,15 @@ def _prepare_execution_lanes(
                     raise ClassicProjectError(
                         "POSIX backend unexpectedly returned a Windows lineage planner"
                     )
+                backend.configure_worker_temporary_environment(
+                    worker,
+                    temporary=logical_temporary,
+                    timeout_seconds=min(initialization_timeout, 30),
+                )
+                backend.verify_worker_drive_mappings(
+                    worker,
+                    logical_drive=logical_workspace.drive_letter,
+                )
             except BaseException as original:
                 cleanup_error: BaseException | None = None
                 try:
@@ -582,10 +644,8 @@ def _prepare_execution_lanes(
                     bindings.append((candidate, candidate_stack))
                 worker = native_worker
 
-        physical_temporary = temporary_root / lane_id
         try:
-            physical_temporary.mkdir()
-            windows_environment = producer_environment(lane_id)
+            windows_environment = producer_environment()
             environment = _host_environment((*host_programs, *role_commands.values()))
             if isinstance(backend, PosixWineBackend):
                 environment.update(

@@ -291,6 +291,86 @@ def test_wine_environment_is_minimal_and_declares_classic_runtime(tmp_path: Path
     assert environment["PATH"].split(os.pathsep)[0] == str(Path(sys.executable).resolve().parent)
 
 
+def test_wine_worker_sets_and_probes_exact_windows_temporary_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = PosixWineBackend(wine=sys.executable, wineserver=sys.executable)
+    worker = backend.create_worker(tmp_path / "workers", "compile")
+    commands: list[CommandSpec] = []
+    temporary = r"C:\users\reprobit\AppData\Local\Temp"
+
+    monkeypatch.setattr(backend, "_server_lease", lambda candidate: object())
+
+    def run(
+        supervisor: object,
+        specification: CommandSpec,
+        **kwargs: object,
+    ) -> ProcessResult:
+        del supervisor, kwargs
+        commands.append(specification)
+        output = (
+            f"TEMP={temporary}\r\nTMP={temporary}\r\n".encode()
+            if specification.argv[1] == r"C:\windows\system32\cmd.exe"
+            else b""
+        )
+        return ProcessResult(specification.argv, 0, output, 1, 0.01)
+
+    monkeypatch.setattr("reprobit.process.ProcessSupervisor.run", run)
+
+    backend.configure_worker_temporary_environment(worker, temporary=temporary)
+
+    assert [specification.argv[1:] for specification in commands] == [
+        (
+            r"C:\windows\system32\reg.exe",
+            "add",
+            r"HKCU\Environment",
+            "/v",
+            name,
+            "/t",
+            "REG_SZ",
+            "/d",
+            temporary,
+            "/f",
+        )
+        for name in ("TEMP", "TMP")
+    ] + [(r"C:\windows\system32\cmd.exe", "/d", "/c", "set TEMP&set TMP")]
+    assert all(
+        specification.environment_mapping["WINEPREFIX"] == str(worker.wine_prefix)
+        for specification in commands
+    )
+
+
+def test_wine_worker_rejects_different_child_temporary_environment(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = PosixWineBackend(wine=sys.executable, wineserver=sys.executable)
+    worker = backend.create_worker(tmp_path / "workers", "compile")
+    monkeypatch.setattr(backend, "_server_lease", lambda candidate: object())
+
+    def run(
+        supervisor: object,
+        specification: CommandSpec,
+        **kwargs: object,
+    ) -> ProcessResult:
+        del supervisor, kwargs
+        output = (
+            b"TEMP=C:\\users\\wrong\\Temp\r\nTMP=C:\\users\\wrong\\Temp\r\n"
+            if specification.argv[1] == r"C:\windows\system32\cmd.exe"
+            else b""
+        )
+        return ProcessResult(specification.argv, 0, output, 1, 0.01)
+
+    monkeypatch.setattr("reprobit.process.ProcessSupervisor.run", run)
+
+    with pytest.raises(BackendError, match="differs from the canonical"):
+        backend.configure_worker_temporary_environment(
+            worker,
+            temporary=r"C:\users\reprobit\AppData\Local\Temp",
+        )
+
+
 def test_worker_ids_are_exclusive(tmp_path: Path) -> None:
     backend = PosixWineBackend()
     backend.create_worker(tmp_path, "same")

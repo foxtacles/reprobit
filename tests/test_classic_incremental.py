@@ -131,8 +131,8 @@ def test_warm_wine_environment_binds_rendered_frontend_paths() -> None:
     )
     assert environment["LIB"] == (r"\Users\builder\MSVC420\lib;\Users\builder\MSVC420\mfc\lib")
     assert environment["LIBPATH"] == environment["LIB"]
-    assert environment["TEMP"] == r"Z:\build\.reprobit-tmp\$LANE"
-    assert environment["TMP"] == r"Z:\build\.reprobit-tmp\$LANE"
+    assert environment["TEMP"] == r"Z:\Users\reprobit\AppData\Local\Temp"
+    assert environment["TMP"] == environment["TEMP"]
 
     native = incremental_planning._warm_cache_environment(
         cast(ClassicMSVCToolchain, Installation()),

@@ -200,6 +200,66 @@ def _prepare_bundle(project_root: Path) -> ProjectBundle:
     )
 
 
+def test_classic_temporary_directory_is_fixed_to_the_logical_drive() -> None:
+    assert classic_runtime_environment._classic_temporary_directory(r"r:\build") == (
+        r"R:\Users\reprobit\AppData\Local\Temp"
+    )
+
+
+def test_classic_temporary_directory_reuses_one_dos_case_path(tmp_path: Path) -> None:
+    root = tmp_path / "logical-drive"
+    (root / "users").mkdir(parents=True)
+
+    temporary = classic_runtime_environment._materialize_dos_directory(
+        root,
+        ("Users", "reprobit", "AppData", "Local", "Temp"),
+    )
+
+    assert temporary == root / "users" / "reprobit" / "AppData" / "Local" / "Temp"
+    assert [child.name for child in root.iterdir()] == ["users"]
+
+
+def test_classic_temporary_directory_rejects_dos_case_collision(tmp_path: Path) -> None:
+    root = tmp_path / "logical-drive"
+    (root / "Users").mkdir(parents=True)
+    try:
+        (root / "users").mkdir()
+    except FileExistsError:
+        pytest.skip("fixture filesystem is case-insensitive")
+
+    with pytest.raises(ClassicProjectError, match="DOS-case collision"):
+        classic_runtime_environment._materialize_dos_directory(root, ("Users", "reprobit"))
+
+
+def test_classic_temporary_directory_rejects_non_directory_ancestor(tmp_path: Path) -> None:
+    root = tmp_path / "logical-drive"
+    root.mkdir()
+    (root / "Users").write_text("not a directory\n", encoding="utf-8")
+
+    with pytest.raises(ClassicProjectError, match="redirected or not a directory"):
+        classic_runtime_environment._materialize_dos_directory(root, ("Users", "reprobit"))
+
+
+def test_classic_logical_workspace_reserves_temporary_seat(tmp_path: Path) -> None:
+    base = _prepare_bundle(tmp_path)
+    bundle = base.model_copy(
+        update={
+            "spec": base.spec.model_copy(
+                update={
+                    "paths": base.spec.paths.model_copy(update={"source": r"R:\Users\reprobit"})
+                }
+            )
+        }
+    )
+
+    with pytest.raises(ClassicProjectError, match="logical seats overlap"):
+        classic_runtime_environment._materialize_direct_logical_workspace(
+            bundle,
+            session_root=tmp_path / "session",
+            toolchain_root=tmp_path / "toolchain",
+        )
+
+
 def test_prepared_unit_binds_only_the_exact_msvc42_win32_i386_target(
     tmp_path: Path,
 ) -> None:
@@ -1333,7 +1393,7 @@ def test_prepare_failure_releases_logical_drive_and_uses_stable_temporary(
             jobs=1,
         )
 
-    assert captured_temporary == [r"R:\build\.reprobit-tmp\lane-0000"]
+    assert captured_temporary == [r"R:\Users\reprobit\AppData\Local\Temp"]
     assert "session-" not in captured_temporary[0]
     # Metadata-only preparation never creates a backend worker or drive
     # binding, so even an environment/executor failure has no runtime lease to
@@ -3287,8 +3347,8 @@ def test_rooted_toolchain_environment_preserves_producer_spelling() -> None:
         ),
         "LIB": r"Z:\Users\builder\MSVC420\lib;Z:\Users\builder\MSVC420\mfc\lib",
         "LIBPATH": (r"Z:\Users\builder\MSVC420\lib;Z:\Users\builder\MSVC420\mfc\lib"),
-        "TEMP": r"Z:\build\.reprobit-tmp\lane-0000",
-        "TMP": r"Z:\build\.reprobit-tmp\lane-0000",
+        "TEMP": r"Z:\Users\reprobit\AppData\Local\Temp",
+        "TMP": r"Z:\Users\reprobit\AppData\Local\Temp",
     }
 
     rendered = classic_runtime_environment._rooted_toolchain_environment(
@@ -3304,8 +3364,8 @@ def test_rooted_toolchain_environment_preserves_producer_spelling() -> None:
         ),
         "LIB": r"\Users\builder\MSVC420\lib;\Users\builder\MSVC420\mfc\lib",
         "LIBPATH": r"\Users\builder\MSVC420\lib;\Users\builder\MSVC420\mfc\lib",
-        "TEMP": r"Z:\build\.reprobit-tmp\lane-0000",
-        "TMP": r"Z:\build\.reprobit-tmp\lane-0000",
+        "TEMP": r"Z:\Users\reprobit\AppData\Local\Temp",
+        "TMP": r"Z:\Users\reprobit\AppData\Local\Temp",
     }
     assert environment["PATH"].startswith("Z:")
 
@@ -3342,9 +3402,14 @@ def test_compiler_environment_digest_binds_exact_path_presentation() -> None:
         "INCLUDE": r"Z:\toolchain\include",
         "LIB": r"Z:\toolchain\lib",
         "LIBPATH": r"Z:\toolchain\lib",
+        "TEMP": r"Z:\Users\reprobit\AppData\Local\Temp",
+        "TMP": r"Z:\Users\reprobit\AppData\Local\Temp",
         "WINEPATH": r"Z:\toolchain\bin",
     }
-    rooted_environment = {name: value[2:] for name, value in drive_environment.items()}
+    rooted_environment = {
+        name: value if name in {"TEMP", "TMP"} else value[2:]
+        for name, value in drive_environment.items()
+    }
 
     assert classic_runtime_environment._compiler_environment_digest(
         drive_environment
@@ -3357,6 +3422,15 @@ def test_compiler_environment_digest_binds_exact_path_presentation() -> None:
     ) != classic_runtime_environment._compiler_environment_digest(
         {**rooted_environment, "WINEDLLOVERRIDES": "msvcrt40=n;msvcrt20=n"}
     )
+    assert classic_runtime_environment._compiler_environment_digest(
+        rooted_environment
+    ) != classic_runtime_environment._compiler_environment_digest(
+        {**rooted_environment, "TEMP": r"Z:\Temp", "TMP": r"Z:\Temp"}
+    )
+    with pytest.raises(ClassicProjectError, match="TEMP/TMP presentations differ"):
+        classic_runtime_environment._compiler_environment_digest(
+            {**rooted_environment, "TMP": r"Z:\Temp"}
+        )
 
 
 @pytest.mark.parametrize(
@@ -3373,6 +3447,8 @@ def test_compiler_environment_digest_rejects_ambiguous_paths(value: str) -> None
         "INCLUDE": value,
         "LIB": r"\toolchain\lib",
         "LIBPATH": r"\toolchain\lib",
+        "TEMP": r"Z:\Users\reprobit\AppData\Local\Temp",
+        "TMP": r"Z:\Users\reprobit\AppData\Local\Temp",
         "WINEPATH": r"\toolchain\bin",
     }
 
@@ -3381,12 +3457,13 @@ def test_compiler_environment_digest_rejects_ambiguous_paths(value: str) -> None
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Wine lanes are POSIX-only")
-def test_parallel_wine_lanes_have_private_prefixes_and_temporaries(
+def test_parallel_wine_lanes_use_private_prefixes_and_one_canonical_temporary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     backend = PosixWineBackend(wine=sys.executable, wineserver=sys.executable)
     initialized: list[str] = []
     bound: list[str] = []
+    configured: list[tuple[str, str]] = []
 
     class Binding:
         def __init__(self, worker_id: str) -> None:
@@ -3411,9 +3488,20 @@ def test_parallel_wine_lanes_have_private_prefixes_and_temporaries(
         assert worker.worker_id in bound
         assert logical_drive == "R"
 
+    def configure(
+        worker: WorkerSandbox,
+        *,
+        temporary: str,
+        timeout_seconds: float,
+    ) -> None:
+        assert worker.worker_id in bound
+        assert timeout_seconds == 30
+        configured.append((worker.worker_id, temporary))
+
     monkeypatch.setattr(backend, "initialize_worker_prefix", initialize)
     monkeypatch.setattr(backend, "bind_skeleton", bind)
     monkeypatch.setattr(backend, "verify_worker_drive_mappings", verify)
+    monkeypatch.setattr(backend, "configure_worker_temporary_environment", configure)
 
     logical_root = tmp_path / "logical-drive"
     build_root = logical_root / "build"
@@ -3511,7 +3599,11 @@ def test_parallel_wine_lanes_have_private_prefixes_and_temporaries(
         assert sorted(bound) == sorted(initialized)
         assert len({lane.environment["WINEPREFIX"] for lane in lanes}) == 3
         assert [lane.environment["TEMP"] for lane in lanes] == [
-            rf"R:\build\.reprobit-tmp\lane-{index:04d}" for index in range(3)
+            r"R:\Users\reprobit\AppData\Local\Temp"
+        ] * 3
+        assert sorted(configured) == [
+            (f"producer-graph-{index:04d}", r"R:\Users\reprobit\AppData\Local\Temp")
+            for index in range(3)
         ]
         assert all(lane.environment["INCLUDE"] == r"\toolchain\include" for lane in lanes)
         assert all(lane.environment["LIB"] == r"\toolchain\lib" for lane in lanes)
@@ -3532,6 +3624,8 @@ def test_lazy_lane_pool_reuses_one_lane_for_sequential_work() -> None:
             "INCLUDE": r"R:\toolchain\include",
             "LIB": r"R:\toolchain\lib",
             "LIBPATH": r"R:\toolchain\lib",
+            "TEMP": r"R:\Users\reprobit\AppData\Local\Temp",
+            "TMP": r"R:\Users\reprobit\AppData\Local\Temp",
         }
     )
 
@@ -3567,6 +3661,8 @@ def test_lazy_lane_pool_rejects_close_with_borrowed_lane_then_cleans() -> None:
             "INCLUDE": r"R:\toolchain\include",
             "LIB": r"R:\toolchain\lib",
             "LIBPATH": r"R:\toolchain\lib",
+            "TEMP": r"R:\Users\reprobit\AppData\Local\Temp",
+            "TMP": r"R:\Users\reprobit\AppData\Local\Temp",
         }
     )
     closed: list[bool] = []
