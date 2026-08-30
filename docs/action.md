@@ -19,8 +19,9 @@ The workflow that calls ReproBit must:
 
 The committed project chooses the compiler profile and verification policy. The
 Action does not download, cache, upload, or redistribute proprietary compilers
-or reference binaries. Pin ReproBit and every other Action to an immutable
-commit.
+or reference binaries. Until ReproBit has a stable release tag, use the same
+ReproBit commit for the CLI and Action. Use maintained major-version tags for
+third-party Actions.
 
 ## Example
 
@@ -44,8 +45,8 @@ jobs:
   verify:
     runs-on: windows-2022
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
       - name: Install the pinned ReproBit CLI for provisioning
@@ -64,7 +65,7 @@ jobs:
           toolchain-root: ${{ runner.temp }}/msvc42
       - name: Preserve ReproBit evidence
         if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@v7
         with:
           name: reprobit-report
           path: build/reprobit-report
@@ -114,8 +115,9 @@ explicit `clean` input may narrow a project that otherwise permits quarantine;
 an Action input can never broaden the committed policy.
 
 `allow-quarantine` is not a general relaxed mode. Byte equality and logic
-certification must still pass, and only the project's exact, non-growing legacy
-allowlist may run. The report then states that toolchain origin did not pass.
+certification must still pass, and only the project's exact, non-growing
+reference-byte exception allowlist may run. The report then states that
+toolchain origin did not pass.
 
 ## Outputs and failures
 
@@ -129,7 +131,7 @@ The Action exports:
 | `byte-exact` | Every selected candidate matched its reference bytes. |
 | `logic-certified` | Every intervention passed its required checks. |
 | `toolchain-origin` | First-party program bytes came from the declared toolchain. |
-| `quarantined` | An allowlisted legacy action ran. |
+| `quarantined` | An allowlisted reference-byte exception ran. |
 | `total-cost` | Total intervention cost in relative points for the project. |
 | `report-json` | Path to the canonical JSON report. |
 | `report-html` | Path to the self-contained HTML report. |

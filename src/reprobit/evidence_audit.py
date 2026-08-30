@@ -179,7 +179,7 @@ def _legacy_quarantine_ranges(
 
     relative = tuple(item.output_range for item in intervention.ranges)
     # A generic target-scoped legacy action declares artifact offsets
-    # directly.  Only function-scoped migrated actions need VA translation.
+    # directly. Only function-scoped actions need VA translation.
     if intervention.scope.function is None:
         return relative, "artifact-file"
     if target is None:

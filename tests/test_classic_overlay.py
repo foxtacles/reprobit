@@ -19,7 +19,6 @@ from reprobit.classic_overlay_document import (
 from reprobit.classic_overlay_generator import render_classic_overlay_generator
 from reprobit.classic_overlay_tokens import ClassicOverlayRenderSession
 from reprobit.classic_overlay_types import SourceEditError
-from reprobit.migration_overlay import normalize_legacy_member_probe_return_types
 
 
 def _seat_digest(tokens: list[str]) -> str:
@@ -307,62 +306,6 @@ def test_member_probe_requires_an_explicit_return_type() -> None:
     assert b"long Probe(Bitmap* p_bitmap)" in rendered
 
 
-def _probe_document() -> dict[str, object]:
-    source = b"int marker;\n"
-    return {
-        "schema": 2,
-        "outputs": [
-            {
-                "path": "src/unit.cpp",
-                "clean": digest_bytes(source),
-                "effective": "0" * 64,
-                "size": 0,
-                "ops": [
-                    {
-                        "op": "insert",
-                        "anchor": {
-                            "ctx": _seat_digest(["<SEAT>", "int", "marker", ";"]),
-                            "b": 0,
-                            "a": 3,
-                            "at": "start",
-                        },
-                        "gen": {
-                            "k": "member_probe",
-                            "arguments": [{"kind": "integer", "value": 0}],
-                            "function_identifier": "ProbeCarrier",
-                            "inline_depth": 0,
-                            "qualified_member": ["Widget", "Probe"],
-                            "receiver_type": "Widget",
-                        },
-                    }
-                ],
-            }
-        ],
-        "graph": {"generated_tus": [], "link_admissions": []},
-    }
-
-
-def test_legacy_member_probe_type_is_normalized_from_clean_declarations() -> None:
-    document = _probe_document()
-    sources = {"include/widget.h": b"class Widget { public: virtual int Probe(int); };\n"}
-
-    normalized = normalize_legacy_member_probe_return_types(document, sources)
-
-    generator = normalized["outputs"][0]["ops"][0]["gen"]  # type: ignore[index]
-    assert generator["return_type"] == "int"
-
-
-def test_legacy_member_probe_normalization_rejects_ambiguous_declarations() -> None:
-    document = _probe_document()
-    sources = {
-        "include/first.h": b"class Widget { public: virtual int Probe(int); };\n",
-        "include/second.h": b"class Widget { public: virtual long Probe(int); };\n",
-    }
-
-    with pytest.raises(SourceEditError, match="return type is ambiguous"):
-        normalize_legacy_member_probe_return_types(document, sources)
-
-
 @pytest.mark.parametrize(
     ("generator", "expected"),
     [
@@ -619,9 +562,9 @@ def _overlay_document(intervention_file: Path) -> Mapping[str, object]:
 
 @pytest.mark.skipif(
     _fixture_environment() is None,
-    reason="external migrated-overlay regression fixture is not configured",
+    reason="external project-overlay regression fixture is not configured",
 )
-def test_all_migrated_overlay_shards_render_to_their_declared_identities() -> None:
+def test_all_project_overlay_shards_render_to_their_declared_identities() -> None:
     fixture = _fixture_environment()
     assert fixture is not None
     stage, source_root = fixture
@@ -653,9 +596,9 @@ def test_all_migrated_overlay_shards_render_to_their_declared_identities() -> No
 
 @pytest.mark.skipif(
     _fixture_environment() is None,
-    reason="external migrated-overlay regression fixture is not configured",
+    reason="external project-overlay regression fixture is not configured",
 )
-def test_all_migrated_donor_overlays_render_to_their_declared_identities() -> None:
+def test_all_project_donor_overlays_render_to_their_declared_identities() -> None:
     fixture = _fixture_environment()
     assert fixture is not None
     stage, source_root = fixture
@@ -714,9 +657,9 @@ def test_all_migrated_donor_overlays_render_to_their_declared_identities() -> No
 
 @pytest.mark.skipif(
     _fixture_environment() is None,
-    reason="external migrated-overlay regression fixture is not configured",
+    reason="external project-overlay regression fixture is not configured",
 )
-def test_migrated_member_probes_carry_explicit_return_types() -> None:
+def test_project_member_probes_carry_explicit_return_types() -> None:
     fixture = _fixture_environment()
     assert fixture is not None
     stage, _source_root = fixture

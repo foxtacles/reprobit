@@ -5,13 +5,12 @@ and oracle verification. A project describes targets and interventions as
 data. A committed producer graph records every direct compiler, resource,
 librarian, and linker invocation, while execution backends provide bounded
 processes and stable compiler-visible paths. CMake can bootstrap that graph
-during migration, but it is outside the certification runtime.
+during project setup, but it is outside the certification runtime.
 
 The reusable core and discovery tools are lasting parts of ReproBit. The
 built-in classic-MSVC adapter is supported product code too, not a disposable
-migration layer. Only the legacy runner, the schema-v2 claims sidecar, and the
-configured CMake migration tree are one-off inputs; discard them after the new
-project data has been reviewed and verified.
+compatibility layer. The ignored CMake import tree is temporary and can be
+discarded after the committed producer graph has been reviewed.
 
 The producer and verifier are separate trust domains. A normal producer receives project
 source and declared toolchain inputs, but no reference-image path or raw-byte service. It

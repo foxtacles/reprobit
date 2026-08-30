@@ -39,7 +39,6 @@ from reprobit.discovery_cli import (
 )
 from reprobit.discovery_project_grind import enumerate_project_grind_campaign
 from reprobit.incremental import IncrementalBuildSummary
-from reprobit.migration import MigrationOutput
 from reprobit.model import (
     Artifact,
     ArtifactKind,
@@ -55,10 +54,7 @@ from reprobit.model import (
     Verdict,
 )
 from reprobit.producer_graph import (
-    ProducerGraphDocument,
     ProducerGraphError,
-    ProducerNode,
-    ProducerRole,
 )
 from reprobit.progress import ProgressKind
 from reprobit.project_loader import load_project, load_project_tree
@@ -509,6 +505,7 @@ def test_fresh_source_preview_does_not_report_the_unreviewed_project_file_as_rem
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert event["added"] == ["src/unit.cpp"]
     assert event["removed"] == []
+    assert event["next_command"] == f"rbit source lock --project {tmp_path}"
 
 
 def test_source_preview_reports_stale_tu_and_lock_preserves_reviewed_authority(
@@ -1376,15 +1373,7 @@ def test_cli_legacy_oracle_targets_rejects_validated_project_scoped_orphan(
         _legacy_oracle_targets(validated)
 
 
-def _migration_files(source: Path) -> dict[PurePosixPath, bytes]:
-    return {
-        PurePosixPath(path.relative_to(source).as_posix()): path.read_bytes()
-        for path in source.rglob("*")
-        if path.is_file() and ".reprobit-transactions" not in path.parts
-    }
-
-
-def test_graph_configure_exposes_closed_migration_receipt(
+def test_graph_configure_exposes_closed_import_receipt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -1400,7 +1389,7 @@ def test_graph_configure_exposes_closed_migration_receipt(
     capsys.readouterr()
     toolchain = tmp_path / "toolchain"
     toolchain.mkdir()
-    workspace = tmp_path / "migration"
+    workspace = tmp_path / "graph-configure"
     captured: dict[str, object] = {}
 
     def configure(bundle: ProjectBundle, **options: object) -> SimpleNamespace:
@@ -2551,8 +2540,8 @@ def test_interactive_producer_progress_leaves_durable_failure_context() -> None:
 
 def test_interactive_activity_is_transient_on_success_and_durable_on_failure() -> None:
     success = _CapturedTTY()
-    with CLIOutput("text", StringIO(), success).activity("loading project"):
-        pass
+    with CLIOutput("text", StringIO(), success).activity("loading project") as update:
+        update("checking source files")
     assert "loading project: complete" not in success.getvalue()
 
     failure = _CapturedTTY()
@@ -2565,6 +2554,20 @@ def test_interactive_activity_is_transient_on_success_and_durable_on_failure() -
     # Rich may prefix the durable line with terminal cursor-clear controls.
     assert "loading project: failed (" in failed_summary
     assert "s elapsed; error: invalid project" in failed_summary
+
+
+def test_activity_updates_are_machine_readable() -> None:
+    machine = StringIO()
+    with CLIOutput("ndjson", machine, StringIO()).activity(
+        "loading project", phase="setup"
+    ) as update:
+        update("checking source files")
+
+    events = [json.loads(line) for line in machine.getvalue().splitlines()]
+    assert any(
+        event["kind"] == "phase_started" and event["message"] == "checking source files"
+        for event in events
+    )
 
 
 def test_redirected_progress_reports_latest_count_when_execution_fails() -> None:
@@ -2715,8 +2718,7 @@ def test_state_status_and_clean_expose_retained_workspace_lifecycle(
         == 0
     )
     preview = capsys.readouterr().out
-    expected = human_command(("rbit", "clean", project, "--older-than-hours", "24", "--cache"))
-    assert f"Run {expected} to perform this cleanup." in preview
+    assert "Nothing to remove." in preview
     assert "1 recent cache record" in preview
     assert cache.status().records == 1
 
@@ -2724,6 +2726,72 @@ def test_state_status_and_clean_expose_retained_workspace_lifecycle(
     cleaned = capsys.readouterr().out
     assert "Removed 1 cache record" in cleaned
     assert cache.status().records == 0
+
+
+def test_state_status_and_clean_reports_are_explicit_and_previewable(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project with reports"
+    _complete_project(project)
+    capsys.readouterr()
+    reports = project / ".reprobit-state" / "reports"
+    (reports / "grind").mkdir(parents=True)
+    canonical_html = reports / "report.html"
+    canonical_json = reports / "report.json"
+    grind_report = reports / "grind" / "report.html"
+    unmanaged = reports / "keep.txt"
+    canonical_html.write_bytes(b"html")
+    canonical_json.write_bytes(b"json!")
+    grind_report.write_bytes(b"grind!")
+    unmanaged.write_bytes(b"not managed")
+
+    assert main(["--format", "ndjson", "state", "status", str(project)]) == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    status = events[-1]
+    assert status["event"] == "state_status"
+    assert status["report_files"] == 3
+    assert status["report_bytes"] == 15
+    assert status["total_bytes"] >= 15
+
+    assert main(["clean", str(project), "--preview"]) == 0
+    preview = capsys.readouterr().out
+    assert "Saved reports will be kept" in preview
+    assert canonical_html.is_file()
+    assert grind_report.is_file()
+
+    assert main(["clean", str(project), "--reports", "--preview"]) == 0
+    preview = capsys.readouterr().out
+    expected = human_command(("rbit", "clean", project, "--reports"))
+    assert "3 managed report files" in preview
+    assert f"Run {expected} to perform this cleanup." in preview
+    assert canonical_html.is_file()
+    assert grind_report.is_file()
+
+    assert main(["clean", str(project), "--reports"]) == 0
+    cleaned = capsys.readouterr().out
+    assert "Removed 3 managed report files" in cleaned
+    assert not canonical_html.exists()
+    assert not canonical_json.exists()
+    assert not (reports / "grind").exists()
+    assert unmanaged.read_bytes() == b"not managed"
+
+
+def test_clean_preview_does_not_recommend_a_no_op(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "clean-project"
+    _complete_project(project)
+    capsys.readouterr()
+
+    assert main(["--format", "ndjson", "clean", str(project), "--preview"]) == 0
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["event"] == "cleanup_preview"
+    assert event["reclaimable_bytes"] == 0
+    assert event["next_command"] is None
+    assert event["next_argv"] == []
+    assert event["message"].endswith("Nothing to remove.")
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "nan", "inf", "not-a-number"])
@@ -2764,9 +2832,9 @@ def test_cost_and_selected_explain_are_compact_in_text_and_complete_in_ndjson(
     assert main(["cost", str(project)]) == 0
     cost_text = capsys.readouterr().out
     assert "project intervention cost: 1 relative points (model v2)" in cost_text
-    assert "function attribution: 0 attributed, 1 unallocated project/TU shared" in cost_text
-    assert "targets:\n  program: 1 (interventions=1, units=1)" in cost_text
-    assert "classes:\n  state_carrier: 1 (interventions=1, units=1)" in cost_text
+    assert "function attribution: 0 attributed + 1 remaining at target/TU scope = 1" in cost_text
+    assert "by target (same project total):\n  program: 1 (interventions=1, units=1)" in cost_text
+    assert "by class (same project total):\n  State carrier: 1 " in cost_text
 
     assert main(["explain", str(project)]) == 0
     bulk_text = capsys.readouterr().out
@@ -2775,8 +2843,8 @@ def test_cost_and_selected_explain_are_compact_in_text_and_complete_in_ndjson(
 
     assert main(["explain", str(project), "--intervention", "state.one"]) == 0
     selected_text = capsys.readouterr().out
-    assert "cost class: state_carrier" in selected_text
-    assert "typed units: intervention: 1 x 1 = 1" in selected_text
+    assert "cost class: State carrier" in selected_text
+    assert "typed units: Intervention: 1 x 1 = 1" in selected_text
     assert "dependencies: none" in selected_text
     assert "shared beneficiaries: none" in selected_text
     assert "rationale: stabilize one compiler state carrier" in selected_text
@@ -2929,6 +2997,10 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
 
     monkeypatch.setattr("reprobit.cache.IncrementalCache", CacheBomb)
     monkeypatch.setattr("reprobit.cli_build.prepare_producer_graph_run", prepare)
+    monkeypatch.setattr(
+        "reprobit.cli_environment.resolve_classic_execution_inputs",
+        lambda **_kwargs: object(),
+    )
     monkeypatch.setattr("reprobit.engine.ReproductionEngine.run", verify_run)
     monkeypatch.setattr("reprobit.legacy.bind_pe32_oracle", lambda _oracle: object())
 
@@ -2944,6 +3016,29 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
     assert cold_requests == [True, True]
     assert prepared_calls == ["prepared", "prepared"]
     assert bound_legacy_targets == [frozenset(), frozenset()]
+
+
+def test_build_preflight_failure_does_not_retain_an_empty_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_project(project)
+    capsys.readouterr()
+
+    def refuse_execution_inputs(**_kwargs: object) -> object:
+        raise CLIError("compiler setup is unavailable")
+
+    monkeypatch.setattr(
+        "reprobit.cli_environment.resolve_classic_execution_inputs",
+        refuse_execution_inputs,
+    )
+
+    assert main(["build", str(project), "--cold"]) == 2
+    assert "compiler setup is unavailable" in capsys.readouterr().err
+    runs = project / ".reprobit-state" / "runs"
+    assert not runs.exists() or not any(runs.iterdir())
     assert not (project / ".reprobit-state" / "cache").exists()
 
 
@@ -3098,117 +3193,6 @@ def test_verify_rejects_redundant_cold_profile_and_individual_report_flags(
         assert "unrecognized arguments" in capsys.readouterr().err
 
 
-def test_manifest_preview_and_apply_use_the_cas_transaction(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    source_project = tmp_path / "source-project"
-    _complete_project(source_project)
-    capsys.readouterr()
-    files = _migration_files(source_project)
-    legacy = tmp_path / "legacy.json"
-    legacy.write_text('{"schema":2}')
-    claims = tmp_path / "claims.json"
-    claims.write_text('{"schema":1,"bindings":[]}')
-    result = MigrationOutput(files, "a" * 64, 1, 0)
-    seen_claims: list[Path | None] = []
-
-    def migrate(
-        path: Path,
-        *,
-        semantic_claims_path: Path | None = None,
-    ) -> MigrationOutput:
-        seen_claims.append(semantic_claims_path)
-        return result
-
-    monkeypatch.setattr("reprobit.migration.migration_output", migrate)
-    destination = tmp_path / "destination"
-    destination.mkdir()
-    stale_intervention = (
-        destination / "reprobit/interventions/tus/program--tu_ffffffffffffffff.json"
-    )
-    stale_proof = destination / "reprobit/proofs/tus/program--tu_ffffffffffffffff.json"
-    stale_intervention.parent.mkdir(parents=True)
-    stale_proof.parent.mkdir(parents=True)
-    extra_intervention = json.loads(files[PurePosixPath("reprobit/interventions/program.json")])
-    extra_intervention["interventions"][0]["id"] = "state.extra"
-    extra_intervention["interventions"][0]["carrier"] = "state.extra.carrier"
-    stale_intervention.write_bytes(canonical_json(extra_intervention))
-    stale_proof.write_bytes(files[PurePosixPath("reprobit/proofs/program.proof.json")])
-    stale_graph = destination / "reprobit/producer-graph.json"
-    stale_graph.write_bytes(
-        canonical_json(
-            ProducerGraphDocument(
-                schema_version=3,
-                toolchain_lock_digest=Digest.from_bytes(b"stale toolchain"),
-                path_profile_id="dos-stable-v1",
-                extractor="cmake-makefiles-v1",
-                nodes=(
-                    ProducerNode(
-                        id="compiler.stale",
-                        role=ProducerRole.COMPILER,
-                        owner="program",
-                        arguments=("/c",),
-                        outputs=("build/stale.obj",),
-                    ),
-                ),
-            )
-        )
-    )
-    arbitrary = destination / "reprobit/interventions/tus/keep-me.txt"
-    arbitrary.write_text("not a ReproBit schema file", encoding="utf-8")
-    preserved_paths = (stale_intervention, stale_proof)
-
-    assert (
-        main(
-            [
-                "manifest",
-                "migrate",
-                str(legacy),
-                "--project-root",
-                str(destination),
-                "--semantic-claims",
-                str(claims),
-            ]
-        )
-        == 0
-    )
-    preview = capsys.readouterr().out
-    assert "1 managed removal(s)" in preview
-    assert stale_graph.relative_to(destination).as_posix() in preview
-    assert all(
-        f"preserve {path.relative_to(destination).as_posix()}" in preview
-        for path in preserved_paths
-    )
-    assert all(path.is_file() for path in (*preserved_paths, stale_graph))
-    assert not (destination / "reprobit.toml").exists()
-    assert (
-        main(
-            [
-                "manifest",
-                "migrate",
-                str(legacy),
-                "--project-root",
-                str(destination),
-                "--semantic-claims",
-                str(claims),
-                "--apply",
-            ]
-        )
-        == 0
-    )
-    applied = capsys.readouterr().out
-    assert "1 managed removal(s)" in applied
-    assert seen_claims == [claims.resolve(), claims.resolve()]
-    assert not stale_graph.exists()
-    assert all(path.is_file() for path in preserved_paths)
-    assert arbitrary.read_text(encoding="utf-8") == "not a ReproBit schema file"
-    loaded = load_project_tree(destination)
-    assert loaded.spec.project_id == "sample"
-    assert any(item.id == "state.extra" for item in loaded.interventions)
-
-
 def test_report_help_explains_the_input_and_output_paths(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -3234,6 +3218,78 @@ def test_primary_help_uses_human_terms_for_common_workflows(
     assert "save only proven results" in top_level
     assert "portable project read set" not in top_level
     assert "cold exact solution" not in top_level
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("doctor", "--help"),
+        ("status", "--help"),
+        ("build", "--help"),
+        ("verify", "--help"),
+        ("discover", "init", "--help"),
+        ("state", "status", "--help"),
+    ),
+)
+def test_project_command_help_states_the_default_directory(
+    arguments: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        main(list(arguments))
+
+    assert stopped.value.code == 0
+    assert "project directory (default: .)" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("toolchain", "lock", "--help"),
+        ("import", "cmake", "--help"),
+        ("graph", "extract", "--help"),
+        ("discover", "run", "--help"),
+    ),
+)
+def test_terminal_help_does_not_print_markdown_backticks(
+    arguments: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        main(list(arguments))
+
+    assert stopped.value.code == 0
+    assert "`" not in capsys.readouterr().out
+
+
+def test_missing_project_records_are_not_described_as_invalid(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "fresh-project"
+    assert main(["init", str(project)]) == 0
+    capsys.readouterr()
+
+    assert main(["validate", str(project)]) == 2
+    error = capsys.readouterr().err
+    assert "required project file is missing" in error
+    assert "invalid" not in error
+
+    toolchain = project / "reprobit/toolchain.lock.json"
+    fixture_toolchain = Path(__file__).parents[1] / "examples/grind/reprobit/toolchain.lock.json"
+    toolchain.write_bytes(fixture_toolchain.read_bytes())
+    assert main(["validate", str(project)]) == 2
+    directory_error = capsys.readouterr().err
+    assert "required project directory is missing" in directory_error
+    assert "manifest directory" not in directory_error
+
+
+def test_commands_name_an_absent_reprobit_project_plainly(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["validate", str(tmp_path)]) == 2
+    assert "no ReproBit project found" in capsys.readouterr().err
 
 
 def test_primary_help_does_not_load_specialized_command_stacks() -> None:

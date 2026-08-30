@@ -3,11 +3,28 @@
 from __future__ import annotations
 
 import shutil
-from pathlib import Path
+from os import PathLike
+from pathlib import Path, PurePosixPath
 
 
 class CLIError(RuntimeError):
     """A command cannot honestly complete with the supplied inputs."""
+
+
+def canonical_project_relative(value: str, *, label: str) -> str:
+    """Require one canonical, portable project-relative CLI value."""
+
+    path = PurePosixPath(value)
+    if (
+        not value
+        or "\0" in value
+        or "\\" in value
+        or path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise CLIError(f"{label} must be a canonical project-relative path")
+    return value
 
 
 def project_root(value: str) -> Path:
@@ -17,6 +34,15 @@ def project_root(value: str) -> Path:
     if not path.is_dir() or path.is_symlink():
         raise CLIError(f"project root is not an existing real directory: {path}")
     return path.resolve(strict=True)
+
+
+def real_directory(value: str | PathLike[str], *, label: str) -> Path:
+    """Resolve an existing directory without accepting a redirected entry."""
+
+    candidate = Path(value).expanduser()
+    if candidate.is_symlink() or not candidate.is_dir():
+        raise CLIError(f"{label} is not an existing real directory: {candidate}")
+    return candidate.resolve(strict=True)
 
 
 def safe_project_path(root: Path, value: str) -> Path:

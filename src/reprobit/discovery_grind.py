@@ -299,7 +299,11 @@ def run_project_grind(
     chosen_paths: tuple[str, str] | None = None
     chosen: GrindSolution | None = None
 
-    with StagedProject(live_context.root, snapshot.files) as staged_root:
+    with StagedProject(
+        live_context.root,
+        live_context.bundle.spec.state_dir,
+        snapshot.files,
+    ) as staged_root:
         # This second load is the only operative authority. The first live
         # context chose the input set; the sealed copy proves that those exact
         # captured bytes form one valid, self-consistent project snapshot.

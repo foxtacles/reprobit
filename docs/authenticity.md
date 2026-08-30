@@ -94,7 +94,7 @@ closed. The validator identity, implementation digest, exact input statement, an
 bound into the semantic proof.
 
 Reference images are comparison oracles, not payload sources. Raw oracle access is withheld from
-normal producers. A separately bound legacy capability can be enabled only by an exact,
+normal producers. A separately bound reference-byte capability can be enabled only by an exact,
 non-growing allowlist; its presence always prevents a clean verdict.
 
 Candidate composers receive fresh seed/donor artifacts, closed recipe parameters, and digest
@@ -105,7 +105,8 @@ comparison.
 
 `allow-quarantine` is not a general relaxed mode. It still requires a cold build, literal byte
 identity, passing logic certificates, and complete non-quarantined origin integrity. It permits
-only the finite ranges named by the exact legacy allowlist and leaves `toolchain_origin` false.
+only the finite ranges named by the exact reference-byte exception allowlist and leaves
+`toolchain_origin` false.
 
 ReproBit protects against accidental or undeclared transformations, stale artifacts, path drift,
 concurrent mutation, and oracle-payload leakage. It does not claim to defend against a hostile

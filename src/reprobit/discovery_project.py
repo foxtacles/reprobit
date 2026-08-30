@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import TracebackType
@@ -38,6 +36,7 @@ from reprobit.schema import (
     ProofDocument,
 )
 from reprobit.source_lock import receipt_source_input
+from reprobit.state import KeepWorkspace, RunArena
 from reprobit.strict_json import canonical_json, strict_load
 
 
@@ -172,6 +171,12 @@ def _safe_project_path(root: Path, relative: str) -> Path:
     except ValueError as exc:
         raise ProjectDiscoveryError(f"project input escapes its root: {relative!r}") from exc
     return candidate
+
+
+def discovery_state_root(root: Path, state_dir: str) -> Path:
+    """Resolve the owned local-state root used by discovery workspaces."""
+
+    return _safe_project_path(root.resolve(strict=True), state_dir)
 
 
 def _document_paths(root: Path, relative: str) -> tuple[Path, ...]:
@@ -407,17 +412,22 @@ class StagedProject:
     def __init__(
         self,
         project_root: Path,
+        state_dir: str,
         snapshots: tuple[ProjectFileSnapshot, ...],
     ) -> None:
-        self.project_root = project_root.resolve(strict=True)
+        root = project_root.resolve(strict=True)
+        self.arena = RunArena(
+            discovery_state_root(root, state_dir),
+            kind="grind",
+            keep=KeepWorkspace.NEVER,
+        )
         self.snapshots = snapshots
-        self.root: Path | None = None
 
     def __enter__(self) -> Path:
-        lexical = Path(tempfile.mkdtemp(prefix=".reprobit-grind-", dir=self.project_root))
-        root = lexical.resolve(strict=True)
+        arena = self.arena.__enter__()
+        root = arena.path / "project"
         try:
-            root.relative_to(self.project_root)
+            root.mkdir()
             for snapshot in self.snapshots:
                 destination = root.joinpath(*PurePosixPath(snapshot.relative_path).parts)
                 destination.parent.mkdir(parents=True, exist_ok=True)
@@ -430,9 +440,8 @@ class StagedProject:
                         f"staged project input differs: {snapshot.relative_path!r}"
                     )
         except BaseException:
-            shutil.rmtree(root)
+            arena.finish(succeeded=False)
             raise
-        self.root = root
         return root
 
     def __exit__(
@@ -441,14 +450,7 @@ class StagedProject:
         exc: BaseException | None,
         traceback: TracebackType | None,
     ) -> None:
-        del exc_type, exc, traceback
-        root = self.root
-        self.root = None
-        if root is None:
-            return
-        if root.parent != self.project_root or not root.name.startswith(".reprobit-grind-"):
-            raise ProjectDiscoveryError("staged project ownership changed")
-        shutil.rmtree(root)
+        self.arena.__exit__(exc_type, exc, traceback)
 
 
 __all__ = [
@@ -460,6 +462,7 @@ __all__ = [
     "ProjectGrindSnapshot",
     "StagedProject",
     "capture_project_grind_inputs",
+    "discovery_state_root",
     "load_project_grind_plan",
     "resolve_project_grind_context",
 ]

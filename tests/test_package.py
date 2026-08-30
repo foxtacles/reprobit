@@ -65,9 +65,8 @@ def test_wheel_declares_required_non_python_assets() -> None:
     ):
         assert (ROOT / relative).is_file()
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert '"share/reprobit/runtime/ReproBitPathProxy.sh"' in workflow
-    assert '"share/reprobit/runtime/msvc42-wine/wine-msvc.sh"' in workflow
-    assert '"share/reprobit/cmake/ReproBitPathProxy.sh"' not in workflow
+    assert 'for directory in ("cmake", "runtime", "schemas")' in workflow
+    assert 'f"share/reprobit/{path.as_posix()}"' in workflow
 
 
 @pytest.mark.parametrize(

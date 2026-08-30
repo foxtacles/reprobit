@@ -279,7 +279,10 @@ def test_action_summary_writes_outputs(tmp_path: Path, monkeypatch: object) -> N
     assert "toolchain-origin=false" in received
     summary_text = summary.read_text(encoding="utf-8")
     assert "not clean" in summary_text
-    assert "| Intervention cost | 10000 relative points |" in summary_text
+    assert "| Exact bytes | Yes |" in summary_text
+    assert "| Built from declared source and compiler | No |" in summary_text
+    assert "| Adjustment cost | 10000 relative points |" in summary_text
+    assert "| `sample` | Yes |" in summary_text
 
 
 def test_action_summary_rejects_output_path_line_breaks(tmp_path: Path) -> None:
@@ -513,6 +516,7 @@ def test_prepared_cleanup_failure_never_publishes_action_completion(
             authenticity=SimpleNamespace(policy=AuthenticityPolicy.CLEAN),
             state_dir=".reprobit-state",
             targets=(target,),
+            toolchain=SimpleNamespace(profile="msvc_4_2"),
         )
     )
 
@@ -558,6 +562,16 @@ def test_prepared_cleanup_failure_never_publishes_action_completion(
         action_nonce="6" * 64,
         keep_workspace="on-failure",
         jobs=1,
+        backend="auto",
+        wine=None,
+        wineserver=None,
+        toolchain_root=None,
+        compiler_transport=None,
+        resource_transport=None,
+    )
+    monkeypatch.setattr(
+        "reprobit.cli_environment.resolve_classic_execution_inputs",
+        lambda **_kwargs: object(),
     )
     output = CLIOutput("text", StringIO(), StringIO())
     with pytest.raises(RuntimeError, match="fixture cleanup failure"):

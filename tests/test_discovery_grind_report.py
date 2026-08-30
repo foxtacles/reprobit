@@ -218,6 +218,14 @@ def test_cli_writes_a_human_grind_report_for_no_solution(
 ) -> None:
     _install_cli_result(monkeypatch, _result(solution=None))
     machine = StringIO()
+    report_directory = tmp_path / ".reprobit-state/reports/grind"
+    report_directory.mkdir(parents=True)
+    stale_json = report_directory / "cold-verification.json"
+    stale_html = report_directory / "cold-verification.html"
+    unrelated = report_directory / "notes.txt"
+    stale_json.write_bytes(b"old cold json")
+    stale_html.write_bytes(b"old cold html")
+    unrelated.write_bytes(b"keep")
 
     status = grind_cli.command_discover_grind(
         _args(tmp_path, accept_exact=False),
@@ -229,6 +237,9 @@ def test_cli_writes_a_human_grind_report_for_no_solution(
     report = tmp_path / ".reprobit-state/reports/grind/report.html"
     assert status == 1
     assert report.is_file()
+    assert not stale_json.exists()
+    assert not stale_html.exists()
+    assert unrelated.read_bytes() == b"keep"
     assert "No exact adjustment within these search limits" in report.read_text(encoding="utf-8")
     complete = next(
         item

@@ -1,4 +1,4 @@
-"""Migration-only CLI workflows for committed direct-producer graphs."""
+"""Advanced CLI workflows for committed direct-producer graphs."""
 
 from __future__ import annotations
 
@@ -7,19 +7,12 @@ from pathlib import Path
 
 from reprobit.cli_output import CLIOutput
 from reprobit.cli_paths import (
-    CLIError,
     project_root,
+    real_directory,
     resolve_program,
 )
 from reprobit.model import Digest
 from reprobit.project_loader import load_project_tree
-
-
-def _real_directory(value: str, *, label: str) -> Path:
-    candidate = Path(value).expanduser()
-    if candidate.is_symlink() or not candidate.is_dir():
-        raise CLIError(f"{label} is not an existing real directory: {candidate}")
-    return candidate.resolve(strict=True)
 
 
 def command_graph_configure(args: argparse.Namespace, output: CLIOutput) -> int:
@@ -28,14 +21,14 @@ def command_graph_configure(args: argparse.Namespace, output: CLIOutput) -> int:
     from reprobit.cmake_configure import configure_cmake_project
 
     root = project_root(args.project)
-    # Configuration is migration-only and never executes a certifying build.
+    # Configuration is an import step and never executes a certifying build.
     # Load every other authority while deliberately omitting the graph being
     # replaced, which may legitimately bind the previous toolchain lock.
     bundle = load_project_tree(root, include_producer_graph=False)
     workspace = Path(args.workspace_root).expanduser()
     if not workspace.is_absolute():
         workspace = Path.cwd() / workspace
-    toolchain = _real_directory(args.toolchain_root, label="toolchain root")
+    toolchain = real_directory(args.toolchain_root, label="toolchain root")
     cmake = Path(resolve_program(args.cmake, root))
 
     def absolute_transport(value: str) -> Path:
@@ -44,7 +37,7 @@ def command_graph_configure(args: argparse.Namespace, output: CLIOutput) -> int:
             candidate = Path.cwd() / candidate
         return candidate.resolve(strict=True)
 
-    with output.activity("configuring migration-only Unix Makefiles authority"):
+    with output.activity("configuring CMake metadata"):
         result = configure_cmake_project(
             bundle,
             project_root=root,
@@ -58,7 +51,7 @@ def command_graph_configure(args: argparse.Namespace, output: CLIOutput) -> int:
         )
     output.emit(
         "producer_graph_configured",
-        "configured migration metadata; review it, then run `rbit graph extract` "
+        "configured build metadata; review it, then run rbit graph extract "
         f"with --configured-build-root {result.configured_build_root} and "
         f"--effective-source-root {result.effective_source_root}",
         configured_build_root=result.configured_build_root,
@@ -77,7 +70,7 @@ def command_graph_configure(args: argparse.Namespace, output: CLIOutput) -> int:
 
 
 def command_graph_extract(args: argparse.Namespace, output: CLIOutput) -> int:
-    """Temporary CLI wrapper around the permanent graph-recording service."""
+    """Advanced CLI wrapper around the graph-recording service."""
 
     from reprobit.cmake_graph import record_cmake_graph
 

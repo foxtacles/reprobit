@@ -361,6 +361,9 @@ tbody tr:hover { background: var(--accent-soft); }
 }
 @media (max-width: 680px) {
   .topbar-inner { align-items: flex-start; flex-direction: column; }
+  .section-nav { overflow-x: visible; }
+  .section-nav ul { flex-wrap: wrap; }
+  .section-nav a { padding: .55rem .7rem; }
   .section-heading, .table-tools { align-items: stretch; flex-direction: column; }
   details.advanced > summary { grid-template-columns: auto minmax(0, 1fr); gap: .2rem .7rem; }
   .summary-meta { grid-column: 2; text-align: left; }

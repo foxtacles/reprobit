@@ -16,8 +16,10 @@ from reprobit.costs import CostBreakdown, InterventionCost, calculate_cost
 from reprobit.model import Digest
 from reprobit.producer_graph import producer_graph_accepts_source
 from reprobit.project_loader import load_project, load_project_tree
+from reprobit.report_html_format import cost_class_label, human_label
 from reprobit.schema import (
     BuildPlanDocument,
+    ClassicRecipeIntervention,
     Intervention,
     LogicalPathProfile,
     ProducerGraphBuildAdapter,
@@ -308,18 +310,35 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
             overlay_outputs=(report.overlay_outputs if report is not None else ()),
         )
     stale_units = _stale_tu_fields(report)
+    next_command: str | None = None
+    if authority_error is None and not stale_units:
+        lock_arguments: list[str | Path] = [
+            "rbit",
+            "source",
+            "lock",
+            "--project",
+            root,
+        ]
+        for path in args.path:
+            lock_arguments.extend(("--path", path))
+        if graph_invalidation_required:
+            lock_arguments.append("--invalidate-producer-graph")
+        next_command = human_command(lock_arguments)
+    message = _source_preview_message(
+        added=added,
+        removed=removed,
+        changed=changed,
+        entries=len(document.entries),
+        graph_invalidation_required=graph_invalidation_required,
+        authority_checked=report is not None,
+        authority_error=authority_error,
+        stale_units=stale_units,
+    )
+    if next_command is not None:
+        message += f"\nNext: {next_command}"
     output.emit(
         "source_preview",
-        _source_preview_message(
-            added=added,
-            removed=removed,
-            changed=changed,
-            entries=len(document.entries),
-            graph_invalidation_required=graph_invalidation_required,
-            authority_checked=report is not None,
-            authority_error=authority_error,
-            stale_units=stale_units,
-        ),
+        message,
         before_source_manifest_digest=current_digest.value,
         after_source_manifest_digest=document_digest.value,
         entries=len(document.entries),
@@ -334,6 +353,7 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
         stale_translation_units=stale_units,
         authority_regeneration_required=bool(authority_error or stale_units),
         authority_error=authority_error,
+        next_command=next_command,
     )
     return 0
 
@@ -384,7 +404,7 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
                 raise CLIError(
                     "source authority removed an input used by the committed producer graph; "
                     "rerun with --invalidate-producer-graph, reconfigure the project, "
-                    "then run `rbit graph extract`"
+                    "then run rbit graph extract"
                 )
             graph_invalidated = True
 
@@ -444,8 +464,8 @@ def command_validate(args: argparse.Namespace, output: CLIOutput) -> int:
             and bundle.producer_graph is None
         ):
             raise CLIError(
-                "producer-graph project has no committed graph; run the migration "
-                "extractor before validation"
+                "producer-graph project has no committed graph; run rbit import cmake "
+                "before validation"
             )
     output.emit(
         "validated",
@@ -468,16 +488,24 @@ def _scope_text(scope: Any) -> str:
     return "/".join(values)
 
 
+def _human_intervention_label(item: Intervention) -> str:
+    if isinstance(item, ClassicRecipeIntervention):
+        return f"{human_label(item.family.value).capitalize()} adjustment"
+    return human_label(item.kind)
+
+
 def _human_intervention_detail(item: Intervention, cost: InterventionCost) -> str:
     units = ", ".join(
-        f"{unit.kind.value}: {unit.count} x {unit.unit_cost} = {unit.cost}" for unit in cost.units
+        f"{human_label(unit.kind.value)}: {unit.count} x {unit.unit_cost} = {unit.cost}"
+        for unit in cost.units
     )
     dependencies = ", ".join(item.dependencies) or "none"
     beneficiaries = ", ".join(_scope_text(scope) for scope in item.beneficiaries) or "none"
     return "\n".join(
         (
-            f"{item.id}: {item.kind}, cost={cost.cost}, scope={_scope_text(item.scope)}",
-            f"  cost class: {cost.cost_class.value}",
+            f"{item.id}: {_human_intervention_label(item)}, cost={cost.cost}, "
+            f"scope={_scope_text(item.scope)}",
+            f"  cost class: {cost_class_label(cost.cost_class)}",
             f"  typed units: {units}",
             f"  dependencies: {dependencies}",
             f"  shared beneficiaries: {beneficiaries}",
@@ -491,19 +519,20 @@ def _human_cost_breakdown(result: CostBreakdown) -> str:
     lines = [
         f"project intervention cost: {result.project_total} relative points "
         f"(model v{result.model_version})",
-        f"function attribution: {attributed} attributed, "
-        f"{result.unallocated_shared_cost} unallocated project/TU shared",
+        f"function attribution: {attributed} attributed + "
+        f"{result.unallocated_shared_cost} remaining at target/TU scope "
+        f"= {result.project_total}",
     ]
     if result.by_target:
-        lines.append("targets:")
+        lines.append("by target (same project total):")
         lines.extend(
             f"  {item.target}: {item.cost} (interventions={item.interventions}, units={item.units})"
             for item in result.by_target
         )
     if result.by_class:
-        lines.append("classes:")
+        lines.append("by class (same project total):")
         lines.extend(
-            f"  {item.cost_class.value}: {item.cost} "
+            f"  {cost_class_label(item.cost_class)}: {item.cost} "
             f"(interventions={item.interventions}, units={item.units})"
             for item in result.by_class
         )
@@ -524,7 +553,10 @@ def command_explain(args: argparse.Namespace, output: CLIOutput) -> int:
         raise CLIError(f"unknown intervention: {args.intervention}")
     for item in selected:
         cost = costs[item.id]
-        summary = f"{item.id}: {item.kind}, cost={cost.cost}, scope={_scope_text(item.scope)}"
+        summary = (
+            f"{item.id}: {_human_intervention_label(item)}, cost={cost.cost}, "
+            f"scope={_scope_text(item.scope)}"
+        )
         output.emit(
             "intervention",
             (
@@ -578,7 +610,16 @@ def command_status(args: argparse.Namespace, output: CLIOutput) -> int:
         completed=readiness.completed,
         total=len(readiness.items),
         next_command=readiness.next_command,
-        checks=readiness.items,
+        checks=[
+            {
+                "id": item.id,
+                "label": item.label,
+                "ready": item.ready,
+                "detail": item.detail,
+                "next_command": item.next_command,
+            }
+            for item in readiness.items
+        ],
     )
     return 0 if readiness.ready else 1
 

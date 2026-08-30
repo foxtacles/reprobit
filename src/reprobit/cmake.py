@@ -1,4 +1,4 @@
-"""CMake migration target-plan reader and packaged module lookup."""
+"""CMake import target-plan reader and packaged module lookup."""
 
 from __future__ import annotations
 

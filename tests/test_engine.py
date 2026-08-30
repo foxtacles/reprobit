@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from types import CodeType, ModuleType, SimpleNamespace
 from typing import cast
@@ -566,12 +568,31 @@ def test_toolchain_header_root_is_bound_to_complete_portable_tree_lock(
     assert [code for _claim, code, _message in issues] == ["toolchain-root-lock"]
 
 
-def test_engine_runs_build_verifies_evidence_and_materializes_reports(tmp_path: Path) -> None:
+def test_engine_runs_build_verifies_evidence_and_materializes_reports(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     expected = b"exact output"
     reference = tmp_path / "reference.bin"
     reference.write_bytes(expected)
-    reports = ReportDestinations(tmp_path / "report.json", tmp_path / "report.html")
+    state_root = tmp_path / ".reprobit-state"
+    reports = ReportDestinations(
+        state_root / "reports/report.json",
+        state_root / "reports/report.html",
+    )
     bundle, provider = _bundle(tmp_path, expected)
+    publication_leases: list[Path] = []
+
+    @contextmanager
+    def observe_publication_lease(root: Path) -> Iterator[None]:
+        publication_leases.append(root)
+        yield
+
+    monkeypatch.setattr(
+        engine_module,
+        "report_publication_lease",
+        observe_publication_lease,
+    )
 
     with seal_file_oracle(reference) as oracle:
         result = ReproductionEngine().run_unsafe_for_testing(
@@ -608,6 +629,7 @@ def test_engine_runs_build_verifies_evidence_and_materializes_reports(tmp_path: 
     assert result.report.proof.package.id == "reprobit"
     assert reports.json is not None and reports.json.read_bytes().endswith(b"\n")
     assert reports.html is not None and "Cost overview" in reports.html.read_text()
+    assert publication_leases == [state_root]
 
 
 def test_high_assurance_entrypoint_rejects_a_name_spoofed_provider(

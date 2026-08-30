@@ -3147,7 +3147,7 @@ def apply_imul_operand_exchange(
         imul = decoded[index_of[imul_at]]
         require(
             mov["length"] == 2 and body[mov_at] == 139 and (body[mov_at + 1] >> 6 == 3),
-            f"{site_context}: the load is not `mov r32, r32`",
+            f"{site_context}: the load is not mov r32, r32",
         )
         rt = body[mov_at + 1] >> 3 & 7
         rs = body[mov_at + 1] & 7
@@ -3162,7 +3162,7 @@ def apply_imul_operand_exchange(
             and (body[imul_at + 2] >> 6 == 1)
             and (body[imul_at + 2] & 7 == 4)
             and (body[imul_at + 3] == 36),
-            f"{site_context}: the operator is not `imul r32, [esp+disp8]`",
+            f"{site_context}: the operator is not imul r32, [esp+disp8]",
         )
         require(
             body[imul_at + 2] >> 3 & 7 == rt,

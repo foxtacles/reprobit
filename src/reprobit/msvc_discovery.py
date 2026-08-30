@@ -1,7 +1,7 @@
 """MSVC request and compiler adapter for bounded intervention discovery.
 
 The adapter composes the reusable direct compiler with the bounded COFF
-analysis module; neither depends on the removable classic migration framework.
+analysis module; neither depends on project-specific setup code.
 """
 
 from __future__ import annotations

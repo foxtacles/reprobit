@@ -23,7 +23,6 @@ from reprobit.cli_graph import (
     command_graph_configure,
     command_graph_extract,
 )
-from reprobit.cli_migration import command_manifest_migrate
 from reprobit.cli_output import CLIOutput
 from reprobit.cli_project import (
     command_cost,
@@ -49,7 +48,7 @@ except PackageNotFoundError:
 
 
 def _lazy_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:
-    """Load the one-off CMake importer only when that command is selected."""
+    """Load the CMake importer only when that command is selected."""
 
     from reprobit.cli_cmake_import import command_cmake_import
 
@@ -298,17 +297,31 @@ def _parser() -> argparse.ArgumentParser:
     doctor = subcommands.add_parser(
         "doctor", help="check whether the compiler can run correctly on this machine"
     )
-    doctor.add_argument("project", nargs="?", default=".")
+    doctor.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
     doctor.add_argument(
         "--backend",
         choices=("auto", POSIX_WINE_BACKEND, WINDOWS_NATIVE_BACKEND),
         default="auto",
     )
-    doctor.add_argument("--wine", default="wine")
-    doctor.add_argument("--wineserver", default="wineserver")
-    doctor.add_argument("--execute-probe", action="store_true")
-    doctor.add_argument("--toolchain-profile", choices=tuple(TOOLCHAIN_PROFILES))
-    doctor.add_argument("--toolchain-root")
+    doctor.add_argument("--wine", default="wine", help="POSIX Wine executable or PATH name")
+    doctor.add_argument(
+        "--wineserver", default="wineserver", help="POSIX wineserver executable or PATH name"
+    )
+    doctor.add_argument(
+        "--execute-probe",
+        action="store_true",
+        help="also run the bounded compiler child-process test",
+    )
+    doctor.add_argument(
+        "--toolchain-profile",
+        choices=tuple(TOOLCHAIN_PROFILES),
+        help="compiler profile when checking an installation without a project",
+    )
+    doctor.add_argument(
+        "--toolchain-root",
+        metavar="DIRECTORY",
+        help="compiler installation to authenticate",
+    )
     doctor.set_defaults(handler=_lazy_doctor)
 
     toolchain = subcommands.add_parser("toolchain", help="install and record exact compiler files")
@@ -338,11 +351,17 @@ def _parser() -> argparse.ArgumentParser:
     lock = toolchain_commands.add_parser(
         "lock", help="record the exact compiler files this project expects"
     )
-    lock.add_argument("--project", default=".")
-    lock.add_argument("--profile", choices=tuple(TOOLCHAIN_PROFILES))
+    lock.add_argument(
+        "--project", default=".", help="project containing reprobit.toml (default: .)"
+    )
+    lock.add_argument(
+        "--profile",
+        choices=tuple(TOOLCHAIN_PROFILES),
+        help="compiler profile (default: read it from reprobit.toml)",
+    )
     lock.add_argument(
         "--root",
-        help="compiler installation override (normally remembered by `rbit setup`)",
+        help="compiler installation override (normally remembered by rbit setup)",
     )
     lock.add_argument(
         "--runtime-file",
@@ -351,7 +370,11 @@ def _parser() -> argparse.ArgumentParser:
         metavar="RELATIVE_PATH",
         help="pin an additional wrapper or runtime dependency (repeatable)",
     )
-    lock.add_argument("--output")
+    lock.add_argument(
+        "--output",
+        metavar="PROJECT_RELATIVE_PATH",
+        help="lock-file path (default: read it from reprobit.toml)",
+    )
     lock.set_defaults(handler=_lazy_toolchain_lock)
 
     source = subcommands.add_parser(
@@ -361,7 +384,9 @@ def _parser() -> argparse.ArgumentParser:
     source_preview = source_commands.add_parser(
         "preview", help="show source changes and records that need review without writing"
     )
-    source_preview.add_argument("--project", default=".")
+    source_preview.add_argument(
+        "--project", default=".", help="project containing reprobit.toml (default: .)"
+    )
     source_preview.add_argument(
         "--path",
         action="append",
@@ -382,12 +407,16 @@ def _parser() -> argparse.ArgumentParser:
             "(default: build/reprobit-source)"
         ),
     )
-    source_export.add_argument("--project", default=".")
+    source_export.add_argument(
+        "--project", default=".", help="project containing reprobit.toml (default: .)"
+    )
     source_export.set_defaults(handler=command_source_export)
     source_lock = source_commands.add_parser(
         "lock", help="safely record tracked or explicitly named source inputs"
     )
-    source_lock.add_argument("--project", default=".")
+    source_lock.add_argument(
+        "--project", default=".", help="project containing reprobit.toml (default: .)"
+    )
     source_lock.add_argument(
         "--path",
         action="append",
@@ -429,7 +458,7 @@ def _parser() -> argparse.ArgumentParser:
     cmake_import_advanced.add_argument(
         "--toolchain-root",
         metavar="DIRECTORY",
-        help="compiler installation override (normally remembered by `rbit setup`)",
+        help="compiler installation override (normally remembered by rbit setup)",
     )
     cmake_import_advanced.add_argument(
         "--compiler-transport",
@@ -474,7 +503,7 @@ def _parser() -> argparse.ArgumentParser:
     graph_commands = graph.add_subparsers(dest="graph_command", required=True)
     graph_configure = graph_commands.add_parser(
         "configure",
-        help="create a fresh migration-only Unix Makefiles tree without building",
+        help="create a fresh CMake metadata tree without building",
     )
     graph_configure.add_argument(
         "--project", default=".", help="project containing reprobit.toml (default: .)"
@@ -533,19 +562,19 @@ def _parser() -> argparse.ArgumentParser:
         "--configured-build-root",
         required=True,
         metavar="DIRECTORY",
-        help="CMake Unix Makefiles tree created by `rbit graph configure`",
+        help="CMake Unix Makefiles tree created by rbit graph configure",
     )
     graph_extract.add_argument(
         "--effective-source-root",
         required=True,
         metavar="DIRECTORY",
-        help="migration source tree whose physical paths match the configured commands",
+        help="effective source tree whose physical paths match the configured commands",
     )
     graph_extract.add_argument(
         "--effective-source-digest",
         required=True,
         metavar="SHA256",
-        help="source receipt printed by the matching `rbit graph configure` run",
+        help="source receipt printed by the matching rbit graph configure run",
     )
     graph_extract.add_argument(
         "--toolchain-root",
@@ -566,35 +595,21 @@ def _parser() -> argparse.ArgumentParser:
     )
     graph_extract.set_defaults(handler=command_graph_extract)
 
-    manifest = subcommands.add_parser("manifest", help="run the one-time project conversion")
-    manifest_commands = manifest.add_subparsers(dest="manifest_command", required=True)
-    migrate = manifest_commands.add_parser(
-        "migrate",
-        help="preview or apply the one-time schema-2 conversion",
-    )
-    migrate.add_argument("source")
-    migrate.add_argument("--project-root", default=".")
-    migrate.add_argument(
-        "--semantic-claims",
-        metavar="PATH",
-        help="one-off reviewed source-overlay claims (not copied into the project)",
-    )
-    migrate.add_argument("--apply", action="store_true")
-    migrate.set_defaults(handler=command_manifest_migrate)
-
     for name, help_text, handler in (
         ("validate", "check every saved project file", command_validate),
         ("cost", "show intervention cost totals", command_cost),
     ):
         command = subcommands.add_parser(name, help=help_text)
-        command.add_argument("project", nargs="?", default=".")
+        command.add_argument(
+            "project", nargs="?", default=".", help="project directory (default: .)"
+        )
         command.set_defaults(handler=handler)
 
     status = subcommands.add_parser(
         "status",
         help="show what is ready and the next project setup step",
     )
-    status.add_argument("project", nargs="?", default=".")
+    status.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
     status.add_argument(
         "--all",
         action="store_true",
@@ -604,7 +619,7 @@ def _parser() -> argparse.ArgumentParser:
 
     clean = subcommands.add_parser(
         "clean",
-        help="remove inactive ReproBit workspaces while keeping the reusable cache",
+        help="remove inactive workspaces; cache and reports are opt-in",
     )
     clean.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
     clean.add_argument(
@@ -617,25 +632,34 @@ def _parser() -> argparse.ArgumentParser:
         type=_nonnegative_hours,
         default=None,
         metavar="HOURS",
-        help="keep selected workspace and cache entries newer than this age (default: 0)",
+        help="keep workspace and cache entries newer than this age (default: 0)",
     )
     clean.add_argument(
         "--cache",
         action="store_true",
         help="also remove cache records and blobs old enough for the selected age",
     )
+    clean.add_argument(
+        "--reports",
+        action="store_true",
+        help="also remove the canonical verification and grind reports",
+    )
     clean.set_defaults(handler=command_clean)
 
     explain = subcommands.add_parser("explain", help="explain saved interventions")
-    explain.add_argument("project", nargs="?", default=".")
-    explain.add_argument("--intervention")
+    explain.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
+    explain.add_argument(
+        "--intervention",
+        metavar="ID",
+        help="show full details for one intervention",
+    )
     explain.set_defaults(handler=command_explain)
 
     build = subcommands.add_parser(
         "build",
         help="incrementally rebuild changed compiler and linker steps without CMake",
     )
-    build.add_argument("project", nargs="?", default=".")
+    build.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
     _add_execution_options(build, cold_option=True)
     build.set_defaults(handler=command_build)
 
@@ -643,7 +667,7 @@ def _parser() -> argparse.ArgumentParser:
         "verify",
         help="build every target from scratch and check exact bytes and trust evidence",
     )
-    verify.add_argument("project", nargs="?", default=".")
+    verify.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
     _add_execution_options(verify, cold_option=False)
     verify.add_argument(
         "--policy",
@@ -679,7 +703,9 @@ def _parser() -> argparse.ArgumentParser:
         "init",
         help="create a small automatic search plan without compiling",
     )
-    discover_init.add_argument("project", nargs="?", default=".")
+    discover_init.add_argument(
+        "project", nargs="?", default=".", help="project directory (default: .)"
+    )
     discover_init.add_argument(
         "--source",
         required=True,
@@ -712,7 +738,7 @@ def _parser() -> argparse.ArgumentParser:
     discover_run.add_argument(
         "--toolchain-root",
         metavar="DIRECTORY",
-        help="compiler installation override (normally remembered by `rbit setup`)",
+        help="compiler installation override (normally remembered by rbit setup)",
     )
     discover_run.add_argument(
         "--report-json",
@@ -815,12 +841,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     discover_grind.set_defaults(handler=_lazy_discover_grind)
 
-    state = subcommands.add_parser("state", help="inspect local run and cache files")
+    state = subcommands.add_parser("state", help="inspect local runs, cache, and reports")
     state_commands = state.add_subparsers(dest="state_command", required=True)
     state_status = state_commands.add_parser(
-        "status", help="show retained runs, active leases, cache size, and disk usage"
+        "status", help="show retained runs, cache, reports, active leases, and disk usage"
     )
-    state_status.add_argument("project", nargs="?", default=".")
+    state_status.add_argument(
+        "project", nargs="?", default=".", help="project directory (default: .)"
+    )
     state_status.set_defaults(handler=command_state_status)
     report = subcommands.add_parser("report", help="validate JSON and render self-contained HTML")
     report.add_argument("input", help="canonical report.json to validate and render")
@@ -832,7 +860,11 @@ def _parser() -> argparse.ArgumentParser:
     report.set_defaults(handler=command_report)
 
     module = subcommands.add_parser("cmake-module", help="print the packaged CMake module path")
-    module.add_argument("--file", action="store_true")
+    module.add_argument(
+        "--file",
+        action="store_true",
+        help="print the packaged ReproBit.cmake file instead of its directory",
+    )
     module.set_defaults(handler=_command_cmake_module)
     return parser
 

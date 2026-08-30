@@ -913,10 +913,12 @@ def test_html_reconciles_shared_cost_and_marks_only_the_exact_quarantine_scope()
 
     rendered = render_report_html(base.model_copy(update={"costs": costs, "verdict": verdict}))
 
-    assert rendered.count("Assigned to functions") == 2
-    assert rendered.count("Shared project/TU cost") == 2
-    assert rendered.count("40.0% is not assigned to one function") == 2
+    assert rendered.count("Attributed to functions") == 2
+    assert rendered.count("Remaining at target/TU scope") == 2
+    assert rendered.count("40.0% remains at target or TU scope") == 2
     assert "That is context, so do not add it to the" in rendered
+    assert "Exposure (non-additive)" in rendered
+    assert rendered.count("separate views of the same project total") == 2
     assert "Function-level cost attribution rows" in rendered
     assert "Complete function-cost allocation" not in rendered
     assert rendered.count('<span class="exception-note">authenticity exception</span>') == 1
@@ -1234,6 +1236,7 @@ def test_html_is_self_contained_escaped_and_warns_for_quarantine(tmp_path: Path)
     assert "Disclosed authenticity exceptions remain" in rendered
     assert "1 intervention affects 1 range" in rendered
     assert "3 bytes total" in rendered
+    assert "its points do not represent a byte count" in rendered
     assert "action(s)" not in rendered
     assert "artifact-file" in rendered
     assert "[0x8, 0xb)" in rendered

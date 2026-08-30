@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 from collections import Counter
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -17,11 +16,11 @@ from reprobit.discovery_grind import (
     ProjectGrindResult,
     run_project_grind,
 )
-from reprobit.discovery_project import ProjectGrindPlan
+from reprobit.discovery_project import ProjectGrindPlan, discovery_state_root
 from reprobit.model import Digest
 from reprobit.msvc_discovery_coff import isolated_msvc_function_symbols
 from reprobit.progress import ProgressKind
-from reprobit.project_loader import load_project_tree
+from reprobit.project_loader import load_project, load_project_tree
 from reprobit.schema import (
     ClassicRecipeIntervention,
     ClassicTranslationUnitPlan,
@@ -29,11 +28,12 @@ from reprobit.schema import (
     LegacyOracleInstallIntervention,
     ProjectBundle,
 )
+from reprobit.state import KeepWorkspace, RunArena
 from reprobit.strict_json import JsonValue, canonical_json
 
 _MAX_REFERENCE_ENTRIES = 4_096
 _MAX_REFERENCE_OBJECTS = 64
-_MAX_PROJECT_SYMBOLS = 64
+MAX_PROJECT_GRIND_SYMBOLS = 64
 _DEFAULT_CLASSES = InclusiveRange(start=1, stop=4)
 _DEFAULT_FUNCTIONS = InclusiveRange(start=10, stop=10)
 
@@ -325,9 +325,9 @@ def enumerate_project_grind_campaign(
 ) -> ProjectGrindCampaign:
     """Enumerate a deterministic, bounded set of low-cost per-symbol searches."""
 
-    if not 1 <= max_symbols <= _MAX_PROJECT_SYMBOLS:
+    if not 1 <= max_symbols <= MAX_PROJECT_GRIND_SYMBOLS:
         raise ProjectAutoGrindError(
-            f"project-wide grind max symbols must be between 1 and {_MAX_PROJECT_SYMBOLS}"
+            f"project-wide grind max symbols must be between 1 and {MAX_PROJECT_GRIND_SYMBOLS}"
         )
     root = project_root.resolve(strict=True)
     bundle = load_project_tree(root)
@@ -456,6 +456,7 @@ def run_project_auto_grind(
         reference_assignments=reference_assignments,
         max_symbols=max_symbols,
     )
+    state_dir = load_project(root).state_dir
     plans = tuple(project_grind_plan(item) for item in campaign.items)
     item_totals = tuple(2 + 3 * len(enumerate_declaration_states(plan.plan)) for plan in plans)
     total = 2 + sum(item_totals)
@@ -481,8 +482,12 @@ def run_project_auto_grind(
         )
 
     outcomes: list[ProjectGrindOutcome] = []
-    with tempfile.TemporaryDirectory(prefix=".reprobit-project-grind-", dir=root) as directory:
-        plan_path = Path(directory) / "plan.json"
+    with RunArena(
+        discovery_state_root(root, state_dir),
+        kind="grind",
+        keep=KeepWorkspace.NEVER,
+    ) as arena:
+        plan_path = arena.path / "plan.json"
         plan_relative = PurePosixPath(plan_path.relative_to(root).as_posix()).as_posix()
         for index, (item, plan, item_total) in enumerate(
             zip(
@@ -602,6 +607,7 @@ def project_auto_grind_summary(result: ProjectAutoGrindResult) -> Mapping[str, J
 
 
 __all__ = [
+    "MAX_PROJECT_GRIND_SYMBOLS",
     "ProjectAutoGrindError",
     "ProjectAutoGrindResult",
     "ProjectGrindArtifacts",

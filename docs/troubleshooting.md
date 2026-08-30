@@ -22,7 +22,9 @@ successful runs too. Use `rbit state status` to inspect disk use and
 `rbit clean --preview` to see how much inactive state can be removed. Run
 `rbit clean` when you are finished diagnosing retained failures. The reusable
 build cache is kept unless you explicitly add `--cache`; preview that broader
-cleanup with `rbit clean --cache --preview` first.
+cleanup with `rbit clean --cache --preview` first. Generated verification and
+grind reports are counted by `state status`, kept by default, and removed only
+when you add `--reports`.
 
 ## Toolchain doctor reports a digest or tree mismatch
 
@@ -86,5 +88,5 @@ them only after their zero-loss and literal gates pass together.
 
 Read the independent verdict fields. Byte equality can coexist with a failed
 logic certificate, incomplete producer ancestry, a warm build, or quarantine.
-`allow-quarantine` permits only the exact frozen legacy actions; it never hides
+`allow-quarantine` permits only the exact frozen reference-byte exceptions; it never hides
 another origin-integrity defect.

@@ -44,6 +44,9 @@ def command_state_status(args: argparse.Namespace, output: CLIOutput) -> int:
         f"  cache: {status.cache_records} record(s), {status.cache_blobs} blob(s), "
         f"{human_bytes(status.cache_bytes)}",
         f"  cache leases: {status.cache_active_leases} active, {status.cache_stale_leases} stale",
+        f"  reports: {status.report_files} managed "
+        f"{'file' if status.report_files == 1 else 'files'}, "
+        f"{human_bytes(status.report_bytes)}",
     ]
     output.emit(
         "state_status",
@@ -59,6 +62,8 @@ def command_state_status(args: argparse.Namespace, output: CLIOutput) -> int:
         cache_blobs=status.cache_blobs,
         cache_active_leases=status.cache_active_leases,
         cache_stale_leases=status.cache_stale_leases,
+        report_bytes=status.report_bytes,
+        report_files=status.report_files,
         runs=[
             {
                 "path": item.path,
@@ -86,8 +91,8 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
         "checking how much local build state can be removed"
         if args.preview
         else (
-            "removing inactive build workspaces and selected cache data"
-            if args.cache
+            "removing inactive build workspaces and selected local data"
+            if args.cache or args.reports
             else "removing inactive build workspaces"
         )
     )
@@ -96,6 +101,7 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             older_than_seconds=age_seconds,
             dry_run=args.preview,
             include_cache=args.cache,
+            include_reports=args.reports,
         )
     if args.preview:
         next_argv: list[str | Path] = ["rbit", "clean", root]
@@ -103,7 +109,15 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             next_argv.extend(("--older-than-hours", f"{age_hours:g}"))
         if args.cache:
             next_argv.append("--cache")
-        next_command = human_command(next_argv)
+        if args.reports:
+            next_argv.append("--reports")
+        has_selection = bool(
+            result.removed
+            or result.cache_removed_records
+            or result.cache_removed_blobs
+            or result.reports_removed
+        )
+        next_command = human_command(next_argv) if has_selection else None
         if not args.cache:
             cache_summary = "The reusable incremental cache will be kept."
         elif result.cache_active_leases:
@@ -117,20 +131,36 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
                 f"and {result.cache_removed_blobs} unreferenced blob(s); "
                 f"{result.cache_skipped_recent_records} recent cache record(s) will be kept."
             )
+        report_summary = (
+            f"The selection includes {result.report_files} managed report "
+            f"{'file' if result.report_files == 1 else 'files'}."
+            if args.reports
+            else "Saved reports will be kept."
+        )
+        next_step = (
+            f"Run {next_command} to perform this cleanup."
+            if next_command is not None
+            else "Nothing to remove."
+        )
         output.emit(
             "cleanup_preview",
             f"Clean preview: {human_bytes(result.reclaimed_bytes)} can be freed. "
             f"Selected {len(result.removed)} inactive workspace(s). {cache_summary} "
-            f"Run {next_command} to perform this cleanup.",
+            f"{report_summary} "
+            f"{next_step}",
             candidates=result.removed,
             cache_requested=args.cache,
             cache_records=result.cache_removed_records,
             cache_blobs=result.cache_removed_blobs,
             active_cache_leases=result.cache_active_leases,
+            reports_requested=args.reports,
+            report_files=result.report_files,
+            report_bytes=result.report_bytes,
+            reports=result.reports_removed,
             reclaimable_bytes=result.reclaimed_bytes,
             older_than_hours=age_hours,
             next_command=next_command,
-            next_argv=next_argv,
+            next_argv=next_argv if next_command is not None else (),
         )
         return 0
     if not args.cache:
@@ -146,10 +176,17 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             f"{result.cache_removed_blobs} unreferenced blob(s); kept "
             f"{result.cache_skipped_recent_records} recent cache record(s)."
         )
+    report_summary = (
+        f"Removed {result.report_files} managed report "
+        f"{'file' if result.report_files == 1 else 'files'}."
+        if args.reports
+        else "Saved reports were kept."
+    )
     output.emit(
         "cleanup",
         f"Freed {human_bytes(result.reclaimed_bytes)}. "
         f"Removed {len(result.removed)} inactive workspace(s). {cache_summary} "
+        f"{report_summary} "
         f"Kept {len(result.skipped_active)} active and "
         f"{len(result.skipped_recent)} recent workspace(s).",
         removed=result.removed,
@@ -161,6 +198,10 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
         cache_blobs=result.cache_removed_blobs,
         active_cache_leases=result.cache_active_leases,
         skipped_recent_cache_records=result.cache_skipped_recent_records,
+        reports_requested=args.reports,
+        report_files=result.report_files,
+        report_bytes=result.report_bytes,
+        reports=result.reports_removed,
         older_than_hours=age_hours,
     )
     return 0

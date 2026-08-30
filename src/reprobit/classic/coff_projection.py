@@ -1851,7 +1851,7 @@ def _runtime_projection_equivalence_proof(
         if section_proof is None:
             return _RuntimeProjectionEquivalence(False, False, None, {}, {}, None)
         if theorem_family is not None and theorem_family != section_theorem:
-            # No current migrated object needs theorem composition.  Refuse a
+            # No current object needs theorem composition. Refuse a
             # mixed proof family instead of inventing a generalized engine.
             return _RuntimeProjectionEquivalence(False, False, None, {}, {}, None)
         theorem_family = section_theorem

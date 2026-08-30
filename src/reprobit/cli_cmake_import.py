@@ -10,12 +10,19 @@ import sys
 import tempfile
 from collections.abc import Iterator
 from contextlib import contextmanager
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from reprobit.backends import NativeWindowsBackend, backend_for_host
 from reprobit.cli_environment import resolve_classic_execution_inputs
 from reprobit.cli_output import CLIOutput, human_command
-from reprobit.cli_paths import CLIError, project_root, resolve_program, safe_project_path
+from reprobit.cli_paths import (
+    CLIError,
+    project_root,
+    real_directory,
+    resolve_program,
+    safe_project_path,
+)
+from reprobit.cli_state import state_root
 from reprobit.cmake_configure import configure_cmake_project
 from reprobit.cmake_graph import record_cmake_graph
 from reprobit.cmake_import import (
@@ -35,13 +42,6 @@ from reprobit.toolchains import MSVC_42, ClassicMSVCToolchain
 _FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 
 
-def _real_directory(value: str | os.PathLike[str], *, label: str) -> Path:
-    candidate = Path(value).expanduser()
-    if candidate.is_symlink() or not candidate.is_dir():
-        raise CLIError(f"{label} is not an existing real directory: {candidate}")
-    return candidate.resolve(strict=True)
-
-
 def _absolute_file(path: Path) -> Path:
     candidate = path.expanduser()
     if not candidate.is_absolute():
@@ -50,15 +50,6 @@ def _absolute_file(path: Path) -> Path:
     if resolved.is_symlink() or not resolved.is_file():
         raise CLIError(f"execution transport is not a regular file: {resolved}")
     return resolved
-
-
-def _import_state_root(root: Path, relative: str) -> Path:
-    lexical = root.joinpath(*PurePosixPath(relative.replace("\\", "/")).parts)
-    if lexical.is_symlink():
-        raise CLIError(f"state directory is a symlink: {lexical}")
-    state = safe_project_path(root, relative)
-    state.mkdir(parents=True, exist_ok=True)
-    return state
 
 
 def _plain_directory(path: Path) -> bool:
@@ -138,7 +129,7 @@ def command_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:
         compiler_transport=args.compiler_transport,
         resource_transport=args.resource_transport,
     )
-    toolchain_root = _real_directory(execution.toolchain_root, label="toolchain root")
+    toolchain_root = real_directory(execution.toolchain_root, label="toolchain root")
     installation = ClassicMSVCToolchain(spec.toolchain.profile, toolchain_root)
     compiler_transport = execution.compiler_transport
     resource_transport = execution.resource_transport
@@ -162,7 +153,7 @@ def command_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:
         if any(path.is_symlink() or not path.is_file() for path in (make_program, message_file)):
             raise CLIError(
                 "native CMake import needs NMAKE from the current authenticated compiler "
-                "bundle; provision it to a fresh destination with `rbit toolchain provision`"
+                "bundle; provision it to a fresh destination with rbit toolchain provision"
             )
         try:
             verify_msvc42_cmake_frontend(toolchain_root)
@@ -183,7 +174,7 @@ def command_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:
             installation.doctor(bundle.toolchain_lock).require_ok()
             if bundle.build_plan is None:
                 raise CLIError("CMake import could not create or load its build plan")
-        state = _import_state_root(root, spec.state_dir)
+        state = state_root(root, spec)
         arena = RunArena(
             state,
             kind="import",

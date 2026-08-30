@@ -203,7 +203,7 @@ removes only the fixed, flat set of compiler files and never follows a redirecte
 directory tree.
 
 Raw campaigns deliberately keep this state separate from a project's
-`.reprobit-state`. The `rbit clean` command manages project build state and does
+`.reprobit-state`. The `rbit clean` command manages project-local state and does
 not remove `.reprobit-discovery` or another explicitly selected
 `--state-directory`; delete that campaign directory yourself only after its
 reports and candidate objects are no longer needed.

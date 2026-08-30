@@ -1,9 +1,9 @@
 """Quarantined classic-MSVC simulated-elision composer.
 
 This module is the only classic producer allowed to read reference-image bytes.
-It preserves the finite schema-v2 compatibility action while proving its
-declared code regions equivalent, rebuilding all branch and COFF offsets, and
-making the resulting provenance permanently ineligible for a clean verdict.
+It preserves one finite quarantined action while proving its declared code
+regions equivalent, rebuilding all branch and COFF offsets, and making the
+resulting provenance permanently ineligible for a clean verdict.
 Normal candidate producers must never import this module.
 """
 
@@ -165,7 +165,7 @@ def _srr_entry_load_proof(
             not (memory and memory.get("write")),
             f"{context}: a memory write at {item['offset']} interrupts the entry-load scan",
         )
-    require(False, f"{context}: no dominating `mov {register}, [ebp{disp:+#x}]` was found")
+    require(False, f"{context}: no dominating mov {register}, [ebp{disp:+#x}] was found")
     raise AssertionError("unreachable")
 
 

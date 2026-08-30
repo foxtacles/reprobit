@@ -122,7 +122,8 @@ and removes files that are no longer part of it.
 Failed builds keep a private workspace so problems can be inspected. Reclaim
 those workspaces with `rbit clean .`; the reusable build cache is kept by
 default. Use `rbit clean . --cache` when you also want to reclaim cache space,
-and add `--preview` to either command to see exactly what would be removed.
+or `rbit clean . --reports` to remove generated verification and grind reports.
+Add `--preview` to see exactly what would be removed.
 
 ReproBit uses the remembered authenticated compiler and the locked host launchers. CI can still
 pass explicit machine paths and emit NDJSON. Use `rbit build . --cold` for a non-certifying
@@ -180,7 +181,7 @@ ReproBit grew out of byte-identity work on the
 [LEGO Island decompilation](https://github.com/isledecomp/isle). That project rebuilds a 1997 game
 with Microsoft Visual C++ 4.2. It illustrates the gap between two important finish lines:
 
-- **Functional decompilation:** the recovered C++ behaves like the original game.
+- **Complete decompilation:** the recovered C++ behaves like the original game.
 - **Byte-identical decompilation:** the old compiler also emits the exact original executable and
   DLL, down to every byte.
 
@@ -245,7 +246,7 @@ _In words: on the clean path, the reference binary is available only to the fina
 as material for the producer._
 
 A verdict is **clean** only when all three claims pass, the verification build starts from scratch,
-and no explicitly quarantined legacy shortcut runs. See the
+and no quarantined reference-byte exception runs. See the
 [authenticity model](docs/authenticity.md) for the exact guarantees and trust boundary.
 
 ## Fast enough for everyday iteration
@@ -346,7 +347,6 @@ Detailed references:
 - [Platforms and logical paths](docs/platforms.md)
 - [Native Windows and external MSVC setup](docs/windows.md)
 - [One-time CMake import](docs/cmake.md)
-- [Temporary schema-v2 migration](docs/migration.md)
 - [Architecture](docs/architecture.md)
 
 ## Development

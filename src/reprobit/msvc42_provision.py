@@ -89,9 +89,8 @@ _FILES = {
     ),
 }
 
-# Migration-only native Windows build-system frontend.  Certifying builds and
-# general compiler setup do not require it; fresh provisioning includes it so
-# the guided CMake importer is also available on Windows.
+# Optional native Windows build-system frontend. Certifying builds and general
+# compiler setup do not require it; provisioning includes it for CMake imports.
 _CMAKE_FRONTEND_FILES = {
     "bin/NMAKE.EXE": FileAuthority(
         61_952, "2992db8eca994af6a7d7108c20d3976ae1d8b0b6e4923bd8de3ec59f24f91113"
@@ -311,7 +310,7 @@ def verify_msvc42(root: Path) -> None:
 
 
 def verify_msvc42_cmake_frontend(root: Path) -> None:
-    """Authenticate the two migration-only NMake files used by CMake import."""
+    """Authenticate the two NMake files used by CMake import."""
 
     requested_root = root.expanduser()
     if requested_root.is_symlink() or not requested_root.is_dir():

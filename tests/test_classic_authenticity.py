@@ -16,7 +16,6 @@ import reprobit.classic.relational as relational_algorithms
 import reprobit.classic.rewriting as rewriting_algorithms
 import reprobit.classic.scheduling as schedule_algorithms
 from reprobit.binary import ByteIdentityError
-from reprobit.legacy import LegacyOracleInstallGate
 
 FORBIDDEN_PAYLOAD_PARAMETERS = {
     "oracle",
@@ -241,8 +240,3 @@ def test_oracle_discovery_producer_was_removed() -> None:
     for module in CANDIDATE_MODULES:
         assert forbidden.isdisjoint(vars(module))
         assert not any("simulated_elision" in name for name in vars(module))
-
-
-def test_direct_oracle_install_gate_lives_only_in_quarantine_module() -> None:
-    assert LegacyOracleInstallGate.__module__ == "reprobit.legacy"
-    assert all(not hasattr(module, "LegacyOracleInstallGate") for module in CANDIDATE_MODULES)

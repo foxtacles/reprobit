@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from reprobit.cli import main
+from reprobit.cli_output import human_command
 from reprobit.project_loader import load_project
 from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES
 
@@ -56,13 +58,31 @@ def test_setup_creates_and_rechecks_the_project_toolchain_lock(
     assert "Project lock: matches" in second
     assert load_project(project).project_id == "sample"
 
+    assert main(["--format", "ndjson", *command]) == 0
+    machine_events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    setup = machine_events[-1]
+    assert setup["event"] == "setup"
+    assert setup["environment_ready"] is True
+    assert setup["project_ready"] is False
+    assert setup["readiness"][0] == {
+        "detail": "sample uses schema 3",
+        "id": "project",
+        "label": "Project",
+        "next_command": None,
+        "ready": True,
+    }
+
 
 def test_setup_requires_init_first(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    assert main(["setup", str(tmp_path), "--no-provision"]) == 2
-    assert "rbit init" in capsys.readouterr().err
+    project = tmp_path / "project with spaces"
+    project.mkdir()
+    assert main(["setup", str(project), "--no-provision"]) == 2
+    error = capsys.readouterr().err
+    assert human_command(("rbit", "init", project)) in error
+    assert "`" not in error
 
 
 def test_toolchain_provision_has_a_short_human_command(
@@ -72,7 +92,8 @@ def test_toolchain_provision_has_a_short_human_command(
 ) -> None:
     destination = tmp_path / "installed"
 
-    def provision(path: Path) -> Path:
+    def provision(path: Path, progress: object = None) -> Path:
+        del progress
         path.mkdir(parents=True)
         return path
 
@@ -92,4 +113,4 @@ def test_toolchain_provision_has_a_short_human_command(
     )
     rendered = capsys.readouterr().out
     assert f"Compiler ready at {destination}" in rendered
-    assert "Next: rbit setup" in rendered
+    assert "Next in a ReproBit project: rbit setup ." in rendered

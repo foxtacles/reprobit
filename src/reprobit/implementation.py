@@ -438,16 +438,13 @@ def _scoped_package_import_closure_digest(
     package_root: Path,
     root_modules: Sequence[str],
 ) -> Digest:
-    roots = _canonical_root_modules(root_modules)
-    entries = _package_import_closure_entries(package_root, roots)
-    material = [
-        {
-            "path": path.relative_to(package_root).as_posix(),
-            "digest": snapshot.digest,
-            "size": snapshot.size,
-        }
-        for path, _payload, snapshot in entries
-    ]
+    return _scoped_package_import_closure_receipt(package_root, root_modules)[0]
+
+
+def _import_closure_material_digest(
+    roots: tuple[str, ...],
+    material: list[dict[str, object]],
+) -> Digest:
     return Digest.from_bytes(
         canonical_json(
             {
@@ -459,11 +456,87 @@ def _scoped_package_import_closure_digest(
     )
 
 
+def _scoped_package_import_closure_receipt(
+    package_root: Path,
+    root_modules: Sequence[str],
+) -> tuple[Digest, tuple[str, ...]]:
+    """Resolve and hash a closure once, retaining its canonical file set."""
+
+    roots = _canonical_root_modules(root_modules)
+    entries = _package_import_closure_entries(package_root, roots)
+    relative_paths = tuple(
+        path.relative_to(package_root).as_posix() for path, _payload, _snapshot in entries
+    )
+    material = [
+        {
+            "path": relative,
+            "digest": snapshot.digest,
+            "size": snapshot.size,
+        }
+        for relative, (_path, _payload, snapshot) in zip(relative_paths, entries, strict=True)
+    ]
+    return _import_closure_material_digest(roots, material), relative_paths
+
+
+def _rehash_scoped_package_import_closure(
+    package_root: Path,
+    root_modules: Sequence[str],
+    relative_paths: Sequence[str],
+) -> Digest:
+    """Rehash a previously resolved closure without reparsing every module."""
+
+    roots = _canonical_root_modules(root_modules)
+    paths = tuple(relative_paths)
+    if not paths or paths != tuple(sorted(set(paths))):
+        raise RuntimeError("ReproBit import-closure file set must be non-empty and canonical")
+    material: list[dict[str, object]] = []
+    for relative in paths:
+        logical = PurePosixPath(relative)
+        if (
+            not relative
+            or logical.is_absolute()
+            or logical.as_posix() != relative
+            or any(part in {"", ".", ".."} for part in logical.parts)
+        ):
+            raise RuntimeError(f"invalid ReproBit import-closure path: {relative!r}")
+        material.append(
+            _identity_bound_material(
+                package_root,
+                package_root.joinpath(*logical.parts),
+                role=relative,
+            )
+        )
+    return _import_closure_material_digest(roots, material)
+
+
 def scoped_package_import_closure_digest(root_modules: Sequence[str]) -> Digest:
     """Hash the static package-local import closure of canonical module roots."""
 
     package_root = Path(__file__).resolve(strict=True).parent
     return _scoped_package_import_closure_digest(package_root, root_modules)
+
+
+def scoped_package_import_closure_receipt(
+    root_modules: Sequence[str],
+) -> tuple[Digest, tuple[str, ...]]:
+    """Hash an installed import closure and return its canonical file set."""
+
+    package_root = Path(__file__).resolve(strict=True).parent
+    return _scoped_package_import_closure_receipt(package_root, root_modules)
+
+
+def rehash_scoped_package_import_closure(
+    root_modules: Sequence[str],
+    relative_paths: Sequence[str],
+) -> Digest:
+    """Rehash a resolved installed closure without repeating static analysis."""
+
+    package_root = Path(__file__).resolve(strict=True).parent
+    return _rehash_scoped_package_import_closure(
+        package_root,
+        root_modules,
+        relative_paths,
+    )
 
 
 @cache
@@ -486,7 +559,9 @@ def revalidate_package_implementation(expected: Digest) -> None:
 __all__ = [
     "loaded_code_digest",
     "package_implementation_digest",
+    "rehash_scoped_package_import_closure",
     "revalidate_package_implementation",
     "scoped_package_implementation_digest",
     "scoped_package_import_closure_digest",
+    "scoped_package_import_closure_receipt",
 ]

@@ -70,7 +70,10 @@ def _context(
         root=root,
         config=SimpleNamespace(plan=plan),
         bundle=SimpleNamespace(
-            spec=SimpleNamespace(project_id=f"project.{label}"),
+            spec=SimpleNamespace(
+                project_id=f"project.{label}",
+                state_dir=".reprobit-state",
+            ),
             interventions=(),
         ),
         unit=SimpleNamespace(
@@ -137,8 +140,13 @@ def _install_grind_fixture(
         return SimpleNamespace(files=(object(),), authority_directories=())
 
     @contextmanager
-    def stage(root: Path, snapshots: tuple[object, ...]) -> Iterator[Path]:
+    def stage(
+        root: Path,
+        state_dir: str,
+        snapshots: tuple[object, ...],
+    ) -> Iterator[Path]:
         assert root == live_root
+        assert state_dir == ".reprobit-state"
         assert len(snapshots) == 1
         yield staged_root
 

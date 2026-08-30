@@ -4,15 +4,22 @@ from __future__ import annotations
 
 import argparse
 import io
+import os
 import shutil
 import tempfile
 from collections import Counter
 from collections.abc import Callable
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from reprobit.cli_output import CLIOutput, human_command
-from reprobit.cli_paths import CLIError, project_root, relative_output, safe_project_path
+from reprobit.cli_paths import (
+    CLIError,
+    canonical_project_relative,
+    project_root,
+    relative_output,
+    safe_project_path,
+)
 from reprobit.discovery_contracts import InclusiveRange, enumerate_declaration_states
 from reprobit.discovery_grind import (
     ColdTrialEvidence,
@@ -27,7 +34,7 @@ from reprobit.report_io import (
     read_report_json,
     render_report_html,
 )
-from reprobit.state import KeepWorkspace
+from reprobit.state import KeepWorkspace, report_publication_lease
 from reprobit.strict_json import canonical_json
 from reprobit.transactions import CASTransaction
 
@@ -40,20 +47,6 @@ PrepareRun = Callable[..., "ClassicProducerGraphPreparedRun"]
 VerifyCommand = Callable[[argparse.Namespace, CLIOutput], int]
 
 
-def _canonical_project_relative(value: str, *, label: str) -> str:
-    path = PurePosixPath(value)
-    if (
-        not value
-        or "\0" in value
-        or "\\" in value
-        or path.is_absolute()
-        or path.as_posix() != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise CLIError(f"{label} must be a canonical project-relative path")
-    return value
-
-
 def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> int:
     """Create the compact project-aware plan used by the automatic grind."""
 
@@ -61,7 +54,7 @@ def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> 
     bundle = load_project_tree(root)
     if bundle.build_plan is None:
         raise CLIError("discover init requires a committed ReproBit build plan")
-    source = _canonical_project_relative(args.source, label="source")
+    source = canonical_project_relative(args.source, label="source")
     matches = tuple(
         unit
         for unit in bundle.build_plan.translation_units
@@ -70,19 +63,19 @@ def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> 
     )
     if not matches:
         detail = (
-            f" for translation unit `{args.translation_unit}`"
+            f" for translation unit '{args.translation_unit}'"
             if args.translation_unit is not None
             else ""
         )
-        raise CLIError(f"the build plan has no `{source}` compiler lane{detail}")
+        raise CLIError(f"the build plan has no '{source}' compiler lane{detail}")
     if len(matches) != 1:
-        choices = ", ".join(f"`{unit.id}`" for unit in matches)
+        choices = ", ".join(f"'{unit.id}'" for unit in matches)
         raise CLIError(
-            f"`{source}` has several compiler lanes ({choices}); choose one with --translation-unit"
+            f"'{source}' has several compiler lanes ({choices}); choose one with --translation-unit"
         )
     unit = matches[0]
     plan = ProjectGrindPlan(
-        reference_object=_canonical_project_relative(
+        reference_object=canonical_project_relative(
             args.reference,
             label="reference object",
         ),
@@ -107,8 +100,8 @@ def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> 
     )
     output.emit(
         "discovery_grind_plan_created",
-        f"Created a {states}-state grind plan at `{root / destination}`.\n"
-        f"Selected `{unit.id}` from `{source}` for `{args.symbol}`.\n"
+        f"Created a {states}-state grind plan at {root / destination}.\n"
+        f"Selected '{unit.id}' from '{source}' for '{args.symbol}'.\n"
         "No compiler was run and no intervention authority changed.\n"
         f"Next: {next_command}",
         project=root,
@@ -295,7 +288,8 @@ def command_discover_grind(
         raise CLIError("--reference-object requires --project-wide")
 
     root = project_root(args.project)
-    report_directory = safe_project_path(root, load_project(root).state_dir) / "reports" / "grind"
+    state_root = safe_project_path(root, load_project(root).state_dir)
+    report_directory = state_root / "reports" / "grind"
     with output.producer_activity("Finding and proving a low-cost exact intervention") as progress:
         result = run_project_grind(
             root,
@@ -376,10 +370,17 @@ def command_discover_grind(
             ).encode("utf-8")
         }
         files.update(cold_files)
-        transaction = CASTransaction(root)
-        for relative, payload in files.items():
-            transaction.write(relative, payload)
-        report_transaction_id = transaction.commit().transaction_id
+        with report_publication_lease(state_root):
+            transaction = CASTransaction(root)
+            for owned in (
+                relative_output(root, str(desired_cold_json)),
+                relative_output(root, str(desired_cold_html)),
+            ):
+                if owned not in files and os.path.lexists(root / owned):
+                    transaction.delete(owned)
+            for relative, payload in files.items():
+                transaction.write(relative, payload)
+            report_transaction_id = transaction.commit().transaction_id
         grind_report_html = desired_grind_report
         if cold_files:
             cold_report_json = desired_cold_json
@@ -390,12 +391,12 @@ def command_discover_grind(
     report_warning = "; ".join(report_warnings) or None
 
     grind_report_line = (
-        f"Grind report: `{grind_report_html}`"
+        f"Grind report: {grind_report_html}"
         if grind_report_html is not None
         else "Grind report: unavailable (see the nonfatal warning above)"
     )
     cold_report_line = (
-        f"Cold verification: `{cold_report_html}`"
+        f"Cold verification: {cold_report_html}"
         if cold_report_html is not None
         else "Cold verification report: unavailable"
     )
@@ -410,7 +411,7 @@ def command_discover_grind(
             )
         message = (
             f"No exact solution was found in {result.states} bounded declaration states.\n"
-            "No project files changed. Widen `reprobit/discovery.json` "
+            "No project files changed. Widen reprobit/discovery.json "
             f"deliberately if these bounds are too small.{reason_summary}\n"
             f"{grind_report_line}"
         )
@@ -426,11 +427,11 @@ def command_discover_grind(
         review_command = human_command(("git", "diff", "--", intervention_file, proof_file))
         verify_command_text = human_command(("rbit", "verify", root))
         message = (
-            f"Exact solution saved for `{solution.symbol}`: "
-            f"`classes={classes}`, `functions={functions}`.\n"
+            f"Exact solution saved for '{solution.symbol}': "
+            f"classes={classes}, functions={functions}.\n"
             "A fresh build matched every target byte for byte, and both required logic "
             f"checks passed. {saved_summary} in one safe update.\n"
-            f"Changed: `{intervention_file}`, `{proof_file}`\n"
+            f"Changed: {intervention_file}, {proof_file}\n"
             f"Added cost: {solution.added_cost} relative points.\n"
             f"{grind_report_line}\n"
             f"{cold_report_line}\n"
@@ -457,8 +458,8 @@ def command_discover_grind(
             else "Approval will save 2 intervention records and their matching proof records.\n"
         )
         message = (
-            f"Exact solution found for `{solution.symbol}`: "
-            f"`classes={classes}`, `functions={functions}`.\n"
+            f"Exact solution found for '{solution.symbol}': "
+            f"classes={classes}, functions={functions}.\n"
             "A fresh build matched every target byte for byte, and both required logic "
             "checks passed. Only review reports were written; project files stayed unchanged.\n"
             f"{reuse_line}"

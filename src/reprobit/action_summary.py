@@ -21,6 +21,12 @@ def _bool(value: bool) -> str:
     return "true" if value is True else "false"
 
 
+def _yes_no(value: bool) -> str:
+    """Render a human result without changing the Action's boolean outputs."""
+
+    return "Yes" if value is True else "No"
+
+
 def _accepted(report: Report) -> bool:
     """Return the Action step result, conservatively defaulting to clean."""
 
@@ -81,28 +87,28 @@ def _write_summary(report: Report, *, accepted: bool) -> None:
     lines = [
         "## ReproBit byte identity",
         "",
-        "| Claim | Result |",
+        "| Check | Result |",
         "| --- | --- |",
-        f"| Accepted by requested policy | {_bool(accepted)} |",
-        f"| Clean | {_bool(report.verdict.clean)} |",
-        f"| Byte exact | {_bool(report.verdict.byte_exact)} |",
-        f"| Logic certified | {_bool(report.verdict.logic_certified)} |",
-        f"| Toolchain origin | {_bool(report.verdict.toolchain_origin)} |",
-        f"| Intervention cost | {report.costs.project_total} relative points |",
+        f"| Accepted by selected policy | {_yes_no(accepted)} |",
+        f"| Clean result | {_yes_no(report.verdict.clean)} |",
+        f"| Exact bytes | {_yes_no(report.verdict.byte_exact)} |",
+        f"| Adjustments verified | {_yes_no(report.verdict.logic_certified)} |",
+        f"| Built from declared source and compiler | {_yes_no(report.verdict.toolchain_origin)} |",
+        f"| Adjustment cost | {report.costs.project_total} relative points |",
         "",
     ]
     if report.verdict.quarantined:
         lines.extend(
             [
                 "> [!WARNING]",
-                "> This run used explicitly quarantined legacy oracle payload. It is not clean.",
+                "> This run used a quarantined reference-byte exception. It is not clean.",
                 "",
             ]
         )
     if report.targets:
-        lines.extend(["| Target | Byte exact |", "| --- | --- |"])
+        lines.extend(["| Target | Exact bytes |", "| --- | --- |"])
         for target in report.targets:
-            lines.append(f"| {target.id} | {_bool(target.byte_exact)} |")
+            lines.append(f"| `{target.id}` | {_yes_no(target.byte_exact)} |")
         lines.append("")
     with Path(summary_path).open("a", encoding="utf-8") as stream:
         stream.write("\n".join(lines))

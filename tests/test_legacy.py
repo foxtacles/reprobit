@@ -9,12 +9,7 @@ from reprobit import classic_legacy
 from reprobit.artifacts import digest_bytes
 from reprobit.classic_legacy import compose_legacy_simulated_elision
 from reprobit.legacy import (
-    LegacyCopyRange,
-    LegacyFileOracle,
     LegacyInstallError,
-    LegacyOracleInstall,
-    LegacyOracleInstallGate,
-    LegacyPolicy,
     bind_pe32_oracle,
 )
 from reprobit.model import ByteRange, Digest, Scope
@@ -26,100 +21,6 @@ from reprobit.schema import (
 )
 from reprobit.strict_json import canonical_json
 from reprobit.verify import seal_file_oracle
-
-
-def _action(candidate: bytes, oracle: bytes) -> LegacyOracleInstall:
-    return LegacyOracleInstall(
-        "legacy.function",
-        (
-            LegacyCopyRange(
-                output_offset=2,
-                oracle_offset=1,
-                length=3,
-                preimage_digest=digest_bytes(candidate[2:5]),
-                oracle_digest=digest_bytes(oracle[1:4]),
-            ),
-        ),
-    )
-
-
-def test_frozen_gate_installs_only_allowlisted_ranges_and_quarantines(tmp_path: Path) -> None:
-    candidate = b"abcdefgh"
-    oracle_bytes = b"0XYZ4567"
-    reference = tmp_path / "reference.bin"
-    reference.write_bytes(oracle_bytes)
-    action = _action(candidate, oracle_bytes)
-    gate = LegacyOracleInstallGate(LegacyPolicy.freeze((action,)))
-
-    with LegacyFileOracle.open(reference) as oracle:
-        output, receipt = gate.apply(candidate, oracle, (action,))
-
-    assert output == b"abXYZfgh"
-    assert receipt.byte_count == 3
-    assert not receipt.toolchain_origin
-    assert not receipt.clean
-    quarantine = receipt.quarantine(artifact_id="output.image")
-    assert quarantine.byte_count == 3
-    assert quarantine.ranges[0].offset == 2
-
-
-def test_changed_or_new_action_is_rejected_before_oracle_read(tmp_path: Path) -> None:
-    candidate = b"abcdefgh"
-    oracle_bytes = b"0XYZ4567"
-    original = _action(candidate, oracle_bytes)
-    changed = LegacyOracleInstall(
-        original.id,
-        (
-            LegacyCopyRange(
-                output_offset=1,
-                oracle_offset=1,
-                length=3,
-                preimage_digest=digest_bytes(candidate[1:4]),
-                oracle_digest=digest_bytes(oracle_bytes[1:4]),
-            ),
-        ),
-    )
-    reference = tmp_path / "reference.bin"
-    reference.write_bytes(oracle_bytes)
-
-    with (
-        LegacyFileOracle.open(reference) as oracle,
-        pytest.raises(LegacyInstallError, match="new or differs"),
-    ):
-        LegacyOracleInstallGate(LegacyPolicy.freeze((original,))).apply(
-            candidate, oracle, (changed,)
-        )
-
-
-def test_preimage_drift_fails_closed(tmp_path: Path) -> None:
-    candidate = b"abcdefgh"
-    oracle_bytes = b"0XYZ4567"
-    action = _action(candidate, oracle_bytes)
-    reference = tmp_path / "reference.bin"
-    reference.write_bytes(oracle_bytes)
-
-    with (
-        LegacyFileOracle.open(reference) as oracle,
-        pytest.raises(LegacyInstallError, match="preimage"),
-    ):
-        LegacyOracleInstallGate(LegacyPolicy.freeze((action,))).apply(
-            b"abQQQfgh", oracle, (action,)
-        )
-
-
-def test_disabled_policy_refuses_any_action(tmp_path: Path) -> None:
-    candidate = b"abcdefgh"
-    oracle_bytes = b"0XYZ4567"
-    action = _action(candidate, oracle_bytes)
-    reference = tmp_path / "reference.bin"
-    reference.write_bytes(oracle_bytes)
-    disabled = LegacyPolicy(False, (), 0, 0, 0)
-
-    with (
-        LegacyFileOracle.open(reference) as oracle,
-        pytest.raises(LegacyInstallError, match="disabled"),
-    ):
-        LegacyOracleInstallGate(disabled).apply(candidate, oracle, (action,))
 
 
 def _write_int(image: bytearray, offset: int, value: int, width: int) -> None:
@@ -237,7 +138,7 @@ def _simulated_elision_fixture() -> tuple[
     intervention = LegacyOracleInstallIntervention.freeze(
         id="legacy.action",
         scope=Scope(target="program", translation_unit="unit", function="?fixture@@YAXXZ"),
-        rationale="Finite synthetic compatibility action.",
+        rationale="Finite synthetic quarantine action.",
         dependencies=("donor.fixture",),
         proof_receipt_digest=Digest.from_bytes(canonical_json(receipt)),
         preimage_digest=preimage_digest,

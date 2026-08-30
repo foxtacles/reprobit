@@ -100,7 +100,7 @@ def _warm_link_control_material(
         )
         raise ClassicIncrementalError(
             f"target {linker.target_id!r} lacks committed DEFAULTLIB edges; "
-            f"rerun `rbit graph extract ... {suggestions}`"
+            f"rerun rbit graph extract ... {suggestions}"
         ) from exc
     except Exception as exc:
         raise ClassicIncrementalError(

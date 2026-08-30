@@ -7,6 +7,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     name: ${{ matrix.os }} / Python ${{ matrix.python }}
@@ -17,15 +21,16 @@ jobs:
       matrix:
         os: [macos-latest, ubuntu-latest, windows-2022]
         python: ["3.11", "3.14"]
+        exclude:
+          - os: windows-2022
+            python: "3.11"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           cache: pip
-      - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[test]"
-      - run: python -m pip check
       - run: python -m pytest
 
   quality:
@@ -33,13 +38,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
-      - run: python -m pip install --upgrade pip build
-      - run: python -m pip install -e ".[test]"
+      - run: python -m pip install build -e ".[test]"
       - run: python -m pip check
       - name: Validate composite Action YAML
         run: >-
@@ -56,6 +60,7 @@ jobs:
           rbit --version
           python - <<'PY'
           from importlib.metadata import distribution
+          from pathlib import Path
           from reprobit.assets import runtime_asset_path
           from reprobit.cmake import cmake_module_path
 
@@ -71,26 +76,13 @@ jobs:
               "reprobit/py.typed",
               f"{license_root}/LICENSE",
               f"{license_root}/NOTICE",
-              "share/reprobit/cmake/ReproBit.cmake",
-              "share/reprobit/runtime/ReproBitPathProxy.sh",
-              "share/reprobit/runtime/msvc42-wine/README.md",
-              "share/reprobit/runtime/msvc42-wine/cl",
-              "share/reprobit/runtime/msvc42-wine/lib",
-              "share/reprobit/runtime/msvc42-wine/link",
-              "share/reprobit/runtime/msvc42-wine/msvcenv.sh",
-              "share/reprobit/runtime/msvc42-wine/rc",
-              "share/reprobit/runtime/msvc42-wine/wine-msvc.sh",
-              "share/reprobit/schemas/build-plan-v3.schema.json",
-              "share/reprobit/schemas/catalog-v3.schema.json",
-              "share/reprobit/schemas/intervention-document-v3.schema.json",
-              "share/reprobit/schemas/oracle-document-v3.schema.json",
-              "share/reprobit/schemas/producer-graph-v3.schema.json",
-              "share/reprobit/schemas/project-v3.schema.json",
-              "share/reprobit/schemas/proof-document-v3.schema.json",
-              "share/reprobit/schemas/report-v2.schema.json",
-              "share/reprobit/schemas/source-manifest-v3.schema.json",
-              "share/reprobit/schemas/toolchain-lock-v3.schema.json",
           }
+          for directory in ("cmake", "runtime", "schemas"):
+              required.update(
+                  f"share/reprobit/{path.as_posix()}"
+                  for path in Path(directory).rglob("*")
+                  if path.is_file()
+              )
           if missing := sorted(required - files):
               raise SystemExit(f"wheel omitted {missing}")
           PY
@@ -102,8 +94,8 @@ jobs:
     env:
       PYTHONUNBUFFERED: "1"
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
           cache: pip
@@ -120,7 +112,6 @@ jobs:
           "Windows=$([Environment]::OSVersion.VersionString)" | Tee-Object -Append "$env:RUNNER_TEMP\native-runner.txt"
           python -c "import platform, struct; print(f'Python={platform.python_version()} ({struct.calcsize(chr(80))*8}-bit)')" |
             Tee-Object -Append "$env:RUNNER_TEMP\native-runner.txt"
-      - run: python -m pip install --upgrade pip
       - run: python -m pip install -e ".[test]"
       - name: Provision and authenticate the external compiler
         run: >-
@@ -134,26 +125,19 @@ jobs:
           --toolchain-profile msvc_4_2
           --toolchain-root "$env:REPROBIT_MSVC_4_2_ROOT"
           --execute-probe
-      - name: Exercise native lineage drive, process ownership, and compiler chain
+      - name: Run the full suite with the authenticated compiler
         run: >-
           python -m pytest -q
           --junitxml="$env:RUNNER_TEMP\native-tests.xml"
-          tests/test_native_device_map.py
-          tests/test_secure_paths_windows.py
-          tests/test_sealed_namespace_windows.py
-          tests/test_process.py
-          tests/test_backends.py
-          tests/test_toolchains.py
-          tests/test_cmake_import_windows.py
-          tests/test_msvc_discovery_integration.py
+          --ignore=tests/test_msvc_grind_integration.py
       - name: Run the project-wide grind sample end to end
         run: >-
           python -m pytest -q
           --junitxml="$env:RUNNER_TEMP\grind-tests.xml"
           tests/test_msvc_grind_integration.py
       - name: Upload native diagnostics only
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: failure()
+        uses: actions/upload-artifact@v7
         with:
           name: native-msvc42-diagnostics
           path: |

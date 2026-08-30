@@ -33,6 +33,8 @@ ModelT = TypeVar("ModelT", bound=StrictModel)
 
 
 def _load_json_model(path: Path, model: type[ModelT]) -> ModelT:
+    if not path.is_file():
+        raise SchemaError(f"required project file is missing: {path}")
     try:
         value = strict_load(path)
         return model.model_validate_json(canonical_json(value))
@@ -48,6 +50,8 @@ def load_project(path: str | Path) -> ProjectSpec:
     source = Path(path)
     if source.is_dir():
         source = source / "reprobit.toml"
+    if not source.is_file():
+        raise SchemaError(f"no ReproBit project found at {source}")
     try:
         document = tomllib.loads(source.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, tomllib.TOMLDecodeError) as exc:
@@ -76,7 +80,7 @@ def _safe_child(root: Path, relative: str) -> Path:
 def _document_paths(root: Path, relative: str) -> tuple[Path, ...]:
     directory = _safe_child(root, relative)
     if not directory.is_dir():
-        raise SchemaError(f"manifest directory does not exist: {directory}")
+        raise SchemaError(f"required project directory is missing: {directory}")
     paths = tuple(sorted(directory.rglob("*.json"), key=lambda item: item.as_posix()))
     for path in paths:
         resolved = path.resolve()
@@ -99,7 +103,7 @@ def load_project_tree(
     """Load and cross-validate committed schema-v3 project authority.
 
     ``include_producer_graph=False`` is reserved for the non-certifying graph
-    migration path.  It lets that path configure a replacement after an
+    configuration path.  It lets that path configure a replacement after an
     independently reviewed toolchain lock changes; normal project loading and
     every certifying build continue to require the committed graph.
 

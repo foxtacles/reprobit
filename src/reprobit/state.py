@@ -56,6 +56,8 @@ class StateStatus:
     runs: tuple[RunState, ...]
     cache_bytes: int
     cache_files: int
+    report_bytes: int
+    report_files: int
     cache_records: int = 0
     cache_blobs: int = 0
     cache_active_leases: int = 0
@@ -71,11 +73,11 @@ class StateStatus:
 
     @property
     def total_bytes(self) -> int:
-        return self.run_bytes + self.cache_bytes
+        return self.run_bytes + self.cache_bytes + self.report_bytes
 
     @property
     def total_files(self) -> int:
-        return self.run_files + self.cache_files
+        return self.run_files + self.cache_files + self.report_files
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,6 +88,9 @@ class GCResult:
     reclaimed_bytes: int
     skipped_active: tuple[Path, ...]
     skipped_recent: tuple[Path, ...]
+    reports_removed: tuple[Path, ...] = ()
+    report_files: int = 0
+    report_bytes: int = 0
     cache_removed_records: int = 0
     cache_removed_blobs: int = 0
     cache_active_leases: int = 0
@@ -93,10 +98,12 @@ class GCResult:
     dry_run: bool = False
 
 
-_RUN_KIND = re.compile(r"^[a-z][a-z0-9-]{0,31}$")
+_RUN_KIND = re.compile(r"^[a-z][a-z0-9]{0,31}$")
 _OUTCOME_FILE = ".outcome.json"
 _LEASE_FILE = ".lease"
 _MAINTENANCE_FILE = ".maintenance.lock"
+_CANONICAL_REPORTS = ("report.html", "report.json")
+_GRIND_REPORT_DIRECTORY = "grind"
 
 
 def _require_real_directory(path: Path, label: str) -> Path:
@@ -150,6 +157,15 @@ def _maintenance_gate(state_root: Path, *, create: bool = True) -> Iterator[None
         lock.close()
 
 
+@contextmanager
+def report_publication_lease(state_root: Path) -> Iterator[None]:
+    """Keep managed report publication exclusive with state cleanup."""
+
+    root = _require_real_directory(state_root, "state root")
+    with _maintenance_gate(root):
+        yield
+
+
 def _require_runs_root(runs_root: Path) -> None:
     if os.path.lexists(runs_root):
         if runs_root.is_symlink() or not runs_root.is_dir():
@@ -171,20 +187,21 @@ def _tree_usage(root: Path) -> tuple[int, int, int]:
     while pending:
         directory = pending.pop()
         try:
-            entries = tuple(os.scandir(directory))
+            entries = os.scandir(directory)
         except OSError as exc:
             raise _StateError(f"cannot inspect state directory {directory}: {exc}") from exc
-        for entry in entries:
-            try:
-                stat_result = entry.stat(follow_symlinks=False)
-            except OSError as exc:
-                raise _StateError(f"cannot inspect state entry {entry.path}: {exc}") from exc
-            newest = max(newest, stat_result.st_mtime_ns)
-            if entry.is_dir(follow_symlinks=False):
-                pending.append(Path(entry.path))
-            elif entry.is_file(follow_symlinks=False):
-                files += 1
-                total_bytes += stat_result.st_size
+        with entries:
+            for entry in entries:
+                try:
+                    stat_result = entry.stat(follow_symlinks=False)
+                except OSError as exc:
+                    raise _StateError(f"cannot inspect state entry {entry.path}: {exc}") from exc
+                newest = max(newest, stat_result.st_mtime_ns)
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(Path(entry.path))
+                elif entry.is_file(follow_symlinks=False):
+                    files += 1
+                    total_bytes += stat_result.st_size
     return total_bytes, files, newest
 
 
@@ -319,6 +336,46 @@ class StateStore:
                 self.root = root.resolve(strict=False)
         self.runs_root = self.root / "runs"
         self.cache_root = self.root / "cache"
+        self.reports_root = self.root / "reports"
+
+    def _managed_report_paths(self) -> tuple[Path, ...]:
+        """Return only report paths created and owned by ReproBit."""
+
+        if not os.path.lexists(self.reports_root):
+            return ()
+        if self.reports_root.is_symlink() or not self.reports_root.is_dir():
+            raise _StateError(f"reports root is not a real directory: {self.reports_root}")
+        paths: list[Path] = []
+        for name in _CANONICAL_REPORTS:
+            path = self.reports_root / name
+            if not os.path.lexists(path):
+                continue
+            if path.is_symlink() or not path.is_file():
+                raise _StateError(f"managed report is not a real file: {path}")
+            paths.append(path)
+        grind = self.reports_root / _GRIND_REPORT_DIRECTORY
+        if os.path.lexists(grind):
+            if grind.is_symlink() or not grind.is_dir():
+                raise _StateError(f"grind reports root is not a real directory: {grind}")
+            paths.append(grind)
+        return tuple(paths)
+
+    @staticmethod
+    def _report_usage(paths: tuple[Path, ...]) -> tuple[int, int]:
+        total_bytes = 0
+        total_files = 0
+        for path in paths:
+            if path.is_dir():
+                size, files, _ = _tree_usage(path)
+                total_bytes += size
+                total_files += files
+            else:
+                report_stat = path.stat(follow_symlinks=False)
+                if not stat.S_ISREG(report_stat.st_mode):
+                    raise _StateError(f"managed report is not a real file: {path}")
+                total_bytes += report_stat.st_size
+                total_files += 1
+        return total_bytes, total_files
 
     def _run_paths(self) -> tuple[Path, ...]:
         if not os.path.lexists(self.runs_root):
@@ -396,11 +453,21 @@ class StateStore:
         else:
             cache_bytes, cache_files = 0, 0
             cache_status = None
+        try:
+            report_paths = self._managed_report_paths()
+            report_bytes, report_files = self._report_usage(report_paths)
+        except FileNotFoundError:
+            # A completed report may be replaced or removed while status is
+            # scanning it. A later status invocation will observe the new set.
+            report_paths = self._managed_report_paths()
+            report_bytes, report_files = self._report_usage(report_paths)
         return StateStatus(
             self.root,
             tuple(runs),
             cache_bytes,
             cache_files,
+            report_bytes,
+            report_files,
             cache_records=cache_status.records if cache_status is not None else 0,
             cache_blobs=cache_status.blobs if cache_status is not None else 0,
             cache_active_leases=(cache_status.active_leases if cache_status is not None else 0),
@@ -413,8 +480,9 @@ class StateStore:
         older_than_seconds: float = 0.0,
         dry_run: bool = False,
         include_cache: bool = False,
+        include_reports: bool = False,
     ) -> GCResult:
-        """Remove inactive run arenas and, when requested, reusable cache data."""
+        """Remove inactive runs and explicitly selected cache or report data."""
 
         if older_than_seconds < 0:
             raise _StateError("GC age cannot be negative")
@@ -427,6 +495,9 @@ class StateStore:
         cache_removed_blobs = 0
         cache_active_leases = 0
         cache_skipped_recent_records = 0
+        reports_removed: tuple[Path, ...] = ()
+        report_files = 0
+        report_bytes = 0
         if os.path.lexists(self.root):
             with _maintenance_gate(self.root):
                 for path in self._run_paths():
@@ -499,16 +570,30 @@ class StateStore:
             cache_active_leases = cache_result.active_leases
             cache_skipped_recent_records = cache_result.skipped_recent_records
             reclaimed += cache_result.reclaimed_bytes
+        if include_reports and os.path.lexists(self.root):
+            with _maintenance_gate(self.root):
+                reports_removed = self._managed_report_paths()
+                report_bytes, report_files = self._report_usage(reports_removed)
+                if not dry_run:
+                    for path in reports_removed:
+                        if path.is_dir():
+                            shutil.rmtree(path)
+                        else:
+                            path.unlink()
+                reclaimed += report_bytes
         return GCResult(
-            tuple(removed),
-            reclaimed,
-            tuple(skipped_active),
-            tuple(skipped_recent),
-            cache_removed_records,
-            cache_removed_blobs,
-            cache_active_leases,
-            cache_skipped_recent_records,
-            dry_run,
+            removed=tuple(removed),
+            reclaimed_bytes=reclaimed,
+            skipped_active=tuple(skipped_active),
+            skipped_recent=tuple(skipped_recent),
+            reports_removed=reports_removed,
+            report_files=report_files,
+            report_bytes=report_bytes,
+            cache_removed_records=cache_removed_records,
+            cache_removed_blobs=cache_removed_blobs,
+            cache_active_leases=cache_active_leases,
+            cache_skipped_recent_records=cache_skipped_recent_records,
+            dry_run=dry_run,
         )
 
 
@@ -534,4 +619,5 @@ __all__ = [
     "StateStatus",
     "StateStore",
     "human_bytes",
+    "report_publication_lease",
 ]

@@ -17,6 +17,8 @@ rbit verify . --report-dir build/reprobit-report
 `status` names the next missing setup item. `build` is the fast incremental
 developer loop; `verify` always starts fresh and writes the trust report. The
 longer commands below are for first-time project onboarding and unusual hosts.
+`status` checks the saved project files; run `setup` once on each machine to
+prepare and remember its local compiler.
 
 <details>
 <summary>Advanced: progress events</summary>
@@ -96,10 +98,9 @@ The guided CMake import derives only facts it can check: target mappings, empty
 initial intervention/proof records, the protected reference digest, and the
 compiler/linker commands CMake exposes. It does not guess entropy interventions.
 
-For a schema-v2 project, the one-way `rbit manifest migrate` command creates its
-reviewable records. For a fresh CMake project, `rbit import cmake .` creates the
-minimal initial records and graph. `rbit status .` keeps every missing item
-visible; successful compiler setup alone never counts as a build-ready project.
+For a fresh CMake project, `rbit import cmake .` creates the minimal initial
+records and graph. `rbit status .` keeps every missing item visible; successful
+compiler setup alone never counts as a build-ready project.
 
 `validate` then loads every shard, rejects duplicate keys and IDs, checks
 cross-document references and dependency cycles, receipts current manifest
@@ -186,13 +187,14 @@ and the reviewed `reprobit-target-plan.json`.
 
 ```console
 rbit graph configure --project . \
-  --workspace-root .reprobit-state/migration \
+  --workspace-root .reprobit-state/import \
   --toolchain-root /opt/toolchains/msvc42 \
   --compiler-transport /opt/toolchains/msvc42/wine/x86/cl \
   --resource-transport /opt/toolchains/msvc42/wine/x86/rc
 rbit graph extract --project . \
-  --configured-build-root .reprobit-state/migration/build \
-  --effective-source-root .reprobit-state/migration/source \
+  --configured-build-root .reprobit-state/import/build \
+  --effective-source-root .reprobit-state/import/source \
+  --effective-source-digest SHA256_FROM_CONFIGURE \
   --toolchain-root /opt/toolchains/msvc42 \
   --directive-input program=oldnames.lib
 rbit validate .
@@ -201,7 +203,8 @@ rbit cost .
 ```
 
 `graph configure` reports the exact configured/effective roots, target plan,
-compile database, configure log, command digest, and duration. It refuses a
+compile database, effective-source digest, configure log, command digest, and
+duration. Replace `SHA256_FROM_CONFIGURE` above with that reported digest. It refuses a
 non-empty workspace and detects any source mutation during CMake configuration.
 `graph extract` reads expanded compile commands, resource rules, response files,
 and link commands; converts physical paths into `${SOURCE}`, `${BUILD}`, and
@@ -324,13 +327,15 @@ rbit state status .
 rbit clean . --preview
 rbit clean .
 rbit clean . --cache --preview
+rbit clean . --reports --preview
 ```
 
 `clean` removes inactive build workspaces while preserving the reusable
 incremental cache. Add `--cache` when you also want to remove eligible cache
-records and blobs. It never removes an active build, cache data in use, or a
-saved report. Add `--older-than-hours 24` to either scope when you want to keep
-the most recent day. `--preview` performs the same safety checks, shows how much
+records and blobs. Generated reports are also kept unless you add `--reports`;
+that option removes only the canonical verification reports and the grind
+report tree. Add `--older-than-hours 24` when you want to keep recent workspaces
+and cache records. `--preview` performs the same safety checks, shows how much
 space can be freed, and prints the exact cleanup command without deleting
 anything. Verification from scratch never uses the incremental cache as trusted
 build input.
@@ -389,28 +394,6 @@ Raw `discover run` proposals are not accepted by certification commands.
 Candidate exploration stays in ignored state. The narrow project-aware
 `discover grind --accept-exact` path reruns the logic checks, rebuilds and
 verifies the candidate from scratch, and saves only a passing exact result.
-
-<details>
-<summary>Temporary: import an unreleased schema-v2 project</summary>
-
-```console
-rbit manifest migrate tools/legacy-manifest.json --project-root .
-rbit manifest migrate tools/legacy-manifest.json --project-root . \
-  --semantic-claims tools/reprobit-migration-claims.once.json --apply
-```
-
-`--semantic-claims` supplies reviewed scope/header facts that schema v2 never
-recorded. The strict one-off JSON sidecar is not a runtime input or migration
-output; leave the historical manifest unchanged and discard the sidecar after
-reviewing the generated schema-v3 project.
-
-The first command is a deterministic preview. `--apply` publishes the complete
-schema-v3 tree in one content-addressed transaction after validating it in a
-temporary project. Migration is one-way: normal commands never load schema v2.
-Raw legacy reference-byte or instruction payload fields become digest-only
-redactions; they do not become executable recipe parameters.
-
-</details>
 
 ## Render an existing report
 

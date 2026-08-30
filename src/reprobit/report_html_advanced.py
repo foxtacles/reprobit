@@ -358,14 +358,14 @@ def _render_cost_details(report: Report) -> str:
                 "All intervention cost in this project",
             ),
             (
-                "Assigned to functions",
+                "Attributed to functions",
                 format_integer(attributed),
                 "Function-specific cost plus assigned shares of broader adjustments",
             ),
             (
-                "Shared project/TU cost",
+                "Remaining at target/TU scope",
                 format_integer(report.costs.unallocated_shared_cost),
-                f"{unallocated_percent:.1f}% is not assigned to one function",
+                f"{unallocated_percent:.1f}% remains at target or TU scope",
             ),
         ),
         caption="Project-to-function cost reconciliation",
@@ -391,7 +391,11 @@ def _render_cost_details(report: Report) -> str:
         ),
         caption="Exact costs by target",
     )
-    return reconciliation + classes + targets
+    return (
+        reconciliation
+        + '<p class="explain">The class and target tables are separate views of the same '
+        "project total; do not add them together.</p>" + classes + targets
+    )
 
 
 def _render_function_details(report: Report) -> str:
@@ -427,7 +431,7 @@ def _render_function_details(report: Report) -> str:
                 "Function",
                 "Direct",
                 "Allocated shared",
-                "Exposure",
+                "Exposure (non-additive)",
                 "Attributed total",
             ),
             rows,

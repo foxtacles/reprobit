@@ -30,7 +30,7 @@ from reprobit.strict_json import canonical_json
 
 
 class CMakeConfigureError(ClassicProjectError):
-    """A migration-time configure boundary was incomplete or unsafe."""
+    """A CMake import boundary was incomplete or unsafe."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,7 +154,7 @@ def configure_cmake_project(
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", configuration) is None:
         raise CMakeConfigureError("CMake configuration name is unsafe")
     if generator not in {"Unix Makefiles", "NMake Makefiles"}:
-        raise CMakeConfigureError(f"unsupported migration CMake generator: {generator!r}")
+        raise CMakeConfigureError(f"unsupported CMake import generator: {generator!r}")
     if generator == "NMake Makefiles" and make_program is None:
         raise CMakeConfigureError("NMake Makefiles requires an explicit NMAKE program")
 

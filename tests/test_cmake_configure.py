@@ -119,7 +119,7 @@ def test_graph_configure_surfaces_the_bounded_process_failure(
 ) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
-    workspace = tmp_path / "migration"
+    workspace = tmp_path / "cmake-configure"
     toolchain = tmp_path / "toolchain"
     transports = toolchain / "wine/x86"
     transports.mkdir(parents=True)
@@ -180,7 +180,7 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
 ) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
-    workspace = tmp_path / "migration"
+    workspace = tmp_path / "cmake-configure"
     toolchain = tmp_path / "toolchain"
     transports = toolchain / "wine/x86"
     transports.mkdir(parents=True)

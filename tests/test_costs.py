@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from fractions import Fraction
+
 import pytest
 from pydantic import ValidationError
 
@@ -144,6 +146,14 @@ def test_calculate_cost_counts_unique_nodes_once_and_allocates_shared_rationally
     assert by_function["first()"].exposure_cost == 10
     assert by_function["second()"].allocated_shared_cost.numerator == 5
     assert result.interventions[0].beneficiaries == (first, second)
+    attributed = sum(
+        Fraction(item.direct_cost) + item.allocated_shared_cost.as_fraction()
+        for item in result.by_function
+    )
+    assert attributed + result.unallocated_shared_cost == result.project_total
+    assert sum(item.cost for item in result.by_class) == result.project_total
+    assert sum(item.cost for item in result.by_target) == result.project_total
+    assert sum(item.exposure_cost for item in result.by_function) == 20
 
 
 def test_composite_auxiliary_donors_are_each_charged_and_allocated_once() -> None:

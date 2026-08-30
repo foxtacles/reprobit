@@ -58,7 +58,7 @@ class OverlayOutputWitness:
 
 
 class ClassicProjectError(RuntimeError):
-    """A migrated project cannot be executed without guessing or stale state."""
+    """A project cannot be executed without guessing or stale state."""
 
 
 class FamilyExecutionMode(StrEnum):
@@ -129,7 +129,7 @@ def _coverage() -> Mapping[ClassicRecipeFamily, FamilyCoverage]:
             result[family] = FamilyCoverage(
                 FamilyExecutionMode.QUARANTINE_ONLY,
                 False,
-                "must be represented and executed by LegacyOracleInstallGate",
+                "must be represented and executed by the quarantined simulated-elision composer",
             )
         elif family in {
             ClassicRecipeFamily.IMAGE_BINARY_REPACK,

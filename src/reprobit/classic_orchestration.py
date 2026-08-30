@@ -1,4 +1,4 @@
-"""Project-neutral planning and composition for migrated classic MSVC builds.
+"""Project-neutral planning and composition for classic MSVC builds.
 
 This module owns the seam between typed schema-v3 shards and the low-level
 COFF/PE producers.  It deliberately does not know how a consumer names its

@@ -27,6 +27,7 @@ from reprobit.state import KeepWorkspace, RunArena
 
 if TYPE_CHECKING:
     from reprobit.classic_runtime_preparation import ClassicProducerGraphPreparedRun
+    from reprobit.cli_environment import ClassicExecutionInputs
 
 
 def _host_environment(programs: Sequence[str], temporary: Path) -> tuple[tuple[str, str], ...]:
@@ -76,6 +77,7 @@ def prepare_producer_graph_run(
     *,
     project_root: Path,
     session_root: Path,
+    execution: ClassicExecutionInputs,
     progress: Callable[[int, int, str, str, ProgressKind, str | None], None],
 ) -> ClassicProducerGraphPreparedRun:
     """Prepare the closed built-in direct runtime from CLI authority."""
@@ -92,15 +94,6 @@ def prepare_producer_graph_run(
     ) -> None:
         progress(completed, total, phase, node_id, ProgressKind(kind), reason)
 
-    from reprobit.cli_environment import resolve_classic_execution_inputs
-
-    execution = resolve_classic_execution_inputs(
-        profile=bundle.spec.toolchain.profile,
-        explicit_toolchain_root=args.toolchain_root,
-        backend=selected_backend(args),
-        compiler_transport=args.compiler_transport,
-        resource_transport=args.resource_transport,
-    )
     return prepare_classic_producer_graph_run(
         bundle,
         project_root=project_root,
@@ -155,6 +148,17 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                 # Preserve their existing strict source validation.
                 bundle = load_project_tree(root)
                 developer_authority = None
+    execution = None
+    if isinstance(bundle.spec.build, ProducerGraphBuildAdapter):
+        from reprobit.cli_environment import resolve_classic_execution_inputs
+
+        execution = resolve_classic_execution_inputs(
+            profile=bundle.spec.toolchain.profile,
+            explicit_toolchain_root=args.toolchain_root,
+            backend=selected_backend(args),
+            compiler_transport=args.compiler_transport,
+            resource_transport=args.resource_transport,
+        )
     state = state_root(root, bundle.spec)
     required = tuple(safe_project_path(root, item.artifact) for item in bundle.spec.targets)
     arena = RunArena(
@@ -166,6 +170,7 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
         with arena:
             run_root = arena.path
             if isinstance(bundle.spec.build, ProducerGraphBuildAdapter):
+                assert execution is not None
                 if args.cold:
                     with output.producer_activity("building from scratch") as progress:
                         prepared = prepare_producer_graph_run(
@@ -173,6 +178,7 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                             bundle,
                             project_root=root,
                             session_root=run_root / "classic",
+                            execution=execution,
                             progress=progress,
                         )
                         with ExitStack() as stack:
@@ -202,17 +208,6 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                     assert developer_authority is not None
                     from reprobit.classic_incremental import (
                         execute_classic_incremental_build,
-                    )
-                    from reprobit.cli_environment import (
-                        resolve_classic_execution_inputs,
-                    )
-
-                    execution = resolve_classic_execution_inputs(
-                        profile=bundle.spec.toolchain.profile,
-                        explicit_toolchain_root=args.toolchain_root,
-                        backend=selected_backend(args),
-                        compiler_transport=args.compiler_transport,
-                        resource_transport=args.resource_transport,
                     )
 
                     with output.producer_activity(
@@ -346,6 +341,15 @@ def command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
         )
     if not isinstance(bundle.spec.build, ProducerGraphBuildAdapter):
         raise CLIError(f"unsupported certification adapter: {type(bundle.spec.build).__name__}")
+    from reprobit.cli_environment import resolve_classic_execution_inputs
+
+    execution = resolve_classic_execution_inputs(
+        profile=bundle.spec.toolchain.profile,
+        explicit_toolchain_root=args.toolchain_root,
+        backend=selected_backend(args),
+        compiler_transport=args.compiler_transport,
+        resource_transport=args.resource_transport,
+    )
     state = state_root(root, bundle.spec)
     if args.report_dir:
         report_directory = safe_project_path(root, args.report_dir)
@@ -377,6 +381,7 @@ def command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
                     bundle,
                     project_root=root,
                     session_root=run_root / "classic",
+                    execution=execution,
                     progress=progress,
                 )
                 with ExitStack() as stack:

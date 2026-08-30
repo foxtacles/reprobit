@@ -140,7 +140,7 @@ def inspect_project_readiness(root: Path) -> ProjectReadiness:
             (
                 None
                 if source_ready
-                else human_command(("rbit", "source", "lock", "--project", candidate))
+                else human_command(("rbit", "source", "preview", "--project", candidate))
             ),
         ),
     ]
@@ -242,9 +242,9 @@ def render_project_readiness(readiness: ProjectReadiness, *, include_ready: bool
     """Render a compact checklist with one next action."""
 
     if readiness.ready:
-        return f"Project ready: {readiness.completed}/{len(readiness.items)} checks passed"
+        return f"Project files ready: {readiness.completed}/{len(readiness.items)} checks passed"
     lines = [
-        f"Project setup: {readiness.completed}/{len(readiness.items)} checks ready",
+        f"Project files: {readiness.completed}/{len(readiness.items)} checks ready",
     ]
     for item in readiness.items:
         if item.ready and not include_ready:

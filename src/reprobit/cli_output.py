@@ -11,7 +11,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import Enum
-from pathlib import Path
+from pathlib import Path, PurePath
 from threading import Lock
 from typing import TYPE_CHECKING, Any, TextIO
 
@@ -130,7 +130,7 @@ def _jsonable(value: Any) -> Any:
         return value.model_dump(mode="json", exclude_none=True)
     if isinstance(value, Enum):
         return value.value
-    if isinstance(value, Path):
+    if isinstance(value, PurePath):
         return str(value)
     if isinstance(value, Mapping):
         return {str(key): _jsonable(item) for key, item in value.items()}
@@ -288,10 +288,23 @@ class CLIOutput:
         )
 
     @contextmanager
-    def activity(self, description: str, *, phase: str = "work") -> Iterator[None]:
-        with self._progress.phase(phase, description):
+    def activity(
+        self,
+        description: str,
+        *,
+        phase: str = "work",
+    ) -> Iterator[Callable[[str], None]]:
+        with self._progress.phase(phase, description) as phase_scope:
             if self.output_format != "text" or not self._interactive:
-                yield
+
+                def update(message: str) -> None:
+                    phase_scope.activity(
+                        kind=ProgressKind.PHASE_STARTED,
+                        phase=phase,
+                        message=message,
+                    )
+
+                yield update
                 return
             console = Console(file=self.stderr)
             started = time.monotonic()
@@ -304,8 +317,17 @@ class CLIOutput:
                     console=console,
                     transient=True,
                 ) as progress:
-                    progress.add_task(description, total=None)
-                    yield
+                    task = progress.add_task(description, total=None)
+
+                    def update(message: str) -> None:
+                        phase_scope.activity(
+                            kind=ProgressKind.PHASE_STARTED,
+                            phase=phase,
+                            message=message,
+                        )
+                        progress.update(task, description=message)
+
+                    yield update
             except BaseException as error:
                 failure = error
                 raise

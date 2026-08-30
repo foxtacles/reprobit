@@ -109,23 +109,25 @@ exact roots reported by the first command:
 
 ```console
 rbit graph configure --project . \
-  --workspace-root .reprobit-state/migration \
+  --workspace-root .reprobit-state/import \
   --toolchain-root /opt/toolchains/msvc42 \
   --compiler-transport /opt/toolchains/msvc42/wine/x86/cl \
   --resource-transport /opt/toolchains/msvc42/wine/x86/rc
 rbit graph extract --project . \
-  --configured-build-root .reprobit-state/migration/build \
-  --effective-source-root .reprobit-state/migration/source \
+  --configured-build-root .reprobit-state/import/build \
+  --effective-source-root .reprobit-state/import/source \
+  --effective-source-digest SHA256_FROM_CONFIGURE \
   --toolchain-root /opt/toolchains/msvc42 \
   --directive-input config=mfcs42 \
   --directive-input config=msvcprt.lib
 ```
 
-The workspace must be absent or empty; ReproBit will not erase or reuse a
-configured tree. The configure command seals the effective source tree before
-and after CMake, rejects a changed target universe, and reports a configure log
-and command digest for review. The default target-plan path is
-`.reprobit-state/migration/build/reprobit-target-plan.json`; use
+Replace `SHA256_FROM_CONFIGURE` with the effective-source digest printed by
+`graph configure`. The workspace must be absent or empty; ReproBit will not
+erase or reuse a configured tree. The configure command seals the effective
+source tree before and after CMake, rejects a changed target universe, and
+reports a configure log and command digest for review. The default target-plan path is
+`.reprobit-state/import/build/reprobit-target-plan.json`; use
 `--target-plan` only for another path beneath the configured build root. The
 extractor reads `compile_commands.json`, resource rules, `link.txt`, and bounded
 response files, then rejects commands or inputs outside the effective source,

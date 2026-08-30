@@ -317,7 +317,7 @@ def _render_costs(report: Report) -> str:
     hotspot_chart = bar_chart(
         identity="cost-hotspot-chart",
         title="Top function hotspots",
-        description="Functions carrying the most direct and shared intervention cost.",
+        description="Highest attributed totals: direct cost plus allocated shared cost.",
         bars=hotspot_bars,
     )
     attributed = report.costs.project_total - report.costs.unallocated_shared_cost
@@ -334,22 +334,23 @@ def _render_costs(report: Report) -> str:
   <p class="explain"><strong>Cost ranks interventions; it is not elapsed time.</strong>
     Higher scores mean a larger departure from an ordinary build. A TU is one source file as the
     compiler sees it. <code>Oracle install</code> identifies the disclosed reference-byte
-    exceptions and is deliberately weighted heavily.</p>
-  <div class="card-grid cost-reconciliation" aria-label="Function cost attribution">
+    exceptions and is deliberately weighted heavily; its points do not represent a byte count.</p>
+  <div class="card-grid cost-reconciliation" aria-label="Project cost reconciliation">
     <div class="card"><h3>Project total</h3>
       <div class="value">{format_integer(report.costs.project_total)}</div>
       <p>All intervention cost in this project</p></div>
-    <div class="card"><h3>Assigned to functions</h3>
+    <div class="card"><h3>Attributed to functions</h3>
       <div class="value">{format_integer(attributed)}</div>
       <p>Function-specific cost plus assigned shares of broader adjustments</p></div>
-    <div class="card"><h3>Shared project/TU cost</h3>
+    <div class="card"><h3>Remaining at target/TU scope</h3>
       <div class="value">{format_integer(report.costs.unallocated_shared_cost)}</div>
-      <p>{unallocated_percent:.1f}% is not assigned to one function</p></div>
+      <p>{unallocated_percent:.1f}% remains at target or TU scope</p></div>
   </div>
   <p class="explain"><strong>Each function total includes its own adjustments plus its assigned
-    share of broader project or TU adjustments.</strong> The advanced table also shows the full
+    share of broader target- or TU-wide adjustments.</strong> The advanced table also shows the full
     shared cost touching a function as <em>exposure</em>. That is context, so do not add it to the
-    total again.</p>
+    total again. The class and target charts are separate views of the same project total; do not
+    add them together.</p>
   <div class="chart-grid">{charts}</div>
   <div style="margin-top:1rem">{hotspot_chart}</div>
 </section>"""

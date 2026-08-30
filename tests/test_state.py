@@ -15,6 +15,7 @@ from reprobit.state import (
     RunArena,
     StateStore,
     human_bytes,
+    report_publication_lease,
 )
 from reprobit.state_lock import AdvisoryFileLock, StateError
 
@@ -72,6 +73,14 @@ def test_run_arena_removes_success_and_retains_failure_by_default(
     assert len(status.runs) == 1
     assert status.runs[0].outcome == "failed"
     assert not status.runs[0].active
+
+
+def test_run_kind_cannot_be_ambiguous_with_its_identifier(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+
+    with pytest.raises(StateError, match="invalid run kind"):
+        RunArena(state, kind="project-grind")
 
 
 def test_run_arena_retention_modes_are_explicit(tmp_path: Path) -> None:
@@ -375,6 +384,115 @@ def test_status_is_read_only_for_legacy_runs_without_a_lease(tmp_path: Path) -> 
     assert status.run_bytes == 3
     assert status.run_files == 1
     assert status.runs[0].outcome == "incomplete"
+
+
+def test_status_and_explicit_gc_account_for_only_managed_reports(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    reports = state / "reports"
+    grind = reports / "grind" / "project"
+    grind.mkdir(parents=True)
+    canonical_html = reports / "report.html"
+    canonical_json = reports / "report.json"
+    grind_report = grind / "report.html"
+    unmanaged = reports / "notes.txt"
+    canonical_html.write_bytes(b"html")
+    canonical_json.write_bytes(b"json!")
+    grind_report.write_bytes(b"grind!")
+    unmanaged.write_bytes(b"keep me")
+
+    status = StateStore(state).status()
+
+    assert status.report_files == 3
+    assert status.report_bytes == 15
+    assert status.total_files == 3
+    assert status.total_bytes == 15
+    assert StateStore(state).gc().report_files == 0
+    assert canonical_html.is_file()
+    assert canonical_json.is_file()
+    assert grind_report.is_file()
+
+    preview = StateStore(state).gc(dry_run=True, include_reports=True)
+    assert preview.reports_removed == (canonical_html, canonical_json, reports / "grind")
+    assert preview.report_files == 3
+    assert preview.report_bytes == 15
+    assert preview.reclaimed_bytes == 15
+    assert canonical_html.is_file()
+    assert grind_report.is_file()
+
+    result = StateStore(state).gc(include_reports=True)
+    assert result.reports_removed == preview.reports_removed
+    assert result.report_files == 3
+    assert result.reclaimed_bytes == 15
+    assert not canonical_html.exists()
+    assert not canonical_json.exists()
+    assert not (reports / "grind").exists()
+    assert unmanaged.read_bytes() == b"keep me"
+    assert StateStore(state).status().report_files == 0
+
+
+def test_report_cleanup_waits_for_an_active_publication_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    report = state / "reports/report.json"
+    report.parent.mkdir(parents=True)
+    report.write_bytes(b"report")
+    cleanup_attempted = threading.Event()
+    cleanup_finished = threading.Event()
+    real_acquire = AdvisoryFileLock.acquire
+    result: list[object] = []
+
+    def observed_acquire(
+        lock: AdvisoryFileLock,
+        *,
+        nonblocking: bool,
+    ) -> bool:
+        if (
+            lock.path == state / ".maintenance.lock"
+            and threading.current_thread().name == "report-cleanup"
+        ):
+            cleanup_attempted.set()
+        return real_acquire(lock, nonblocking=nonblocking)
+
+    monkeypatch.setattr(AdvisoryFileLock, "acquire", observed_acquire)
+
+    def clean() -> None:
+        try:
+            result.append(StateStore(state).gc(include_reports=True))
+        except BaseException as exc:  # pragma: no cover - asserted below
+            result.append(exc)
+        finally:
+            cleanup_finished.set()
+
+    thread = threading.Thread(target=clean, name="report-cleanup")
+    with report_publication_lease(state):
+        thread.start()
+        assert cleanup_attempted.wait(5)
+        assert not cleanup_finished.is_set()
+        assert report.is_file()
+    thread.join(5)
+
+    assert not thread.is_alive()
+    assert len(result) == 1
+    cleanup = result[0]
+    assert isinstance(cleanup, state_module.GCResult)
+    assert cleanup.reports_removed == (report,)
+    assert not report.exists()
+
+
+def test_status_rejects_a_redirected_reports_root(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    try:
+        (state / "reports").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    with pytest.raises(StateError, match="reports root is not a real directory"):
+        StateStore(state).status()
 
 
 def test_status_skips_an_arena_removed_during_its_usage_scan(

@@ -297,7 +297,7 @@ def test_source_export_rejects_a_redirected_destination(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(shutil.which("cmake") is None, reason="CMake is not installed")
-@pytest.mark.skipif(os.name != "posix", reason="project-plan configuration is migration-only")
+@pytest.mark.skipif(os.name != "posix", reason="project-plan fixture requires POSIX")
 def test_generated_project_plan_configures_at_exact_graph_seat(tmp_path: Path) -> None:
     bundle, generated = _bundle(tmp_path)
     effective = tmp_path / "state/effective"

@@ -4,7 +4,7 @@ The classic overlay renderer proves *what bytes* a typed operation produced.
 This module proves the smaller, complementary claim needed before those bytes
 may influence a composed object:
 
-* the six source refactors used by the migrated project are bound to one
+* the six source refactors used by the current project are bound to one
   source-aware consumer and to the declarations that make the rewrite
   logic-equivalent; and
 * the two dead-local carrier forms are kept in the weaker, honest category of

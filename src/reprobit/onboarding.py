@@ -9,7 +9,7 @@ from reprobit.backends import (
     ExecutionBackend,
 )
 from reprobit.cli_environment import selected_backend
-from reprobit.cli_output import CLIOutput
+from reprobit.cli_output import CLIOutput, human_command
 from reprobit.cli_paths import CLIError, project_root, relative_output, safe_project_path
 from reprobit.msvc42_provision import provision_msvc42, verify_msvc42
 from reprobit.project_loader import load_project
@@ -47,8 +47,8 @@ def _provision(
     with output.activity(
         "downloading and authenticating Microsoft Visual C++ 4.2",
         phase="toolchain-provision",
-    ):
-        return provision_msvc42(destination)
+    ) as progress:
+        return provision_msvc42(destination, progress=progress)
 
 
 def command_toolchain_provision(args: argparse.Namespace, output: CLIOutput) -> int:
@@ -68,11 +68,11 @@ def command_toolchain_provision(args: argparse.Namespace, output: CLIOutput) -> 
         save_toolchain_root(args.profile, installed)
     output.emit(
         "toolchain_provisioned",
-        f"Compiler ready at {installed}\nNext: rbit setup",
+        f"Compiler ready at {installed}\nNext in a ReproBit project: rbit setup .",
         profile=args.profile,
         root=installed,
         saved=not args.no_save,
-        next_command="rbit setup",
+        next_command="rbit setup .",
     )
     return 0
 
@@ -249,7 +249,8 @@ def command_setup(args: argparse.Namespace, output: CLIOutput) -> int:
     root = project_root(args.project)
     entrypoint = root / "reprobit.toml"
     if not entrypoint.is_file() or entrypoint.is_symlink():
-        raise CLIError(f"no ReproBit project found; run `rbit init {root}` first")
+        command = human_command(("rbit", "init", root))
+        raise CLIError(f"no ReproBit project found; run {command} first")
     spec = load_project(entrypoint)
     selected_root = resolve_toolchain_root(
         spec.toolchain.profile,
@@ -318,7 +319,16 @@ def command_setup(args: argparse.Namespace, output: CLIOutput) -> int:
         toolchain_lock_created=created_lock,
         backend=backend.identifier,
         backend_failures=failures,
-        readiness=readiness.items,
+        readiness=[
+            {
+                "id": item.id,
+                "label": item.label,
+                "ready": item.ready,
+                "detail": item.detail,
+                "next_command": item.next_command,
+            }
+            for item in readiness.items
+        ],
         next_command=readiness.next_command,
     )
     return 0 if not failures else 1

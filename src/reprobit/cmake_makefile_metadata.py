@@ -140,7 +140,7 @@ def metadata_files(build_root: Path, name: str) -> tuple[Path, ...]:
 
 
 def split_command_line(value: str) -> tuple[str, ...]:
-    """Split migration-time command text without eating native path separators."""
+    """Split CMake command text without eating native path separators."""
 
     if os.name != "nt":
         return tuple(shlex.split(value, posix=True))

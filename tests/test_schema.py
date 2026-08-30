@@ -198,7 +198,7 @@ def test_translation_unit_group_order_is_explicit_and_closed() -> None:
         "target_policies",
     ),
 )
-def test_build_plan_rejects_pre_release_migration_fields(obsolete: str) -> None:
+def test_build_plan_rejects_obsolete_source_fields(obsolete: str) -> None:
     payload = _build_plan_with_link_options().model_dump(mode="json")
     payload[obsolete] = None
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):

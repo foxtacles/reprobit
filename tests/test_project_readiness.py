@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -47,6 +48,8 @@ def test_fresh_init_reports_all_remaining_authority_at_once(
     assert reference_index < build_plan_index
     build_plan = next(item for item in readiness.items if item.id == "build_plan")
     assert build_plan.next_command is None
+    source_lock = next(item for item in readiness.items if item.id == "source_manifest")
+    assert source_lock.next_command == f"rbit source preview --project {project}"
     assert "Build graph" in rendered
     assert "Reference metadata" in rendered
     assert "Protected references" in rendered
@@ -56,6 +59,17 @@ def test_fresh_init_reports_all_remaining_authority_at_once(
     assert main(["status", str(project)]) == 1
     captured = capsys.readouterr()
     assert "Compiler lock" in captured.out
+
+    assert main(["--format", "ndjson", "status", str(project)]) == 1
+    event = json.loads(capsys.readouterr().out)
+    assert event["event"] == "project_readiness"
+    assert event["checks"][0] == {
+        "detail": "fresh-project uses schema 3",
+        "id": "project",
+        "label": "Project",
+        "next_command": None,
+        "ready": True,
+    }
 
     reference = project / "reference/program.exe"
     reference.parent.mkdir()
@@ -92,9 +106,9 @@ def test_valid_project_can_have_no_intervention_or_proof_documents(
         "0 documents (valid when no build adjustment is needed)"
     )
     assert checks["proofs"].detail == "0 documents (valid when there is nothing to prove)"
-    assert render_project_readiness(readiness) == "Project ready: 10/10 checks passed"
+    assert render_project_readiness(readiness) == "Project files ready: 10/10 checks passed"
     assert main(["status", str(project)]) == 0
-    assert "Project ready: 10/10 checks passed" in capsys.readouterr().out
+    assert "Project files ready: 10/10 checks passed" in capsys.readouterr().out
 
 
 def test_derived_project_id_is_human_and_schema_safe(tmp_path: Path) -> None:

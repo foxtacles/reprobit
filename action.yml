@@ -56,7 +56,7 @@ outputs:
     description: Whether first-party program bytes came from the declared toolchain
     value: ${{ steps.summary.outputs.toolchain-origin }}
   quarantined:
-    description: Whether an allowlisted legacy action ran
+    description: Whether an allowlisted reference-byte exception ran
     value: ${{ steps.summary.outputs.quarantined }}
   total-cost:
     description: Total intervention cost for the selected targets

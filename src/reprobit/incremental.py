@@ -14,7 +14,10 @@ from pathlib import Path, PureWindowsPath
 from types import MappingProxyType
 
 from reprobit.cache import cache_key
-from reprobit.implementation import scoped_package_import_closure_digest
+from reprobit.implementation import (
+    rehash_scoped_package_import_closure,
+    scoped_package_import_closure_receipt,
+)
 from reprobit.model import Digest
 from reprobit.paths import normalize_logical_path
 from reprobit.schema import (
@@ -30,12 +33,19 @@ from reprobit.source_lock import SourceLockError, receipt_source_input
 from reprobit.strict_json import JsonValue
 
 _PRODUCER_IMPLEMENTATION_ROOTS = ("reprobit.classic_incremental",)
+(
+    _INITIAL_PRODUCER_IMPLEMENTATION_DIGEST,
+    _PRODUCER_IMPLEMENTATION_PATHS,
+) = scoped_package_import_closure_receipt(_PRODUCER_IMPLEMENTATION_ROOTS)
 
 
 def producer_implementation_digest() -> Digest:
     """Identify only code that can affect warm producer outputs and receipts."""
 
-    return scoped_package_import_closure_digest(_PRODUCER_IMPLEMENTATION_ROOTS)
+    return rehash_scoped_package_import_closure(
+        _PRODUCER_IMPLEMENTATION_ROOTS,
+        _PRODUCER_IMPLEMENTATION_PATHS,
+    )
 
 
 def revalidate_producer_implementation(expected: Digest) -> None:
@@ -56,7 +66,7 @@ def producer_cache_implementation(
     return f"classic-producer-graph-v1-{digest.value}"
 
 
-PRODUCER_IMPLEMENTATION_DIGEST = producer_implementation_digest()
+PRODUCER_IMPLEMENTATION_DIGEST = _INITIAL_PRODUCER_IMPLEMENTATION_DIGEST
 PRODUCER_CACHE_IMPLEMENTATION = producer_cache_implementation(PRODUCER_IMPLEMENTATION_DIGEST)
 
 

@@ -124,18 +124,18 @@ def scaffold_cmake_authority(
 
     source_path = safe_project_path(root, spec.layout.source_manifest)
     if source_path.is_symlink() or not source_path.is_file():
-        raise CLIError("source lock is missing; run `rbit source lock --project .`")
+        raise CLIError("source lock is missing; run rbit source lock --project .")
     try:
         source_data, source_receipt = read_relative_file(root, spec.layout.source_manifest)
         source = SourceManifestDocument.model_validate_json(source_data)
     except (OSError, ValueError) as error:
         raise CLIError(f"source lock is invalid: {error}") from error
     if not source.complete:
-        raise CLIError("source review is incomplete; run `rbit source lock --project .`")
+        raise CLIError("source review is incomplete; run rbit source lock --project .")
 
     lock_path = safe_project_path(root, spec.toolchain.lock_file)
     if lock_path.is_symlink() or not lock_path.is_file():
-        raise CLIError("compiler lock is missing; run `rbit setup`")
+        raise CLIError("compiler lock is missing; run rbit setup")
     try:
         lock_data, lock_receipt = read_relative_file(root, spec.toolchain.lock_file)
         project_data, project_receipt = read_relative_file(root, "reprobit.toml")

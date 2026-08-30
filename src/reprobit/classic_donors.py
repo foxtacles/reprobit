@@ -287,8 +287,8 @@ def merge_candidate_constraints(
 ) -> CandidateConstraints:
     """Merge only ``expected_values`` from one cross-checked proof receipt.
 
-    Redaction entries are deliberately not exposed to the producer.  They are
-    migration audit records, not candidate inputs.
+    Redaction entries are deliberately not exposed to the producer. They are
+    audit records, not candidate inputs.
     """
 
     _require(

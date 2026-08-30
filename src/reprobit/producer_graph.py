@@ -1,10 +1,10 @@
 """Committed, closed producer graphs for high-assurance classic builds.
 
-The graph is deliberately lower level than a build-system project.  CMake (or
-another project build system) may be used to *extract* this document during a
-migration, but a certifying run never executes that project-controlled build
-system.  It resolves the symbolic paths below and invokes only locked producer
-roles itself.
+The graph is deliberately lower level than a build-system project. CMake (or
+another project build system) may be used to *extract* this document during
+project setup, but a certifying run never executes that project-controlled
+build system. It resolves the symbolic paths below and invokes only locked
+producer roles itself.
 """
 
 from __future__ import annotations

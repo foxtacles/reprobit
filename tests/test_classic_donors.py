@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections import Counter
 from hashlib import sha256
-from pathlib import Path
 from typing import Any, cast
 
 import pytest
@@ -23,7 +21,6 @@ from reprobit.classic_donors import (
     prepare_donor_compile_request,
     validate_donor_recipe,
 )
-from reprobit.migration import migration_output
 from reprobit.model import Scope
 from reprobit.schema import (
     ClassicField,
@@ -31,8 +28,6 @@ from reprobit.schema import (
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ClassicRecipeRole,
-    InterventionDocument,
-    ProofDocument,
 )
 
 
@@ -575,56 +570,3 @@ def test_constraint_receipt_cross_checks_identity_family_and_payloads() -> None:
         )
     with pytest.raises(DonorSourceError, match="one proof receipt"):
         matching_candidate_constraints(intervention, [])
-
-
-def _large_v2_manifest() -> Path | None:
-    for candidate in sorted(Path.cwd().parent.glob("*/tools/byte_identity_manifest.json")):
-        project_root = candidate.parent.parent
-        claims = candidate.with_name("reprobit_migration_semantic_claims.once.json")
-        if (
-            candidate.stat().st_size > 1_000_000
-            and (project_root / ".git").exists()
-            and claims.is_file()
-        ):
-            return candidate
-    return None
-
-
-def test_every_migrated_donor_record_matches_a_closed_family_grammar() -> None:
-    source = _large_v2_manifest()
-    if source is None:
-        pytest.skip("large schema-v2 integration fixture is not present")
-    claims_path = source.with_name("reprobit_migration_semantic_claims.once.json")
-    assert claims_path.is_file()
-    output = migration_output(source, semantic_claims_path=claims_path)
-    interventions: list[ClassicRecipeIntervention] = []
-    receipts: list[ClassicProofReceipt] = []
-    for path, data in output.files.items():
-        text = path.as_posix()
-        if text.startswith("reprobit/interventions/"):
-            document = InterventionDocument.model_validate_json(data)
-            interventions.extend(
-                item
-                for item in document.interventions
-                if isinstance(item, ClassicRecipeIntervention)
-                and item.role is ClassicRecipeRole.DONOR
-            )
-        elif text.startswith("reprobit/proofs/"):
-            receipts.extend(ProofDocument.model_validate_json(data).expected_observations)
-
-    census = Counter(intervention.family for intervention in interventions)
-    assert census == {
-        ClassicRecipeFamily.DECLARATION_SHAPE: 171,
-        ClassicRecipeFamily.DONOR_SOURCE_OVERLAY: 45,
-        ClassicRecipeFamily.FORWARD_DECLARATION_RUN: 45,
-        ClassicRecipeFamily.PAD_SHAPE: 22,
-        ClassicRecipeFamily.EXTERN_RUN_PAIR: 20,
-        ClassicRecipeFamily.FORWARD_RUN_WITH_SHAPE: 10,
-        ClassicRecipeFamily.DECLARATION_RUN_TRIPLE: 4,
-        ClassicRecipeFamily.PREFIX_FORWARD_AFTER_INCLUDES_EXTERN: 2,
-    }
-    for intervention in interventions:
-        validate_donor_recipe(
-            intervention,
-            matching_candidate_constraints(intervention, receipts),
-        )

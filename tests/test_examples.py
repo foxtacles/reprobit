@@ -106,3 +106,13 @@ def test_examples_keep_generated_outputs_out_and_use_sample_language() -> None:
         if path.suffix not in {".md", ".py"}:
             continue
         assert re.search(r"\btoy\b", path.read_text(encoding="utf-8"), re.I) is None
+
+
+def test_examples_lead_with_the_guided_automatic_workflow() -> None:
+    index = (EXAMPLES / "README.md").read_text(encoding="utf-8")
+
+    automatic = "[Automatic grind](grind/README.md) **(recommended first)**"
+    advanced = "[Advanced declaration discovery](declaration-discovery/README.md)"
+    assert automatic in index
+    assert advanced in index
+    assert index.index(automatic) < index.index(advanced)

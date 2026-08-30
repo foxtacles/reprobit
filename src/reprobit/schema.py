@@ -342,7 +342,7 @@ class SourceManifestEntry(StrictModel):
 
 
 class SourceManifestDocument(StrictModel):
-    """Complete clean-source authority, separate from effective overlays and migration lineage."""
+    """Complete clean-source authority, separate from effective overlays and provenance."""
 
     model_config = ConfigDict(
         json_schema_extra={
@@ -537,7 +537,7 @@ class BinarySurgeryIntervention(InterventionBase):
 
 
 class ClassicRecipeFamily(StrEnum):
-    """Closed classic recipe families admitted by the one-way v2 migration.
+    """Closed classic recipe families supported by the current proof model.
 
     ``source_overlay_graph`` is project-level authority: after its closed typed-source
     proof and any exact sparse declaration-counterfactual compiler audits, rendered
@@ -661,7 +661,7 @@ def _forbidden_classic_paths(fields: tuple[ClassicField, ...]) -> tuple[str, ...
 
 
 class ClassicRecipeIntervention(InterventionBase):
-    """A data-only invocation of one migrated, closed classic recipe family.
+    """A data-only invocation of one closed classic recipe family.
 
     Project data selects a family and role but never self-asserts a primary source
     origin.  The runtime assigns ``certified-project-overlay`` only after the closed

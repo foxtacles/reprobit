@@ -78,7 +78,6 @@ def test_classic_implementation_import_closure_has_exact_architecture_boundary()
         "classic_incremental.py",
         "cli.py",
         "discovery.py",
-        "migration.py",
     }.isdisjoint(relative)
     assert not any(
         path.startswith(
@@ -88,7 +87,6 @@ def test_classic_implementation_import_closure_has_exact_architecture_boundary()
                 "cli",
                 "discovery",
                 "incremental",
-                "migration",
             )
         )
         for path in relative
@@ -111,12 +109,12 @@ def test_classic_validator_revalidation_rejects_a_changed_closure(
         semantic_contracts.revalidate_classic_validator_implementation()
 
 
-def test_graph_cli_import_closure_excludes_schema_v2_migration() -> None:
+def test_graph_cli_import_closure_has_a_narrow_boundary() -> None:
     relative = _relative_closure(PACKAGE_ROOT, GRAPH_CLI_ROOT_MODULES)
 
     assert "cli_graph.py" in relative
     assert "project_loader.py" in relative
-    assert "migration.py" not in relative
+    assert {"cli.py", "discovery.py", "classic_incremental.py"}.isdisjoint(relative)
 
 
 def test_incremental_producer_import_closure_has_a_narrow_product_boundary() -> None:
@@ -142,14 +140,12 @@ def test_incremental_producer_import_closure_has_a_narrow_product_boundary() -> 
         "discovery.py",
         "discovery_cli.py",
         "discovery_report_html.py",
-        "migration.py",
         "progress.py",
         "report_html.py",
         "report_html_style.py",
     }.isdisjoint(relative)
     assert not any(
-        path.startswith(("cli", "discovery", "migration", "progress", "report_html"))
-        for path in relative
+        path.startswith(("cli", "discovery", "progress", "report_html")) for path in relative
     )
     assert incremental.producer_implementation_digest() == (
         implementation.scoped_package_import_closure_digest(PRODUCER_ROOT_MODULES)
@@ -162,7 +158,6 @@ def test_incremental_producer_import_closure_has_a_narrow_product_boundary() -> 
         "cli.py",
         "cli_output.py",
         "discovery_report_html.py",
-        "migration.py",
         "progress.py",
         "report_html.py",
         "report_html_style.py",
@@ -274,7 +269,7 @@ def test_classic_validator_digest_binds_each_proof_execution_and_publication_sea
 
 @pytest.mark.parametrize(
     "relative",
-    ("classic_incremental.py", "cli.py", "discovery.py", "migration.py"),
+    ("classic_incremental.py", "cli.py", "discovery.py"),
 )
 def test_classic_validator_digest_excludes_unrelated_product_surfaces(
     tmp_path: Path,
@@ -486,3 +481,27 @@ def test_import_closure_hashes_the_same_snapshot_it_parses(
 
     assert captured == baseline
     assert (package / "entry.py").read_bytes() == b"# changed after snapshot\n"
+
+
+def test_resolved_import_closure_rehash_does_not_repeat_static_analysis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = _minimal_package(tmp_path, "import reprobit.dependency\n")
+    dependency = package / "dependency.py"
+    dependency.write_text("VALUE = 1\n", encoding="utf-8")
+    roots = ("reprobit.entry",)
+    baseline, paths = implementation._scoped_package_import_closure_receipt(
+        package,
+        roots,
+    )
+    monkeypatch.setattr(
+        implementation,
+        "_package_import_closure_entries",
+        lambda *_args, **_kwargs: pytest.fail("resolved closure was parsed again"),
+    )
+
+    assert implementation._rehash_scoped_package_import_closure(package, roots, paths) == baseline
+
+    dependency.write_text("VALUE = 2\n", encoding="utf-8")
+    assert implementation._rehash_scoped_package_import_closure(package, roots, paths) != baseline

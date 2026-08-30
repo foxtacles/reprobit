@@ -271,6 +271,11 @@ def test_project_auto_grind_reuses_per_symbol_engine_and_aggregates_progress(
         "enumerate_project_grind_campaign",
         lambda *_args, **_kwargs: campaign,
     )
+    monkeypatch.setattr(
+        project_grind,
+        "load_project",
+        lambda _root: SimpleNamespace(state_dir=".reprobit-state"),
+    )
     plans: list[ProjectGrindPlan] = []
     acceptances: list[bool] = []
     report_refs: list[weakref.ReferenceType[object]] = []
@@ -351,6 +356,7 @@ def test_project_auto_grind_reuses_per_symbol_engine_and_aggregates_progress(
     assert all(reference() is None for reference in report_refs)
     assert observed[-1] == (30, 30)
     assert not tuple(tmp_path.glob(".reprobit-project-grind-*"))
+    assert not tuple((tmp_path / ".reprobit-state/runs").glob("grind-*"))
 
 
 def test_project_grind_report_header_uses_shared_reprobit_mark() -> None:
@@ -498,14 +504,30 @@ def test_project_report_persists_plan_decision_and_copyable_next_step(
         "--accept-exact",
     )
     verify_argv = ("rbit", "verify", str(root))
+    state_root = root / ".reprobit-state"
+    report_directory = state_root / "reports/grind/project"
     artifacts = project_grind_cli._publish_project_grind_outcome(
         root,
+        state_root,
         1,
         item,
         project_grind.project_grind_plan(item),
         symbol_result,
         verify_argv=verify_argv,
     )
+    stale_owned = (
+        report_directory / "plans/002-plan.json",
+        report_directory / "outcomes/002-decision.html",
+        report_directory / "cold/002-verification.json",
+        report_directory / "cold/002-verification.html",
+    )
+    for path in stale_owned:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"stale")
+    unrelated = report_directory / "cold/notes.txt"
+    out_of_range = report_directory / "cold/065-verification.json"
+    unrelated.write_bytes(b"keep")
+    out_of_range.write_bytes(b"keep")
     result = ProjectAutoGrindResult(
         ProjectGrindCampaign("sample", 1, 1, 1, 0, (item,), ()),
         (project_grind._compact_outcome(item, symbol_result, artifacts),),
@@ -515,6 +537,7 @@ def test_project_report_persists_plan_decision_and_copyable_next_step(
     report_json, report_html, _transaction, decisions, plans = (
         project_grind_cli._project_grind_reports(
             root,
+            state_root,
             result,
             approval_argv=approval_argv,
             verify_argv=verify_argv,
@@ -523,6 +546,9 @@ def test_project_report_persists_plan_decision_and_copyable_next_step(
 
     assert report_json.is_file()
     assert report_html.is_file()
+    assert all(not path.exists() for path in stale_owned)
+    assert unrelated.read_bytes() == b"keep"
+    assert out_of_range.read_bytes() == b"keep"
     assert observed_hrefs == ["001-verification.json"]
     assert len(decisions) == len(plans) == 1
     assert decisions[0].is_file()
@@ -554,6 +580,7 @@ def test_project_report_persists_plan_decision_and_copyable_next_step(
     )
     project_grind_cli._project_grind_reports(
         root,
+        state_root,
         published,
         approval_argv=approval_argv,
         verify_argv=verify_argv,
@@ -564,6 +591,63 @@ def test_project_report_persists_plan_decision_and_copyable_next_step(
         "argv": list(verify_argv),
         "command": human_command(verify_argv),
     }
+
+
+def test_project_outcome_replaces_stale_cold_reports_with_no_solution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    monkeypatch.setattr(
+        project_grind_cli,
+        "load_project",
+        lambda _root: SimpleNamespace(state_dir=".reprobit-state"),
+    )
+    state_root = root / ".reprobit-state"
+    report_directory = state_root / "reports/grind/project"
+    stale_json = report_directory / "cold/001-verification.json"
+    stale_html = report_directory / "cold/001-verification.html"
+    unrelated = report_directory / "cold/notes.txt"
+    for path in (stale_json, stale_html, unrelated):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"old")
+    item = ProjectGrindWorkItem(
+        "program",
+        "tu.transform",
+        "_transform",
+        "reference/reference.obj",
+    )
+    result = ProjectGrindResult(
+        "sample",
+        "program",
+        item.translation_unit_id,
+        item.symbol,
+        4,
+        5,
+        0,
+        0,
+        (),
+        None,
+        False,
+        None,
+    )
+
+    artifacts = project_grind_cli._publish_project_grind_outcome(
+        root,
+        state_root,
+        1,
+        item,
+        project_grind.project_grind_plan(item),
+        result,
+        verify_argv=("rbit", "verify", str(root)),
+    )
+
+    assert artifacts.cold_verification_json is None
+    assert artifacts.cold_verification_html is None
+    assert not stale_json.exists()
+    assert not stale_html.exists()
+    assert unrelated.read_bytes() == b"old"
 
 
 def test_project_wide_cli_preview_reports_copyable_acceptance_command(
@@ -595,17 +679,19 @@ def test_project_wide_cli_preview_reports_copyable_acceptance_command(
         False,
     )
     observed: dict[str, object] = {}
+    project_loads = 0
 
     def run(*_args: object, **kwargs: object) -> ProjectAutoGrindResult:
         observed.update(kwargs)
         return result
 
+    def load(_root: Path) -> SimpleNamespace:
+        nonlocal project_loads
+        project_loads += 1
+        return SimpleNamespace(state_dir=".reprobit-state")
+
     monkeypatch.setattr(project_grind_cli, "run_project_auto_grind", run)
-    monkeypatch.setattr(
-        project_grind_cli,
-        "load_project",
-        lambda _root: SimpleNamespace(state_dir=".reprobit-state"),
-    )
+    monkeypatch.setattr(project_grind_cli, "load_project", load)
     report_json = tmp_path / ".reprobit-state/reports/grind/project/report.json"
     report_html = report_json.with_suffix(".html")
     monkeypatch.setattr(
@@ -642,6 +728,7 @@ def test_project_wide_cli_preview_reports_copyable_acceptance_command(
         if json.loads(line).get("event") == "discovery_project_grind_complete"
     )
     assert status == 0
+    assert project_loads == 1
     assert observed["accept_exact"] is False
     assert event["approval_argv"][-1] == "--accept-exact"
     assert "--project-wide" in event["approval_argv"]

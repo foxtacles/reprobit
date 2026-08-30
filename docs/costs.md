@@ -25,7 +25,10 @@ bundling cannot reduce the charge.
 
 The project total sums typed units after deduplicating identical intervention IDs. Reports expose
 both intervention and unit counts, distinguish direct function cost from allocated shared cost,
-and retain non-additive exposure so shared work is never counted twice.
+and retain non-additive exposure so shared work is never counted twice. The target and class
+breakdowns are two views of that same total, not extra costs to add together. Function attribution
+also conserves the total exactly: attributed function cost plus cost remaining at target or TU
+scope equals the project total, even when equal shares are fractions.
 
 Every beneficiary must be a unique, canonically ordered function scope in the intervention's
 target (and in the same translation unit for a unit-scoped intervention). Project loading also
@@ -37,6 +40,10 @@ A shared donor is charged once. Reusing the same donor for another function wide
 beneficiary list but does not charge the donor again; only newly added intervention work changes
 the project total. Each beneficiary's exposure still shows the donor's full cost, and remains a
 non-additive diagnostic.
+
+An oracle install costs 10,000 points per intervention unit, not per referenced byte. Exact range
+and byte counts remain separate authenticity evidence in the report; the cost score deliberately
+ranks any reference-byte installation as a large departure from an ordinary build.
 
 ## Runtime work is not intervention cost
 

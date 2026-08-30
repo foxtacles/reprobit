@@ -11,6 +11,7 @@ from reprobit.discovery_contracts import (
     enumerate_declaration_states,
 )
 from reprobit.discovery_project import (
+    ProjectDiscoveryError,
     ProjectFileSnapshot,
     ProjectGrindPlan,
     StagedProject,
@@ -25,6 +26,7 @@ from reprobit.schema import (
     LegacyOracleInstallIntervention,
     OracleInstallRange,
 )
+from reprobit.state import StateStore
 from reprobit.strict_json import canonical_json
 
 
@@ -155,9 +157,31 @@ def test_staged_project_copies_only_sealed_inputs_and_cleans_up(
         payload=payload,
     )
 
-    with StagedProject(tmp_path, (snapshot,)) as staged:
-        assert staged.parent == tmp_path
+    state_dir = ".reprobit-state"
+    with StagedProject(tmp_path, state_dir, (snapshot,)) as staged:
+        state = StateStore(tmp_path / state_dir).status()
+        assert len(state.runs) == 1
+        assert state.runs[0].active is True
+        assert state.runs[0].kind == "grind"
+        assert staged == state.runs[0].path / "project"
         assert (staged / "src" / "transform.cpp").read_bytes() == payload
         retained = staged
 
     assert not retained.exists()
+    assert StateStore(tmp_path / state_dir).status().runs == ()
+    assert not tuple(tmp_path.glob(".reprobit-grind-*"))
+
+
+def test_staged_project_removes_its_owned_arena_when_sealing_fails(
+    tmp_path: Path,
+) -> None:
+    snapshot = ProjectFileSnapshot(
+        relative_path="src/transform.cpp",
+        digest=Digest.from_bytes(b"different"),
+        payload=b"payload",
+    )
+
+    with pytest.raises(ProjectDiscoveryError, match="staged project input differs"):
+        StagedProject(tmp_path, ".reprobit-state", (snapshot,)).__enter__()
+
+    assert StateStore(tmp_path / ".reprobit-state").status().runs == ()

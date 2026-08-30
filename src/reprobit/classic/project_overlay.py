@@ -1,4 +1,4 @@
-"""Project-overlay semantic ancestry proofs for migrated classic source overlays.
+"""Project-overlay semantic ancestry proofs for classic source overlays.
 
 Source rendering is not a semantic proof.  This module admits an overlay only
 when current-run evidence establishes a closed source theorem, compiler-input

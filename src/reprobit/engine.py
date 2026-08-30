@@ -66,6 +66,7 @@ from reprobit.secure_paths import (
     remove_published_relative,
     reseal_relative_file,
 )
+from reprobit.state import report_publication_lease
 from reprobit.strict_json import canonical_json
 from reprobit.verify import LiteralVerifier, SealedFileOracle
 
@@ -85,6 +86,7 @@ def _publish_report_payloads(
     payloads: Mapping[Path, bytes],
     *,
     final_reseal: Callable[[], None],
+    publication_state_root: Path | None = None,
 ) -> None:
     """Prestage reports, reseal targets, commit durably, then reseal again.
 
@@ -93,6 +95,13 @@ def _publish_report_payloads(
     Thus a failed run cannot leave a stale report that appears complete.
     """
 
+    if publication_state_root is not None:
+        with report_publication_lease(publication_state_root):
+            _publish_report_payloads(
+                payloads,
+                final_reseal=final_reseal,
+            )
+        return
     if len({path.resolve(strict=False) for path in payloads}) != len(payloads):
         raise EngineError("report destinations must be distinct")
     destinations = [
@@ -942,7 +951,23 @@ class ReproductionEngine:
                 ),
             ).encode("utf-8")
         if report_payloads:
-            _publish_report_payloads(report_payloads, final_reseal=reseal)
+            state_root = request.project_root.joinpath(
+                *PurePosixPath(request.bundle.spec.state_dir).parts
+            )
+            managed_reports = state_root / "reports"
+            publication_state_root = (
+                state_root
+                if all(
+                    Path(os.path.abspath(path)).is_relative_to(managed_reports)
+                    for path in report_payloads
+                )
+                else None
+            )
+            _publish_report_payloads(
+                report_payloads,
+                final_reseal=reseal,
+                publication_state_root=publication_state_root,
+            )
         else:
             reseal()
         return EngineResult(build, target_receipts, evidence, verdict, report)

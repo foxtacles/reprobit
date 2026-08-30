@@ -3,12 +3,19 @@
 from __future__ import annotations
 
 import argparse
+import os
 import posixpath
 from pathlib import Path, PurePosixPath
 from typing import cast
 
 from reprobit.cli_output import CLIOutput, human_command
-from reprobit.cli_paths import CLIError, project_root, relative_output, safe_project_path
+from reprobit.cli_paths import (
+    CLIError,
+    canonical_project_relative,
+    project_root,
+    relative_output,
+    safe_project_path,
+)
 from reprobit.discovery_grind import (
     DonorProgress,
     ProjectGrindCallbacks,
@@ -17,6 +24,7 @@ from reprobit.discovery_grind import (
 from reprobit.discovery_grind_report import render_grind_report_html
 from reprobit.discovery_project import ProjectGrindPlan
 from reprobit.discovery_project_grind import (
+    MAX_PROJECT_GRIND_SYMBOLS,
     ProjectAutoGrindResult,
     ProjectGrindArtifacts,
     ProjectGrindWorkItem,
@@ -27,22 +35,9 @@ from reprobit.discovery_project_grind import (
 from reprobit.discovery_project_grind_report import render_project_auto_grind_report_html
 from reprobit.project_loader import load_project
 from reprobit.report_io import render_report_html
+from reprobit.state import report_publication_lease
 from reprobit.strict_json import JsonValue, canonical_json
 from reprobit.transactions import CASTransaction
-
-
-def _canonical_project_relative(value: str, *, label: str) -> str:
-    path = PurePosixPath(value)
-    if (
-        not value
-        or "\0" in value
-        or "\\" in value
-        or path.is_absolute()
-        or path.as_posix() != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise CLIError(f"{label} must be a canonical project-relative path")
-    return value
 
 
 def _project_reference_assignments(
@@ -62,7 +57,7 @@ def _project_reference_assignments(
         assignments.append(
             ProjectReferenceAssignment(
                 translation_unit,
-                _canonical_project_relative(reference, label="reference object"),
+                canonical_project_relative(reference, label="reference object"),
             )
         )
     return tuple(assignments)
@@ -128,12 +123,30 @@ def _approval_argv(root: Path, args: argparse.Namespace) -> tuple[str, ...]:
     return tuple(values)
 
 
-def _project_report_directory(root: Path) -> Path:
-    return safe_project_path(root, load_project(root).state_dir) / "reports/grind/project"
+def _project_report_directory(state_root: Path) -> Path:
+    return state_root / "reports/grind/project"
+
+
+def _owned_numbered_report_outputs(root: Path, directory: Path) -> tuple[Path, ...]:
+    """Return the bounded filenames owned by project-wide grind reports."""
+
+    paths: list[Path] = []
+    for index in range(1, MAX_PROJECT_GRIND_SYMBOLS + 1):
+        stem = f"{index:03d}"
+        paths.extend(
+            (
+                relative_output(root, str(directory / "plans" / f"{stem}-plan.json")),
+                relative_output(root, str(directory / "outcomes" / f"{stem}-decision.html")),
+                relative_output(root, str(directory / "cold" / f"{stem}-verification.json")),
+                relative_output(root, str(directory / "cold" / f"{stem}-verification.html")),
+            )
+        )
+    return tuple(paths)
 
 
 def _publish_project_grind_outcome(
     root: Path,
+    state_root: Path,
     index: int,
     item: ProjectGrindWorkItem,
     plan: ProjectGrindPlan,
@@ -143,7 +156,7 @@ def _publish_project_grind_outcome(
 ) -> ProjectGrindArtifacts:
     """Atomically publish one detailed result before the next symbol runs."""
 
-    directory = _project_report_directory(root)
+    directory = _project_report_directory(state_root)
     stem = f"{index:03d}"
     plan_path = directory / "plans" / f"{stem}-plan.json"
     decision_path = directory / "outcomes" / f"{stem}-decision.html"
@@ -152,16 +165,16 @@ def _publish_project_grind_outcome(
     plan_relative = PurePosixPath(plan_output.as_posix()).as_posix()
     files = {plan_output: canonical_json(plan)}
 
-    cold_json_path: Path | None = None
-    cold_html_path: Path | None = None
+    cold_json_path = directory / "cold" / f"{stem}-verification.json"
+    cold_html_path = directory / "cold" / f"{stem}-verification.html"
+    cold_json_output = relative_output(root, str(cold_json_path))
+    cold_html_output = relative_output(root, str(cold_html_path))
     cold_json_link: str | None = None
     cold_html_link: str | None = None
     solution = result.solution
     if solution is not None:
-        cold_json_path = directory / "cold" / f"{stem}-verification.json"
-        cold_html_path = directory / "cold" / f"{stem}-verification.html"
-        files[relative_output(root, str(cold_json_path))] = canonical_json(solution.report)
-        files[relative_output(root, str(cold_html_path))] = render_report_html(
+        files[cold_json_output] = canonical_json(solution.report)
+        files[cold_html_output] = render_report_html(
             solution.report,
             canonical_json_href=cold_json_path.name,
         ).encode("utf-8")
@@ -187,23 +200,19 @@ def _publish_project_grind_outcome(
         approval_command=per_symbol_approval,
         verify_command=human_command(verify_argv),
     ).encode("utf-8")
-    transaction = CASTransaction(root)
-    for relative, payload in sorted(files.items(), key=lambda item: item[0].as_posix()):
-        transaction.write(relative, payload)
-    transaction.commit()
+    with report_publication_lease(state_root):
+        transaction = CASTransaction(root)
+        for owned in (cold_json_output, cold_html_output):
+            if owned not in files and os.path.lexists(root / owned):
+                transaction.delete(owned)
+        for relative, payload in sorted(files.items(), key=lambda item: item[0].as_posix()):
+            transaction.write(relative, payload)
+        transaction.commit()
     return ProjectGrindArtifacts(
         plan=plan_output.as_posix(),
         decision_report=decision_output.as_posix(),
-        cold_verification_json=(
-            relative_output(root, str(cold_json_path)).as_posix()
-            if cold_json_path is not None
-            else None
-        ),
-        cold_verification_html=(
-            relative_output(root, str(cold_html_path)).as_posix()
-            if cold_html_path is not None
-            else None
-        ),
+        cold_verification_json=(cold_json_output.as_posix() if solution is not None else None),
+        cold_verification_html=(cold_html_output.as_posix() if solution is not None else None),
     )
 
 
@@ -213,12 +222,13 @@ def _relative_report_link(directory: Path | PurePosixPath, relative: str) -> str
 
 def _project_grind_reports(
     root: Path,
+    state_root: Path,
     result: ProjectAutoGrindResult,
     *,
     approval_argv: tuple[str, ...],
     verify_argv: tuple[str, ...],
 ) -> tuple[Path, Path, str, tuple[Path, ...], tuple[Path, ...]]:
-    directory = _project_report_directory(root)
+    directory = _project_report_directory(state_root)
     directory_relative = relative_output(root, str(directory))
     desired_json = directory / "report.json"
     desired_html = directory / "report.html"
@@ -307,10 +317,27 @@ def _project_grind_reports(
             next_step_command=next_command,
         ).encode("utf-8"),
     }
-    transaction = CASTransaction(root)
-    for relative, payload in files.items():
-        transaction.write(relative, payload)
-    transaction_id = transaction.commit().transaction_id
+    with report_publication_lease(state_root):
+        transaction = CASTransaction(root)
+        retained = set(files)
+        for outcome in result.outcomes:
+            artifacts = outcome.artifacts
+            if artifacts is None:
+                continue
+            for value in (
+                artifacts.plan,
+                artifacts.decision_report,
+                artifacts.cold_verification_json,
+                artifacts.cold_verification_html,
+            ):
+                if value is not None:
+                    retained.add(Path(*PurePosixPath(value).parts))
+        for owned in _owned_numbered_report_outputs(root, directory):
+            if owned not in retained and os.path.lexists(root / owned):
+                transaction.delete(owned)
+        for relative, payload in files.items():
+            transaction.write(relative, payload)
+        transaction_id = transaction.commit().transaction_id
     return (
         desired_json,
         desired_html,
@@ -332,6 +359,8 @@ def command_discover_project_grind(
     if args.plan != "reprobit/discovery.json":
         raise CLIError("--plan belongs to the per-symbol grind; omit it with --project-wide")
     assignments = _project_reference_assignments(args.reference_object)
+    state_root = safe_project_path(root, load_project(root).state_dir)
+    report_directory = _project_report_directory(state_root)
     verify_argv = ("rbit", "verify", str(root))
     outcome_report_warnings: list[tuple[ProjectGrindWorkItem, str, str]] = []
 
@@ -344,6 +373,7 @@ def command_discover_project_grind(
         try:
             return _publish_project_grind_outcome(
                 root,
+                state_root,
                 index,
                 item,
                 plan,
@@ -382,7 +412,7 @@ def command_discover_project_grind(
     persisted_plans: tuple[Path, ...] = ()
     report_transaction_id: str | None = None
     report_warnings: list[str] = []
-    desired_report = _project_report_directory(root) / "report.html"
+    desired_report = report_directory / "report.html"
     for item, error_type, error_message in outcome_report_warnings:
         warning = f"{item.translation_unit_id}/{item.symbol}: {error_type}: {error_message}"
         report_warnings.append(warning)
@@ -408,6 +438,7 @@ def command_discover_project_grind(
             persisted_plans,
         ) = _project_grind_reports(
             root,
+            state_root,
             result,
             approval_argv=approval_argv,
             verify_argv=verify_argv,
@@ -427,7 +458,7 @@ def command_discover_project_grind(
     report_warning = "; ".join(report_warnings) or None
 
     report_line = (
-        f"Report: `{report_html}`"
+        f"Report: {report_html}"
         if report_html is not None
         else "Report: unavailable (see the nonfatal warning above)"
     )
@@ -435,7 +466,7 @@ def command_discover_project_grind(
         message = (
             "No eligible project functions were available for the bounded grind.\n"
             "Add a reference object named for a translation-unit id or source stem, or use "
-            "`--reference-object TU=PATH`.\n"
+            "--reference-object TU=PATH.\n"
             f"{report_line}"
         )
     elif result.published:

@@ -251,7 +251,7 @@ class _PosixNamespaceLease:
                 "producer-readable namespace descriptor preflight failed: "
                 f"lease={estimated}, open={current}, reserve={_DESCRIPTOR_RESERVE}, "
                 f"required-soft-limit={required_limit}, soft={soft}, hard={hard_text}; "
-                f"raise the hard limit if needed, then run `ulimit -n {required_limit}`"
+                f"raise the hard limit if needed, then run ulimit -n {required_limit}"
             )
 
     def _open_anchor(self, anchor: Path) -> _PosixDirectory:
