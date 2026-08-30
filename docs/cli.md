@@ -241,6 +241,19 @@ declared `build/GAME.EXE`. The declared binary remains the only output used for
 byte-exact certification or release. There are no extra paths to configure, and
 incremental builds cache and restore both comparison files together.
 
+Source-aware tools must also read the same reviewed source view as the
+compiler. This matters when an intervention adds declarations or otherwise
+moves source lines. Export that view into a new or empty directory, then use it
+as the tool's source root:
+
+```console
+rbit source export build/reprobit-debug/source
+```
+
+The export contains only project inputs admitted by the source lock, with the
+reviewed source adjustments applied. It does not contain reference binaries,
+compiler files, build outputs, or private run state.
+
 ### Reading the report
 
 Open `build/reprobit-report/report.html` in a browser. Start with the overall

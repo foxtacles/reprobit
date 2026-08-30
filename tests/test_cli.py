@@ -553,6 +553,37 @@ def test_source_preview_reports_stale_tu_and_lock_preserves_reviewed_authority(
     assert all(path.read_bytes() == data for path, data in before.items())
 
 
+def test_source_export_materializes_the_reviewed_effective_view(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "source",
+                "export",
+                "build/comparison-source",
+                "--project",
+                str(project),
+            ]
+        )
+        == 0
+    )
+
+    destination = project / "build/comparison-source"
+    assert (destination / "src/unit.cpp").read_bytes() == (project / "src/unit.cpp").read_bytes()
+    assert (destination / "notes.txt").read_bytes() == (project / "notes.txt").read_bytes()
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["event"] == "source_exported"
+    assert Path(event["path"]) == destination
+
+
 def test_validate_rejects_current_manifest_with_stale_effective_tu_pin(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

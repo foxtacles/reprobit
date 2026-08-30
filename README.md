@@ -107,7 +107,15 @@ matched binary and `.PDB` under the sibling `reprobit-debug/` directory—for
 example, `build/reprobit-debug/GAME.EXE` and
 `build/reprobit-debug/GAME.PDB`. Give analysis tools those two files together.
 ReproBit chooses the paths automatically and caches the pair during incremental
-builds.
+builds. If the project uses reviewed source adjustments, export the matching
+source view before running a source-aware comparison tool:
+
+```console
+rbit source export build/reprobit-debug/source
+```
+
+Point the tool's source root at that directory. This keeps its line and symbol
+information matched to the files the compiler actually read.
 
 Failed builds keep a private workspace so problems can be inspected. Reclaim
 those workspaces with `rbit clean .`; the reusable build cache is kept by

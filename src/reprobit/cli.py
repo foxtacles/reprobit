@@ -30,6 +30,7 @@ from reprobit.cli_project import (
     command_explain,
     command_init,
     command_report,
+    command_source_export,
     command_source_lock,
     command_source_preview,
     command_status,
@@ -368,6 +369,18 @@ def _parser() -> argparse.ArgumentParser:
         help="project-relative file or tree to inspect (repeatable; defaults to Git tracked files)",
     )
     source_preview.set_defaults(handler=command_source_preview)
+    source_export = source_commands.add_parser(
+        "export",
+        help="write the reviewed effective source view used by compilers and analysis tools",
+    )
+    source_export.add_argument(
+        "destination",
+        nargs="?",
+        default="build/reprobit-source",
+        help="new or empty project-relative directory (default: build/reprobit-source)",
+    )
+    source_export.add_argument("--project", default=".")
+    source_export.set_defaults(handler=command_source_export)
     source_lock = source_commands.add_parser(
         "lock", help="safely record tracked or explicitly named source inputs"
     )

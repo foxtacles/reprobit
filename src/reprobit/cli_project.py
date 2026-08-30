@@ -395,6 +395,25 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
     return 0
 
 
+def command_source_export(args: argparse.Namespace, output: CLIOutput) -> int:
+    """Materialize the reviewed effective source view used by producers."""
+
+    from reprobit.classic_project import materialize_effective_workspace
+
+    root = project_root(args.project)
+    destination = safe_project_path(root, args.destination)
+    with output.activity("preparing the effective source view", phase="source"):
+        bundle = load_project_tree(root)
+        witnesses = materialize_effective_workspace(bundle, root, destination)
+    output.emit(
+        "source_exported",
+        f"Effective source view ready: {destination}",
+        path=destination,
+        interventions=len(witnesses),
+    )
+    return 0
+
+
 def command_validate(args: argparse.Namespace, output: CLIOutput) -> int:
     root = project_root(args.project)
     bundle = load_project_tree(root)
@@ -566,6 +585,7 @@ __all__ = [
     "command_explain",
     "command_init",
     "command_report",
+    "command_source_export",
     "command_source_lock",
     "command_source_preview",
     "command_status",
