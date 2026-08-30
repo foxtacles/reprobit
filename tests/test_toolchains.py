@@ -637,6 +637,9 @@ def test_opt_in_profile_compiler_smoke(
     }
     output_root = tmp_path / "private-output"
     output_root.mkdir()
+    wine_prefix = tmp_path / "wine-prefix"
+    wine_prefix.mkdir(mode=0o700)
+    host_environment["WINEPREFIX"] = os.fspath(wine_prefix)
     object_file = output_root / "classic_smoke.obj"
     pdb_file = output_root / "classic_smoke.pdb"
     command = CommandSpec.create(

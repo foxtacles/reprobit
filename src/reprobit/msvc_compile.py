@@ -555,6 +555,14 @@ def hold_wine_prefix(
     executable = os.fspath(wineserver) if wineserver is not None else shutil.which("wineserver")
     if executable is None:
         raise DiscoveryError("wineserver is required to hold a Wine prefix")
+    # wineserver requires the prefix directory to exist; wine normally
+    # creates it lazily, but nothing has run in this prefix yet.
+    prefix = environment.get("WINEPREFIX")
+    if prefix is None:
+        home = environment.get("HOME")
+        prefix = os.path.join(home, ".wine") if home else None
+    if prefix is not None:
+        Path(prefix).mkdir(mode=0o700, parents=True, exist_ok=True)
     held = subprocess.Popen(
         (executable, "-f", "-p"),
         env=dict(environment),
