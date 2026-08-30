@@ -79,7 +79,7 @@ def test_classic_implementation_import_closure_has_exact_architecture_boundary()
         path.startswith(
             (
                 "classic_incremental",
-                "classic_migration",
+                "cmake_configure",
                 "cli",
                 "discovery",
                 "incremental",
@@ -255,9 +255,7 @@ def test_classic_validator_digest_binds_each_proof_execution_and_publication_sea
 
     assert changed != baseline
     assert semantic_contracts._source_overlay_validator_digest(changed) != baseline_validator
-    assert semantic_contracts.SOURCE_OVERLAY_VALIDATOR_ID == (
-        "classic.source-overlay-ancestry.v1"
-    )
+    assert semantic_contracts.SOURCE_OVERLAY_VALIDATOR_ID == ("classic.source-overlay-ancestry.v1")
 
 
 @pytest.mark.parametrize(

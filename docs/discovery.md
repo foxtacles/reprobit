@@ -2,13 +2,53 @@
 
 ReproBit discovery tries small, declaration-only changes that can steer an old
 compiler toward the reference bytes without changing your program's intended
-behavior. The normal human workflow is `grind`: give it one source file, symbol,
-and reference object, then let it try a small low-cost search.
+behavior. The normal human workflow is `grind`: let it make a bounded project
+pass, or select one source and function when you need precise control. ReproBit
+saves a result only when you explicitly approve a run whose candidate passes a
+fresh proof build.
 
 ## Automatic grind
 
-Start from a configured ReproBit project whose normal build already runs. Create
-the small search plan once:
+Start from a configured ReproBit project whose normal build already runs.
+Project-wide grind compares functions from project-owned reference `.obj`
+files; it cannot derive those objects from the reference executable alone.
+Obtain them from your project's archival or analysis inputs, place them under
+`reference/`, then run a read-only project preview:
+
+```console
+rbit discover grind . --project-wide
+```
+
+ReproBit first matches an object to the source filename without its extension:
+`src/widget.cpp` maps to `reference/widget.obj`. An exact translation-unit ID
+also works. When names collide, provide the pair directly with
+`--reference-object TU=PATH`; repeat the option for more translation units. A
+single eligible source file and single reference object are paired
+automatically.
+
+The bounded search tries at most eight functions by default and samples one
+from each source file before returning to the first. `--max-symbols` can raise
+that limit to 64. Automatic directory scanning inspects at most 4,096 entries
+and accepts at most 64 reference `.obj` files. Each object may index at most
+4,096 functions. Exceeding a bound stops with a clear error instead of silently
+dropping input.
+
+The summary is written to
+`.reprobit-state/reports/grind/project/report.html`. It links every attempted
+function to a detailed decision report and keeps the exact bounded plan used for
+that decision beside the report. Exact previews include a copyable approval
+command; accepted runs include the fresh verification command. Project-wide
+grind is a low-hanging-fruit pass, not a promise to solve every compiler
+mismatch. A completed preview exits with status 1 when it finds no exact result,
+but its report is still valid. Approve freshly proven results only after review:
+
+```console
+rbit discover grind . --project-wide --accept-exact
+git diff -- reprobit/interventions reprobit/proofs
+rbit verify .
+```
+
+For one deliberately selected function, create the small expert plan once:
 
 ```console
 rbit discover init . \
@@ -41,13 +81,13 @@ rbit discover grind .
 ```
 
 Each candidate is compiled through the project's locked compiler graph. A
-candidate only counts as a solution after a separate cold build reproduces every
-target byte for byte and passes the required logic checks. Every completed
-bounded search writes a human summary to
+candidate only counts as a solution after a separate build from scratch
+reproduces every target byte for byte and passes the required logic checks.
+Every completed bounded search writes a human summary to
 `.reprobit-state/reports/grind/report.html`, including searches with no exact
 solution. An exact result links to its separate `cold-verification.html` and
-`cold-verification.json` evidence in the same directory. The preview does not
-change project files.
+`cold-verification.json` build-from-scratch evidence in the same directory. The
+preview does not change project files.
 
 When the result looks right, authorize a fresh proof run and atomic publication:
 
@@ -58,9 +98,9 @@ rbit verify .
 ```
 
 Advance approval is not proof and does not reuse an old preview verdict. ReproBit
-recompiles and cold-verifies the solution, then changes only the owning
+recompiles and verifies the solution from scratch, then changes only the owning
 intervention and proof shards in one compare-and-swap transaction. A concurrent
-source, plan, reference, oracle, toolchain, graph, or project-record edit aborts
+source, plan, reference binary, toolchain, graph, or project-record edit aborts
 the save. If no exact solution passes, no project files change. Writing review
 reports is separate from saving the accepted intervention and proof records. If
 the local report cannot be written after those records were saved, the CLI emits
@@ -161,3 +201,9 @@ Discovery state directories are private working state. Every state level must be
 a real directory rather than a symbolic link or reparse point; workspace cleanup
 removes only the fixed, flat set of compiler files and never follows a redirected
 directory tree.
+
+Raw campaigns deliberately keep this state separate from a project's
+`.reprobit-state`. The `rbit clean` command manages project build state and does
+not remove `.reprobit-discovery` or another explicitly selected
+`--state-directory`; delete that campaign directory yourself only after its
+reports and candidate objects are no longer needed.

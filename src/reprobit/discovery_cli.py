@@ -25,7 +25,7 @@ if TYPE_CHECKING:
         DiscoveryInputReceipt,
     )
     from reprobit.msvc_discovery import MsvcDiscoveryRequest
-    from reprobit.msvc_discovery_analysis import MsvcFunctionReference
+    from reprobit.msvc_discovery_coff import MsvcFunctionReference
     from reprobit.toolchains import ClassicMSVCToolchain
 
 
@@ -471,7 +471,7 @@ def _publish_reports(
             "  Reports:",
             f"    HTML review: {paths.report_html}",
             f"    Canonical JSON: {paths.report_json}",
-            "Nothing was applied. Review candidates before creating certified project authority.",
+            "Nothing was applied. Review candidates before adding anything to a verified project.",
         )
     )
     output.emit(
@@ -494,7 +494,7 @@ def _publish_reports(
 def _load_campaign_inputs(paths: _DiscoveryPaths) -> _CampaignInputs:
     from reprobit.discovery_contracts import DiscoveryInputReceipt, DiscoveryInputRole
     from reprobit.msvc_discovery import MsvcDiscoveryRequest
-    from reprobit.msvc_discovery_analysis import MsvcFunctionReference
+    from reprobit.msvc_discovery_coff import MsvcFunctionReference
     from reprobit.secure_paths import SecurePathError, read_relative_file
     from reprobit.strict_json import strict_loads
 
@@ -705,8 +705,7 @@ def _validate_selected_artifacts(
             payload, snapshot = read_relative_file(paths.root, artifact.logical_path)
         except SecurePathError as exc:
             raise CLIError(
-                "discovery artifact is absent, redirected, or unstable: "
-                f"{artifact.logical_path}"
+                f"discovery artifact is absent, redirected, or unstable: {artifact.logical_path}"
             ) from exc
         if len(payload) != artifact.object_size or snapshot.digest != artifact.object:
             raise CLIError(f"discovery artifact differs from its report: {artifact.logical_path}")

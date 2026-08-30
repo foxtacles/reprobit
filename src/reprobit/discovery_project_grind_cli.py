@@ -1,0 +1,523 @@
+"""CLI and report publication for the bounded project-wide grind."""
+
+from __future__ import annotations
+
+import argparse
+import posixpath
+from pathlib import Path, PurePosixPath
+from typing import cast
+
+from reprobit.cli_output import CLIOutput, human_command
+from reprobit.cli_paths import CLIError, project_root, relative_output, safe_project_path
+from reprobit.discovery_grind import (
+    DonorProgress,
+    ProjectGrindCallbacks,
+    ProjectGrindResult,
+)
+from reprobit.discovery_grind_report import render_grind_report_html
+from reprobit.discovery_project import ProjectGrindPlan
+from reprobit.discovery_project_grind import (
+    ProjectAutoGrindResult,
+    ProjectGrindArtifacts,
+    ProjectGrindWorkItem,
+    ProjectReferenceAssignment,
+    project_auto_grind_summary,
+    run_project_auto_grind,
+)
+from reprobit.discovery_project_grind_report import render_project_auto_grind_report_html
+from reprobit.project_loader import load_project
+from reprobit.report_io import render_report_html
+from reprobit.strict_json import JsonValue, canonical_json
+from reprobit.transactions import CASTransaction
+
+
+def _canonical_project_relative(value: str, *, label: str) -> str:
+    path = PurePosixPath(value)
+    if (
+        not value
+        or "\0" in value
+        or "\\" in value
+        or path.is_absolute()
+        or path.as_posix() != value
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise CLIError(f"{label} must be a canonical project-relative path")
+    return value
+
+
+def _project_reference_assignments(
+    values: list[str],
+) -> tuple[ProjectReferenceAssignment, ...]:
+    assignments: list[ProjectReferenceAssignment] = []
+    for value in values:
+        translation_unit, separator, reference = value.partition("=")
+        if (
+            not separator
+            or not translation_unit
+            or not reference
+            or "=" in reference
+            or "\0" in translation_unit
+        ):
+            raise CLIError("--reference-object must use the exact TU=PROJECT_PATH form")
+        assignments.append(
+            ProjectReferenceAssignment(
+                translation_unit,
+                _canonical_project_relative(reference, label="reference object"),
+            )
+        )
+    return tuple(assignments)
+
+
+def _campaign_callbacks(
+    callbacks: ProjectGrindCallbacks,
+    *,
+    reuse_across_symbols: bool,
+) -> ProjectGrindCallbacks:
+    """Reuse immutable compiler probes within one read-only project campaign."""
+
+    if not reuse_across_symbols:
+        return callbacks
+
+    seed_cache: dict[str, bytes] = {}
+    donor_cache: dict[frozenset[str], dict[str, bytes]] = {}
+
+    def probe_seed(staged_root: Path, node_id: str) -> bytes:
+        payload = seed_cache.get(node_id)
+        if payload is None:
+            payload = callbacks.probe_seed(staged_root, node_id)
+            seed_cache[node_id] = payload
+        return payload
+
+    def probe_donors(
+        staged_root: Path,
+        donor_ids: tuple[str, ...],
+        progress: DonorProgress | None,
+    ) -> dict[str, bytes]:
+        key = frozenset(donor_ids)
+        cached = donor_cache.get(key)
+        if cached is None:
+            compiled = callbacks.probe_donors(staged_root, donor_ids, progress)
+            cached = dict(compiled)
+            donor_cache[key] = cached
+        else:
+            if callable(progress):
+                for completed, donor_id in enumerate(donor_ids, start=1):
+                    progress(completed, len(donor_ids), donor_id)
+        return {donor_id: cached[donor_id] for donor_id in donor_ids}
+
+    return ProjectGrindCallbacks(
+        probe_seed=probe_seed,
+        probe_donors=probe_donors,
+        cold_verify=callbacks.cold_verify,
+    )
+
+
+def _approval_argv(root: Path, args: argparse.Namespace) -> tuple[str, ...]:
+    values = [
+        "rbit",
+        "discover",
+        "grind",
+        str(root),
+        "--project-wide",
+        "--max-symbols",
+        str(args.max_symbols),
+    ]
+    for value in args.reference_object:
+        values.extend(("--reference-object", value))
+    values.append("--accept-exact")
+    return tuple(values)
+
+
+def _project_report_directory(root: Path) -> Path:
+    return safe_project_path(root, load_project(root).state_dir) / "reports/grind/project"
+
+
+def _publish_project_grind_outcome(
+    root: Path,
+    index: int,
+    item: ProjectGrindWorkItem,
+    plan: ProjectGrindPlan,
+    result: ProjectGrindResult,
+    *,
+    verify_argv: tuple[str, ...],
+) -> ProjectGrindArtifacts:
+    """Atomically publish one detailed result before the next symbol runs."""
+
+    directory = _project_report_directory(root)
+    stem = f"{index:03d}"
+    plan_path = directory / "plans" / f"{stem}-plan.json"
+    decision_path = directory / "outcomes" / f"{stem}-decision.html"
+    plan_output = relative_output(root, str(plan_path))
+    decision_output = relative_output(root, str(decision_path))
+    plan_relative = PurePosixPath(plan_output.as_posix()).as_posix()
+    files = {plan_output: canonical_json(plan)}
+
+    cold_json_path: Path | None = None
+    cold_html_path: Path | None = None
+    cold_json_link: str | None = None
+    cold_html_link: str | None = None
+    solution = result.solution
+    if solution is not None:
+        cold_json_path = directory / "cold" / f"{stem}-verification.json"
+        cold_html_path = directory / "cold" / f"{stem}-verification.html"
+        files[relative_output(root, str(cold_json_path))] = canonical_json(solution.report)
+        files[relative_output(root, str(cold_html_path))] = render_report_html(
+            solution.report,
+            canonical_json_href=cold_json_path.name,
+        ).encode("utf-8")
+        cold_json_link = f"../cold/{cold_json_path.name}"
+        cold_html_link = f"../cold/{cold_html_path.name}"
+
+    per_symbol_approval = human_command(
+        (
+            "rbit",
+            "discover",
+            "grind",
+            root,
+            "--plan",
+            plan_relative,
+            "--accept-exact",
+        )
+    )
+    files[decision_output] = render_grind_report_html(
+        result,
+        plan_relative=plan_relative,
+        cold_report_html=cold_html_link,
+        cold_report_json=cold_json_link,
+        approval_command=per_symbol_approval,
+        verify_command=human_command(verify_argv),
+    ).encode("utf-8")
+    transaction = CASTransaction(root)
+    for relative, payload in sorted(files.items(), key=lambda item: item[0].as_posix()):
+        transaction.write(relative, payload)
+    transaction.commit()
+    return ProjectGrindArtifacts(
+        plan=plan_output.as_posix(),
+        decision_report=decision_output.as_posix(),
+        cold_verification_json=(
+            relative_output(root, str(cold_json_path)).as_posix()
+            if cold_json_path is not None
+            else None
+        ),
+        cold_verification_html=(
+            relative_output(root, str(cold_html_path)).as_posix()
+            if cold_html_path is not None
+            else None
+        ),
+    )
+
+
+def _relative_report_link(directory: Path | PurePosixPath, relative: str) -> str:
+    return posixpath.relpath(relative, start=directory.as_posix())
+
+
+def _project_grind_reports(
+    root: Path,
+    result: ProjectAutoGrindResult,
+    *,
+    approval_argv: tuple[str, ...],
+    verify_argv: tuple[str, ...],
+) -> tuple[Path, Path, str, tuple[Path, ...], tuple[Path, ...]]:
+    directory = _project_report_directory(root)
+    directory_relative = relative_output(root, str(directory))
+    desired_json = directory / "report.json"
+    desired_html = directory / "report.html"
+    decision_paths: list[Path] = []
+    plan_paths: list[Path] = []
+    decision_links: list[str | None] = []
+    artifact_rows: list[dict[str, JsonValue]] = []
+    for outcome in result.outcomes:
+        artifacts = outcome.artifacts
+        if artifacts is None:
+            plan_relative = None
+            decision_link = None
+            cold_json_link = None
+            cold_html_link = None
+        else:
+            plan_relative = artifacts.plan
+            plan_paths.append(root / Path(*PurePosixPath(artifacts.plan).parts))
+            decision_paths.append(root / Path(*PurePosixPath(artifacts.decision_report).parts))
+            decision_link = _relative_report_link(
+                directory_relative,
+                artifacts.decision_report,
+            )
+            cold_json_link = (
+                _relative_report_link(
+                    PurePosixPath(artifacts.decision_report).parent,
+                    artifacts.cold_verification_json,
+                )
+                if artifacts.cold_verification_json is not None
+                else None
+            )
+            cold_html_link = (
+                _relative_report_link(
+                    PurePosixPath(artifacts.decision_report).parent,
+                    artifacts.cold_verification_html,
+                )
+                if artifacts.cold_verification_html is not None
+                else None
+            )
+        decision_links.append(decision_link)
+        artifact_rows.append(
+            {
+                "target": outcome.item.target_id,
+                "translation_unit": outcome.item.translation_unit_id,
+                "symbol": outcome.item.symbol,
+                "plan": plan_relative,
+                "decision_report": decision_link,
+                "cold_verification_json": cold_json_link,
+                "cold_verification_html": cold_html_link,
+            }
+        )
+
+    if result.exact and not result.accepted:
+        next_kind = "approve"
+        next_argv = approval_argv
+        next_label = "Repeat fresh proofs and save the passing adjustments"
+    elif result.published:
+        next_kind = "verify"
+        next_argv = verify_argv
+        next_label = "Verify the saved project again from scratch"
+    else:
+        next_kind = None
+        next_argv = ()
+        next_label = None
+    next_command = human_command(next_argv) if next_argv else None
+
+    summary = dict(project_auto_grind_summary(result))
+    outcome_rows = cast(list[dict[str, JsonValue]], summary["outcomes"])
+    for row, artifact_metadata in zip(outcome_rows, artifact_rows, strict=True):
+        row.update(artifact_metadata)
+    summary["next_step"] = (
+        {
+            "kind": next_kind,
+            "argv": list(next_argv),
+            "command": next_command,
+        }
+        if next_kind is not None and next_command is not None
+        else None
+    )
+    files = {
+        relative_output(root, str(desired_json)): canonical_json(summary),
+        relative_output(root, str(desired_html)): render_project_auto_grind_report_html(
+            result,
+            outcome_reports=tuple(decision_links),
+            summary_json=desired_json.name,
+            next_step_label=next_label,
+            next_step_command=next_command,
+        ).encode("utf-8"),
+    }
+    transaction = CASTransaction(root)
+    for relative, payload in files.items():
+        transaction.write(relative, payload)
+    transaction_id = transaction.commit().transaction_id
+    return (
+        desired_json,
+        desired_html,
+        transaction_id,
+        tuple(decision_paths),
+        tuple(plan_paths),
+    )
+
+
+def command_discover_project_grind(
+    args: argparse.Namespace,
+    output: CLIOutput,
+    *,
+    callbacks: ProjectGrindCallbacks,
+) -> int:
+    """Run the bounded project-wide low-hanging-fruit search."""
+
+    root = project_root(args.project)
+    if args.plan != "reprobit/discovery.json":
+        raise CLIError("--plan belongs to the per-symbol grind; omit it with --project-wide")
+    assignments = _project_reference_assignments(args.reference_object)
+    verify_argv = ("rbit", "verify", str(root))
+    outcome_report_warnings: list[tuple[ProjectGrindWorkItem, str, str]] = []
+
+    def finalize_outcome(
+        index: int,
+        item: ProjectGrindWorkItem,
+        plan: ProjectGrindPlan,
+        result: ProjectGrindResult,
+    ) -> ProjectGrindArtifacts | None:
+        try:
+            return _publish_project_grind_outcome(
+                root,
+                index,
+                item,
+                plan,
+                result,
+                verify_argv=verify_argv,
+            )
+        except Exception as exc:
+            # Reports are diagnostics, never authority.  Preserve a completed
+            # search (and any already-published intervention) and keep going.
+            outcome_report_warnings.append((item, type(exc).__name__, str(exc)))
+            return None
+
+    with output.producer_activity(
+        "Finding and proving low-cost adjustments across the project"
+    ) as progress:
+        result = run_project_auto_grind(
+            root,
+            reference_assignments=assignments,
+            max_symbols=args.max_symbols,
+            accept_exact=args.accept_exact,
+            # Preview runs leave authority unchanged, so equal compiler probes are
+            # immutable across symbols. Accepted runs can publish after each symbol;
+            # compile each later item against that newly updated project state.
+            callbacks=_campaign_callbacks(
+                callbacks,
+                reuse_across_symbols=not args.accept_exact,
+            ),
+            progress=progress,
+            finalize_outcome=finalize_outcome,
+        )
+
+    approval_argv = _approval_argv(root, args)
+    report_json: Path | None = None
+    report_html: Path | None = None
+    decision_reports: tuple[Path, ...] = ()
+    persisted_plans: tuple[Path, ...] = ()
+    report_transaction_id: str | None = None
+    report_warnings: list[str] = []
+    desired_report = _project_report_directory(root) / "report.html"
+    for item, error_type, error_message in outcome_report_warnings:
+        warning = f"{item.translation_unit_id}/{item.symbol}: {error_type}: {error_message}"
+        report_warnings.append(warning)
+        output.emit(
+            "discovery_project_grind_report_warning",
+            "A function search finished, but its detailed review report could not be "
+            "written. The remaining searches will continue, and any already-saved proven "
+            "records remain unchanged.",
+            project=root,
+            report=desired_report,
+            translation_unit=item.translation_unit_id,
+            symbol=item.symbol,
+            error_type=error_type,
+            error=error_message,
+            nonfatal=True,
+        )
+    try:
+        (
+            report_json,
+            report_html,
+            report_transaction_id,
+            decision_reports,
+            persisted_plans,
+        ) = _project_grind_reports(
+            root,
+            result,
+            approval_argv=approval_argv,
+            verify_argv=verify_argv,
+        )
+    except Exception as exc:
+        report_warnings.append(f"campaign index: {type(exc).__name__}: {exc}")
+        output.emit(
+            "discovery_project_grind_report_warning",
+            "The bounded project search finished, but its review report could not be "
+            "written. Any already-saved proven records remain unchanged.",
+            project=root,
+            report=desired_report,
+            error_type=type(exc).__name__,
+            error=str(exc),
+            nonfatal=True,
+        )
+    report_warning = "; ".join(report_warnings) or None
+
+    report_line = (
+        f"Report: `{report_html}`"
+        if report_html is not None
+        else "Report: unavailable (see the nonfatal warning above)"
+    )
+    if not result.outcomes:
+        message = (
+            "No eligible project functions were available for the bounded grind.\n"
+            "Add a reference object named for a translation-unit id or source stem, or use "
+            "`--reference-object TU=PATH`.\n"
+            f"{report_line}"
+        )
+    elif result.published:
+        message = (
+            f"Saved {result.published} freshly verified exact adjustment"
+            f"{'s' if result.published != 1 else ''} from {len(result.outcomes)} bounded "
+            "function searches.\n"
+            "ReproBit kept only candidates that matched every target byte for byte and passed "
+            "their logic checks. This is a low-hanging-fruit pass, not a complete solver.\n"
+            f"{report_line}\n"
+            f"Next: {human_command(verify_argv)}"
+        )
+    elif result.exact:
+        message = (
+            f"Found {result.exact} freshly verified exact adjustment"
+            f"{'s' if result.exact != 1 else ''} across {len(result.outcomes)} bounded "
+            "function searches. Project files stayed unchanged.\n"
+            "This is a low-hanging-fruit pass, not a complete solver. Review the report, then "
+            "rerun the same fresh proofs and save passing results with:\n"
+            f"{human_command(approval_argv)}\n"
+            f"{report_line}"
+        )
+    else:
+        message = (
+            f"Tried {len(result.outcomes)} bounded project function"
+            f"{'s' if len(result.outcomes) != 1 else ''}; no exact low-cost adjustment was "
+            "proven. Project files stayed unchanged.\n"
+            "The grind intentionally stops short of an exhaustive solver.\n"
+            f"{report_line}"
+        )
+    next_argv = (
+        approval_argv
+        if result.exact and not result.accepted
+        else (verify_argv if result.published else ())
+    )
+    output.emit(
+        "discovery_project_grind_complete",
+        message,
+        project=root,
+        project_wide=True,
+        accepted=args.accept_exact,
+        eligible_units=result.campaign.eligible_units,
+        reference_objects=result.campaign.reference_objects,
+        discovered_symbols=result.campaign.discovered_symbols,
+        attempted_symbols=len(result.outcomes),
+        truncated_symbols=result.campaign.truncated_symbols,
+        exact_symbols=result.exact,
+        published_symbols=result.published,
+        max_symbols=args.max_symbols,
+        report_json=report_json,
+        report_html=report_html,
+        decision_reports=decision_reports,
+        persisted_plans=persisted_plans,
+        report_transaction_id=report_transaction_id,
+        report_warning=report_warning,
+        approval_argv=approval_argv if result.exact and not result.accepted else (),
+        verify_argv=verify_argv,
+        next_argv=next_argv,
+        next_command=human_command(next_argv) if next_argv else None,
+        outcomes=[
+            {
+                "target": outcome.item.target_id,
+                "translation_unit": outcome.item.translation_unit_id,
+                "symbol": outcome.item.symbol,
+                "reference_object": outcome.item.reference_object,
+                "exact": outcome.exact,
+                "published": outcome.published,
+                "added_cost": outcome.added_cost,
+            }
+            for outcome in result.outcomes
+        ],
+        skips=[
+            {
+                "translation_unit": skip.translation_unit_id,
+                "reference_object": skip.reference_object,
+                "symbol": skip.symbol,
+                "reason": skip.reason,
+            }
+            for skip in result.campaign.skips
+        ],
+    )
+    return 0 if result.exact else 1
+
+
+__all__ = ["command_discover_project_grind"]

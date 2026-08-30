@@ -7,12 +7,12 @@ source, build, and toolchain spellings, then run `rbit doctor --execute-probe`.
 ReproBit reproduces those strings in a private skeleton; it does not pad a
 different physical path.
 
-## A build passes but cold verification refuses
+## A build passes but verification from scratch refuses
 
-A build does not issue a certification verdict. The built-in classic adapter
-executes the committed producer graph in a new cold arena; CMake is not part of
-that run. `rbit verify` is implicitly cold and binds every receipt to that new
-run. A pre-existing published target is replaced atomically only after the new
+A build does not issue a certification verdict. The built-in MSVC adapter
+executes the committed producer graph in a new workspace; CMake is not part of
+that run. `rbit verify` always builds from scratch and binds every receipt to
+that new run. A pre-existing published target is replaced atomically only after the new
 private product is complete; pre-existing files inside the fresh run arena are
 still rejected.
 
@@ -67,15 +67,15 @@ producer-graph invalidation, stale effective translation units, and overlay
 rendering errors.
 
 If only the manifest binding changed, run `rbit source lock --project .`; add
-`--invalidate-producer-graph` when preview requires it, then reconfigure and run
-`rbit graph extract` with the configured build, effective source, and toolchain
-roots described in [CMake migration integration](cmake.md). With a graph-v2
+`--invalidate-producer-graph` when preview requires it, then rerun the guided
+`rbit import cmake .` command described in [Import a CMake project](cmake.md).
+The separate `rbit graph configure` and `rbit graph extract` commands are only
+for advanced imports that need manual control. With a graph-v2
 document, ordinary byte edits at existing admitted paths do not require that
 invalidation; additions and removals do. If preview says authority regeneration
-is required, do
-not edit the old digest or rerun lock to bless it. Regenerate the affected TU,
-intervention, and proof documents with the adapter and publish them only after
-their zero-loss and literal gates pass together.
+is required, do not edit the old digest or rerun lock to bless it. Regenerate
+the affected TU, intervention, and proof documents with the adapter and publish
+them only after their zero-loss and literal gates pass together.
 
 ## Bytes match but the command exits nonzero
 

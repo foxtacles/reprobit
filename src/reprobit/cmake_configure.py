@@ -2,7 +2,7 @@
 
 This module is intentionally outside the classic execution trust boundary.
 It materializes reviewed source authority and runs CMake only to produce the
-Unix-Makefiles metadata consumed by :mod:`reprobit.producer_graph` extraction.
+Makefile metadata consumed by :mod:`reprobit.producer_graph` extraction.
 Certifying build and verify paths import :mod:`reprobit.classic_runtime`
 instead and never call this module.
 """
@@ -13,31 +13,33 @@ import math
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from reprobit.classic_project import (
     ClassicProjectError,
-    _effective_source_seal,
+    _cmake_quote,
     materialize_effective_workspace,
     write_cmake_project_plan,
 )
 from reprobit.cmake import CMakeExportPlan, cmake_module_path
+from reprobit.cmake_source import effective_source_digest
 from reprobit.model import Digest
 from reprobit.process import CommandSpec, ProcessError, ProcessSupervisor
 from reprobit.schema import ProducerGraphBuildAdapter, ProjectBundle
 from reprobit.strict_json import canonical_json
 
 
-class ClassicMigrationError(ClassicProjectError):
+class CMakeConfigureError(ClassicProjectError):
     """A migration-time configure boundary was incomplete or unsafe."""
 
 
 @dataclass(frozen=True, slots=True)
-class ClassicGraphConfiguration:
+class CMakeConfiguration:
     """Closed paths and command receipt needed by ``rbit graph extract``."""
 
     configured_build_root: Path
     effective_source_root: Path
+    effective_source_digest: Digest
     toolchain_root: Path
     target_plan: Path
     compile_database: Path
@@ -51,12 +53,12 @@ class ClassicGraphConfiguration:
 def _regular_executable(path: Path, *, label: str) -> Path:
     candidate = path.expanduser()
     if not candidate.is_absolute():
-        raise ClassicMigrationError(f"{label} must be an absolute path")
+        raise CMakeConfigureError(f"{label} must be an absolute path")
     if candidate.is_symlink() or not candidate.is_file():
-        raise ClassicMigrationError(f"{label} is absent or redirected: {candidate}")
+        raise CMakeConfigureError(f"{label} is absent or redirected: {candidate}")
     resolved = candidate.resolve(strict=True)
     if resolved.is_symlink() or not os.access(resolved, os.X_OK):
-        raise ClassicMigrationError(f"{label} is not a regular executable: {resolved}")
+        raise CMakeConfigureError(f"{label} is not a regular executable: {resolved}")
     return resolved
 
 
@@ -68,31 +70,35 @@ def _transport_sibling(directory: Path, name: str) -> Path:
         and not item.is_symlink()
     )
     if len(matches) != 1:
-        raise ClassicMigrationError(
-            f"MSVC configure transport does not uniquely provide {name!r}"
-        )
+        raise CMakeConfigureError(f"MSVC configure transport does not uniquely provide {name!r}")
     return _regular_executable(matches[0], label=f"{name} transport")
 
 
-def _migration_environment(transport_directory: Path) -> dict[str, str]:
+def _configure_environment(
+    transport_directory: Path,
+    *,
+    include_directories: tuple[Path, ...] = (),
+    library_directories: tuple[Path, ...] = (),
+) -> dict[str, str]:
     environment = dict(os.environ)
-    for canonical, value in (
+    additions: list[tuple[str, str]] = [
         (
             "PATH",
             str(transport_directory)
             + os.pathsep
             + next(
-                (
-                    current
-                    for key, current in environment.items()
-                    if key.casefold() == "path"
-                ),
+                (current for key, current in environment.items() if key.casefold() == "path"),
                 os.defpath,
             ),
         ),
         ("LANG", "C"),
         ("LC_ALL", "C"),
-    ):
+    ]
+    if include_directories:
+        additions.append(("INCLUDE", os.pathsep.join(map(str, include_directories))))
+    if library_directories:
+        additions.append(("LIB", os.pathsep.join(map(str, library_directories))))
+    for canonical, value in additions:
         for key in tuple(environment):
             if key.casefold() == canonical.casefold():
                 del environment[key]
@@ -102,10 +108,10 @@ def _migration_environment(transport_directory: Path) -> dict[str, str]:
 
 def _require_regular_output(path: Path, *, label: str) -> None:
     if path.is_symlink() or not path.is_file():
-        raise ClassicMigrationError(f"{label} is absent or redirected: {path}")
+        raise CMakeConfigureError(f"{label} is absent or redirected: {path}")
 
 
-def configure_classic_producer_graph(
+def configure_cmake_project(
     bundle: ProjectBundle,
     *,
     project_root: Path,
@@ -116,8 +122,11 @@ def configure_classic_producer_graph(
     resource_transport: Path,
     configuration: str = "RelWithDebInfo",
     timeout_seconds: float = 600.0,
-) -> ClassicGraphConfiguration:
-    """Create one fresh Unix-Makefiles tree for graph extraction.
+    defer_project_plan: bool = False,
+    generator: str = "Unix Makefiles",
+    make_program: Path | None = None,
+) -> CMakeConfiguration:
+    """Create one fresh Makefile tree for graph extraction.
 
     The workspace must be empty.  Its fixed ``source`` and ``build`` children,
     together with the returned target-plan path, can be passed directly to
@@ -125,59 +134,67 @@ def configure_classic_producer_graph(
     """
 
     if not isinstance(bundle.spec.build, ProducerGraphBuildAdapter):
-        raise ClassicMigrationError(
-            "classic graph configuration requires the producer-graph adapter"
-        )
-    if bundle.source_manifest is None or not bundle.source_manifest.complete or (
-        bundle.build_plan is None
+        raise CMakeConfigureError("CMake graph configuration requires the producer-graph adapter")
+    if (
+        bundle.source_manifest is None
+        or not bundle.source_manifest.complete
+        or (bundle.build_plan is None)
     ):
-        raise ClassicMigrationError(
-            "classic graph configuration requires complete source/build authority"
+        raise CMakeConfigureError(
+            "CMake graph configuration requires complete source/build authority"
         )
     if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
-        raise ClassicMigrationError("configure timeout must be positive and finite")
+        raise CMakeConfigureError("configure timeout must be positive and finite")
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", configuration) is None:
-        raise ClassicMigrationError("CMake configuration name is unsafe")
+        raise CMakeConfigureError("CMake configuration name is unsafe")
+    if generator not in {"Unix Makefiles", "NMake Makefiles"}:
+        raise CMakeConfigureError(f"unsupported migration CMake generator: {generator!r}")
+    if generator == "NMake Makefiles" and make_program is None:
+        raise CMakeConfigureError("NMake Makefiles requires an explicit NMAKE program")
 
     project_root = project_root.resolve(strict=True)
     if project_root.is_symlink() or not project_root.is_dir():
-        raise ClassicMigrationError("project root is absent or redirected")
+        raise CMakeConfigureError("project root is absent or redirected")
     workspace_root = workspace_root.expanduser().resolve(strict=False)
     if workspace_root == project_root:
-        raise ClassicMigrationError("migration workspace cannot be the project root")
-    if workspace_root.is_symlink() or (
-        workspace_root.exists() and not workspace_root.is_dir()
-    ):
-        raise ClassicMigrationError("migration workspace is redirected or not a directory")
+        raise CMakeConfigureError("CMake import workspace cannot be the project root")
+    if workspace_root.is_symlink() or (workspace_root.exists() and not workspace_root.is_dir()):
+        raise CMakeConfigureError("CMake import workspace is redirected or not a directory")
     if workspace_root.exists() and any(workspace_root.iterdir()):
-        raise ClassicMigrationError(
-            f"migration workspace is not empty: {workspace_root}"
-        )
+        raise CMakeConfigureError(f"CMake import workspace is not empty: {workspace_root}")
     workspace_root.mkdir(parents=True, exist_ok=True)
 
     toolchain_root = toolchain_root.expanduser().resolve(strict=True)
     if toolchain_root.is_symlink() or not toolchain_root.is_dir():
-        raise ClassicMigrationError("toolchain root is absent or redirected")
+        raise CMakeConfigureError("toolchain root is absent or redirected")
     cmake = _regular_executable(cmake, label="CMake executable")
-    compiler = _regular_executable(
-        compiler_transport, label="compiler transport"
-    )
-    resource = _regular_executable(
-        resource_transport, label="resource-compiler transport"
-    )
+    compiler = _regular_executable(compiler_transport, label="compiler transport")
+    resource = _regular_executable(resource_transport, label="resource-compiler transport")
     try:
         compiler.relative_to(toolchain_root)
         resource.relative_to(toolchain_root)
     except ValueError as exc:
-        raise ClassicMigrationError(
+        raise CMakeConfigureError(
             "compiler transports must remain beneath the admitted toolchain root"
         ) from exc
     if compiler.parent != resource.parent:
-        raise ClassicMigrationError(
+        raise CMakeConfigureError(
             "compiler and resource transports must share one admitted directory"
         )
     linker = _transport_sibling(compiler.parent, "link")
     librarian = _transport_sibling(compiler.parent, "lib")
+    make = (
+        _regular_executable(make_program, label="CMake make program")
+        if make_program is not None
+        else None
+    )
+    if make is not None:
+        try:
+            make.relative_to(toolchain_root)
+        except ValueError as exc:
+            raise CMakeConfigureError(
+                "CMake make program must remain beneath the admitted toolchain root"
+            ) from exc
 
     effective_root = workspace_root / "source"
     configured_root = workspace_root / "build"
@@ -194,7 +211,33 @@ def configure_classic_producer_graph(
     write_cmake_project_plan(bundle, effective_root, project_plan)
     module = (cmake_module_path() / "ReproBit.cmake").resolve(strict=True)
     _require_regular_output(module, label="ReproBit CMake module")
-    source_seal = _effective_source_seal(effective_root)
+    bootstrap: Path | None = None
+    if defer_project_plan:
+        # CMAKE_PROJECT_INCLUDE runs during the top-level project() call.  It
+        # makes the ReproBit functions available immediately, then defers the
+        # generated target registrations until the directory has declared its
+        # targets.  A normal CMake project therefore needs no source edit.
+        bootstrap = workspace_root / "reprobit-cmake-import.cmake"
+        bootstrap.write_text(
+            "\n".join(
+                (
+                    "# Generated by ReproBit; do not edit.",
+                    "get_property(_reprobit_import_scheduled GLOBAL PROPERTY "
+                    "REPROBIT_CMAKE_IMPORT_SCHEDULED)",
+                    "if(NOT _reprobit_import_scheduled)",
+                    "  set_property(GLOBAL PROPERTY REPROBIT_CMAKE_IMPORT_SCHEDULED TRUE)",
+                    f"  include({_cmake_quote(module.as_posix())})",
+                    "  cmake_language(DEFER DIRECTORY "
+                    f"{_cmake_quote(effective_root.as_posix())} "
+                    "ID reprobit_import_plan CALL include "
+                    f"{_cmake_quote(project_plan.as_posix())})",
+                    "endif()",
+                    "",
+                )
+            ),
+            encoding="utf-8",
+        )
+    source_digest = effective_source_digest(effective_root)
 
     command = (
         str(cmake),
@@ -203,7 +246,7 @@ def configure_classic_producer_graph(
         "-B",
         str(configured_root),
         "-G",
-        "Unix Makefiles",
+        generator,
         f"-DCMAKE_BUILD_TYPE={configuration}",
         "-DCMAKE_SYSTEM_NAME=Windows",
         f"-DCMAKE_C_COMPILER={compiler}",
@@ -217,11 +260,31 @@ def configure_classic_producer_graph(
         f"-DREPROBIT_TARGET_PLAN={target_plan}",
         f"-DREPROBIT_EFFECTIVE_SOURCE_ROOT={effective_root}",
         "-DREPROBIT_TERMINAL=ON",
+        *((f"-DCMAKE_MAKE_PROGRAM={make}",) if make is not None else ()),
+        *((f"-DCMAKE_PROJECT_INCLUDE={bootstrap}",) if bootstrap is not None else ()),
     )
+    include_directories: tuple[Path, ...] = ()
+    library_directories: tuple[Path, ...] = ()
+    if generator == "NMake Makefiles":
+        from reprobit.toolchains import TOOLCHAIN_PROFILES
+
+        profile = TOOLCHAIN_PROFILES[bundle.spec.toolchain.profile]
+        include_directories = tuple(
+            toolchain_root.joinpath(*PurePosixPath(relative).parts)
+            for relative in profile.include_roots
+        )
+        library_directories = tuple(
+            toolchain_root.joinpath(*PurePosixPath(relative).parts)
+            for relative in profile.library_roots
+        )
     specification = CommandSpec.create(
         command,
         cwd=effective_root,
-        environment=_migration_environment(compiler.parent),
+        environment=_configure_environment(
+            compiler.parent,
+            include_directories=include_directories,
+            library_directories=library_directories,
+        ),
         timeout_seconds=timeout_seconds,
         log_path=configure_log,
     )
@@ -229,13 +292,13 @@ def configure_classic_producer_graph(
         with ProcessSupervisor() as supervisor:
             result = supervisor.run(specification)
     except ProcessError as exc:
-        raise ClassicMigrationError(
-            f"migration CMake configure failed; inspect {configure_log}"
+        raise CMakeConfigureError(
+            f"CMake import configure failed; inspect {configure_log}"
         ) from exc
-    if _effective_source_seal(effective_root) != source_seal:
-        raise ClassicMigrationError("CMake configure changed effective source authority")
+    if effective_source_digest(effective_root) != source_digest:
+        raise CMakeConfigureError("CMake configure changed effective source authority")
     for path, label in (
-        (configured_root / "Makefile", "Unix Makefiles root"),
+        (configured_root / "Makefile", f"{generator} root"),
         (compile_database, "compile database"),
         (target_plan, "ReproBit target plan"),
         (configure_log, "configure log"),
@@ -244,7 +307,7 @@ def configure_classic_producer_graph(
         _require_regular_output(path, label=label)
     export_plan = CMakeExportPlan.read(target_plan)
     if export_plan.link_admissions:
-        raise ClassicMigrationError(
+        raise CMakeConfigureError(
             "configured target plan declares link admissions that the direct "
             "producer graph cannot encode; remove them before graph extraction"
         )
@@ -252,9 +315,7 @@ def configure_classic_producer_graph(
     if {target.artifact_id for target in export_plan.targets} != target_ids or (
         len(export_plan.targets) != len(target_ids)
     ):
-        raise ClassicMigrationError(
-            "configured target plan differs from project target authority"
-        )
+        raise CMakeConfigureError("configured target plan differs from project target authority")
     command_digest = Digest.from_bytes(
         canonical_json(
             {
@@ -265,22 +326,23 @@ def configure_classic_producer_graph(
             }
         )
     )
-    return ClassicGraphConfiguration(
-        configured_root.resolve(strict=True),
-        effective_root.resolve(strict=True),
-        toolchain_root,
-        target_plan.resolve(strict=True),
-        compile_database.resolve(strict=True),
-        project_plan.resolve(strict=True),
-        configure_log.resolve(strict=True),
-        command,
-        command_digest,
-        result.duration_seconds,
+    return CMakeConfiguration(
+        configured_build_root=configured_root.resolve(strict=True),
+        effective_source_root=effective_root.resolve(strict=True),
+        effective_source_digest=source_digest,
+        toolchain_root=toolchain_root,
+        target_plan=target_plan.resolve(strict=True),
+        compile_database=compile_database.resolve(strict=True),
+        project_plan=project_plan.resolve(strict=True),
+        configure_log=configure_log.resolve(strict=True),
+        command=command,
+        command_digest=command_digest,
+        duration_seconds=result.duration_seconds,
     )
 
 
 __all__ = [
-    "ClassicGraphConfiguration",
-    "ClassicMigrationError",
-    "configure_classic_producer_graph",
+    "CMakeConfiguration",
+    "CMakeConfigureError",
+    "configure_cmake_project",
 ]

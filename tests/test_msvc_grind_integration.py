@@ -158,6 +158,7 @@ def test_native_msvc42_grind_publishes_minimal_authority_then_cold_verifies(
             "discover",
             "grind",
             project,
+            "--project-wide",
             "--accept-exact",
         ),
         cwd=project,
@@ -165,21 +166,20 @@ def test_native_msvc42_grind_publishes_minimal_authority_then_cold_verifies(
     )
     grind_events = _events(grind)
     completed = [
-        event for event in grind_events if event.get("event") == "discovery_grind_complete"
+        event for event in grind_events if event.get("event") == "discovery_project_grind_complete"
     ]
     assert len(completed) == 1
-    assert completed[0]["published"] is True
-    assert completed[0]["exact"] is True
-    assert completed[0]["added_interventions"] == 2
-    assert completed[0]["added_cost"] == 26
+    assert completed[0]["published_symbols"] == 1
+    assert completed[0]["exact_symbols"] == 1
+    assert completed[0]["attempted_symbols"] == 1
+    assert completed[0]["outcomes"][0]["added_cost"] == 26
     grind_report_html = (
-        project / ".reprobit-state" / "reports" / "grind" / "report.html"
+        project / ".reprobit-state" / "reports" / "grind" / "project" / "report.html"
     )
-    cold_report_path = grind_report_html.with_name("cold-verification.json")
-    cold_report_html = grind_report_html.with_name("cold-verification.html")
-    assert completed[0]["grind_report_html"] == str(grind_report_html)
-    assert completed[0]["cold_verification_report_json"] == str(cold_report_path)
-    assert completed[0]["cold_verification_report_html"] == str(cold_report_html)
+    cold_report_path = grind_report_html.parent / "cold" / "001-verification.json"
+    cold_report_html = grind_report_html.parent / "cold" / "001-verification.html"
+    assert completed[0]["report_html"] == str(grind_report_html)
+    assert completed[0]["report_json"] == str(grind_report_html.with_suffix(".json"))
     assert grind_report_html.is_file()
     assert cold_report_html.is_file()
     grind_report = Report.model_validate_json(cold_report_path.read_bytes())

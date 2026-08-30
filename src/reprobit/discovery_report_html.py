@@ -26,7 +26,7 @@ from reprobit.report_html_components import (
     format_integer,
     table,
 )
-from reprobit.report_html_style import REPORT_CSS, REPORT_SCRIPT
+from reprobit.report_html_style import REPORT_CSS, REPORT_SCRIPT, REPROBIT_MARK_SVG
 from reprobit.strict_json import canonical_json, strict_loads
 
 _PROPOSAL_CARD_LIMIT = 100
@@ -121,7 +121,7 @@ def _pretty_json(value: object) -> str:
 
 def _kind_label(kind: DiscoveryFindingKind) -> str:
     return {
-        DiscoveryFindingKind.WHOLE_BODY: "Whole-body match",
+        DiscoveryFindingKind.WHOLE_BODY: "Whole-function match",
         DiscoveryFindingKind.PRIVATE_DONOR: "Private donor",
         DiscoveryFindingKind.INSTRUCTION_MOSAIC: "Instruction mosaic",
     }[kind]
@@ -194,13 +194,15 @@ def _render_overview(report: DiscoveryCampaignReport) -> str:
     )
     return f"""
 <section class="hero discovery-hero" id="overview" aria-labelledby="report-title">
-  <p class="eyebrow">Non-certifying discovery</p>
+  <p class="eyebrow">Discovery preview</p>
   <h1 id="report-title">{escape(heading)}</h1>
   <p class="lede">ReproBit tried the declaration combinations allowed by this request and
-    compared each compiled result with the supplied references. It did not prove, approve,
-    apply, or change a project intervention.</p>
+    compared each compiled result with the supplied references. These are suggestions only:
+    nothing was proved, approved, saved, or changed in a project.</p>
+  <p><strong>Search scope:</strong> target {code(report.plan.target)} ·
+    TU {code(report.plan.translation_unit)}</p>
   <div class="claim-row" aria-label="Discovery status">
-    <span class="claim warn">Review evidence only</span>
+    <span class="claim warn">Suggestions only</span>
     <span class="claim ok">Search complete</span>
     <span class="claim ok">Nothing applied</span>
   </div>
@@ -244,22 +246,37 @@ def _render_candidate_charts(report: DiscoveryCampaignReport) -> str:
 <section class="section" id="results" aria-labelledby="results-title">
   <div class="section-heading"><div><p class="eyebrow">What the search found</p>
     <h2 id="results-title">Candidate overview</h2></div>
-    <p>{count_phrase(len(report.proposals), 'review-only proposal')}</p></div>
+    <p>{count_phrase(len(report.proposals), "review-only proposal")}</p></div>
   <div class="chart-grid">
-    {bar_chart(identity="candidate-kind-chart", title="Candidates by kind",
-        description="The intervention shapes suggested by this search.", bars=kind_bars,
-        empty_message="No candidates were found.")}
-    {bar_chart(identity="candidate-symbol-chart", title="Candidates by symbol",
-        description=symbol_description, bars=symbol_bars,
-        empty_message="No candidates were found.")}
+    {
+        bar_chart(
+            identity="candidate-kind-chart",
+            title="Candidates by kind",
+            description="The intervention shapes suggested by this search.",
+            bars=kind_bars,
+            empty_message="No candidates were found.",
+        )
+    }
+    {
+        bar_chart(
+            identity="candidate-symbol-chart",
+            title="Candidates by symbol",
+            description=symbol_description,
+            bars=symbol_bars,
+            empty_message="No candidates were found.",
+        )
+    }
   </div>
+  <p class="explain"><strong>Candidate terms:</strong> a private donor offers a compatible
+    function body from another compiled state; an instruction mosaic combines selected
+    instruction ranges from compiled candidates. Both still require project-level review and
+    separate verification.</p>
 </section>"""
 
 
 def _state_summary(state: DeclarationState) -> str:
     parameters = " · ".join(
-        f"{escape(item.name.replace('_', ' '))} {code(item.value)}"
-        for item in state.parameters
+        f"{escape(item.name.replace('_', ' '))} {code(item.value)}" for item in state.parameters
     )
     return f"{escape(_family_label(state.family))} · {parameters}"
 
@@ -326,8 +343,13 @@ def _proposal_advanced(
   <dt>Reference body SHA-256</dt><dd>{code(proposal.reference_body.value)}</dd>
   <dt>Proposed output SHA-256</dt><dd>{code(proposal.proposed_output.value)}</dd>
 </dl>
-{table(("Role", "Artifact ID", "Path", "Bytes", "Object SHA-256"), artifact_rows,
-    caption="Proposal artifact records")}
+{
+        table(
+            ("Role", "Artifact ID", "Path", "Bytes", "Object SHA-256"),
+            artifact_rows,
+            caption="Proposal artifact records",
+        )
+    }
 {range_table}
 <h4>Exact intervention JSON</h4>
 <pre><code>{escape(exact_json)}</code></pre>"""
@@ -369,10 +391,7 @@ def _render_proposals(report: DiscoveryCampaignReport) -> str:
         key=lambda item: (item.symbol.casefold(), item.symbol, item.kind.value, item.finding_id),
     )
     visible = ordered[:_PROPOSAL_CARD_LIMIT]
-    cards = "".join(
-        _render_proposal_card(item, states, artifacts)
-        for item in visible
-    )
+    cards = "".join(_render_proposal_card(item, states, artifacts) for item in visible)
     if not cards:
         cards = (
             '<div class="advanced-intro"><p>No compiler state in this bounded campaign '
@@ -431,8 +450,7 @@ def _render_next_steps(report: DiscoveryCampaignReport) -> str:
             ),
         )
     items = "".join(
-        f'<li class="next-step"><strong>{escape(title)}</strong>'
-        f"<span>{escape(detail)}</span></li>"
+        f'<li class="next-step"><strong>{escape(title)}</strong><span>{escape(detail)}</span></li>'
         for title, detail in steps
     )
     return f"""
@@ -512,13 +530,10 @@ def _render_observation_index(report: DiscoveryCampaignReport) -> str:
             f"All {format_integer(len(visible))} cell records are indexed here. The canonical "
             f"JSON contains all {format_integer(function_count)} raw function observations."
         )
-    return (
-        f"<p>{escape(note)}</p>"
-        + table(
-            ("Cell ID", "State ID", "Family", "Functions", "Object SHA-256", "Command SHA-256"),
-            rows,
-            caption="Bounded compiler-cell observation index",
-        )
+    return f"<p>{escape(note)}</p>" + table(
+        ("Cell ID", "State ID", "Family", "Functions", "Object SHA-256", "Command SHA-256"),
+        rows,
+        caption="Bounded compiler-cell observation index",
     )
 
 
@@ -590,13 +605,11 @@ def _render_selected_evidence(report: DiscoveryCampaignReport) -> str:
     if declaration_omitted:
         declaration_note = (
             '<p class="notice">The canonical JSON retains '
-            f'{count_phrase(declaration_omitted, "exact declaration payload")} '
+            f"{count_phrase(declaration_omitted, 'exact declaration payload')} "
             "that this compact page does not repeat.</p>"
         )
     declarations = (
-        "<h4>Exact generated declarations</h4>"
-        + "".join(declaration_details)
-        + declaration_note
+        "<h4>Exact generated declarations</h4>" + "".join(declaration_details) + declaration_note
     )
     return receipt_note + states + artifacts + declarations
 
@@ -658,7 +671,7 @@ def _render_advanced(report: DiscoveryCampaignReport, canonical_json_name: str) 
     <p><small>Keep the HTML review and its canonical JSON sibling together when sharing a
       campaign.</small></p>
   </div>
-  {''.join(sections)}
+  {"".join(sections)}
 </section>"""
 
 
@@ -670,9 +683,7 @@ def _render_navigation() -> str:
         ("Next steps", "#next-steps"),
         ("Advanced", "#advanced"),
     )
-    items = "".join(
-        f'<li><a href="{target}">{escape(label)}</a></li>' for label, target in links
-    )
+    items = "".join(f'<li><a href="{target}">{escape(label)}</a></li>' for label, target in links)
     return f'<nav class="section-nav" aria-label="Report sections"><ul>{items}</ul></nav>'
 
 
@@ -685,6 +696,7 @@ def render_discovery_report_html(
 
     json_name = _canonical_json_name(canonical_json_name)
     title = f"{report.plan.target} — ReproBit discovery review"
+    schema_label = code(f"v{report.schema_version}")
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -697,7 +709,9 @@ def render_discovery_report_html(
 <body>
 <a class="skip-link" href="#overview">Skip to discovery review</a>
 <header class="topbar"><div class="topbar-inner">
-  <div class="brand">ReproBit · Discovery review</div>
+  <div class="brand">{REPROBIT_MARK_SVG}<span class="brand-label">
+    ReproBit · Discovery review
+  </span></div>
   <div class="run-label">Run {code(report.campaign_id)}</div>
 </div></header>
 {_render_navigation()}
@@ -709,7 +723,7 @@ def render_discovery_report_html(
 {_render_advanced(report, json_name)}
 </main>
 <footer class="footer"><div class="footer-inner">
-  ReproBit discovery schema v{report.schema_version} · non-certifying review · no external assets
+  ReproBit discovery schema {schema_label} · non-certifying review · no external assets
 </div></footer>
 <script>{REPORT_SCRIPT}</script>
 </body>

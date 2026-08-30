@@ -144,8 +144,7 @@ def _legacy_compile_record(
     return {
         "directory": build.as_posix(),
         "command": (
-            f"/opt/compiler/wine/x86/cl -D{define} /Fo{output} "
-            f"-c {staged_source.as_posix()}"
+            f"/opt/compiler/wine/x86/cl -D{define} /Fo{output} -c {staged_source.as_posix()}"
         ),
         "file": staged_source.as_posix(),
         "output": output,
@@ -591,14 +590,18 @@ def test_migration_accepts_canonical_windows_path_spellings() -> None:
             tomllib.loads(result.files[PurePosixPath("reprobit.toml")].decode())["paths"]
         )
 
-    assert outputs == [
-        {
-            "id": "migrated-pinned-v1",
-            "source": r"D:\workspace\sample-build\src",
-            "build": r"D:\workspace\sample-build\build",
-            "toolchain": r"D:\opt\compiler",
-        }
-    ] * 2
+    assert (
+        outputs
+        == [
+            {
+                "id": "migrated-pinned-v1",
+                "source": r"D:\workspace\sample-build\src",
+                "build": r"D:\workspace\sample-build\build",
+                "toolchain": r"D:\opt\compiler",
+            }
+        ]
+        * 2
+    )
 
 
 @pytest.mark.parametrize(
@@ -686,6 +689,8 @@ def test_migration_rewrites_named_donor_selectors_to_intervention_ids() -> None:
         {"donor": variant_id, "end": 2, "start": 1},
     ]
     assert fields["donor_variants"] == [{"donor": variant_id, "offsets": [0]}]
+    expected_beneficiary = [migrated["scope"]]
+    assert all(donor["beneficiaries"] == expected_beneficiary for donor in donors)
 
 
 def test_unknown_recipe_family_fails_closed() -> None:

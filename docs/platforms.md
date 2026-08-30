@@ -17,8 +17,8 @@ it as a different source tree.
 
 Wine workers use separate prefixes and process groups so compiler state and descendants cannot
 leak between lanes. The project locks the host launchers used for the compiler and resource
-compiler alongside the toolchain itself. See the [command-line workflow](cli.md) for the required
-transport options.
+compiler alongside the toolchain itself. The normal `rbit setup` flow remembers these launchers;
+explicit transport options in the [command-line workflow](cli.md) are advanced one-run overrides.
 
 ## Native Windows
 
@@ -34,7 +34,8 @@ Public CI runs portable tests and package checks on Ubuntu, macOS, and Windows. 
 drive lifecycle, and compiles through the real CL -> C1XX -> C2 chain. Compiler bytes are never
 committed, cached, or uploaded.
 
-That gate proves the 4.2 host and compiler path, not a project's full cold byte-identity verdict.
-Project certification still needs the project's locked toolchain, reference data, and cold
-fixture on its intended host. ReproBit also recognizes MSVC 5.0 profiles, but they do not yet have
+That gate proves the 4.2 host and compiler path, not a project's full byte-identity verdict from
+scratch. Project certification still needs the project's locked toolchain, reference data, and a
+fixture that builds from scratch on its intended host. ReproBit also recognizes MSVC 5.0 profiles,
+but they do not yet have
 equivalent end-to-end public evidence.

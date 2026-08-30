@@ -707,7 +707,7 @@ def _fixture_bundle(
         source_topology_digest=Digest.from_bytes(b"topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(*compilers, *linkers),
     )
     paths = LogicalPathProfile(
@@ -2825,7 +2825,7 @@ def test_generated_epoch_waits_for_all_ordinary_transforms_and_resources(
         source_topology_digest=Digest.from_bytes(b"barrier-topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=tuple(sorted((ordinary, resource, generated, linker), key=lambda item: item.id)),
     )
     paths = LogicalPathProfile(

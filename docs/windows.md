@@ -1,28 +1,61 @@
 # Native Windows and MSVC 4.2
 
 This is the canonical guide to ReproBit's native Windows path. macOS and Linux
-can test portable behavior, but only Windows can exercise the logon-session
-drive and Job Object lifecycle used by this backend.
+can test portable behavior, but only Windows can exercise the native isolation
+used by this backend. The technical details are available below.
 
 ## Set up the compiler
 
 The compiler is not stored in this repository, a GitHub cache, or workflow
-artifact. From a ReproBit checkout, install the package, then provision and
-check the known MSVC 4.2 files. These commands use PowerShell:
+artifact. From an initialized ReproBit project, the normal PowerShell setup is:
 
 ```console
-rbit toolchain provision --destination C:\toolchains\msvc42 --no-save
+rbit setup .
+rbit status .
+```
+
+`setup` provisions and authenticates MSVC 4.2 when needed, remembers its local
+path, writes or checks the project lock, and runs the native execution probe.
+To choose a specific installation directory instead:
+
+```console
+rbit toolchain provision --destination C:\toolchains\msvc42
+rbit setup . --toolchain-root C:\toolchains\msvc42
+```
+
+After reviewing and locking the source files, place the reference binary at
+the path shown by `rbit status`, then run the same guided import used on other
+hosts:
+
+```console
+rbit import cmake .
+```
+
+The provisioned compiler bundle includes authenticated `NMAKE.EXE` and
+`NMAKE.ERR` files for this one-time CMake import. ReproBit uses them
+automatically; direct builds and verification consume the committed graph and
+do not run NMake or CMake.
+
+<details>
+<summary>Advanced: run the native probe without project setup</summary>
+
+```console
 rbit doctor --backend windows_native_v1 `
   --toolchain-profile msvc_4_2 `
   --toolchain-root C:\toolchains\msvc42 `
   --execute-probe
 ```
 
-ReproBit does not download authenticated inputs from inside the producer tree.
-Provision the compiler and obtain any protected reference files before starting
-the hermetic build.
+</details>
 
-## How the private drive works
+Finish compiler setup and obtain protected reference binaries or other
+dependencies before `rbit build` or `rbit verify`; the isolated build does not
+download inputs.
+
+<details>
+<summary>Advanced: native isolation and exact compiler authentication</summary>
+
+### How the private drive works
 
 The native lineage broker uses
 `CreateProcessWithLogonW(LOGON_NETCREDENTIALS_ONLY)` to create its isolated
@@ -43,7 +76,7 @@ is empty. The execution probe checks that a descendant sees the private path;
 missing APIs, redirected roots, drive conflicts, failed session isolation, or
 escaped descendants are hard failures.
 
-## What the provisioner trusts
+### What the provisioner trusts
 
 The provisioner uses sparse checkouts at these exact upstream revisions:
 
@@ -67,6 +100,8 @@ and performs no checkout. An inexact existing destination is never modified.
 These upstream repositories do not include a license grant for the Microsoft
 binaries. Their public availability is not permission to redistribute or use
 them. Keep the payload external and confirm that your use is authorized.
+
+</details>
 
 ## What CI proves
 

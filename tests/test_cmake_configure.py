@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,7 +12,8 @@ from typing import cast
 
 import pytest
 
-import reprobit.classic_migration as classic_migration
+import reprobit.cmake_configure as cmake_configure
+from reprobit.cmake_source import effective_source_digest
 from reprobit.model import Digest
 from reprobit.schema import (
     BuildPlanDocument,
@@ -87,19 +90,19 @@ def test_transport_sibling_rejects_symlink_only_and_two_real_aliases(
     real = _executable(tmp_path / "elsewhere")
     (tmp_path / "link").symlink_to(real)
     with pytest.raises(
-        classic_migration.ClassicMigrationError,
+        cmake_configure.CMakeConfigureError,
         match="does not uniquely provide 'link'",
     ):
-        classic_migration._transport_sibling(tmp_path, "link")
+        cmake_configure._transport_sibling(tmp_path, "link")
 
     (tmp_path / "link").unlink()
     _executable(tmp_path / "link")
     _executable(tmp_path / "link.exe")
     with pytest.raises(
-        classic_migration.ClassicMigrationError,
+        cmake_configure.CMakeConfigureError,
         match="does not uniquely provide 'link'",
     ):
-        classic_migration._transport_sibling(tmp_path, "link")
+        cmake_configure._transport_sibling(tmp_path, "link")
 
 
 @pytest.mark.parametrize(
@@ -124,7 +127,9 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
         (transports / f"{name}.exe").symlink_to(name)
     module_root = tmp_path / "cmake"
     module_root.mkdir()
-    (module_root / "ReproBit.cmake").write_text("# fixture\n", encoding="utf-8")
+    (module_root / "ReproBit.cmake").write_bytes(
+        (Path(__file__).parents[1] / "cmake/ReproBit.cmake").read_bytes()
+    )
 
     admissions = (
         [
@@ -173,23 +178,33 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
         del bundle, root
         assert effective == workspace / "source"
         effective.mkdir(parents=True)
-        (effective / "CMakeLists.txt").write_text("project(fixture)\n")
+        (effective / "CMakeLists.txt").write_text(
+            "cmake_minimum_required(VERSION 3.20)\n"
+            "project(fixture C)\n"
+            "add_executable(app main.c)\n",
+            encoding="utf-8",
+        )
+        (effective / "main.c").write_text("int main(void) { return 0; }\n", encoding="utf-8")
         return ()
 
     def write_plan(bundle: ProjectBundle, effective: Path, output: Path) -> None:
         del bundle, effective
-        output.write_text("# generated fixture\n", encoding="utf-8")
+        output.write_text(
+            "reprobit_register_target(TARGET app ARTIFACT_ID program)\n"
+            'reprobit_write_plan(OUTPUT "${REPROBIT_TARGET_PLAN}")\n',
+            encoding="utf-8",
+        )
 
-    monkeypatch.setattr(classic_migration, "materialize_effective_workspace", materialize)
-    monkeypatch.setattr(classic_migration, "write_cmake_project_plan", write_plan)
-    monkeypatch.setattr(classic_migration, "cmake_module_path", lambda: module_root)
+    monkeypatch.setattr(cmake_configure, "materialize_effective_workspace", materialize)
+    monkeypatch.setattr(cmake_configure, "write_cmake_project_plan", write_plan)
+    monkeypatch.setattr(cmake_configure, "cmake_module_path", lambda: module_root)
 
     if mutate_source:
         with pytest.raises(
-            classic_migration.ClassicMigrationError,
+            cmake_configure.CMakeConfigureError,
             match="changed effective source",
         ):
-            classic_migration.configure_classic_producer_graph(
+            cmake_configure.configure_cmake_project(
                 _bundle(project_root),
                 project_root=project_root,
                 workspace_root=workspace,
@@ -204,10 +219,10 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
 
     if link_admission:
         with pytest.raises(
-            classic_migration.ClassicMigrationError,
+            cmake_configure.CMakeConfigureError,
             match=r"link admissions.*cannot encode",
         ):
-            classic_migration.configure_classic_producer_graph(
+            cmake_configure.configure_cmake_project(
                 _bundle(project_root),
                 project_root=project_root,
                 workspace_root=workspace,
@@ -219,7 +234,7 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
             )
         return
 
-    result = classic_migration.configure_classic_producer_graph(
+    result = cmake_configure.configure_cmake_project(
         _bundle(project_root),
         project_root=project_root,
         workspace_root=workspace,
@@ -228,10 +243,12 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
         compiler_transport=transports / "cl",
         resource_transport=transports / "rc",
         timeout_seconds=30,
+        defer_project_plan=True,
     )
 
     assert result.configured_build_root == (workspace / "build").resolve()
     assert result.effective_source_root == (workspace / "source").resolve()
+    assert result.effective_source_digest == effective_source_digest(workspace / "source")
     assert result.target_plan == (workspace / "build/reprobit-target-plan.json").resolve()
     assert result.compile_database == (workspace / "build/compile_commands.json").resolve()
     assert result.configure_log.is_file()
@@ -243,4 +260,36 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
     assert "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" in arguments
     assert f"-DREPROBIT_EFFECTIVE_SOURCE_ROOT={workspace / 'source'}" in arguments
     assert "-DREPROBIT_TERMINAL=ON" in arguments
+    bootstrap = workspace / "reprobit-cmake-import.cmake"
+    assert f"-DCMAKE_PROJECT_INCLUDE={bootstrap}" in arguments
+    bootstrap_text = bootstrap.read_text(encoding="utf-8")
+    assert f'include("{module_root / "ReproBit.cmake"}")' in bootstrap_text
+    assert "cmake_language(DEFER DIRECTORY" in bootstrap_text
+    assert "ID reprobit_import_plan CALL include" in bootstrap_text
+    assert str(workspace / "reprobit-project-plan.cmake") in bootstrap_text
+    assert "add_executable(app main.c)" in (workspace / "source/CMakeLists.txt").read_text(
+        encoding="utf-8"
+    )
     assert not (workspace / "build/program.exe").exists()
+
+    system_cmake = shutil.which("cmake")
+    if system_cmake is not None:
+        actual_build = workspace / "actual-cmake-build"
+        actual_plan = actual_build / "target-plan.json"
+        subprocess.run(
+            (
+                system_cmake,
+                "-S",
+                str(workspace / "source"),
+                "-B",
+                str(actual_build),
+                f"-DCMAKE_PROJECT_INCLUDE={bootstrap}",
+                f"-DREPROBIT_EFFECTIVE_SOURCE_ROOT={workspace / 'source'}",
+                f"-DREPROBIT_TARGET_PLAN={actual_plan}",
+            ),
+            check=True,
+            capture_output=True,
+        )
+        imported_plan = json.loads(actual_plan.read_text(encoding="utf-8"))
+        assert imported_plan["targets"][0]["name"] == "app"
+        assert imported_plan["targets"][0]["artifact_id"] == "program"

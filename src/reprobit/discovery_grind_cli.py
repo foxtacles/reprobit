@@ -78,8 +78,7 @@ def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> 
     if len(matches) != 1:
         choices = ", ".join(f"`{unit.id}`" for unit in matches)
         raise CLIError(
-            f"`{source}` has several compiler lanes ({choices}); choose one with "
-            "--translation-unit"
+            f"`{source}` has several compiler lanes ({choices}); choose one with --translation-unit"
         )
     unit = matches[0]
     plan = ProjectGrindPlan(
@@ -125,6 +124,7 @@ def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> 
         next_argv=("rbit", "discover", "grind", str(root), "--plan", destination.as_posix()),
     )
     return 0
+
 
 def _private_session(staged_root: Path, label: str) -> Path:
     return Path(tempfile.mkdtemp(prefix=f".reprobit-grind-{label}-", dir=staged_root))
@@ -242,6 +242,34 @@ def _cold_trial(
     return ColdTrialEvidence(accepted=status == 0, report=report)
 
 
+def _grind_callbacks(
+    args: argparse.Namespace,
+    *,
+    prepare_run: PrepareRun,
+    verify_command: VerifyCommand,
+) -> ProjectGrindCallbacks:
+    return ProjectGrindCallbacks(
+        probe_seed=lambda staged, node: _probe_seed(
+            args,
+            staged_root=staged,
+            node_id=node,
+            prepare_run=prepare_run,
+        ),
+        probe_donors=lambda staged, donors, progress: _probe_donors(
+            args,
+            staged_root=staged,
+            donor_ids=donors,
+            progress=progress,
+            prepare_run=prepare_run,
+        ),
+        cold_verify=lambda staged: _cold_trial(
+            args,
+            staged_root=staged,
+            verify_command=verify_command,
+        ),
+    )
+
+
 def command_discover_grind(
     args: argparse.Namespace,
     output: CLIOutput,
@@ -251,38 +279,32 @@ def command_discover_grind(
 ) -> int:
     """Run the public bounded auto-solve workflow."""
 
+    if getattr(args, "project_wide", False):
+        from reprobit.discovery_project_grind_cli import command_discover_project_grind
+
+        return command_discover_project_grind(
+            args,
+            output,
+            callbacks=_grind_callbacks(
+                args,
+                prepare_run=prepare_run,
+                verify_command=verify_command,
+            ),
+        )
+    if getattr(args, "reference_object", ()):
+        raise CLIError("--reference-object requires --project-wide")
+
     root = project_root(args.project)
-    report_directory = (
-        safe_project_path(root, load_project(root).state_dir)
-        / "reports"
-        / "grind"
-    )
-    with output.producer_activity(
-        "Finding and proving a low-cost exact intervention"
-    ) as progress:
+    report_directory = safe_project_path(root, load_project(root).state_dir) / "reports" / "grind"
+    with output.producer_activity("Finding and proving a low-cost exact intervention") as progress:
         result = run_project_grind(
             root,
             plan_relative=args.plan,
             accept_exact=args.accept_exact,
-            callbacks=ProjectGrindCallbacks(
-                probe_seed=lambda staged, node: _probe_seed(
-                    args,
-                    staged_root=staged,
-                    node_id=node,
-                    prepare_run=prepare_run,
-                ),
-                probe_donors=lambda staged, donors, progress: _probe_donors(
-                    args,
-                    staged_root=staged,
-                    donor_ids=donors,
-                    progress=progress,
-                    prepare_run=prepare_run,
-                ),
-                cold_verify=lambda staged: _cold_trial(
-                    args,
-                    staged_root=staged,
-                    verify_command=verify_command,
-                ),
+            callbacks=_grind_callbacks(
+                args,
+                prepare_run=prepare_run,
+                verify_command=verify_command,
             ),
             progress=progress,
         )
@@ -296,19 +318,30 @@ def command_discover_grind(
     cold_report_html: Path | None = None
     report_transaction_id: str | None = None
     report_warnings: list[str] = []
+    report_approval_command = human_command(
+        (
+            "rbit",
+            "discover",
+            "grind",
+            root,
+            "--plan",
+            args.plan,
+            "--accept-exact",
+        )
+    )
+    report_verify_command = human_command(("rbit", "verify", root))
 
     def warn_report(artifact: str, path: Path, exc: Exception) -> None:
         warning = f"{artifact}: {type(exc).__name__}: {exc}"
         report_warnings.append(warning)
-        authority_status = (
-            "The already-published authority remains committed."
+        project_status = (
+            "The already-saved project records remain unchanged."
             if result.published
-            else "Project authority remains unchanged."
+            else "Project files remain unchanged."
         )
         output.emit(
             "discovery_grind_report_warning",
-            f"The grind outcome is complete, but {artifact} could not be written. "
-            f"{authority_status}",
+            f"The grind outcome is complete, but {artifact} could not be written. {project_status}",
             project=root,
             published=result.published,
             artifact=artifact,
@@ -322,11 +355,10 @@ def command_discover_grind(
     if solution is not None:
         try:
             cold_files = {
-                relative_output(root, str(desired_cold_json)): canonical_json(
-                    solution.report
-                ),
+                relative_output(root, str(desired_cold_json)): canonical_json(solution.report),
                 relative_output(root, str(desired_cold_html)): render_report_html(
-                    solution.report
+                    solution.report,
+                    canonical_json_href=desired_cold_json.name,
                 ).encode("utf-8"),
             }
         except Exception as exc:
@@ -337,12 +369,10 @@ def command_discover_grind(
             relative_output(root, str(desired_grind_report)): render_grind_report_html(
                 result,
                 plan_relative=args.plan,
-                cold_report_html=(
-                    desired_cold_html.name if cold_files else None
-                ),
-                cold_report_json=(
-                    desired_cold_json.name if cold_files else None
-                ),
+                cold_report_html=(desired_cold_html.name if cold_files else None),
+                cold_report_json=(desired_cold_json.name if cold_files else None),
+                approval_command=report_approval_command,
+                verify_command=report_verify_command,
             ).encode("utf-8")
         }
         files.update(cold_files)
@@ -376,8 +406,7 @@ def command_discover_grind(
         reason_summary = ""
         if common:
             reason_summary = "\nMost common reasons:\n" + "\n".join(
-                f"- {reason} ({count} state{'s' if count != 1 else ''})"
-                for reason, count in common
+                f"- {reason} ({count} state{'s' if count != 1 else ''})" for reason, count in common
             )
         message = (
             f"No exact solution was found in {result.states} bounded declaration states.\n"
@@ -388,21 +417,19 @@ def command_discover_grind(
     elif result.published:
         classes, functions = (solution.state.parameter(name) for name in ("classes", "functions"))
         intervention_file, proof_file = solution.authority_files
-        authority_summary = (
-            "ReproBit saved 1 function intervention, reused the existing donor, "
-            "and updated its shared beneficiary attribution"
+        saved_summary = (
+            "ReproBit saved 1 function intervention, reused the matching shared donor, "
+            "and updated its cost assignment"
             if solution.reused_donor
             else "ReproBit saved 2 intervention records and their matching proof records"
         )
-        review_command = human_command(
-            ("git", "diff", "--", intervention_file, proof_file)
-        )
+        review_command = human_command(("git", "diff", "--", intervention_file, proof_file))
         verify_command_text = human_command(("rbit", "verify", root))
         message = (
-            f"Exact solution published for `{solution.symbol}`: "
+            f"Exact solution saved for `{solution.symbol}`: "
             f"`classes={classes}`, `functions={functions}`.\n"
-            "Cold byte identity and both required logic checks passed. "
-            f"{authority_summary} in one transaction.\n"
+            "A fresh build matched every target byte for byte, and both required logic "
+            f"checks passed. {saved_summary} in one safe update.\n"
             f"Changed: `{intervention_file}`, `{proof_file}`\n"
             f"Added cost: {solution.added_cost} relative points.\n"
             f"{grind_report_line}\n"
@@ -424,16 +451,16 @@ def command_discover_grind(
             )
         )
         reuse_line = (
-            "Approval will save 1 function intervention and update the existing "
-            "shared donor's beneficiary attribution.\n"
+            "Approval will save 1 function intervention, reuse the matching shared donor, "
+            "and update its cost assignment.\n"
             if solution.reused_donor
             else "Approval will save 2 intervention records and their matching proof records.\n"
         )
         message = (
             f"Exact solution found for `{solution.symbol}`: "
             f"`classes={classes}`, `functions={functions}`.\n"
-            "Cold byte identity and both required logic checks passed. Only review reports "
-            "were written; project files stayed unchanged.\n"
+            "A fresh build matched every target byte for byte, and both required logic "
+            "checks passed. Only review reports were written; project files stayed unchanged.\n"
             f"{reuse_line}"
             f"Added cost if approved: {solution.added_cost} relative points.\n"
             f"{grind_report_line}\n"
@@ -455,9 +482,7 @@ def command_discover_grind(
         added_interventions=(
             solution.added_interventions if solution is not None and result.published else 0
         ),
-        proposed_interventions=(
-            solution.added_interventions if solution is not None else 0
-        ),
+        proposed_interventions=(solution.added_interventions if solution is not None else 0),
         reused_donor=solution.reused_donor if solution is not None else False,
         added_cost=solution.added_cost if solution is not None else 0,
         symbol=solution.symbol if solution is not None else None,

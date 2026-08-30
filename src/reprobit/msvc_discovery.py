@@ -35,13 +35,15 @@ from reprobit.msvc_compile import (
     validate_msvc_compiler_arguments,
 )
 from reprobit.msvc_discovery_analysis import (
-    MsvcFunctionReference,
     analyze_msvc_discovery_products,
-    build_msvc_discovery_artifacts,
     msvc_analysis_authority_digest,
     msvc_discovery_analysis_implementation_digest,
+)
+from reprobit.msvc_discovery_coff import (
+    MsvcFunctionReference,
     observe_msvc_discovery_object,
 )
+from reprobit.msvc_discovery_proposals import build_msvc_discovery_artifacts
 from reprobit.process import CancellationToken
 from reprobit.strict_json import JsonValue, canonical_json
 
@@ -95,12 +97,8 @@ class MsvcDiscoveryRequest(StrictModel):
     schema_version: Literal[1] = 1
     source: Annotated[str, Field(min_length=1, max_length=4096)]
     plan: DiscoveryPlan
-    references: Annotated[
-        tuple[MsvcDiscoveryObjectInput, ...], Field(min_length=1, max_length=256)
-    ]
-    seeds: Annotated[
-        tuple[MsvcDiscoveryObjectInput, ...], Field(max_length=256)
-    ] = ()
+    references: Annotated[tuple[MsvcDiscoveryObjectInput, ...], Field(min_length=1, max_length=256)]
+    seeds: Annotated[tuple[MsvcDiscoveryObjectInput, ...], Field(max_length=256)] = ()
     compiler_arguments: Annotated[
         tuple[Annotated[str, Field(min_length=1, max_length=4096)], ...],
         Field(min_length=1, max_length=256),
@@ -213,9 +211,9 @@ def msvc_discovery_request_json_schema() -> JsonValue:
         for width, maximum in width_limits
     ]
     object_input = cast(dict[str, Any], definitions["MsvcDiscoveryObjectInput"])
-    cast(dict[str, Any], object_input["properties"])["object"][
-        "pattern"
-    ] = _CANONICAL_RELATIVE_PATH_PATTERN
+    cast(dict[str, Any], object_input["properties"])["object"]["pattern"] = (
+        _CANONICAL_RELATIVE_PATH_PATTERN
+    )
     root_properties = cast(dict[str, Any], generated["properties"])
     root_properties["source"]["pattern"] = _CANONICAL_RELATIVE_PATH_PATTERN
     root_properties["compiler_arguments"]["items"] = {
@@ -249,6 +247,7 @@ def msvc_discovery_request_json_schema() -> JsonValue:
         "$id": "urn:reprobit:schema:msvc-discovery-request:1",
         **generated,
     }
+
 
 class MsvcDiscoveryAdapter:
     """Render declaration cells, index every function, and qualify proposals."""

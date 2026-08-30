@@ -15,7 +15,11 @@ from reprobit.action_summary import main, publish_action_completion
 from reprobit.build import BuildPlan
 from reprobit.cli import _command_verify
 from reprobit.cli_output import CLIOutput
-from reprobit.costs import CostBreakdown
+from reprobit.costs import (
+    calculate_cost,
+    calculate_intervention_cost,
+    intervention_cost_row_digest,
+)
 from reprobit.model import (
     Artifact,
     ArtifactKind,
@@ -28,6 +32,7 @@ from reprobit.model import (
     ProvenanceKind,
     ProvenanceNode,
     Quarantine,
+    Scope,
     Verdict,
     quarantine_proof_binding,
 )
@@ -46,13 +51,20 @@ from reprobit.report import (
     ToolchainSummary,
 )
 from reprobit.report_io import write_report_html, write_report_json
-from reprobit.schema import MsvcRelease, ProducerGraphBuildAdapter
+from reprobit.schema import (
+    LegacyOracleInstallIntervention,
+    MsvcRelease,
+    OracleInstallRange,
+    ProducerGraphBuildAdapter,
+    intervention_authority_digest,
+)
 from reprobit.strict_json import canonical_json
 
 
 def _fixture_report() -> Report:
     digest = Digest.from_bytes(b"fixture")
     target_path = "build/sample.exe"
+    quarantine_scope = Scope(target="sample")
     runtime = RuntimeProofBinding.create(
         RuntimeBindingPreimage(
             build=BuildExecutionSummary(
@@ -93,6 +105,26 @@ def _fixture_report() -> Report:
         ranges=(ByteRange(offset=1, length=2),),
         byte_count=2,
         reason="fixture quarantine",
+        scope=quarantine_scope,
+    )
+    legacy_intervention = LegacyOracleInstallIntervention.freeze(
+        id="legacy",
+        scope=quarantine_scope,
+        rationale="fixture quarantine",
+        proof_receipt_digest=digest,
+        preimage_digest=digest,
+        oracle_body_digest=digest,
+        oracle_target="sample",
+        oracle_address=0,
+        ranges=(
+            OracleInstallRange(
+                preimage_range=ByteRange(offset=1, length=2),
+                output_range=ByteRange(offset=1, length=2),
+                oracle_range=ByteRange(offset=1, length=2),
+            ),
+        ),
+        byte_count=2,
+        maximum_oracle_payload_bytes=2,
     )
     legacy_payload = Artifact(
         id="legacy-payload",
@@ -115,6 +147,10 @@ def _fixture_report() -> Report:
     legacy_certificate = Certificate(
         id="certificate.legacy",
         intervention_id="legacy",
+        intervention_authority_digest=intervention_authority_digest(legacy_intervention),
+        intervention_cost_digest=intervention_cost_row_digest(
+            calculate_intervention_cost(legacy_intervention)
+        ),
         obligations=(
             ProofObligation(
                 name="quarantined_oracle_install",
@@ -202,15 +238,7 @@ def _fixture_report() -> Report:
             toolchain_origin=False,
             quarantines=(quarantine,),
         ),
-        costs=CostBreakdown(
-            model_version=2,
-            project_total=0,
-            unallocated_shared_cost=0,
-            by_class=(),
-            by_target=(),
-            by_function=(),
-            interventions=(),
-        ),
+        costs=calculate_cost((legacy_intervention,)),
         targets=(
             TargetSummary(
                 id="sample",
@@ -231,7 +259,11 @@ def test_action_summary_writes_outputs(tmp_path: Path, monkeypatch: object) -> N
     report = tmp_path / "report.json"
     fixture = _fixture_report()
     write_report_json(fixture, report)
-    write_report_html(fixture, report.with_suffix(".html"))
+    write_report_html(
+        fixture,
+        report.with_suffix(".html"),
+        canonical_json_path=report,
+    )
     output = tmp_path / "output"
     summary = tmp_path / "summary"
     monkeypatch.setenv("GITHUB_OUTPUT", str(output))  # type: ignore[attr-defined]
@@ -247,7 +279,7 @@ def test_action_summary_writes_outputs(tmp_path: Path, monkeypatch: object) -> N
     assert "toolchain-origin=false" in received
     summary_text = summary.read_text(encoding="utf-8")
     assert "not clean" in summary_text
-    assert "| Intervention cost | 0 relative points |" in summary_text
+    assert "| Intervention cost | 10000 relative points |" in summary_text
 
 
 def test_action_summary_rejects_output_path_line_breaks(tmp_path: Path) -> None:
@@ -280,7 +312,11 @@ def test_action_summary_refuses_a_stale_report_from_another_invocation(
     receipt_path = tmp_path / "completion.json"
     report = _fixture_report()
     write_report_json(report, report_path)
-    write_report_html(report, report_path.with_suffix(".html"))
+    write_report_html(
+        report,
+        report_path.with_suffix(".html"),
+        canonical_json_path=report_path,
+    )
     previous_nonce = "1" * 64
     current_nonce = "2" * 64
     publish_action_completion(
@@ -335,7 +371,11 @@ def test_policy_rejection_still_publishes_current_negative_report(
     receipt_path = tmp_path / "completion.json"
     report = _fixture_report()
     write_report_json(report, report_path)
-    write_report_html(report, report_path.with_suffix(".html"))
+    write_report_html(
+        report,
+        report_path.with_suffix(".html"),
+        canonical_json_path=report_path,
+    )
     publish_action_completion(
         report,
         report_path=report_path,
@@ -371,7 +411,11 @@ def test_action_refuses_tampered_authorized_quarantine(tmp_path: Path, monkeypat
     receipt_path = tmp_path / "completion.json"
     report = _fixture_report()
     write_report_json(report, report_path)
-    write_report_html(report, report_path.with_suffix(".html"))
+    write_report_html(
+        report,
+        report_path.with_suffix(".html"),
+        canonical_json_path=report_path,
+    )
     publish_action_completion(
         report,
         report_path=report_path,

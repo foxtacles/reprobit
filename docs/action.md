@@ -1,18 +1,19 @@
 # GitHub Action
 
-The ReproBit Action performs one cold build, checks its authenticity claims,
-writes JSON and HTML reports, and fails the job when the selected policy is not
-met. It installs ReproBit from the Action's own checkout, checks the backend and
-toolchain, and then runs the project's direct compiler and linker plan without
-CMake.
+The ReproBit Action performs one build from scratch, checks its authenticity
+claims, writes JSON and HTML reports, and fails the job when the selected policy
+is not met. It installs ReproBit from the Action's own checkout, checks the
+backend and toolchain, and then runs the project's direct compiler and linker
+plan without CMake.
 
 ## Before you run it
 
 The workflow that calls ReproBit must:
 
 1. check out the project and provide Python 3.11 or newer;
-2. run ReproBit's authenticated compiler provisioner and provide any protected
-   reference files;
+2. provide a compiler installation that matches the committed lock—the
+   authenticated provisioner is the normal way to prepare one—and provide any
+   protected reference binaries at the paths named by `reprobit.toml`;
 3. provide Wine launchers on macOS or Linux, when that backend is used; and
 4. pass the physical toolchain directory to the Action.
 
@@ -23,57 +24,88 @@ commit.
 
 ## Example
 
-This example uses a POSIX runner with Wine:
+This complete example uses the native Windows runner and shows only the inputs
+needed for the normal path. It assumes the protected reference binaries are
+already present; add the project's secret/download step before ReproBit when
+they are not committed. Replace the repeated `012345...` placeholder with the
+same ReproBit commit SHA in both places:
 
 ```yaml
+name: Verify with ReproBit
+
+on:
+  push:
+  pull_request:
+
 permissions:
   contents: read
 
-steps:
-  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-  - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-    with:
-      python-version: "3.11"
-  - name: Install the pinned ReproBit CLI
-    run: >-
-      python -m pip install
-      "git+https://github.com/foxtacles/reprobit.git@0123456789abcdef0123456789abcdef01234567"
-  - name: Provision and authenticate MSVC 4.2
-    run: >-
-      rbit toolchain provision
-      --destination "${{ runner.temp }}/msvc42"
-      --no-save
-  - id: reprobit
-    uses: foxtacles/reprobit@0123456789abcdef0123456789abcdef01234567
-    with:
-      project-directory: .
-      toolchain-root: ${{ runner.temp }}/msvc42
-      compiler-transport: ${{ runner.temp }}/msvc42/wine/x86/cl
-      resource-transport: ${{ runner.temp }}/msvc42/wine/x86/rc
-      jobs: 4
-      policy: clean # optional narrowing override
-      initialization-timeout: 600
-      compile-timeout: 600
-      link-timeout: 900
-      cleanup-timeout: 10
-      report-directory: build/reprobit-report
-  - name: Preserve ReproBit evidence
-    if: always()
-    uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-    with:
-      name: reprobit-report
-      path: build/reprobit-report
-      if-no-files-found: warn
+jobs:
+  verify:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.11"
+      - name: Install the pinned ReproBit CLI for provisioning
+        run: >-
+          python -m pip install
+          "git+https://github.com/foxtacles/reprobit.git@0123456789abcdef0123456789abcdef01234567"
+      - name: Provision and authenticate MSVC 4.2
+        run: >-
+          rbit toolchain provision
+          --destination "${{ runner.temp }}/msvc42"
+          --no-save
+      - id: reprobit
+        uses: foxtacles/reprobit@0123456789abcdef0123456789abcdef01234567
+        with:
+          project-directory: .
+          toolchain-root: ${{ runner.temp }}/msvc42
+      - name: Preserve ReproBit evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: reprobit-report
+          path: build/reprobit-report
+          if-no-files-found: warn
 ```
 
-On macOS and Linux, `compiler-transport` and `resource-transport` name the two
-locked host launchers inside the supplied toolchain root. Supply both or neither.
-Leave both empty on native Windows and follow the [native Windows guide](windows.md)
-for compiler setup and private-drive guarantees.
+The first ReproBit install makes `rbit toolchain provision` available before
+the Action starts. The Action then installs the same pinned checkout for its
+verification step. Omitted inputs use the project policy, four workers, bounded
+default timeouts, and `build/reprobit-report`.
 
-The four timeout inputs separately limit lane setup, each compiler or resource
-process, each librarian or linker process, and lane cleanup. `jobs` limits total
-parallel work.
+<details>
+<summary>Optional: narrow policy or tune parallelism and timeouts</summary>
+
+Add only the controls your runner actually needs:
+
+```yaml
+with:
+  # Keep the required toolchain input shown above.
+  jobs: 4
+  policy: clean
+  initialization-timeout: 600
+  compile-timeout: 600
+  link-timeout: 900
+  cleanup-timeout: 10
+  report-directory: build/reprobit-report
+```
+
+`policy: clean` can only narrow a project that permits quarantine; it cannot
+make a clean project less strict. The four timeouts separately limit setup,
+compiler/resource work, librarian/linker work, and cleanup.
+
+</details>
+
+On macOS and Linux, install Wine first and add `compiler-transport` and
+`resource-transport` for the two locked launchers inside the supplied toolchain
+root. Supply both or neither. Leave both empty on native Windows and follow the
+[native Windows guide](windows.md) for compiler setup and private-drive
+guarantees.
+
+`jobs` limits total parallel work.
 
 ## Policy
 
@@ -134,4 +166,4 @@ child chain without caching or uploading compiler bytes.
 
 That is framework evidence, not certification of a consuming project. Trust a
 specific runner and toolchain only after its own `rbit doctor --execute-probe`
-and cold Action fixture pass.
+and build-from-scratch Action fixture pass.

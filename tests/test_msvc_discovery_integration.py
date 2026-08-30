@@ -104,14 +104,9 @@ def test_msvc42_discovery_cold_resume_and_one_cell_extension(
     assert (cold.cells_built, cold.cells_cached) == (4, 0)
     assert (resumed.cells_built, resumed.cells_cached) == (0, 4)
     assert (extended.cells_built, extended.cells_cached) == (1, 4)
-    assert any(
-        proposal.kind is DiscoveryFindingKind.WHOLE_BODY
-        for proposal in cold.proposals
-    )
+    assert any(proposal.kind is DiscoveryFindingKind.WHOLE_BODY for proposal in cold.proposals)
     whole_body = next(
-        proposal
-        for proposal in cold.proposals
-        if proposal.kind is DiscoveryFindingKind.WHOLE_BODY
+        proposal for proposal in cold.proposals if proposal.kind is DiscoveryFindingKind.WHOLE_BODY
     )
     selected = {item.state_id: item.state for item in cold.selected_states}
     assert len(whole_body.state_ids) == 1
@@ -133,9 +128,7 @@ def test_msvc42_discovery_cold_resume_and_one_cell_extension(
         assert exported.stat().st_size == artifact.object_size
     assert any(event.get("kind") == "cache_miss" for event in first_events)
     assert {
-        event.get("phase")
-        for event in first_events
-        if event.get("kind") == "phase_started"
+        event.get("phase") for event in first_events if event.get("kind") == "phase_started"
     } >= {"discovery-compile", "discovery-analyze", "discovery-finalize"}
     final = next(event for event in first_events if event["event"] == "discovery_complete")
     assert final["built"] == 4
@@ -147,5 +140,5 @@ def test_msvc42_discovery_cold_resume_and_one_cell_extension(
     assert "report_json_digest" in final
     assert "report_html_digest" in final
     rendered = (tmp_path / "campaign.report.html").read_text(encoding="utf-8")
-    assert "Non-certifying discovery" in rendered
+    assert "Discovery preview" in rendered
     assert 'href="campaign.report.json"' in rendered

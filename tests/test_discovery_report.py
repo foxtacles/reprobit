@@ -178,18 +178,23 @@ def test_discovery_html_is_layered_noncertifying_and_semantic() -> None:
         report,
         canonical_json_name="campaign.report.json",
     )
+    assert rendered.count('<svg class="brand-mark"') == 1
 
     assert rendered.startswith("<!doctype html>")
-    assert "Non-certifying discovery" in rendered
+    assert "Discovery preview" in rendered
+    assert "Suggestions only" in rendered
     assert "1 candidate ready for review" in rendered
     assert "Combinations checked" in rendered
     assert "Reused from cache" in rendered
     assert "Nothing applied" in rendered
+    assert "Search scope:" in rendered
+    assert "target <code>sample</code>" in rendered
+    assert "TU <code>transform</code>" in rendered
     assert "Review-only next steps" in rendered
     assert 'id="candidate-kind-chart-title"' in rendered
     assert 'id="candidate-symbol-chart-title"' in rendered
-    assert '<code>_transform</code>' in rendered
-    assert '<pre><code>class ReproBitDiscoveryClass0;' in rendered
+    assert "<code>_transform</code>" in rendered
+    assert "<pre><code>class ReproBitDiscoveryClass0;" in rendered
     assert "Exact intervention JSON" in rendered
     assert "{\n  &quot;beneficiaries&quot;" in rendered
     assert "{\n  &quot;max_cells&quot;" in rendered
@@ -205,13 +210,11 @@ def test_discovery_html_caps_large_indexes_and_proposal_cards() -> None:
     fixture = _fixture_report()
     observation = fixture.observations[0]
     observations = tuple(
-        observation.model_copy(update={"cell_id": f"cell.{index:03d}"})
-        for index in range(201)
+        observation.model_copy(update={"cell_id": f"cell.{index:03d}"}) for index in range(201)
     )
     proposal = fixture.proposals[0]
     proposals = tuple(
-        proposal.model_copy(update={"finding_id": f"finding.{index:03d}"})
-        for index in range(101)
+        proposal.model_copy(update={"finding_id": f"finding.{index:03d}"}) for index in range(101)
     )
     report = DiscoveryCampaignReport(
         **{

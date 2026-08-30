@@ -25,16 +25,27 @@ families through reviewed library releases.
 
 ## Install and set up the pre-release
 
-Python 3.11 or newer is required.
+You need Python 3.11 or newer and Git. The one-time CMake import also needs your
+project's compatible CMake version on `PATH`. On macOS and Linux, install Wine
+and `wineserver`; native Windows does not use Wine.
 
 ```console
+git clone https://github.com/foxtacles/reprobit.git
+cd reprobit
 python -m venv .venv
-.venv/bin/python -m pip install /path/to/reprobit
-.venv/bin/rbit --version
+source .venv/bin/activate
+python -m pip install .
+rbit --version
 ```
 
-Those last two paths are `.venv\Scripts\python.exe` and `.venv\Scripts\rbit.exe` in Windows
-PowerShell. Activate the environment instead if that is your usual workflow.
+In Windows PowerShell, replace the activation line with:
+
+```powershell
+.\.venv\Scripts\Activate.ps1
+```
+
+Then run the same `python -m pip install .` and `rbit --version` commands. Keep
+the environment active while using `rbit` in your own project.
 
 ReproBit runs with Wine on macOS and Linux and natively on Windows. It can fetch and authenticate
 the supported MSVC 4.2 files from the pinned archaic-msvc repositories, or use an existing local
@@ -42,25 +53,39 @@ installation. Reference binaries remain project-owned and are never redistribute
 
 ### Project setup outline
 
-Create the project shell and prepare the current machine with the human-first setup command:
+The guided quickstart currently initializes one CMake target. From that target's
+existing project directory, create the ReproBit records and prepare the current
+machine:
 
 ```console
 rbit init . --project-id sample --profile msvc_4_2
 rbit setup .
+rbit source preview --project .
+rbit source lock --project .
+# Put the reference binary at reference/program.exe, then:
+rbit import cmake .
 rbit status .
 ```
 
-`init` creates the entry point and an initial source lock; it does not guess how an unreleased
-project should compile. `setup` downloads the compiler when needed, authenticates it, remembers
-its location, creates or checks the project lock, and tests the host. Pass
-`--toolchain-root /path/to/msvc42` to use an existing installation. `status` shows the next
-incomplete project step instead of requiring you to remember the setup sequence.
+`init` creates the project entry point and an empty, explicitly incomplete source record. `setup`
+downloads the compiler when needed, authenticates it, remembers its location, creates or checks
+the project lock, and tests the host. The two source commands show and then lock the Git-tracked
+files the build may read. `import cmake` creates a small reviewable build plan, records reference
+metadata, configures the existing CMake project once, and saves the direct compiler and linker
+steps. It also creates an empty review shard for each unambiguous source file, so discovery can
+start without hand-authored JSON. It does not edit `CMakeLists.txt`, and normal ReproBit builds
+never invoke CMake. If the CMake target is not `program`, the simplest setup is to pass its name
+to `rbit init --target`; the default rebuilt-output and reference filenames follow that target name.
+For a target with a custom output name, declare both the rebuilt artifact and reference binary
+paths with `--artifact` and `--oracle`, for example:
 
-Each project still needs its own source lock, build plan, reference metadata, and producer graph.
-After the reviewed build plan and project records exist, a CMake-based project can use CMake once
-to import its direct compiler and linker commands; normal ReproBit builds do not invoke it. This
-pre-release does not yet generate that build plan for a fresh project. The
-[command-line workflow](docs/cli.md) explains those project files, while
+```console
+rbit init . --target game --artifact build/GAME.EXE --oracle reference/GAME.EXE
+```
+
+Pass `--toolchain-root /path/to/msvc42` to `setup` when using an existing installation. `status`
+shows the next incomplete step instead of requiring you to remember the sequence. The
+[command-line workflow](docs/cli.md) explains the generated project records, while
 [platform setup](docs/platforms.md) and the
 [native Windows guide](docs/windows.md) cover unusual hosts.
 
@@ -71,6 +96,10 @@ rbit validate .
 rbit build .
 rbit verify . --report-dir build/reprobit-report
 ```
+
+Open `build/reprobit-report/report.html` in a browser. Its first view explains
+the overall result and each target; detailed symbols, commands, and evidence are
+available in collapsed Advanced sections.
 
 Failed builds keep a private workspace so problems can be inspected. Reclaim
 those workspaces with `rbit clean .`; the reusable build cache is kept by
@@ -194,11 +223,11 @@ flowchart LR
     style V fill:transparent,stroke:#94a3b8,stroke-width:1.5px
 ```
 
-_In words: on the clean path, the original binary is available only to the final verifier, never
+_In words: on the clean path, the reference binary is available only to the final verifier, never
 as material for the producer._
 
-A verdict is **clean** only when all three claims pass, the verification build starts cold, and no
-explicitly quarantined legacy shortcut runs. See the
+A verdict is **clean** only when all three claims pass, the verification build starts from scratch,
+and no explicitly quarantined legacy shortcut runs. See the
 [authenticity model](docs/authenticity.md) for the exact guarantees and trust boundary.
 
 ## Fast enough for everyday iteration
@@ -210,7 +239,7 @@ An unchanged build can finish without starting the compiler environment at all. 
 run in parallel, while separate work areas keep compiler scratch and debug state from leaking
 between jobs.
 
-`rbit verify` is deliberately different: it always performs a fresh, cold build and never treats
+`rbit verify` is deliberately different: it always builds from scratch and never treats
 the developer cache as certification evidence.
 
 ```mermaid
@@ -242,8 +271,8 @@ what it rebuilt._
 
 Interactive terminals get a progress bar with elapsed time. Redirected text logs receive regular
 heartbeats, and `rbit --format ndjson ...` emits stable machine-readable progress events for CI
-and other tools. The [GitHub Action](docs/action.md) runs the cold verification workflow and
-exports the individual authenticity results.
+and other tools. The [GitHub Action](docs/action.md) runs the build-from-scratch verification
+workflow and exports the individual authenticity results.
 
 ## Measure how much help the build needs
 
@@ -299,13 +328,13 @@ Detailed references:
 - [Platforms and logical paths](docs/platforms.md)
 - [Native Windows and external MSVC setup](docs/windows.md)
 - [One-time CMake import](docs/cmake.md)
-- [Migration](docs/migration.md)
+- [Temporary schema-v2 migration](docs/migration.md)
 - [Architecture](docs/architecture.md)
 
 ## Development
 
 ```console
-python -m pip install -e '/path/to/reprobit[test]'
+python -m pip install -e '.[test]'
 pytest
 ruff check src tests
 mypy src/reprobit

@@ -11,6 +11,7 @@ import reprobit.engine as engine_module
 from reprobit.artifacts import digest_bytes
 from reprobit.build import BuildPlan, BuildStep
 from reprobit.classic_overlay import render_classic_overlay_declarations
+from reprobit.costs import calculate_intervention_cost, intervention_cost_row_digest
 from reprobit.engine import (
     BuildPlanExecutor,
     EngineRequest,
@@ -64,6 +65,7 @@ from reprobit.schema import (
     TargetSpec,
     ToolchainLock,
     ToolchainRef,
+    intervention_authority_digest,
 )
 from reprobit.strict_json import JsonValue
 from reprobit.toolchains import portable_tree_receipt
@@ -125,9 +127,7 @@ def _builtin_identity_request(*, paired: bool) -> EngineRequest:
     executor = object.__new__(ClassicProducerGraphBuildExecutor)
     provider = object.__new__(ClassicProducerGraphRuntimeEvidenceProvider)
     executor.evidence_provider = (
-        provider
-        if paired
-        else object.__new__(ClassicProducerGraphRuntimeEvidenceProvider)
+        provider if paired else object.__new__(ClassicProducerGraphRuntimeEvidenceProvider)
     )
     request = cast(
         EngineRequest,
@@ -194,9 +194,7 @@ def _bundle(
         rationale="stabilize compiler state",
         carrier="state.carrier",
     )
-    seed_origin = (
-        ArtifactOrigin.STALE_REFUSED if stale_origin else ArtifactOrigin.FRESH_SEED
-    )
+    seed_origin = ArtifactOrigin.STALE_REFUSED if stale_origin else ArtifactOrigin.FRESH_SEED
     artifacts = (
         Artifact(
             id="seed.object",
@@ -221,6 +219,10 @@ def _bundle(
     certificate = Certificate(
         id="certificate.state",
         intervention_id=intervention.id,
+        intervention_authority_digest=intervention_authority_digest(intervention),
+        intervention_cost_digest=intervention_cost_row_digest(
+            calculate_intervention_cost(intervention)
+        ),
         obligations=(
             ProofObligation(
                 name="output_gate",
@@ -337,7 +339,7 @@ def test_report_publication_removes_stale_commit_when_target_changes_mid_commit(
     with pytest.raises(EngineError, match="target changed"):
         engine_module._publish_report_payloads(
             {
-                report_json: b'{}',
+                report_json: b"{}",
                 report_html: b"<html></html>",
             },
             final_reseal=reseal,
@@ -459,11 +461,7 @@ def test_toolchain_header_root_is_bound_to_complete_portable_tree_lock(
         content_digest=Digest(value=received.content_sha256),
     )
     bundle = bundle.model_copy(
-        update={
-            "toolchain_lock": bundle.toolchain_lock.model_copy(
-                update={"input_trees": (tree,)}
-            )
-        }
+        update={"toolchain_lock": bundle.toolchain_lock.model_copy(update={"input_trees": (tree,)})}
     )
     artifact = Artifact(
         id="toolchain.header",
@@ -692,9 +690,7 @@ def test_cold_execution_rejects_preexisting_output_before_running(tmp_path: Path
     )
 
     with pytest.raises(EngineError, match="already exist"):
-        BuildPlanExecutor(run_root=tmp_path / "run", max_workers=1).execute(
-            plan, cold=True
-        )
+        BuildPlanExecutor(run_root=tmp_path / "run", max_workers=1).execute(plan, cold=True)
     assert not marker.exists()
 
 
@@ -718,9 +714,7 @@ def test_produced_input_requires_a_dependency_edge(tmp_path: Path) -> None:
     )
 
     with pytest.raises(EngineError, match="without a dependency"):
-        BuildPlanExecutor(run_root=tmp_path / "run", max_workers=2).execute(
-            plan, cold=True
-        )
+        BuildPlanExecutor(run_root=tmp_path / "run", max_workers=2).execute(plan, cold=True)
 
 
 def test_distinct_output_spellings_may_not_resolve_to_one_path(tmp_path: Path) -> None:
@@ -743,9 +737,7 @@ def test_distinct_output_spellings_may_not_resolve_to_one_path(tmp_path: Path) -
     )
 
     with pytest.raises(EngineError, match="same path"):
-        BuildPlanExecutor(run_root=tmp_path / "run", max_workers=2).execute(
-            plan, cold=True
-        )
+        BuildPlanExecutor(run_root=tmp_path / "run", max_workers=2).execute(plan, cold=True)
 
 
 def test_declared_input_must_remain_unchanged(tmp_path: Path) -> None:
@@ -769,9 +761,7 @@ def test_declared_input_must_remain_unchanged(tmp_path: Path) -> None:
     )
 
     with pytest.raises(EngineError, match="input changed"):
-        BuildPlanExecutor(run_root=tmp_path / "run", max_workers=1).execute(
-            plan, cold=True
-        )
+        BuildPlanExecutor(run_root=tmp_path / "run", max_workers=1).execute(plan, cold=True)
 
 
 def test_declared_output_may_not_be_a_hardlink_to_an_input(tmp_path: Path) -> None:
@@ -792,9 +782,7 @@ def test_declared_output_may_not_be_a_hardlink_to_an_input(tmp_path: Path) -> No
     )
 
     with pytest.raises(EngineError, match="alias build inputs"):
-        BuildPlanExecutor(run_root=tmp_path / "run", max_workers=1).execute(
-            plan, cold=True
-        )
+        BuildPlanExecutor(run_root=tmp_path / "run", max_workers=1).execute(plan, cold=True)
 
 
 def test_declared_output_must_be_created(tmp_path: Path) -> None:
@@ -811,9 +799,7 @@ def test_declared_output_must_be_created(tmp_path: Path) -> None:
     )
 
     with pytest.raises(EngineError, match="declared artifact"):
-        BuildPlanExecutor(run_root=tmp_path / "run", max_workers=1).execute(
-            plan, cold=True
-        )
+        BuildPlanExecutor(run_root=tmp_path / "run", max_workers=1).execute(plan, cold=True)
 
 
 def test_sealed_oracle_must_match_committed_receipt(tmp_path: Path) -> None:
@@ -951,9 +937,7 @@ def test_logic_changing_overlay_is_not_certified_by_renamed_execution_witness(
             }
         ],
     }
-    rendered = render_classic_overlay_declarations(
-        [declaration], {"src/unit.cpp": source}
-    )
+    rendered = render_classic_overlay_declarations([declaration], {"src/unit.cpp": source})
     assert rendered.outputs["src/unit.cpp"] == effective
     assert fragment in effective
     assert b"return values[0]" in effective
@@ -981,6 +965,10 @@ def test_logic_changing_overlay_is_not_certified_by_renamed_execution_witness(
     certificate = Certificate(
         id="certificate.overlay",
         intervention_id=intervention.id,
+        intervention_authority_digest=intervention_authority_digest(intervention),
+        intervention_cost_digest=intervention_cost_row_digest(
+            calculate_intervention_cost(intervention)
+        ),
         obligations=(
             ProofObligation(
                 name=classic_semantic_obligation_name(intervention.family),
@@ -1045,10 +1033,7 @@ def test_logic_changing_overlay_is_not_certified_by_renamed_execution_witness(
 
     assert result.verdict.byte_exact
     assert not result.verdict.logic_certified
-    assert any(
-        issue.code == "missing-semantic-proof"
-        for issue in result.evidence.issues
-    )
+    assert any(issue.code == "missing-semantic-proof" for issue in result.evidence.issues)
 
 
 def test_runtime_certificate_cannot_be_rebound_to_another_artifact(tmp_path: Path) -> None:
@@ -1056,17 +1041,16 @@ def test_runtime_certificate_cannot_be_rebound_to_another_artifact(tmp_path: Pat
     reference = tmp_path / "reference.bin"
     reference.write_bytes(expected)
     bundle, provider = _bundle(tmp_path, expected)
-    certificate = provider.certificates[0].model_copy(
-        update={"artifact_ids": ("seed.object",)}
-    )
+    certificate = provider.certificates[0].model_copy(update={"artifact_ids": ("seed.object",)})
     provider = _FixtureEvidenceProvider(
         provider.artifacts,
         provider.provenance,
         (certificate,),
     )
 
-    with seal_file_oracle(reference) as oracle, pytest.raises(
-        ValueError, match="provenance certificate differs"
+    with (
+        seal_file_oracle(reference) as oracle,
+        pytest.raises(ValueError, match="provenance certificate differs"),
     ):
         ReproductionEngine().run_unsafe_for_testing(
             EngineRequest(
@@ -1199,6 +1183,8 @@ def test_runtime_legacy_evidence_is_logic_certified_but_quarantined(tmp_path: Pa
     certificate = Certificate(
         id="certificate.legacy",
         intervention_id=legacy.id,
+        intervention_authority_digest=intervention_authority_digest(legacy),
+        intervention_cost_digest=intervention_cost_row_digest(calculate_intervention_cost(legacy)),
         obligations=(
             ProofObligation(
                 name="quarantined_oracle_install",

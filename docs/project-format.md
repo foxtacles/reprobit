@@ -1,14 +1,14 @@
 # Project format
 
 A project has a small `reprobit.toml` entry point and strict JSON shards under `reprobit/`.
-`reprobit/source-manifest.json` is a complete, portable digest inventory of the admitted source
-read set. Inspect a proposed refresh with `rbit source preview`, then publish it with `rbit source
-lock`. The lock transaction rechecks every admitted file and updates only safe manifest
-bindings; it refuses stale effective-TU or source-overlay authority instead of silently updating
+After `rbit source lock`, `reprobit/source-manifest.json` is a complete, portable digest inventory
+of the admitted source read set. Inspect a proposed refresh with `rbit source preview`, then publish
+it with `rbit source lock`. The lock transaction rechecks every admitted file and updates only safe
+manifest bindings; it refuses stale effective-TU or source-overlay authority instead of silently updating
 reviewed intervention/proof pins. Committed files use project-relative source, artifact, and
-oracle paths plus logical DOS seats. The CLI project root selects the physical checkout;
-`--toolchain-root` supplies the local compiler installation. There is no separate oracle-root
-override.
+reference-binary paths plus logical DOS seats. The CLI project root selects the physical checkout;
+`--toolchain-root` supplies the local compiler installation. There is no separate reference-binary
+root override.
 
 Interventions are identified by stable IDs and a versioned `kind`. Each record declares its
 scope, parameters, dependencies, rationale, and beneficiaries. Proof shards contain committed
@@ -20,11 +20,14 @@ arbitrary payload fields are errors. File ordering never has semantic meaning; s
 in stable ID order and committed to one canonical model digest.
 
 The entry point selects one locked toolchain profile, an exact DOS logical-path profile, a build
-adapter, an authenticity policy, and target artifact/oracle pairs. Reviewed direct builds use
+adapter, an authenticity policy, and target artifact/reference-binary pairs. The schema calls the
+reference path an `oracle`. Reviewed direct builds use
 `build.kind = "producer-graph"`; the remaining `command` variant is a non-certifying developer
-convenience and is rejected by `verify`. CMake is a graph-extraction input selected by
-`rbit graph configure`, not a project build-adapter kind. The current schema-v3 certification path
-is the built-in classic-MSVC adapter. Physical host paths must not be embedded in JSON shards.
+convenience and is rejected by `verify`. CMake supplies graph-extraction input through the normal
+`rbit import cmake` flow. The split `rbit graph configure` and `rbit graph extract` commands are
+advanced alternatives; CMake is not a project build-adapter kind. The current schema-v3
+certification path is the built-in classic-MSVC adapter. Physical host paths must not be embedded
+in JSON shards.
 `reprobit/build-plan.json` is declarative authority for translation units,
 source-overlay IDs, explicit COMDAT group-order transforms, analysis-only link options, pinned
 project SDK libraries, archive exceptions, and target gates; it cannot name Python callables or

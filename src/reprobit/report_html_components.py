@@ -79,18 +79,13 @@ def table(
     head = "".join(f'<th scope="col">{escape(value)}</th>' for value in headers)
     if rows:
         body = "".join(
-            "<tr>"
-            + "".join(f"<td>{render_content(value)}</td>" for value in row)
-            + "</tr>"
+            "<tr>" + "".join(f"<td>{render_content(value)}</td>" for value in row) + "</tr>"
             for row in rows
         )
     else:
-        body = (
-            f'<tr><td class="empty" colspan="{len(headers)}">'
-            f"{escape(empty_message)}</td></tr>"
-        )
+        body = f'<tr><td class="empty" colspan="{len(headers)}">{escape(empty_message)}</td></tr>'
     return (
-        '<div class="table-scroll">'
+        f'<div class="table-scroll" role="region" aria-label="{escape(caption)}" tabindex="0">'
         f"<table{identity}><caption>{escape(caption)}</caption>"
         f"<thead><tr>{head}</tr></thead><tbody>{body}</tbody></table></div>"
     )
@@ -112,7 +107,7 @@ def filter_control(*, table_id: str, label: str, count: int) -> str:
 def details(*, identity: str, title: str, meta: str, body: str) -> str:
     return f"""
 <details class="advanced" id="{escape(identity)}">
-  <summary><span>{escape(title)}</span><span class="summary-meta">{escape(meta)}</span></summary>
+  <summary><h3>{escape(title)}</h3><span class="summary-meta">{escape(meta)}</span></summary>
   <div class="detail-body">{body}</div>
 </details>"""
 

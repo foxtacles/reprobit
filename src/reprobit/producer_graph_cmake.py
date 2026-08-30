@@ -1,14 +1,51 @@
-"""Migration-time CMake Unix Makefiles producer-graph extraction."""
+"""Bounded CMake Makefiles producer-graph extraction."""
 
 from __future__ import annotations
 
 import os
 import re
-import shlex
-from collections.abc import Iterable, Mapping, Sequence
+from collections import Counter
+from collections.abc import Mapping, Sequence
 from pathlib import Path, PurePosixPath
 from typing import cast
 
+from reprobit.cmake_graph_paths import (
+    attached_value as _attached_value,
+)
+from reprobit.cmake_graph_paths import (
+    build_working_directory as _build_working_directory,
+)
+from reprobit.cmake_graph_paths import (
+    normalize_arguments as _normalize_arguments,
+)
+from reprobit.cmake_graph_paths import (
+    path_reference as _path_reference,
+)
+from reprobit.cmake_graph_paths import (
+    replace_attached_value as _replace_attached_value,
+)
+from reprobit.cmake_graph_paths import (
+    toolchain_executable as _toolchain_executable,
+)
+from reprobit.cmake_makefile_metadata import (
+    MetadataReader,
+    read_compile_database,
+)
+from reprobit.cmake_makefile_metadata import (
+    compile_commands as _compile_commands,
+)
+from reprobit.cmake_makefile_metadata import (
+    expand_response as _expand_response,
+)
+from reprobit.cmake_makefile_metadata import (
+    metadata_files as _metadata_files,
+)
+from reprobit.cmake_makefile_metadata import (
+    resource_commands as _resource_commands,
+)
+from reprobit.cmake_makefile_metadata import (
+    split_command_line as _split_command_line,
+)
 from reprobit.model import Digest
 from reprobit.producer_graph import (
     ProducerGraphDocument,
@@ -18,187 +55,9 @@ from reprobit.producer_graph import (
     graph_reference,
     validate_graph_reference,
 )
-from reprobit.strict_json import strict_load
 
 
-def _replace_root(value: str, root: Path, marker: str) -> str:
-    native = os.fspath(root.resolve(strict=True))
-    candidates = (native, native.replace("\\", "/"))
-    result = value
-    for candidate in sorted(set(candidates), key=len, reverse=True):
-        result = result.replace(candidate, marker)
-    if marker in result:
-        prefix, separator, suffix = result.partition(marker)
-        result = prefix + separator + suffix.replace("\\", "/")
-    return result
-
-
-def _normalize_argument(
-    value: str,
-    *,
-    source_root: Path,
-    build_root: Path,
-    toolchain_root: Path,
-    produced_relatives: frozenset[str],
-) -> str:
-    result = _replace_root(value, source_root, "${SOURCE}")
-    result = _replace_root(result, build_root, "${BUILD}")
-    result = _replace_root(result, toolchain_root, "${TOOLCHAIN}")
-    folded = result.replace("\\", "/").casefold()
-    if folded in produced_relatives:
-        result = "${BUILD}/" + result.replace("\\", "/")
-    for prefix in ("/fo", "/fd", "/out:", "/implib:", "/pdb:", "/map:"):
-        if folded.startswith(prefix):
-            raw = result[len(prefix) :]
-            raw_folded = raw.replace("\\", "/").casefold()
-            if raw_folded in produced_relatives:
-                result = result[: len(prefix)] + "${BUILD}/" + raw.replace("\\", "/")
-            break
-    return result
-
-
-def _path_reference(
-    value: str,
-    *,
-    source_root: Path,
-    build_root: Path,
-    toolchain_root: Path,
-) -> str:
-    path = Path(value)
-    if not path.is_absolute():
-        path = build_root / path
-    resolved = path.resolve(strict=False)
-    for kind, root in (
-        ("source", source_root),
-        ("build", build_root),
-        ("toolchain", toolchain_root),
-    ):
-        try:
-            relative = resolved.relative_to(root.resolve(strict=True)).as_posix()
-        except ValueError:
-            continue
-        return graph_reference(kind, relative)
-    raise ProducerGraphError(f"producer path is outside all logical seats: {value!r}")
-
-
-def _attached_value(arguments: Sequence[str], prefixes: Sequence[str]) -> str | None:
-    for index, argument in enumerate(arguments):
-        folded = argument.casefold()
-        for prefix in prefixes:
-            if folded == prefix.casefold() and index + 1 < len(arguments):
-                return arguments[index + 1]
-            if folded.startswith(prefix.casefold()) and len(argument) > len(prefix):
-                return argument[len(prefix) :]
-    return None
-
-
-def _split_command_line(value: str) -> tuple[str, ...]:
-    """Split migration-time command text without eating native path separators."""
-
-    if os.name != "nt":
-        return tuple(shlex.split(value, posix=True))
-
-    # CMake's Windows command strings use the Microsoft C runtime rules, not
-    # POSIX shell escaping.  In particular, runs of backslashes are special
-    # only when they immediately precede a double quote.
-    arguments: list[str] = []
-    offset = 0
-    while offset < len(value):
-        while offset < len(value) and value[offset].isspace():
-            offset += 1
-        if offset == len(value):
-            break
-        argument: list[str] = []
-        quoted = False
-        while offset < len(value) and (quoted or not value[offset].isspace()):
-            if value[offset] == "\\":
-                start = offset
-                while offset < len(value) and value[offset] == "\\":
-                    offset += 1
-                backslashes = offset - start
-                if offset < len(value) and value[offset] == '"':
-                    argument.extend("\\" * (backslashes // 2))
-                    if backslashes % 2:
-                        argument.append('"')
-                        offset += 1
-                    elif quoted and offset + 1 < len(value) and value[offset + 1] == '"':
-                        argument.append('"')
-                        offset += 2
-                    else:
-                        quoted = not quoted
-                        offset += 1
-                else:
-                    argument.extend("\\" * backslashes)
-                continue
-            if value[offset] == '"':
-                if quoted and offset + 1 < len(value) and value[offset + 1] == '"':
-                    argument.append('"')
-                    offset += 2
-                else:
-                    quoted = not quoted
-                    offset += 1
-                continue
-            argument.append(value[offset])
-            offset += 1
-        arguments.append("".join(argument))
-    return tuple(arguments)
-
-
-def _expand_response(arguments: Iterable[str], *, build_root: Path) -> tuple[str, ...]:
-    expanded: list[str] = []
-    for argument in arguments:
-        if not argument.startswith("@"):
-            expanded.append(argument)
-            continue
-        response = Path(argument[1:])
-        if not response.is_absolute():
-            response = build_root / response
-        try:
-            response.resolve(strict=True).relative_to(build_root.resolve(strict=True))
-        except (OSError, ValueError) as exc:
-            raise ProducerGraphError(f"response file escapes configured build: {argument}") from exc
-        expanded.extend(_split_command_line(response.read_text(encoding="utf-8")))
-    return tuple(expanded)
-
-
-def _read_flags(path: Path, prefix: str) -> tuple[str, ...]:
-    values: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.startswith(prefix + " ="):
-            values.extend(_split_command_line(line.split("=", 1)[1].strip()))
-    return tuple(values)
-
-
-def _resource_commands(build_root: Path) -> tuple[tuple[str, tuple[str, ...]], ...]:
-    result: list[tuple[str, tuple[str, ...]]] = []
-    for makefile in sorted((build_root / "CMakeFiles").glob("*.dir/build.make")):
-        owner = makefile.parent.name.removesuffix(".dir")
-        flags = makefile.parent / "flags.make"
-        variables: dict[str, tuple[str, ...]] | None = None
-        for raw_line in makefile.read_text(encoding="utf-8").splitlines():
-            line = raw_line.strip()
-            if not line or line.startswith(("@", "#")):
-                continue
-            program = line.split(maxsplit=1)[0]
-            if Path(program).name.casefold() not in {"rc", "rc.exe"}:
-                continue
-            if not flags.is_file():
-                raise ProducerGraphError(f"resource target {owner!r} has no flags.make")
-            if variables is None:
-                variables = {
-                    "$(RC_DEFINES)": _read_flags(flags, "RC_DEFINES"),
-                    "$(RC_INCLUDES)": _read_flags(flags, "RC_INCLUDES"),
-                    "$(RC_FLAGS)": _read_flags(flags, "RC_FLAGS"),
-                }
-            tokens = _split_command_line(line)
-            expanded: list[str] = []
-            for token in tokens[1:]:
-                expanded.extend(variables.get(token, (token,)))
-            result.append((owner, tuple(expanded)))
-    return tuple(result)
-
-
-def extract_cmake_unix_makefiles_graph(
+def extract_cmake_makefiles_graph(
     *,
     configured_build_root: Path,
     effective_source_root: Path,
@@ -218,84 +77,94 @@ def extract_cmake_unix_makefiles_graph(
     build_root = configured_build_root.resolve(strict=True)
     source_root = effective_source_root.resolve(strict=True)
     toolchain = toolchain_root.resolve(strict=True)
-    database_path = build_root / "compile_commands.json"
-    raw_database = strict_load(database_path)
-    if not isinstance(raw_database, list):
-        raise ProducerGraphError("compile_commands.json must be an array")
+    raw_database = read_compile_database(build_root)
+    metadata_reader = MetadataReader()
     normalized_directive_inputs: dict[str, tuple[str, ...]] = {}
     for target_id, references in (directive_inputs or {}).items():
         if target_id not in target_outputs:
-            raise ProducerGraphError(
-                f"directive inputs name unknown target {target_id!r}"
-            )
+            raise ProducerGraphError(f"directive inputs name unknown target {target_id!r}")
         canonical = tuple(validate_graph_reference(value) for value in references)
         if any(not value.startswith("system-library/") for value in canonical):
-            raise ProducerGraphError(
-                "directive inputs must be system-library references"
-            )
-        if (
-            len({value.casefold() for value in canonical}) != len(canonical)
-            or canonical != tuple(sorted(canonical, key=str.casefold))
+            raise ProducerGraphError("directive inputs must be system-library references")
+        if len({value.casefold() for value in canonical}) != len(canonical) or canonical != tuple(
+            sorted(canonical, key=str.casefold)
         ):
             raise ProducerGraphError(
                 f"directive inputs for {target_id!r} are not canonical and unique"
             )
         normalized_directive_inputs[target_id] = canonical
 
+    compile_commands = _compile_commands(
+        raw_database,
+        build_root=build_root,
+        source_root=source_root,
+        toolchain_root=toolchain,
+    )
+    pdb_directory_owners = Counter(
+        command.pdb_directory_ref.casefold()
+        for command in compile_commands
+        if command.pdb_directory_ref is not None
+    )
     raw_nodes: list[dict[str, object]] = []
     produced_paths: set[str] = set()
-    for index, database_item in enumerate(raw_database):
-        if not isinstance(database_item, dict) or not isinstance(database_item.get("command"), str):
-            raise ProducerGraphError(f"compile record {index} lacks one literal command")
-        directory = Path(cast(str, database_item.get("directory"))).resolve(strict=True)
-        if directory != build_root:
-            raise ProducerGraphError("compile record uses an unexpected working directory")
-        arguments = _split_command_line(cast(str, database_item["command"]))
-        if not arguments:
-            raise ProducerGraphError("compile command is empty")
-        try:
-            Path(arguments[0]).resolve(strict=True).relative_to(toolchain)
-        except (OSError, ValueError) as exc:
-            raise ProducerGraphError("compile command does not use the selected toolchain") from exc
-        output = _attached_value(arguments[1:], ("/Fo", "-Fo"))
-        pdb = _attached_value(arguments[1:], ("/Fd", "-Fd"))
-        source = cast(str, database_item.get("file"))
-        if output is None or pdb is None or not source:
-            raise ProducerGraphError("compile command omits source, object, or PDB")
-        output_ref = _path_reference(
-            output, source_root=source_root, build_root=build_root, toolchain_root=toolchain
-        )
-        pdb_ref = _path_reference(
-            pdb, source_root=source_root, build_root=build_root, toolchain_root=toolchain
-        )
-        source_ref = _path_reference(
-            source, source_root=source_root, build_root=build_root, toolchain_root=toolchain
-        )
-        owner_match = re.match(r"(?i)^build/CMakeFiles/([^/]+)\.dir/", output_ref)
-        if owner_match is None:
-            raise ProducerGraphError(f"compile output has no CMake target owner: {output_ref}")
-        produced_paths.update(ref.removeprefix("build/") for ref in (output_ref, pdb_ref))
+    for command in compile_commands:
+        arguments = command.arguments
+        pdb_ref = command.pdb_ref
+        if command.pdb_directory_ref is not None:
+            if pdb_directory_owners[command.pdb_directory_ref.casefold()] == 1:
+                # Preserve authentic CMake argv for a directory's sole owner.
+                # VC 4.2 materializes ``vc40.pdb`` beneath that directory.
+                pdb_ref = command.pdb_directory_ref.rstrip("/") + "/vc40.pdb"
+            else:
+                # Shared ``vc40.pdb`` is incompatible with isolated compiler
+                # lanes.  Make the per-TU policy explicit as ``<object>.pdb``.
+                # This changes debug-path input and is not byte-neutral by itself.
+                pdb_ref = command.output_ref + ".pdb"
+                pdb_relative = PurePosixPath(pdb_ref.removeprefix("build/"))
+                pdb_path = build_root.joinpath(*pdb_relative.parts)
+                arguments = _replace_attached_value(
+                    arguments,
+                    ("/Fd", "-Fd"),
+                    os.fspath(pdb_path),
+                )
+        assert pdb_ref is not None
+        produced_paths.update(ref.removeprefix("build/") for ref in (command.output_ref, pdb_ref))
         raw_nodes.append(
             {
                 "role": ProducerRole.COMPILER,
-                "owner": owner_match.group(1),
+                "owner": command.owner,
                 "arguments": arguments[1:],
-                "inputs": (source_ref,),
-                "outputs": (output_ref, pdb_ref),
+                "inputs": (command.source_ref,),
+                "outputs": (command.output_ref, pdb_ref),
+                "working_directory": command.directory,
             }
         )
 
-    for owner, arguments in _resource_commands(build_root):
+    for owner, directory, arguments in _resource_commands(
+        build_root,
+        toolchain_root=toolchain,
+        reader=metadata_reader,
+    ):
         output = _attached_value(arguments, ("/fo", "-fo"))
         if output is None or not arguments:
             raise ProducerGraphError("resource command omits its output")
         source = arguments[-1]
         output_ref = _path_reference(
-            output, source_root=source_root, build_root=build_root, toolchain_root=toolchain
+            output,
+            working_directory=directory,
+            source_root=source_root,
+            build_root=build_root,
+            toolchain_root=toolchain,
         )
         source_ref = _path_reference(
-            source, source_root=source_root, build_root=build_root, toolchain_root=toolchain
+            source,
+            working_directory=directory,
+            source_root=source_root,
+            build_root=build_root,
+            toolchain_root=toolchain,
         )
+        if not output_ref.startswith("build/"):
+            raise ProducerGraphError("resource output is outside the configured build")
         produced_paths.add(output_ref.removeprefix("build/"))
         raw_nodes.append(
             {
@@ -304,29 +173,46 @@ def extract_cmake_unix_makefiles_graph(
                 "arguments": arguments,
                 "inputs": (source_ref,),
                 "outputs": (output_ref,),
+                "working_directory": directory,
             }
         )
 
     link_records: list[dict[str, object]] = []
-    for link_file in sorted((build_root / "CMakeFiles").glob("*.dir/link.txt")):
+    for link_file in _metadata_files(build_root, "link.txt"):
         owner = link_file.parent.name.removesuffix(".dir")
-        command = link_file.read_text(encoding="utf-8").strip()
-        arguments = _split_command_line(command)
+        directory = _build_working_directory(
+            link_file.parent.parent.parent,
+            build_root=build_root,
+            label=f"link target {owner!r} working directory",
+        )
+        link_command_text = metadata_reader.read_text(
+            link_file,
+            label=f"link target {owner!r} metadata",
+        ).strip()
+        arguments = _split_command_line(link_command_text)
         if not arguments:
             raise ProducerGraphError(f"empty link command for {owner!r}")
-        try:
-            Path(arguments[0]).resolve(strict=True).relative_to(toolchain)
-        except (OSError, ValueError) as exc:
-            raise ProducerGraphError(f"link command for {owner!r} uses another toolchain") from exc
-        expanded = _expand_response(arguments[1:], build_root=build_root)
+        executable_path = _toolchain_executable(
+            arguments[0],
+            working_directory=directory,
+            toolchain_root=toolchain,
+            label=f"link command for {owner!r}",
+        )
+        expanded = _expand_response(
+            arguments[1:],
+            build_root=build_root,
+            working_directory=directory,
+            reader=metadata_reader,
+        )
         output = _attached_value(expanded, ("/out:", "-out:"))
         if output is None:
             raise ProducerGraphError(f"link command for {owner!r} omits /out")
-        executable = Path(arguments[0]).name.casefold()
+        executable = executable_path.name.casefold()
         role = ProducerRole.LIBRARIAN if executable in {"lib", "lib.exe"} else ProducerRole.LINKER
         output_refs = [
             _path_reference(
                 output,
+                working_directory=directory,
                 source_root=source_root,
                 build_root=build_root,
                 toolchain_root=toolchain,
@@ -342,6 +228,7 @@ def extract_cmake_unix_makefiles_graph(
                 output_refs.append(
                     _path_reference(
                         implementation_library,
+                        working_directory=directory,
                         source_root=source_root,
                         build_root=build_root,
                         toolchain_root=toolchain,
@@ -351,6 +238,7 @@ def extract_cmake_unix_makefiles_graph(
                 output_refs.append(
                     _path_reference(
                         export_file,
+                        working_directory=directory,
                         source_root=source_root,
                         build_root=build_root,
                         toolchain_root=toolchain,
@@ -368,18 +256,22 @@ def extract_cmake_unix_makefiles_graph(
                 output_refs.append(
                     _path_reference(
                         pdb,
+                        working_directory=directory,
                         source_root=source_root,
                         build_root=build_root,
                         toolchain_root=toolchain,
                     )
                 )
         produced_paths.update(ref.removeprefix("build/") for ref in output_refs)
+        if any(not ref.startswith("build/") for ref in output_refs):
+            raise ProducerGraphError(f"link outputs for {owner!r} leave the build seat")
         link_records.append(
             {
                 "role": role,
                 "owner": owner,
                 "arguments": expanded,
                 "outputs": tuple(output_refs),
+                "working_directory": directory,
             }
         )
 
@@ -387,15 +279,13 @@ def extract_cmake_unix_makefiles_graph(
     raw_nodes.extend(link_records)
     normalized_nodes: list[dict[str, object]] = []
     for raw_node in raw_nodes:
-        arguments = tuple(
-            _normalize_argument(
-                value,
-                source_root=source_root,
-                build_root=build_root,
-                toolchain_root=toolchain,
-                produced_relatives=produced_relatives,
-            )
-            for value in cast(tuple[str, ...], raw_node["arguments"])
+        arguments = _normalize_arguments(
+            cast(tuple[str, ...], raw_node["arguments"]),
+            working_directory=cast(Path, raw_node["working_directory"]),
+            source_root=source_root,
+            build_root=build_root,
+            toolchain_root=toolchain,
+            produced_relatives=produced_relatives,
         )
         explicit_inputs = set(cast(tuple[str, ...], raw_node.get("inputs", ())))
         for argument in arguments:
@@ -482,9 +372,7 @@ def extract_cmake_unix_makefiles_graph(
                 depends_on=tuple(sorted(dependencies, key=str.casefold)),
             )
         )
-    terminal_targets = {
-        node.target_id for node in nodes if node.target_id is not None
-    }
+    terminal_targets = {node.target_id for node in nodes if node.target_id is not None}
     unused_directive_targets = set(normalized_directive_inputs) - terminal_targets
     if unused_directive_targets:
         raise ProducerGraphError(
@@ -496,9 +384,9 @@ def extract_cmake_unix_makefiles_graph(
         source_topology_digest=source_topology_digest_value,
         toolchain_lock_digest=toolchain_lock_digest,
         path_profile_id=path_profile_id,
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=tuple(sorted(nodes, key=lambda item: item.id.casefold())),
     )
 
 
-__all__ = ["extract_cmake_unix_makefiles_graph"]
+__all__ = ["extract_cmake_makefiles_graph"]

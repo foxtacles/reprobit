@@ -8,7 +8,7 @@ from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from reprobit.costs import CostBreakdown, calculate_cost
+from reprobit.costs import CostBreakdown, calculate_cost, intervention_cost_row_digest
 from reprobit.model import (
     Artifact,
     ArtifactKind,
@@ -213,8 +213,7 @@ class TargetComparisonSummary(StrictModel):
     @model_validator(mode="after")
     def exactness_matches_receipts(self) -> TargetComparisonSummary:
         exact = (
-            self.candidate_digest == self.oracle_digest
-            and self.candidate_size == self.oracle_size
+            self.candidate_digest == self.oracle_digest and self.candidate_size == self.oracle_size
         )
         if self.byte_exact != exact:
             raise ValueError("target comparison exactness differs from its receipts")
@@ -222,10 +221,7 @@ class TargetComparisonSummary(StrictModel):
             raise ValueError("target comparison difference offset contradicts exactness")
         if "\x00" in self.artifact or "\x00" in self.logical_artifact:
             raise ValueError("target comparison artifact path contains NUL")
-        if any(
-            part == ".."
-            for part in self.logical_artifact.replace("\\", "/").split("/")
-        ):
+        if any(part == ".." for part in self.logical_artifact.replace("\\", "/").split("/")):
             raise ValueError("target comparison logical artifact escapes its root")
         return self
 
@@ -409,12 +405,11 @@ class ProofReport(StrictModel):
         for artifact in self.artifacts:
             if any(input_id not in artifacts for input_id in artifact.inputs):
                 raise ValueError("proof-report artifact names a missing input")
-            if artifact.producer is not None and len(
-                producers_by_artifact.get(artifact.id, ())
-            ) != 1:
-                raise ValueError(
-                    "proof-report produced artifact must have one producer receipt"
-                )
+            if (
+                artifact.producer is not None
+                and len(producers_by_artifact.get(artifact.id, ())) != 1
+            ):
+                raise ValueError("proof-report produced artifact must have one producer receipt")
         provenance_by_artifact: dict[str, list[ProvenanceNode]] = {}
         for node in self.provenance:
             if node.artifact_id not in artifacts:
@@ -429,9 +424,7 @@ class ProofReport(StrictModel):
                         "proof-report provenance certificate differs from its artifact"
                     )
             provenance_by_artifact.setdefault(node.artifact_id, []).append(node)
-        if any(
-            artifact.id not in provenance_by_artifact for artifact in self.artifacts
-        ):
+        if any(artifact.id not in provenance_by_artifact for artifact in self.artifacts):
             raise ValueError("proof-report artifact has no provenance")
         for certificate in self.certificates:
             if any(item not in artifacts for item in certificate.artifact_ids):
@@ -443,9 +436,7 @@ class ProofReport(StrictModel):
                     if item.evidence_digest == semantic.evidence_digest
                 )
                 if len(semantic_obligations) != 1 or not semantic_obligations[0].passed:
-                    raise ValueError(
-                        "proof-report semantic proof differs from its obligation"
-                    )
+                    raise ValueError("proof-report semantic proof differs from its obligation")
                 if semantic.input_statement is None or semantic.output_statement is None:
                     raise ValueError("proof-report semantic proof omits its statements")
                 if not semantic.artifact_claims:
@@ -453,22 +444,16 @@ class ProofReport(StrictModel):
                 for claim in semantic.artifact_claims:
                     artifact = artifacts.get(claim.artifact_id)
                     if artifact is None or claim.artifact_id not in certificate.artifact_ids:
-                        raise ValueError(
-                            "proof-report semantic claim is outside its certificate"
-                        )
+                        raise ValueError("proof-report semantic claim is outside its certificate")
                     if artifact.digest != claim.digest or artifact.size != claim.size:
-                        raise ValueError(
-                            "proof-report semantic claim differs from its artifact"
-                        )
+                        raise ValueError("proof-report semantic claim differs from its artifact")
                     statement = (
                         semantic.input_statement
                         if claim.relation == "input"
                         else semantic.output_statement
                     )
                     if not _contains_content_receipt(statement, claim.digest, claim.size):
-                        raise ValueError(
-                            "proof-report semantic claim is absent from its statement"
-                        )
+                        raise ValueError("proof-report semantic claim is absent from its statement")
         self._require_acyclic_artifacts(artifacts)
         self._require_forward_producer_stages(artifacts)
         self._require_acyclic_provenance(nodes)
@@ -602,6 +587,37 @@ class PreviousComparison(StrictModel):
     byte_exact_changed: bool
 
 
+def _proof_oracle_intervention_ids(proof: ProofReport) -> frozenset[str]:
+    """Derive oracle-install authority independently from report cost labels."""
+
+    provenance_ids = tuple(
+        node.intervention_id
+        for node in proof.provenance
+        if node.kind is ProvenanceKind.ORACLE_INSTALL and node.intervention_id is not None
+    )
+    if len(provenance_ids) != len(set(provenance_ids)):
+        raise ValueError(
+            "proof requires exactly one oracle-install provenance node per intervention"
+        )
+    obligation_ids = {
+        certificate.intervention_id
+        for certificate in proof.certificates
+        if any(
+            obligation.name == "quarantined_oracle_install"
+            for obligation in certificate.obligations
+        )
+    }
+    provenance_id_set = frozenset(provenance_ids)
+    if provenance_id_set != obligation_ids:
+        missing = sorted(obligation_ids - provenance_id_set)
+        extra = sorted(provenance_id_set - obligation_ids)
+        raise ValueError(
+            "proof oracle-install provenance differs from certificate obligations; "
+            f"missing={missing}, extra={extra}"
+        )
+    return provenance_id_set
+
+
 class Report(StrictModel):
     """The self-authenticating report-v2 wire model."""
 
@@ -634,23 +650,85 @@ class Report(StrictModel):
         }
         unknown_cost_targets = cost_targets - target_ids
         if unknown_cost_targets:
+            raise ValueError(f"report costs name unknown targets: {sorted(unknown_cost_targets)}")
+        certificate_intervention_ids = [item.intervention_id for item in self.proof.certificates]
+        if len(certificate_intervention_ids) != len(set(certificate_intervention_ids)):
+            raise ValueError("report requires exactly one certificate per intervention")
+        certificate_id_set = set(certificate_intervention_ids)
+        certificates_by_intervention = {
+            item.intervention_id: item for item in self.proof.certificates
+        }
+        cost_intervention_ids = {item.intervention_id for item in self.costs.interventions}
+        uncosted_certificates = certificate_id_set - cost_intervention_ids
+        uncertified_costs = cost_intervention_ids - certificate_id_set
+        if uncosted_certificates or (self.verdict.logic_certified and uncertified_costs):
+            missing = sorted(certificate_id_set - cost_intervention_ids)
+            extra = sorted(cost_intervention_ids - certificate_id_set)
             raise ValueError(
-                "report costs name unknown targets: "
-                f"{sorted(unknown_cost_targets)}"
+                "report cost interventions differ from proof certificates; "
+                f"missing={missing}, extra={extra}"
             )
+        for cost in self.costs.interventions:
+            certificate = certificates_by_intervention.get(cost.intervention_id)
+            if certificate is None:
+                continue
+            if cost.intervention_authority_digest != certificate.intervention_authority_digest:
+                raise ValueError(
+                    "report intervention authority differs between cost and certificate "
+                    f"{cost.intervention_id!r}"
+                )
+            if intervention_cost_row_digest(cost) != certificate.intervention_cost_digest:
+                raise ValueError(
+                    "report intervention cost row differs from its certificate "
+                    f"{cost.intervention_id!r}"
+                )
+            semantic_families = {semantic.family for semantic in certificate.semantic_proofs}
+            if not semantic_families:
+                continue
+            expected_family = cost.family.value if cost.family is not None else None
+            if cost.kind != "classic_recipe" or semantic_families != {expected_family}:
+                raise ValueError(
+                    "report classic semantic family differs from intervention cost "
+                    f"{cost.intervention_id!r}"
+                )
+        oracle_costs = {
+            item.intervention_id: item
+            for item in self.costs.interventions
+            if item.kind == "legacy.oracle_install"
+        }
+        proof_oracle_ids = _proof_oracle_intervention_ids(self.proof)
+        if set(oracle_costs) != proof_oracle_ids:
+            missing = sorted(proof_oracle_ids - set(oracle_costs))
+            extra = sorted(set(oracle_costs) - proof_oracle_ids)
+            raise ValueError(
+                "report oracle costs differ from proof oracle installs; "
+                f"missing={missing}, extra={extra}"
+            )
+        quarantines = {item.id: item for item in self.verdict.quarantines}
+        if set(oracle_costs) != set(quarantines):
+            missing = sorted(set(quarantines) - set(oracle_costs))
+            extra = sorted(set(oracle_costs) - set(quarantines))
+            raise ValueError(
+                "report oracle costs differ from authenticity quarantines; "
+                f"missing={missing}, extra={extra}"
+            )
+        for intervention_id, cost in oracle_costs.items():
+            if quarantines[intervention_id].scope != cost.scope:
+                raise ValueError(
+                    f"report oracle cost scope differs from quarantine {intervention_id!r}"
+                )
+        if proof_oracle_ids and self.verdict.toolchain_origin:
+            raise ValueError("report with oracle-install proof cannot claim toolchain origin")
         if self.timings != tuple(sorted(self.timings, key=lambda item: item.stage)) or len(
             {item.stage for item in self.timings}
         ) != len(self.timings):
             raise ValueError("report timings must be unique and canonical")
         if self.verdict.quarantines != tuple(
             sorted(self.verdict.quarantines, key=lambda item: item.id)
-        ) or len({item.id for item in self.verdict.quarantines}) != len(
-            self.verdict.quarantines
-        ):
+        ) or len({item.id for item in self.verdict.quarantines}) != len(self.verdict.quarantines):
             raise ValueError("report quarantines must be unique and canonical")
         if any(
-            quarantine.ranges
-            != tuple(sorted(quarantine.ranges, key=lambda item: item.offset))
+            quarantine.ranges != tuple(sorted(quarantine.ranges, key=lambda item: item.offset))
             for quarantine in self.verdict.quarantines
         ):
             raise ValueError("report quarantine ranges must be canonical")
@@ -679,9 +757,7 @@ class Report(StrictModel):
             raise ValueError("failed proof certificates contradict the certified-logic verdict")
         if self.proof.audit_issues and self.verdict.clean:
             raise ValueError("a clean report cannot carry unresolved audit issues")
-        comparisons = {
-            item.id: item for item in self.proof.runtime.preimage.targets
-        }
+        comparisons = {item.id: item for item in self.proof.runtime.preimage.targets}
         proof_artifacts: dict[str, list[Artifact]] = {}
         for item in self.proof.artifacts:
             proof_artifacts.setdefault(item.logical_path, []).append(item)
@@ -695,15 +771,12 @@ class Report(StrictModel):
                 or comparison.oracle_digest != target.oracle_digest
                 or comparison.byte_exact != target.byte_exact
             ):
-                raise ValueError(
-                    "report target differs from its runtime comparison receipt"
-                )
+                raise ValueError("report target differs from its runtime comparison receipt")
             matches = proof_artifacts.get(target.artifact, [])
             artifact_matches = [
                 item
                 for item in matches
-                if item.size == target.candidate_size
-                and item.digest == target.candidate_digest
+                if item.size == target.candidate_size and item.digest == target.candidate_digest
             ]
             if len(artifact_matches) != 1 and "origin" not in issue_claims:
                 raise ValueError("report target differs from its proof artifact")
@@ -751,9 +824,7 @@ class Report(StrictModel):
                 pending.extend(artifact.inputs)
             provenance_ancestors: set[str] = set()
             pending_nodes = [
-                node.id
-                for node in nodes.values()
-                if node.artifact_id == quarantine.artifact_id
+                node.id for node in nodes.values() if node.artifact_id == quarantine.artifact_id
             ]
             while pending_nodes:
                 node_id = pending_nodes.pop()
@@ -779,9 +850,7 @@ class Report(StrictModel):
                 )
             install = installs[0]
             if len(install.certificate_ids) != 1:
-                raise ValueError(
-                    "report quarantine oracle-install ancestor lacks one exact proof"
-                )
+                raise ValueError("report quarantine oracle-install ancestor lacks one exact proof")
             certificate = certificates.get(install.certificate_ids[0])
             if (
                 certificate is None
@@ -929,9 +998,7 @@ class Report(StrictModel):
                     membership_digest=tree.membership_digest,
                     content_digest=tree.content_digest,
                 )
-                for tree in sorted(
-                    bundle.toolchain_lock.input_trees, key=lambda item: item.id
-                )
+                for tree in sorted(bundle.toolchain_lock.input_trees, key=lambda item: item.id)
             ),
         )
         paths = LogicalPathSummary(

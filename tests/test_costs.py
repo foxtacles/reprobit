@@ -9,6 +9,7 @@ from reprobit.costs import (
     CostModel,
     CostUnitKind,
     calculate_cost,
+    intervention_cost_row_digest,
 )
 from reprobit.model import Scope
 from reprobit.schema import (
@@ -20,6 +21,7 @@ from reprobit.schema import (
     SemanticRewriteIntervention,
     SemanticRewriteMethod,
     StateCarrierIntervention,
+    intervention_authority_digest,
 )
 from reprobit.strict_json import canonical_json
 
@@ -30,6 +32,78 @@ def test_cost_model_weights_are_fixed() -> None:
     assert CostModel.weights[CostClass.ORACLE_INSTALL] == 10_000
     with pytest.raises(TypeError):
         CostModel.weights[CostClass.STATE_CARRIER] = 0  # type: ignore[index]
+
+
+def test_cost_row_binds_complete_canonical_intervention_authority() -> None:
+    base = ClassicRecipeIntervention(
+        id="authority",
+        scope=Scope(target="program"),
+        rationale="complete authority fixture",
+        family=ClassicRecipeFamily.IMAGE_METADATA,
+        role=ClassicRecipeRole.PROJECT,
+        build_target="program",
+        parameters=(ClassicField(name="mode", value=1),),
+    )
+    beneficiary = Scope(
+        target="program",
+        translation_unit="main",
+        function="work()",
+    )
+    variants = (
+        StateCarrierIntervention(
+            id=base.id,
+            scope=base.scope,
+            rationale=base.rationale,
+            carrier="metadata",
+        ),
+        ClassicRecipeIntervention(
+            id=base.id,
+            scope=base.scope,
+            rationale=base.rationale,
+            family=ClassicRecipeFamily.IMAGE_LINK_ORDER,
+            role=base.role,
+            build_target=base.build_target,
+            parameters=base.parameters,
+        ),
+        ClassicRecipeIntervention(
+            id=base.id,
+            scope=Scope(target="alternate"),
+            rationale=base.rationale,
+            family=base.family,
+            role=base.role,
+            build_target=base.build_target,
+            parameters=base.parameters,
+        ),
+        ClassicRecipeIntervention(
+            id=base.id,
+            scope=base.scope,
+            rationale=base.rationale,
+            family=base.family,
+            role=base.role,
+            build_target=base.build_target,
+            parameters=(ClassicField(name="mode", value=2),),
+        ),
+        ClassicRecipeIntervention(
+            id=base.id,
+            scope=base.scope,
+            rationale=base.rationale,
+            family=base.family,
+            role=base.role,
+            build_target=base.build_target,
+            beneficiaries=(beneficiary,),
+            parameters=base.parameters,
+        ),
+    )
+
+    cost = calculate_cost((base,)).interventions[0]
+
+    assert cost.intervention_authority_digest == intervention_authority_digest(base)
+    assert intervention_cost_row_digest(
+        cost.model_copy(update={"scope": Scope(target="relabeled")})
+    ) != intervention_cost_row_digest(cost)
+    assert len(
+        {intervention_authority_digest(intervention).value for intervention in (base, *variants)}
+    ) == 1 + len(variants)
 
 
 def test_calculate_cost_counts_unique_nodes_once_and_allocates_shared_rationally() -> None:
@@ -70,6 +144,53 @@ def test_calculate_cost_counts_unique_nodes_once_and_allocates_shared_rationally
     assert by_function["first()"].exposure_cost == 10
     assert by_function["second()"].allocated_shared_cost.numerator == 5
     assert result.interventions[0].beneficiaries == (first, second)
+
+
+def test_composite_auxiliary_donors_are_each_charged_and_allocated_once() -> None:
+    function_scope = Scope(
+        target="program",
+        translation_unit="main",
+        function="work()",
+    )
+    primary = ClassicRecipeIntervention(
+        id="donor.primary",
+        scope=Scope(target="program", translation_unit="main"),
+        rationale="primary donor cost fixture",
+        family=ClassicRecipeFamily.DECLARATION_SHAPE,
+        role=ClassicRecipeRole.DONOR,
+        build_target="program",
+        beneficiaries=(function_scope,),
+    )
+    auxiliary = ClassicRecipeIntervention(
+        id="donor.auxiliary",
+        scope=Scope(target="program", translation_unit="main"),
+        rationale="auxiliary donor cost fixture",
+        family=ClassicRecipeFamily.PAD_SHAPE,
+        role=ClassicRecipeRole.DONOR,
+        build_target="program",
+        beneficiaries=(function_scope,),
+    )
+    composite = ClassicRecipeIntervention(
+        id="function.composite",
+        scope=function_scope,
+        rationale="composite donor cost fixture",
+        dependencies=(primary.id,),
+        family=ClassicRecipeFamily.RETAIL_EXACT_SAME_TU_INSTRUCTION_HYBRID_RESIZE,
+        role=ClassicRecipeRole.FUNCTION,
+        build_target="program",
+        symbol="work()",
+        parameters=(ClassicField(name="instruction_donor", value=auxiliary.id),),
+    )
+
+    result = calculate_cost((primary, auxiliary, composite, auxiliary))
+
+    assert result.project_total == 506
+    assert result.unallocated_shared_cost == 0
+    assert len(result.by_function) == 1
+    function = result.by_function[0]
+    assert function.direct_cost == 500
+    assert function.allocated_shared_cost.as_fraction() == 6
+    assert function.exposure_cost == 6
 
 
 def test_conflicting_duplicate_intervention_id_is_rejected() -> None:
@@ -288,9 +409,7 @@ def test_cost_record_rejects_noncanonical_class_or_weight() -> None:
     intervention["cost"] = 5
     wrong_class["project_total"] = 5
     wrong_class["unallocated_shared_cost"] = 5
-    wrong_class["by_class"][0].update(
-        cost_class="generated_supplier", cost=5
-    )
+    wrong_class["by_class"][0].update(cost_class="generated_supplier", cost=5)
     wrong_class["by_target"][0]["cost"] = 5
     with pytest.raises(ValidationError, match="canonical mapping"):
         CostBreakdown.model_validate_json(canonical_json(wrong_class))

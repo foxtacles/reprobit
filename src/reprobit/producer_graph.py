@@ -145,11 +145,15 @@ def _relative(value: str, *, label: str) -> str:
     return value
 
 
-def _validate_bound_path(value: str) -> None:
+def _validate_bound_path(value: str, *, allow_directory_form: bool = False) -> None:
     """Require one path token to be relative or rooted at one logical seat."""
 
     if not value or "\\" in value or _WINDOWS_ABSOLUTE.search(value):
         raise ValueError("producer path argument is not portable")
+    if allow_directory_form and value.endswith("/"):
+        value = value[:-1]
+        if not value:
+            raise ValueError("producer directory argument is empty")
     marker_count = sum(value.count(marker) for marker in _MARKERS)
     if marker_count:
         if marker_count != 1:
@@ -183,7 +187,10 @@ def _validate_argument_paths(values: tuple[str, ...]) -> None:
             payload = value[len(prefix) :]
             if not payload:
                 raise ValueError(f"producer path option {value!r} has no path")
-            _validate_bound_path(payload)
+            _validate_bound_path(
+                payload,
+                allow_directory_form=prefix in {"/fd", "-fd"},
+            )
             matched = True
             break
         if matched:
@@ -421,9 +428,7 @@ def _validate_noncompiler_option_grammar(node: ProducerNode) -> None:
             )
             if symbol_prefix is not None:
                 symbol = value[len(symbol_prefix) :]
-                if symbol and not any(
-                    marker in symbol for marker in ("/", "\\", "\x00", "${")
-                ):
+                if symbol and not any(marker in symbol for marker in ("/", "\\", "\x00", "${")):
                     continue
             if not value.startswith(("/", "-")) and (
                 PurePosixPath(value.replace("\\", "/")).suffix.casefold()
@@ -536,16 +541,11 @@ class ProducerNode(StrictModel):
     def validate_directive_inputs(cls, values: tuple[str, ...]) -> tuple[str, ...]:
         canonical = tuple(validate_graph_reference(value) for value in values)
         if any(not value.startswith("system-library/") for value in canonical):
-            raise ValueError(
-                "directive inputs must be bare locked system-library references"
-            )
-        if (
-            len({value.casefold() for value in canonical}) != len(canonical)
-            or canonical != tuple(sorted(canonical, key=str.casefold))
+            raise ValueError("directive inputs must be bare locked system-library references")
+        if len({value.casefold() for value in canonical}) != len(canonical) or canonical != tuple(
+            sorted(canonical, key=str.casefold)
         ):
-            raise ValueError(
-                "directive inputs must be unique and canonically ordered"
-            )
+            raise ValueError("directive inputs must be unique and canonically ordered")
         return canonical
 
     @field_validator("outputs")
@@ -637,7 +637,7 @@ class ProducerGraphDocument(StrictModel):
     source_topology_digest: Digest
     toolchain_lock_digest: Digest
     path_profile_id: Identifier
-    extractor: Literal["cmake-unix-makefiles-v1"]
+    extractor: Literal["cmake-makefiles-v1"]
     nodes: Annotated[tuple[ProducerNode, ...], Field(min_length=1)]
 
     @model_validator(mode="after")

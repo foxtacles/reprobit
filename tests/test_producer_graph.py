@@ -7,7 +7,8 @@ from typing import cast
 import pytest
 from pydantic import ValidationError
 
-import reprobit.producer_graph_cmake as producer_graph_cmake
+import reprobit.cmake_graph_paths as cmake_graph_paths
+import reprobit.cmake_makefile_metadata as cmake_makefile_metadata
 from reprobit.model import Digest
 from reprobit.producer_graph import (
     ProducerGraphDocument,
@@ -23,7 +24,7 @@ from reprobit.producer_graph import (
     source_topology_digest,
     write_producer_graph,
 )
-from reprobit.producer_graph_cmake import extract_cmake_unix_makefiles_graph
+from reprobit.producer_graph_cmake import extract_cmake_makefiles_graph
 
 
 def _digest(value: str) -> Digest:
@@ -33,9 +34,9 @@ def _digest(value: str) -> Digest:
 def test_windows_shell_words_preserve_backslashes_and_strip_quotes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(producer_graph_cmake.os, "name", "nt")
+    monkeypatch.setattr(cmake_makefile_metadata.os, "name", "nt")
 
-    assert producer_graph_cmake._split_command_line(
+    assert cmake_makefile_metadata.split_command_line(
         r'"C:\Program Files\MSVC\cl.exe" /FoC:\build\unit.obj C:\src\unit.cpp'
     ) == (
         r"C:\Program Files\MSVC\cl.exe",
@@ -47,9 +48,9 @@ def test_windows_shell_words_preserve_backslashes_and_strip_quotes(
 def test_windows_shell_words_follow_crt_backslash_quote_rules(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(producer_graph_cmake.os, "name", "nt")
+    monkeypatch.setattr(cmake_makefile_metadata.os, "name", "nt")
 
-    assert producer_graph_cmake._split_command_line(
+    assert cmake_makefile_metadata.split_command_line(
         'cl.exe /DVERSION=\\"1.0\\" "C:\\path with space\\\\" "" unit.cpp'
     ) == (
         "cl.exe",
@@ -60,8 +61,7 @@ def test_windows_shell_words_follow_crt_backslash_quote_rules(
     )
 
 
-def test_windows_bound_root_suffix_is_normalized_to_portable_separators(
-) -> None:
+def test_windows_bound_root_suffix_is_normalized_to_portable_separators() -> None:
     class WindowsRoot:
         def resolve(self, *, strict: bool) -> WindowsRoot:
             assert strict
@@ -70,11 +70,14 @@ def test_windows_bound_root_suffix_is_normalized_to_portable_separators(
         def __fspath__(self) -> str:
             return r"C:\source"
 
-    assert producer_graph_cmake._replace_root(
-        r"/FoC:\source\obj\unit.obj",
-        cast(Path, WindowsRoot()),
-        "${SOURCE}",
-    ) == "/Fo${SOURCE}/obj/unit.obj"
+    assert (
+        cmake_graph_paths.replace_root(
+            r"/FoC:\source\obj\unit.obj",
+            cast(Path, WindowsRoot()),
+            "${SOURCE}",
+        )
+        == "/Fo${SOURCE}/obj/unit.obj"
+    )
 
 
 def test_node_refuses_unseated_commands_and_response_files() -> None:
@@ -132,6 +135,52 @@ def test_node_accepts_normalized_seated_and_relative_paths() -> None:
         outputs=("build/obj/unit.obj",),
     )
     assert node.arguments[0] == "/I${SOURCE}/include"
+
+
+@pytest.mark.parametrize("option", ("/Fd", "/fd", "/fD", "-FD"))
+def test_compiler_directory_form_pdb_option_is_case_insensitive(option: str) -> None:
+    node = ProducerNode(
+        id="compiler.unit",
+        role=ProducerRole.COMPILER,
+        owner="core",
+        arguments=(f"{option}${{BUILD}}/obj/",),
+        inputs=("source/src/unit.cpp",),
+        outputs=("build/obj/unit.obj", "build/obj/vc40.pdb"),
+    )
+
+    assert node.arguments == (f"{option}${{BUILD}}/obj/",)
+
+
+def test_makefile_metadata_reader_enforces_file_and_aggregate_byte_limits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("abc", encoding="utf-8")
+    second.write_text("def", encoding="utf-8")
+    monkeypatch.setattr(cmake_makefile_metadata, "_MAX_METADATA_FILE_BYTES", 3)
+    monkeypatch.setattr(cmake_makefile_metadata, "_MAX_METADATA_TOTAL_BYTES", 5)
+    reader = cmake_makefile_metadata.MetadataReader()
+
+    assert reader.read_text(first, label="first metadata") == "abc"
+    with pytest.raises(ProducerGraphError, match="aggregate extraction byte limit"):
+        reader.read_text(second, label="second metadata")
+
+    monkeypatch.setattr(cmake_makefile_metadata, "_MAX_METADATA_FILE_BYTES", 2)
+    with pytest.raises(ProducerGraphError, match="file limit"):
+        cmake_makefile_metadata.MetadataReader().read_text(first, label="large metadata")
+
+
+def test_compile_database_reader_enforces_record_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "compile_commands.json").write_text("[{}, {}]", encoding="utf-8")
+    monkeypatch.setattr(cmake_makefile_metadata, "_MAX_COMPILE_RECORDS", 1)
+
+    with pytest.raises(ProducerGraphError, match="translation-unit limit"):
+        cmake_makefile_metadata.read_compile_database(tmp_path)
 
 
 def test_linker_directive_inputs_are_explicit_non_argv_edges() -> None:
@@ -208,9 +257,7 @@ def test_directive_inputs_fail_closed(
             ),
             inputs=inputs,
             directive_inputs=directive_inputs,
-            outputs=("build/APP.EXE",)
-            if role is ProducerRole.LINKER
-            else ("build/unit.obj",),
+            outputs=("build/APP.EXE",) if role is ProducerRole.LINKER else ("build/unit.obj",),
         )
 
 
@@ -238,7 +285,7 @@ def test_graph_requires_closed_build_dependencies() -> None:
             source_topology_digest=_digest("1"),
             toolchain_lock_digest=_digest("2"),
             path_profile_id="stable",
-            extractor="cmake-unix-makefiles-v1",
+            extractor="cmake-makefiles-v1",
             nodes=(compiler, linker),
         )
 
@@ -289,12 +336,10 @@ def test_graph_v2_binds_path_topology_but_not_source_content() -> None:
     )
     graph = ProducerGraphDocument(
         schema_version=2,
-        source_topology_digest=source_topology_digest(
-            ("include/unit.h", "src/unit.cpp")
-        ),
+        source_topology_digest=source_topology_digest(("include/unit.h", "src/unit.cpp")),
         toolchain_lock_digest=_digest("2"),
         path_profile_id="stable",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(node,),
     )
 
@@ -343,7 +388,7 @@ def test_graph_rejects_obsolete_source_bindings(
             **values,
             toolchain_lock_digest=_digest("2"),
             path_profile_id="stable",
-            extractor="cmake-unix-makefiles-v1",
+            extractor="cmake-makefiles-v1",
             nodes=(node,),
         )
 
@@ -606,6 +651,7 @@ def _configured_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
         "\n".join(
             (
                 "Building RC object",
+                "APP_OBJECTS = \\",
                 f"\t{toolchain_shell}/wine/x86/rc $(RC_DEFINES) $(RC_INCLUDES) "
                 f"$(RC_FLAGS) /fo CMakeFiles/app.dir/res/app.rc.res {source_shell}/res/app.rc",
             )
@@ -614,8 +660,7 @@ def _configured_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     )
     (core_dir / "objects1.rsp").write_text(compile_output, encoding="utf-8")
     (core_dir / "link.txt").write_text(
-        f"{toolchain_shell}/wine/x86/lib /nologo /out:core.lib "
-        "@CMakeFiles/core.dir/objects1.rsp",
+        f"{toolchain_shell}/wine/x86/lib /nologo /out:core.lib @CMakeFiles/core.dir/objects1.rsp",
         encoding="utf-8",
     )
     (app_dir / "objects1.rsp").write_text("CMakeFiles/app.dir/res/app.rc.res", encoding="utf-8")
@@ -640,7 +685,7 @@ def _configured_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
 
 def test_extracts_closed_direct_graph_and_round_trips(tmp_path: Path) -> None:
     source, build, toolchain = _configured_fixture(tmp_path)
-    graph = extract_cmake_unix_makefiles_graph(
+    graph = extract_cmake_makefiles_graph(
         configured_build_root=build,
         effective_source_root=source,
         toolchain_root=toolchain,
@@ -683,6 +728,137 @@ def test_extracts_closed_direct_graph_and_round_trips(tmp_path: Path) -> None:
     assert producer_graph_digest(received) == producer_graph_digest(graph)
 
 
+def test_directory_form_pdb_is_explicitly_isolated_per_translation_unit(
+    tmp_path: Path,
+) -> None:
+    source, build, toolchain = _configured_fixture(tmp_path)
+    other_source = source / "src/other.cpp"
+    other_source.write_text("fixture\n", encoding="utf-8")
+    database_path = build / "compile_commands.json"
+    database = json.loads(database_path.read_text(encoding="utf-8"))
+    first = database[0]
+    first["command"] = first["command"].replace(
+        "/FdCMakeFiles/core.dir/src/unit.cpp.obj.pdb",
+        "/FdCMakeFiles/core.dir/",
+    )
+    second = {
+        **first,
+        "file": str(other_source),
+        "command": first["command"].replace("unit.cpp", "other.cpp"),
+    }
+    database_path.write_text(json.dumps([first, second]), encoding="utf-8")
+    (build / "CMakeFiles/core.dir/objects1.rsp").write_text(
+        "CMakeFiles/core.dir/src/unit.cpp.obj CMakeFiles/core.dir/src/other.cpp.obj",
+        encoding="utf-8",
+    )
+
+    graph = extract_cmake_makefiles_graph(
+        configured_build_root=build,
+        effective_source_root=source,
+        toolchain_root=toolchain,
+        source_topology_digest_value=_digest("3"),
+        toolchain_lock_digest=_digest("4"),
+        path_profile_id="stable",
+        target_outputs={"app": "APP.EXE"},
+    )
+
+    compilers = tuple(node for node in graph.nodes if node.role is ProducerRole.COMPILER)
+    assert len(compilers) == 2
+    assert {node.outputs for node in compilers} == {
+        (
+            "build/CMakeFiles/core.dir/src/other.cpp.obj",
+            "build/CMakeFiles/core.dir/src/other.cpp.obj.pdb",
+        ),
+        (
+            "build/CMakeFiles/core.dir/src/unit.cpp.obj",
+            "build/CMakeFiles/core.dir/src/unit.cpp.obj.pdb",
+        ),
+    }
+    assert {
+        next(argument for argument in node.arguments if argument.casefold().startswith("/fd"))
+        for node in compilers
+    } == {
+        "/Fd${BUILD}/CMakeFiles/core.dir/src/other.cpp.obj.pdb",
+        "/Fd${BUILD}/CMakeFiles/core.dir/src/unit.cpp.obj.pdb",
+    }
+
+
+def test_single_owner_directory_form_pdb_preserves_authentic_argv(
+    tmp_path: Path,
+) -> None:
+    source, build, toolchain = _configured_fixture(tmp_path)
+    database_path = build / "compile_commands.json"
+    database = json.loads(database_path.read_text(encoding="utf-8"))
+    database[0]["command"] = database[0]["command"].replace(
+        "/FdCMakeFiles/core.dir/src/unit.cpp.obj.pdb",
+        "/FdCMakeFiles/core.dir/",
+    )
+    database_path.write_text(json.dumps(database), encoding="utf-8")
+
+    graph = extract_cmake_makefiles_graph(
+        configured_build_root=build,
+        effective_source_root=source,
+        toolchain_root=toolchain,
+        source_topology_digest_value=_digest("3"),
+        toolchain_lock_digest=_digest("4"),
+        path_profile_id="stable",
+        target_outputs={"app": "APP.EXE"},
+    )
+
+    compiler = next(node for node in graph.nodes if node.role is ProducerRole.COMPILER)
+    assert compiler.outputs == (
+        "build/CMakeFiles/core.dir/src/unit.cpp.obj",
+        "build/CMakeFiles/core.dir/vc40.pdb",
+    )
+    assert "/Fd${BUILD}/CMakeFiles/core.dir/" in compiler.arguments
+
+
+def test_nested_cmake_target_metadata_is_resolved_from_target_directory(
+    tmp_path: Path,
+) -> None:
+    source, build, toolchain = _configured_fixture(tmp_path)
+    nested = build / "subproject"
+    nested.mkdir()
+    (build / "CMakeFiles").rename(nested / "CMakeFiles")
+    database_path = build / "compile_commands.json"
+    database = json.loads(database_path.read_text(encoding="utf-8"))
+    database[0]["directory"] = str(nested)
+    database_path.write_text(json.dumps(database), encoding="utf-8")
+    resource_makefile = nested / "CMakeFiles/app.dir/build.make"
+    resource_makefile.write_text(
+        resource_makefile.read_text(encoding="utf-8").replace(
+            f"\t{toolchain.as_posix()}/wine/x86/rc",
+            f"\tcd {nested.as_posix()} && {toolchain.as_posix()}/wine/x86/rc",
+        ),
+        encoding="utf-8",
+    )
+
+    graph = extract_cmake_makefiles_graph(
+        configured_build_root=build,
+        effective_source_root=source,
+        toolchain_root=toolchain,
+        source_topology_digest_value=_digest("3"),
+        toolchain_lock_digest=_digest("4"),
+        path_profile_id="stable",
+        target_outputs={"app": "subproject/APP.EXE"},
+    )
+
+    compiler = next(node for node in graph.nodes if node.role is ProducerRole.COMPILER)
+    resource = next(node for node in graph.nodes if node.role is ProducerRole.RESOURCE)
+    librarian = next(node for node in graph.nodes if node.role is ProducerRole.LIBRARIAN)
+    linker = next(node for node in graph.nodes if node.role is ProducerRole.LINKER)
+    assert compiler.owner == "core"
+    assert compiler.outputs == (
+        "build/subproject/CMakeFiles/core.dir/src/unit.cpp.obj",
+        "build/subproject/CMakeFiles/core.dir/src/unit.cpp.obj.pdb",
+    )
+    assert resource.outputs == ("build/subproject/CMakeFiles/app.dir/res/app.rc.res",)
+    assert librarian.outputs == ("build/subproject/core.lib",)
+    assert linker.outputs[0] == "build/subproject/APP.EXE"
+    assert "build/subproject/core.lib" in linker.inputs
+    assert "${BUILD}/subproject/core.lib" in linker.arguments
+
+
 @pytest.mark.parametrize(
     ("directive_inputs", "message"),
     (
@@ -712,7 +888,7 @@ def test_extractor_rejects_invalid_directive_inputs(
 ) -> None:
     source, build, toolchain = _configured_fixture(tmp_path)
     with pytest.raises((ProducerGraphError, ValueError), match=message):
-        extract_cmake_unix_makefiles_graph(
+        extract_cmake_makefiles_graph(
             configured_build_root=build,
             effective_source_root=source,
             toolchain_root=toolchain,

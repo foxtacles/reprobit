@@ -1,16 +1,57 @@
-# CMake migration integration
+# Import a CMake project
 
-CMake is admitted only as a one-time graph-extraction input. It is never invoked
-by a certifying run. `rbit graph configure` materializes reviewed effective
-source authority, then performs one bounded configure—never a build—in a new or
-empty workspace. It forces **Unix Makefiles**,
-`CMAKE_EXPORT_COMPILE_COMMANDS=ON`, the locked compiler-role frontends, and
-`reprobit-target-plan.json`. This migration receipt is not certification
-evidence; only the extracted and reviewed producer graph can become authority.
+CMake is a one-time import input. ReproBit never invokes it during a normal
+build or a certifying verification run. After `init`, `setup`, source review,
+and placing the reference binary at its configured path, run:
+
+```console
+rbit import cmake .
+```
+
+This one command creates the minimal initial build records and empty per-source
+review shards, configures the existing CMake project without building it, and
+saves the direct compiler and linker graph. It does not edit `CMakeLists.txt`.
+The guided initializer currently starts with one target. ReproBit target IDs map
+to CMake targets with the same name by default. When the ReproBit ID is
+`program` but the CMake target and output are `app`, declare both facts
+explicitly. The `--oracle` option names the reference binary:
+
+```console
+rbit init . --target program --artifact build/app.exe --oracle reference/program.exe
+# After setup, source review, and placing the reference binary:
+rbit import cmake . --target program=app
+```
+
+For the simplest path, pass the real CMake target name to `rbit init --target`
+when starting the project; the default rebuilt-output and reference filenames
+then follow that name. Use the mapping form only when the ReproBit ID intentionally
+differs, and make sure the artifact declared at init matches the target's real
+output path.
+
+For example, initialize a target whose real output name is `GAME.EXE` with:
+
+```console
+rbit init . --target game --artifact build/GAME.EXE --oracle reference/GAME.EXE
+```
+
+The generated files are ordinary JSON that can be reviewed and committed. A
+failed first import removes only its new scaffold and retains the temporary
+workspace for diagnosis. Only the committed graph becomes build authority.
+
+<details>
+<summary>Advanced: how the CMake import works and how to split it for CI</summary>
+
+The import materializes the reviewed source, then performs one
+bounded configure—never a project build—in a fresh workspace. It uses **Unix
+Makefiles** on POSIX and the provisioned, authenticated **NMake Makefiles**
+frontend on native Windows. Both paths request `CMAKE_EXPORT_COMPILE_COMMANDS`,
+the locked compiler-role frontends, and `reprobit-target-plan.json`.
 
 Run `rbit cmake-module --file` to inspect the installed `ReproBit.cmake`.
-`graph configure` supplies that path and a generated project-plan path to a
-project containing this thin migration hook:
+The guided import supplies that module through `CMAKE_PROJECT_INCLUDE` and
+defers its generated target plan until the project has declared its targets.
+Projects that deliberately use the lower-level split commands can instead
+contain this thin import hook:
 
 ```cmake
 if(REPROBIT_PROJECT_PLAN)
@@ -112,10 +153,12 @@ not file contents: changing bytes at an existing admitted path leaves the
 command DAG reusable, while the source manifest and build plan still bind those
 new bytes independently. Adding or removing an admitted path, or changing the
 toolchain lock, logical-path profile, target set, terminal artifact path, or
-producer commands invalidates the graph and requires a new migration
+producer commands invalidates the graph and requires a new import
 extraction.
 
 Warm `build` stores non-certifying node artifacts in the leased project-local
 CAS. The first run normally misses; an unchanged second run should be all-hit
-with zero Wine lanes. `build --cold` and the unconditionally cold `verify`
-bypass the cache entirely.
+with zero Wine lanes. `build --cold` and `verify`, which always builds from
+scratch, bypass the cache entirely.
+
+</details>

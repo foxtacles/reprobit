@@ -11,8 +11,14 @@ from typing import Annotated, ClassVar, Literal
 
 from pydantic import Field, model_validator
 
-from reprobit.model import Identifier, Scope, StrictModel
-from reprobit.schema import ClassicRecipeFamily, ClassicRecipeIntervention, Intervention
+from reprobit.model import Digest, Identifier, Scope, StrictModel
+from reprobit.schema import (
+    ClassicRecipeFamily,
+    ClassicRecipeIntervention,
+    Intervention,
+    intervention_authority_digest,
+)
+from reprobit.strict_json import canonical_json
 
 
 class CostClass(StrEnum):
@@ -81,28 +87,18 @@ class CostModel:
             ClassicRecipeFamily.EQUAL_BODY_EH_STRUCTURAL_LOCAL: CostClass.STRUCTURAL_DONOR,
             ClassicRecipeFamily.SAME_SLOT_RESIZE: CostClass.STRUCTURAL_DONOR,
             ClassicRecipeFamily.EQUAL_BODY_EH_RELOC_LAYOUT: CostClass.STRUCTURAL_DONOR,
-            ClassicRecipeFamily.RETAIL_EXACT_RELOC_DIVERGENT: (
-                CostClass.CROSS_TU_OR_OVERLAY
-            ),
-            ClassicRecipeFamily.RETAIL_EXACT_SOURCE_EQUAL_BODY: (
-                CostClass.CROSS_TU_OR_OVERLAY
-            ),
-            ClassicRecipeFamily.RETAIL_EXACT_SOURCE_TARGET_CLOSURE: (
-                CostClass.CROSS_TU_OR_OVERLAY
-            ),
+            ClassicRecipeFamily.RETAIL_EXACT_RELOC_DIVERGENT: (CostClass.CROSS_TU_OR_OVERLAY),
+            ClassicRecipeFamily.RETAIL_EXACT_SOURCE_EQUAL_BODY: (CostClass.CROSS_TU_OR_OVERLAY),
+            ClassicRecipeFamily.RETAIL_EXACT_SOURCE_TARGET_CLOSURE: (CostClass.CROSS_TU_OR_OVERLAY),
             ClassicRecipeFamily.RETAIL_EXACT_CROSS_TU_COMPLETE_TARGET_RESIZE: (
                 CostClass.CROSS_TU_OR_OVERLAY
             ),
             ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING: CostClass.SEMANTIC_REWRITE,
-            ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION: (
-                CostClass.SEMANTIC_REWRITE
-            ),
+            ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION: (CostClass.SEMANTIC_REWRITE),
             ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION_REENCODING: (
                 CostClass.SEMANTIC_REWRITE
             ),
-            ClassicRecipeFamily.RETAIL_EXACT_COMPOSED_REWRITING: (
-                CostClass.SEMANTIC_REWRITE
-            ),
+            ClassicRecipeFamily.RETAIL_EXACT_COMPOSED_REWRITING: (CostClass.SEMANTIC_REWRITE),
             ClassicRecipeFamily.RETAIL_EXACT_WEB_RECOLOUR: CostClass.SEMANTIC_REWRITE,
             ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC: CostClass.BINARY_SURGERY,
             ClassicRecipeFamily.RETAIL_EXACT_SAME_TU_INSTRUCTION_HYBRID_RESIZE: (
@@ -137,9 +133,7 @@ class CostModel:
             try:
                 return cls._classic_classes[family]
             except KeyError as exc:
-                raise ValueError(
-                    f"classic recipe family {family.value!r} is not costable"
-                ) from exc
+                raise ValueError(f"classic recipe family {family.value!r} is not costable") from exc
         if family is not None:
             raise ValueError("only classic-recipe cost records may name a family")
         try:
@@ -152,9 +146,7 @@ class CostModel:
         return cls.weights[cls.classify(intervention)]
 
     @classmethod
-    def unit_counts(
-        cls, intervention: Intervention
-    ) -> Mapping[CostUnitKind, int]:
+    def unit_counts(cls, intervention: Intervention) -> Mapping[CostUnitKind, int]:
         if not (
             isinstance(intervention, ClassicRecipeIntervention)
             and intervention.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
@@ -165,9 +157,7 @@ class CostModel:
         outputs = parameters.get("outputs")
         graph = parameters.get("graph")
         if not isinstance(outputs, list) or not isinstance(graph, dict):
-            raise ValueError(
-                f"source overlay {intervention.id!r} lacks typed outputs or graph"
-            )
+            raise ValueError(f"source overlay {intervention.id!r} lacks typed outputs or graph")
 
         edit_count = 0
         for index, output in enumerate(outputs):
@@ -177,17 +167,13 @@ class CostModel:
                     f"source overlay {intervention.id!r} output {index} lacks typed ops"
                 )
             if not operations:
-                raise ValueError(
-                    f"source overlay {intervention.id!r} output {index} has no ops"
-                )
+                raise ValueError(f"source overlay {intervention.id!r} output {index} has no ops")
             edit_count += len(operations)
 
         generated = graph.get("generated_tus")
         admissions = graph.get("link_admissions")
         if not isinstance(generated, list) or not isinstance(admissions, list):
-            raise ValueError(
-                f"source overlay {intervention.id!r} graph lacks typed action lists"
-            )
+            raise ValueError(f"source overlay {intervention.id!r} graph lacks typed action lists")
         counts = {
             CostUnitKind.SOURCE_OVERLAY_EDIT: edit_count,
             CostUnitKind.GENERATED_TRANSLATION_UNIT: len(generated),
@@ -233,6 +219,7 @@ class CostUnitCharge(StrictModel):
 
 class InterventionCost(StrictModel):
     intervention_id: Identifier
+    intervention_authority_digest: Digest
     kind: str
     family: ClassicRecipeFamily | None = None
     cost_class: CostClass
@@ -381,9 +368,9 @@ class CostBreakdown(StrictModel):
     @model_validator(mode="after")
     def is_complete_and_canonical(self) -> CostBreakdown:
         intervention_ids = tuple(item.intervention_id for item in self.interventions)
-        if intervention_ids != tuple(sorted(intervention_ids)) or len(
-            intervention_ids
-        ) != len(set(intervention_ids)):
+        if intervention_ids != tuple(sorted(intervention_ids)) or len(intervention_ids) != len(
+            set(intervention_ids)
+        ):
             raise ValueError("cost interventions must be unique and canonical")
         if self.project_total != sum(item.cost for item in self.interventions):
             raise ValueError("project cost differs from typed intervention costs")
@@ -391,9 +378,7 @@ class CostBreakdown(StrictModel):
         class_expected: defaultdict[CostClass, tuple[int, int, int]] = defaultdict(
             lambda: (0, 0, 0)
         )
-        target_expected: defaultdict[str, tuple[int, int, int]] = defaultdict(
-            lambda: (0, 0, 0)
-        )
+        target_expected: defaultdict[str, tuple[int, int, int]] = defaultdict(lambda: (0, 0, 0))
         for item in self.interventions:
             unit_count = sum(unit.count for unit in item.units)
             interventions, units, cost = class_expected[item.cost_class]
@@ -431,14 +416,59 @@ class CostBreakdown(StrictModel):
             raise ValueError("cost-by-class totals differ from typed intervention costs")
         if self.by_target != expected_by_target:
             raise ValueError("cost-by-target totals differ from typed intervention costs")
-        expected_functions, expected_unallocated = _derive_function_costs(
-            self.interventions
-        )
+        expected_functions, expected_unallocated = _derive_function_costs(self.interventions)
         if self.by_function != expected_functions:
             raise ValueError("function costs differ from typed intervention attribution")
         if self.unallocated_shared_cost != expected_unallocated:
             raise ValueError("unallocated shared cost differs from typed interventions")
         return self
+
+
+def calculate_intervention_cost(intervention: Intervention) -> InterventionCost:
+    """Return the one canonical cost-ledger row for a typed intervention."""
+
+    cost_class = CostModel.classify(intervention)
+    unit_cost = CostModel.weight(intervention)
+    counts = CostModel.unit_counts(intervention)
+    units = tuple(
+        CostUnitCharge(
+            kind=kind,
+            count=counts[kind],
+            unit_cost=unit_cost,
+            cost=counts[kind] * unit_cost,
+        )
+        for kind in CostUnitKind
+        if counts.get(kind, 0)
+    )
+    return InterventionCost(
+        intervention_id=intervention.id,
+        intervention_authority_digest=intervention_authority_digest(intervention),
+        kind=intervention.kind,
+        family=(
+            intervention.family if isinstance(intervention, ClassicRecipeIntervention) else None
+        ),
+        cost_class=cost_class,
+        cost=sum(unit.cost for unit in units),
+        scope=intervention.scope,
+        beneficiaries=intervention.beneficiaries,
+        units=units,
+    )
+
+
+def intervention_cost_row_digest(cost: InterventionCost) -> Digest:
+    """Bind every visible field in one canonical intervention-cost row."""
+
+    return Digest.from_bytes(
+        canonical_json(
+            {
+                "schema": "reprobit-intervention-cost-row-v1",
+                "cost": cost.model_dump(
+                    mode="json",
+                    exclude_computed_fields=True,
+                ),
+            }
+        )
+    )
 
 
 def calculate_cost(interventions: Iterable[Intervention]) -> CostBreakdown:
@@ -451,7 +481,10 @@ def calculate_cost(interventions: Iterable[Intervention]) -> CostBreakdown:
             raise ValueError(f"intervention id {intervention.id!r} has conflicting definitions")
         unique[intervention.id] = intervention
 
-    item_costs: list[InterventionCost] = []
+    item_costs = [
+        calculate_intervention_cost(intervention)
+        for intervention in sorted(unique.values(), key=lambda item: item.id)
+    ]
     class_counts: defaultdict[CostClass, int] = defaultdict(int)
     class_unit_counts: defaultdict[CostClass, int] = defaultdict(int)
     class_costs: defaultdict[CostClass, int] = defaultdict(int)
@@ -459,44 +492,14 @@ def calculate_cost(interventions: Iterable[Intervention]) -> CostBreakdown:
     target_unit_counts: defaultdict[str, int] = defaultdict(int)
     target_costs: defaultdict[str, int] = defaultdict(int)
 
-    for intervention in sorted(unique.values(), key=lambda item: item.id):
-        cost_class = CostModel.classify(intervention)
-        unit_cost = CostModel.weight(intervention)
-        counts = CostModel.unit_counts(intervention)
-        units = tuple(
-            CostUnitCharge(
-                kind=kind,
-                count=counts[kind],
-                unit_cost=unit_cost,
-                cost=counts[kind] * unit_cost,
-            )
-            for kind in CostUnitKind
-            if counts.get(kind, 0)
-        )
-        cost = sum(unit.cost for unit in units)
-        unit_count = sum(unit.count for unit in units)
-        item_costs.append(
-            InterventionCost(
-                intervention_id=intervention.id,
-                kind=intervention.kind,
-                family=(
-                    intervention.family
-                    if isinstance(intervention, ClassicRecipeIntervention)
-                    else None
-                ),
-                cost_class=cost_class,
-                cost=cost,
-                scope=intervention.scope,
-                beneficiaries=intervention.beneficiaries,
-                units=units,
-            )
-        )
-        class_counts[cost_class] += 1
-        class_unit_counts[cost_class] += unit_count
-        class_costs[cost_class] += cost
-        target_counts[intervention.scope.target] += 1
-        target_unit_counts[intervention.scope.target] += unit_count
-        target_costs[intervention.scope.target] += cost
+    for item in item_costs:
+        unit_count = sum(unit.count for unit in item.units)
+        class_counts[item.cost_class] += 1
+        class_unit_counts[item.cost_class] += unit_count
+        class_costs[item.cost_class] += item.cost
+        target_counts[item.scope.target] += 1
+        target_unit_counts[item.scope.target] += unit_count
+        target_costs[item.scope.target] += item.cost
     by_function, unallocated_shared = _derive_function_costs(item_costs)
     by_class = tuple(
         ClassCost(
@@ -540,4 +543,6 @@ __all__ = [
     "RationalCost",
     "TargetCost",
     "calculate_cost",
+    "calculate_intervention_cost",
+    "intervention_cost_row_digest",
 ]

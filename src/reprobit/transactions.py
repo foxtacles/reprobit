@@ -58,9 +58,7 @@ def _relative_path(value: Path | str) -> Path:
     if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
         raise ValueError(f"transaction path must be canonical and relative: {value}")
     rendered = str(value)
-    if "\0" in rendered or (
-        "\\" in rendered and (isinstance(value, str) or os.sep != "\\")
-    ):
+    if "\0" in rendered or ("\\" in rendered and (isinstance(value, str) or os.sep != "\\")):
         raise ValueError(f"transaction path contains an unsafe character: {value}")
     return path
 
@@ -371,12 +369,17 @@ class CASTransaction:
                 )
         if membership_conflicts:
             raise TransactionConflict(
-                "transaction authority membership conflict: "
-                + "; ".join(membership_conflicts)
+                "transaction authority membership conflict: " + "; ".join(membership_conflicts)
             )
 
     @classmethod
     def _rollback_record(cls, root: Path, directory: Path, record: dict[str, Any]) -> None:
+        # A prepared journal has staged payloads but has not touched project
+        # paths.  In particular, a failed preimage check may be reporting a
+        # legitimate concurrent file; recovery must never mistake that file
+        # for a partially installed transaction output.
+        if record.get("state") == "prepared":
+            return
         operations = record.get("operations")
         if not isinstance(operations, list):
             raise TransactionError(f"malformed transaction journal: {directory}")
@@ -398,9 +401,7 @@ class CASTransaction:
                     if not target.is_file():
                         raise TransactionError(f"recovery target is not a file: {target}")
                     if result is None or sha256_file(target) != result:
-                        raise TransactionError(
-                            f"recovery target has unknown contents: {target}"
-                        )
+                        raise TransactionError(f"recovery target has unknown contents: {target}")
                     target.unlink()
                 target.parent.mkdir(parents=True, exist_ok=True)
                 os.replace(backup, target)

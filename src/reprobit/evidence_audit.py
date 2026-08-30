@@ -15,6 +15,7 @@ from reprobit.classic.semantic_contracts import (
     RegisteredSemanticContract,
     semantic_proof_matches,
 )
+from reprobit.costs import calculate_intervention_cost, intervention_cost_row_digest
 from reprobit.execution import (
     BuildExecutionReceipt,
     ObjectTransformAttestation,
@@ -42,6 +43,7 @@ from reprobit.schema import (
     ClassicRecipeIntervention,
     LegacyOracleInstallIntervention,
     ProjectBundle,
+    intervention_authority_digest,
 )
 from reprobit.toolchains import ToolchainError, portable_tree_receipt
 
@@ -247,6 +249,30 @@ class EvidenceAuditor:
         certificates_by_intervention: dict[str, list[Certificate]] = defaultdict(list)
         for certificate in certificates.values():
             certificates_by_intervention[certificate.intervention_id].append(certificate)
+            intervention = interventions.get(certificate.intervention_id)
+            if intervention is None:
+                issue(
+                    EvidenceClaim.LOGIC,
+                    "certificate-intervention",
+                    f"certificate {certificate.id!r} names a missing intervention",
+                )
+            elif certificate.intervention_authority_digest != intervention_authority_digest(
+                intervention
+            ):
+                issue(
+                    EvidenceClaim.LOGIC,
+                    "certificate-intervention-authority",
+                    f"certificate {certificate.id!r} binds different intervention authority",
+                )
+            if intervention is not None and (
+                certificate.intervention_cost_digest
+                != intervention_cost_row_digest(calculate_intervention_cost(intervention))
+            ):
+                issue(
+                    EvidenceClaim.LOGIC,
+                    "certificate-intervention-cost",
+                    f"certificate {certificate.id!r} binds a different intervention cost row",
+                )
             if any(
                 obligation.passed and obligation.evidence_digest is None
                 for obligation in certificate.obligations
@@ -1053,15 +1079,10 @@ class EvidenceAuditor:
                     "misclassified-object-transform",
                     f"object transform {node.id!r} is not typed as an object transform",
                 )
-            if (
-                node.kind is ProvenanceKind.PRODUCER
-                and node.origin is ArtifactOrigin.COMPOSED
-            ):
+            if node.kind is ProvenanceKind.PRODUCER and node.origin is ArtifactOrigin.COMPOSED:
                 artifact = artifacts.get(node.artifact_id)
                 parent = nodes.get(node.parents[0]) if len(node.parents) == 1 else None
-                parent_artifact = (
-                    artifacts.get(parent.artifact_id) if parent is not None else None
-                )
+                parent_artifact = artifacts.get(parent.artifact_id) if parent is not None else None
                 if (
                     node.operation != "publish"
                     or artifact is None

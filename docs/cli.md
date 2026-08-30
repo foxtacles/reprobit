@@ -31,57 +31,84 @@ the committed overlay graph.
 
 ## Create and inspect a project
 
+This guided path currently initializes one CMake target. Multi-target project
+records are supported, but their initial target list still requires advanced
+project setup.
+
 ```console
 rbit init . --project-id sample --profile msvc_4_2
+rbit setup .
 rbit source preview --project .
 rbit source lock --project .
+# Put the reference binary at reference/program.exe, then:
+rbit import cmake .
+rbit status .
 ```
 
-`init` creates the schema-v3 entry point and locks that initial file in a
-portable source manifest. It does not invent build plans, toolchain locks,
-interventions, proof expectations, or oracle receipts. `source preview` hashes
-the proposed Git-tracked read set without writing and reports added, removed,
-and changed paths, required producer-graph invalidation, and any effective
-translation-unit or source-overlay pins that no longer hold. Repeat `--path` on
-either source command to supply a complete replacement file or tree set. It is
-not a filter over the current manifest: every omitted path is reported as a
-removal.
+`init` creates the project entry point and an empty, explicitly incomplete
+source record, so a new project cannot appear build-ready before its real files
+are reviewed. `setup` prepares and records the compiler. `source preview`
+hashes the proposed Git-tracked read set without writing; `source lock` publishes that set
+after review. Repeat `--path` on either source command to provide an explicit
+complete file or tree set instead. It is not a filter over the current record:
+every omitted path is reported as a removal.
 
-`source lock` publishes the manifest and build-plan manifest binding in one
-content-addressed transaction. Every admitted source file is a transaction
-precondition, so an edit racing the lock aborts rather than committing a stale
-receipt. Pass `--invalidate-producer-graph` when preview says the generated
-graph is stale; reconfigure and run `rbit graph extract` afterward. A graph-v2
+`import cmake` is the normal fresh-project path. It derives the initial build
+plan, records the reference binary, and creates empty per-source review shards.
+It then configures the existing project once and saves the direct compiler and
+linker graph. It does not edit `CMakeLists.txt`.
+The simplest setup passes the real CMake target name to `rbit init --target`, so
+the default rebuilt-output and reference filenames follow it. Use
+`--target program=your_cmake_target` during import only when the ReproBit ID
+intentionally differs and its declared artifact still matches the real output.
+For example, a different CMake target and output can be declared without any
+later JSON edit:
+
+```console
+rbit init . --target program --artifact build/app.exe --oracle reference/program.exe
+# After setup, source review, and placing the reference binary:
+rbit import cmake . --target program=app
+```
+
+If the import fails, the generated scaffold is removed and the diagnostic
+workspace is retained for inspection.
+
+<details>
+<summary>Advanced: source-lock safety and generated project records</summary>
+
+`source lock` publishes the manifest and, when one exists, its build-plan
+binding in one content-addressed transaction. Every admitted source file is a
+transaction precondition, so an edit racing the lock aborts rather than
+committing a stale receipt. Pass `--invalidate-producer-graph` when preview says
+the generated graph is stale; rerun `rbit import cmake .` afterward. A graph-v2
 command DAG remains valid when bytes change at an already admitted path, but a
 source-path addition or removal changes its topology receipt. The command does
 not rewrite translation-unit, intervention, or proof pins. If effective TU bytes
 or a clean overlay input changed, it refuses the transaction and requires the
 adapter's reviewed regeneration workflow.
 
-### Complete project build authority
+### What setup records
 
 Machine setup and project setup are separate. `rbit setup` can finish installing
 and checking the compiler while `rbit status` still lists missing project files.
-ReproBit deliberately does not guess compile commands, reference metadata, or
-interventions for a fresh codebase.
+The guided CMake import derives only facts it can check: target mappings, empty
+initial intervention/proof records, the protected reference digest, and the
+compiler/linker commands CMake exposes. It does not guess entropy interventions.
 
-For a schema-v2 project, the one-way `rbit manifest migrate` command creates the
-reviewable build plan, intervention, proof, and reference-metadata shards. For a
-new project, use the typed files in the [grind example](../examples/grind/README.md)
-as a small reference and the [project-format guide](project-format.md) for each
-file's role. This pre-release does not yet provide a generic build-plan scaffold.
-`rbit status .` keeps every missing item visible; do not treat successful compiler
-setup as a build-ready project.
+For a schema-v2 project, the one-way `rbit manifest migrate` command creates its
+reviewable records. For a fresh CMake project, `rbit import cmake .` creates the
+minimal initial records and graph. `rbit status .` keeps every missing item
+visible; successful compiler setup alone never counts as a build-ready project.
 
-After adding the build plan, intervention, proof, and oracle documents, extract
-the migration-time producer graph described below. `validate` then loads every
-shard, rejects duplicate keys and IDs, checks
+`validate` then loads every shard, rejects duplicate keys and IDs, checks
 cross-document references and dependency cycles, receipts current manifest
 bytes, renders declarative overlays in memory, and checks effective TU digests.
 It never runs a build. `explain` and `cost` inspect the committed metadata only,
 so they remain useful while source bytes are being edited; `validate` is the
 command that checks those bytes against committed authority. `explain` lists
 interventions and their fixed costs; pass `--intervention ID` to select one.
+
+</details>
 
 ## Prepare the local compiler
 
@@ -94,6 +121,9 @@ rbit setup . --toolchain-root /opt/toolchains/msvc42
 `setup` selects or downloads the compiler, authenticates it, remembers the local
 path, creates the project lock when absent, verifies an existing lock, and probes
 the host backend. That is the normal workflow on macOS, Linux, and Windows.
+
+<details>
+<summary>Advanced: lock or probe a compiler installation manually</summary>
 
 The lower-level lock command remains available for CI images and unusual manual
 installations that need explicit runtime files:
@@ -117,28 +147,41 @@ or support files that participate in execution must be named explicitly with
 repeatable `--runtime-file` arguments and remain outside `profile_sources`.
 The five paths above are the complete portable runtime set for MSVC 4.2 on
 POSIX. `wine/x86/msvcenv.sh` is used only while CMake configures the one-time
-migration tree; direct ReproBit builds do not execute it, so the provisioner
+import tree; direct ReproBit builds do not execute it, so the provisioner
 authenticates it but the portable runtime lock does not include it.
 Committed lock paths are relative to the supplied toolchain root; the physical
 root itself remains local configuration. `rbit validate` rejects a registered
 profile whose locked profile paths are missing, disagree with these reviewed
 repository inputs, or assign an extra profile source to a wrapper path.
 
-`doctor` is the read-only diagnostic underneath setup. It checks the selected host backend and, when a project and toolchain root
-are supplied, verifies the installation against the committed lock. Add
+`doctor` is the read-only diagnostic underneath setup. It checks the selected
+host backend and, when a project and toolchain root are supplied, verifies the
+installation against the committed lock. Add
 `--execute-probe` to execute the bounded Wine probe on POSIX. On native Windows
 the opt-in probe creates a fresh, verified logon session and defines a temporary
 drive only in that session. The real producer starts suspended inside a nested
 Job Object, and the probe requires its descendant to observe the same drive.
 The mapping is removed only after that complete producer tree exits.
 
-## Commit the direct producer graph
+</details>
 
-CMake is a one-time migration input, not a build or certification runtime.
-The built-in classic migration command materializes the reviewed effective
-source tree and performs one bounded configure—never a build—into a new or
-empty workspace. It forces **Unix Makefiles**, `compile_commands.json`, and the
-reviewed `reprobit-target-plan.json`. Then commit the closed graph:
+## Import the direct build steps
+
+CMake is a one-time import input, not a build or certification runtime.
+For a normal project, the entire import is one command:
+
+```console
+rbit import cmake .
+```
+
+It materializes the reviewed source tree, performs one bounded configure—never
+a project build—and atomically commits the closed graph and its initial TU
+review shards. It uses **Unix Makefiles** on POSIX or the authenticated
+**NMake Makefiles** frontend on native Windows, plus `compile_commands.json`
+and the reviewed `reprobit-target-plan.json`.
+
+<details>
+<summary>Advanced: configure and extract separately for CI or unusual projects</summary>
 
 ```console
 rbit graph configure --project . \
@@ -174,6 +217,8 @@ and one bare library name; paths, duplicate declarations, and implicit runtime
 authorization are rejected. When an edge is missing, the direct runtime emits
 copy/paste-ready flags for a new explicit extraction.
 
+</details>
+
 ## Build and verify
 
 ```console
@@ -184,6 +229,15 @@ rbit verify . --report-dir build/reprobit-report
 Both commands use the compiler location remembered by `rbit setup`. `build` is
 the fast incremental loop; `verify` always builds from scratch and writes the
 trust report.
+
+### Reading the report
+
+Open `build/reprobit-report/report.html` in a browser. Start with the overall
+result and target summaries: they separately show whether the bytes match, the
+saved adjustments passed their logic checks, the output came from the declared
+toolchain, and the build started from scratch. Charts summarize build work and
+adjustment cost when those details are available. Exact symbols, commands,
+receipts, and canonical JSON stay available in collapsed Advanced sections.
 
 <details>
 <summary>Advanced: override machine paths and timeouts for one run</summary>
@@ -210,16 +264,16 @@ defaults are 600, 600, 900, and 10 seconds.
 <details>
 <summary>Advanced: incremental cache, build isolation, and proof details</summary>
 
-The built-in classic adapter requires a valid local compiler installation, but
+The built-in MSVC adapter requires a valid local compiler installation, but
 normal human runs resolve it from `rbit setup`. Plain `build` is a
 non-certifying incremental developer build: the first run populates an
 immutable project-local CAS, while an unchanged second run restores all nodes
 without preparing the logical workspace or starting a Wine lane. It emits
 typed per-node hit/miss events in NDJSON and a compact text/NDJSON summary with
 hit, miss, elapsed-time, invalidation, and initialized-lane counts. Use
-`build --cold` to bypass and construct no cache state. `verify` is always cold,
-has no warm/cache mode, and never opens the cache. It seals each
-reference oracle before execution, builds in a new run directory,
+`build --cold` to bypass and construct no cache state. `verify` always builds
+from scratch, has no warm/cache mode, and never opens the cache. It seals each
+reference binary before execution, builds in a new run directory,
 audits current-run producer and intervention evidence, performs literal
 comparison, and writes canonical JSON plus self-contained HTML. The two
 transport options are only needed for an explicit POSIX override. Before
@@ -252,8 +306,8 @@ records and blobs. It never removes an active build, cache data in use, or a
 saved report. Add `--older-than-hours 24` to either scope when you want to keep
 the most recent day. `--preview` performs the same safety checks, shows how much
 space can be freed, and prints the exact cleanup command without deleting
-anything. Cold verification never uses the incremental cache as trusted build
-input.
+anything. Verification from scratch never uses the incremental cache as trusted
+build input.
 
 The project authenticity policy is authoritative. A command-line policy
 override may only narrow acceptance; it cannot silently broaden a clean project
@@ -264,7 +318,28 @@ against committed project identities.
 
 ## Find and save compiler adjustments
 
-The normal workflow needs three short commands:
+The normal workflow starts with a bounded project preview, then repeats fresh
+proofs only when you approve the result:
+
+```console
+rbit discover grind . --project-wide
+rbit discover grind . --project-wide --accept-exact
+rbit verify .
+```
+
+Project-wide grind needs project-owned reference `.obj` files; it cannot derive
+them from the reference executable alone. Put those objects under `reference/`
+and name them after the source filename without its extension—for example,
+`src/widget.cpp` maps to `reference/widget.obj`—or use the exact translation-unit
+ID. The preview tries a small round-robin sample across eligible source files
+and keeps its summary at
+`.reprobit-state/reports/grind/project/report.html`. Each outcome links to a
+detailed decision report and a persisted bounded plan. Exact previews show the
+copyable, platform-quoted approval command. `--accept-exact` grants advance
+permission for another fresh proof run to save only the solutions that still
+pass byte identity and logic checks. Review the changed files in `git diff`.
+
+For precise control over one function, the expert flow remains available:
 
 ```console
 rbit discover init . \
@@ -272,25 +347,25 @@ rbit discover init . \
   --symbol '?Transform@Widget@@QAEHH@Z' \
   --reference reference/widget.obj
 rbit discover grind .
-rbit discover grind . --accept-exact
 ```
 
-`init` finds the matching compile step and creates a four-state project plan.
-The first `grind` is a read-only preview. It keeps a human report
-at `.reprobit-state/reports/grind/report.html` for both exact and unsuccessful
-bounded searches. Exact results link to the separate cold-verification report.
-The command only reports a solution after a cold, byte-exact build with passing
-logic checks. `--accept-exact` grants
-advance permission for another fresh proof run to save the resulting
-intervention and proof records together. Follow it with `rbit verify .` and
-review the changed project files in `git diff`.
+`init` finds the matching compile step and writes a four-state plan. Running
+`grind` without `--project-wide` evaluates only that plan. It writes
+`.reprobit-state/reports/grind/report.html`; an exact preview includes its own
+fresh approval command.
 
 The advanced `rbit discover run REQUEST` command is a broader resumable campaign.
 It reports whole-function, private-donor, and same-symbol mosaic proposals but
 does not save them. See the [discovery guide](discovery.md) for both workflows,
 incremental behavior, progress events, and reports.
 
-## Schema-v2 migration
+Raw `discover run` proposals are not accepted by certification commands.
+Candidate exploration stays in ignored state. The narrow project-aware
+`discover grind --accept-exact` path reruns the logic checks, rebuilds and
+verifies the candidate from scratch, and saves only a passing exact result.
+
+<details>
+<summary>Temporary: import an unreleased schema-v2 project</summary>
 
 ```console
 rbit manifest migrate tools/legacy-manifest.json --project-root .
@@ -306,24 +381,28 @@ reviewing the generated schema-v3 project.
 The first command is a deterministic preview. `--apply` publishes the complete
 schema-v3 tree in one content-addressed transaction after validating it in a
 temporary project. Migration is one-way: normal commands never load schema v2.
-Raw legacy oracle or instruction payload fields become digest-only redactions;
-they do not become executable recipe parameters.
+Raw legacy reference-byte or instruction payload fields become digest-only
+redactions; they do not become executable recipe parameters.
 
-## Reports and migration-time CMake
+</details>
+
+## Render an existing report
 
 ```console
 rbit report build/reprobit-report/report.json
-rbit cmake-module --file
 ```
 
 `report` strictly re-reads canonical report JSON before rendering HTML.
-`cmake-module` prints the installed module directory, or the complete
-`ReproBit.cmake` path with `--file`. The module is used only to configure and
-export the reviewed migration graph; normal `build` and `verify` runs do not
-load it.
 
-Raw `discover run` proposals and automatic repinning are not accepted by the
-certification commands. Candidate exploration stays in ignored state. The
-narrow project-aware `discover grind --accept-exact` path is the explicit
-transactional adapter: it regenerates proof expectations, cold-verifies them,
-and publishes only a passing exact result.
+<details>
+<summary>Advanced: inspect the one-time CMake import module</summary>
+
+```console
+rbit cmake-module --file
+```
+
+`cmake-module` prints the installed module directory, or the complete
+`ReproBit.cmake` path with `--file`. The module is used only during the one-time
+CMake import; normal `build` and `verify` runs do not load it.
+
+</details>

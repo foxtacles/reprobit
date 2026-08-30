@@ -366,7 +366,7 @@ def test_cold_prepare_rejects_cross_target_rdata_before_runtime(
         source_topology_digest=Digest.from_bytes(b"topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(compiler, *linkers),
     )
 
@@ -536,7 +536,7 @@ def test_compiler_translation_unit_authority_rejects_wrong_or_shared_target(
         source_topology_digest=Digest.from_bytes(b"topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(app_compiler, shared_compiler, *linkers),
     )
     unit = ClassicTranslationUnitPlan(
@@ -608,7 +608,7 @@ def test_compiler_and_rdata_authorities_stop_at_upstream_linker_boundary(
         source_topology_digest=Digest.from_bytes(b"topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(compiler, downstream, upstream),
     )
     unit = ClassicTranslationUnitPlan(
@@ -813,7 +813,7 @@ def test_cold_rdata_authority_rejects_before_runtime_setup(
         source_topology_digest=Digest.from_bytes(b"topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(compiler, linker),
     )
     declaration = {
@@ -955,7 +955,7 @@ def test_shared_rdata_authority_closes_canonical_object_dataflow(
         source_topology_digest=Digest.from_bytes(b"topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(*compilers, linker),
     )
     object_value = {
@@ -1158,7 +1158,7 @@ def test_prepare_failure_releases_logical_drive_and_uses_stable_temporary(
         source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(
             ProducerNode(
                 id="linker.program.0000",
@@ -1394,7 +1394,7 @@ def _source_sdk_library_fixture(
         source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(node,),
     )
     bundle = _prepare_bundle(tmp_path)
@@ -1536,9 +1536,7 @@ def test_only_the_final_terminal_stage_owns_the_public_target_path() -> None:
         count=2,
     )
 
-    assert first == (
-        ".reprobit/stages/terminal/config/0000-project_metadata.EXE"
-    )
+    assert first == (".reprobit/stages/terminal/config/0000-project_metadata.EXE")
     assert final == "build/CONFIG.EXE"
 
 
@@ -1926,7 +1924,7 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
         source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(node,),
     )
     events: list[tuple[int, int, str, str]] = []
@@ -2099,7 +2097,7 @@ def test_counterfactual_compiler_audit_rejects_a_plan_mismatch(tmp_path: Path) -
         source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(node,),
     )
     executor.generated_node_inputs = MappingProxyType({})
@@ -2209,7 +2207,7 @@ def test_effective_compiler_capture_freezes_raw_products_and_epoch_visibility(
         source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(ordinary, carrier),
     )
     ordinary_object = build_root / "Unit.obj"
@@ -2369,7 +2367,7 @@ def _link_control_executor(
         source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(compiler, linker),
     )
     executor.targets = (
@@ -2724,7 +2722,7 @@ def _dependent_link_control_executor(
         source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(*compilers, *linkers),
     )
     overlay.targets = (
@@ -2774,9 +2772,7 @@ def test_link_control_audit_binds_directive_and_def_roots(
 
     assert [item.step_id for item in receipts] == ["link-controls.program"]
     demand, retention = executor._link_root_sets(linker)
-    assert set(demand).issuperset(
-        {"_command_line_forced", "_mainCRTStartup", "_WinMainCRTStartup"}
-    )
+    assert set(demand).issuperset({"_command_line_forced", "_mainCRTStartup", "_WinMainCRTStartup"})
     assert "_forced" not in demand
     assert set(retention) == {"_directive_export", "_internal"}
     assert executor._module_definition_receipts["program"].exports == ("_internal",)
@@ -3638,8 +3634,7 @@ def test_native_logical_role_commands_stay_in_projected_toolchain_authority(
         ),
     )
     role_commands = {
-        role: Path(rf"R:\toolchain\bin\{relative}")
-        for role, relative in role_relatives.items()
+        role: Path(rf"R:\toolchain\bin\{relative}") for role, relative in role_relatives.items()
     }
 
     producer = classic_runtime_producer.ClassicProducerExecution(
@@ -3665,9 +3660,9 @@ def test_native_logical_role_commands_stay_in_projected_toolchain_authority(
         assert producer.initialized_lane_count == 0
         assert producer._namespace_authority_files == ()
         with producer.authority_namespace_lease() as authority:
-            assert {
-                item.relative_path for item in authority.snapshot.files_for("toolchain")
-            } == {f"bin/{relative}" for relative in role_relatives.values()}
+            assert {item.relative_path for item in authority.snapshot.files_for("toolchain")} == {
+                f"bin/{relative}" for relative in role_relatives.values()
+            }
     finally:
         producer.close()
 
@@ -4011,7 +4006,7 @@ def test_donor_compile_record_rejects_non_unique_target_source_identity(
                 intervention=SimpleNamespace(id=request.intervention_id),
                 request=request,
             ),
-        )
+        ),
     )
     executor = object.__new__(classic_runtime_donor.ClassicDonorComposition)
     executor.effective_root = effective_root
@@ -4254,7 +4249,7 @@ def test_donor_invocation_replays_only_dependency_tracked_donors(
         source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(node,),
     )
     executor.compile_timeout = 30.0
@@ -4393,9 +4388,7 @@ def test_donor_invocation_replays_only_dependency_tracked_donors(
         assert invocation.dependency_replay is not None
         assert invocation.dependency_replay.reason is None
         expected_header = (
-            producer.logical_for_host_path(
-                captured[0][1] / "inc/source/include/rendered.h"
-            )
+            producer.logical_for_host_path(captured[0][1] / "inc/source/include/rendered.h")
             if projection is not DonorIncludeProjection.NONE
             else r"Z:\Users\project\source\include\rendered.h"
         )
@@ -4506,7 +4499,7 @@ def test_exact_compiler_probe_returns_raw_outputs_and_closes_runtime(
         source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(node,),
     )
 

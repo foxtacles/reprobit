@@ -62,7 +62,16 @@ a:hover { text-decoration-thickness: 2px; }
   gap: 1rem;
   padding: .8rem 0;
 }
-.brand { font-weight: 760; letter-spacing: .01em; }
+.brand {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: .55rem;
+  font-weight: 760;
+  letter-spacing: .01em;
+}
+.brand-mark { width: 2.35rem; height: 2.35rem; flex: 0 0 auto; }
+.brand-label { min-width: 0; }
 .run-label { color: #c9dbe2; font-size: .82rem; }
 .section-nav {
   position: sticky;
@@ -279,6 +288,7 @@ details.advanced > summary {
   list-style: none;
 }
 details.advanced > summary::-webkit-details-marker { display: none; }
+details.advanced > summary > h3 { margin: 0; font: inherit; }
 details.advanced > summary::before {
   content: "\203A";
   color: var(--accent);
@@ -409,4 +419,28 @@ REPORT_SCRIPT = r"""
 """.strip()
 
 
-__all__ = ["REPORT_CSS", "REPORT_SCRIPT"]
+# Kept inline so every report remains a single, portable file with a crisp vector mark.
+REPROBIT_MARK_SVG = r"""
+<svg class="brand-mark" viewBox="0 0 512 512" aria-hidden="true" focusable="false">
+  <rect x="24" y="24" width="464" height="464" rx="112" fill="#0b1020"/>
+  <rect x="26" y="26" width="460" height="460" rx="110"
+    fill="none" stroke="#34436f" stroke-width="4"/>
+  <g fill="#22d3ee">
+    <circle cx="140" cy="82" r="21"/><circle cx="140" cy="140" r="21"/>
+    <circle cx="140" cy="198" r="21"/><circle cx="140" cy="256" r="21"/>
+    <circle cx="140" cy="314" r="21"/><circle cx="140" cy="372" r="21"/>
+    <circle cx="140" cy="430" r="21"/><circle cx="198" cy="82" r="21"/>
+    <circle cx="256" cy="82" r="21"/><circle cx="314" cy="82" r="21"/>
+    <circle cx="372" cy="140" r="21"/><circle cx="372" cy="198" r="21"/>
+    <circle cx="198" cy="256" r="21"/><circle cx="256" cy="256" r="21"/>
+    <circle cx="314" cy="256" r="21"/>
+  </g>
+  <g fill="#8b5cf6">
+    <circle cx="256" cy="314" r="21"/><circle cx="314" cy="372" r="21"/>
+    <circle cx="372" cy="430" r="21"/>
+  </g>
+</svg>
+""".strip()
+
+
+__all__ = ["REPORT_CSS", "REPORT_SCRIPT", "REPROBIT_MARK_SVG"]

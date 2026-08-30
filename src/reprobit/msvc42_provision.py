@@ -89,6 +89,18 @@ _FILES = {
     ),
 }
 
+# Migration-only native Windows build-system frontend.  Certifying builds and
+# general compiler setup do not require it; fresh provisioning includes it so
+# the guided CMake importer is also available on Windows.
+_CMAKE_FRONTEND_FILES = {
+    "bin/NMAKE.EXE": FileAuthority(
+        61_952, "2992db8eca994af6a7d7108c20d3976ae1d8b0b6e4923bd8de3ec59f24f91113"
+    ),
+    "bin/NMAKE.ERR": FileAuthority(
+        5_097, "85c92a5904ea82b88bca4b01004cab2c52712a1fa7e073f0032106127f653ebc"
+    ),
+}
+
 # These are host-side, permissively licensed shell transports versioned and
 # distributed with ReproBit.  They are deliberately outside profile_sources:
 # compiler/runtime/header/library payload still comes only from the two pinned
@@ -284,9 +296,7 @@ def verify_msvc42(root: Path) -> None:
     for relative, file_authority in _PROVISIONED_TRANSPORT_FILES.items():
         _require_file(admitted_root.joinpath(*relative.split("/")), file_authority)
     for relative, tree_authority in _TREES.items():
-        receipt = portable_tree_receipt(
-            admitted_root.joinpath(*relative.split("/")), relative
-        )
+        receipt = portable_tree_receipt(admitted_root.joinpath(*relative.split("/")), relative)
         received = TreeAuthority(
             receipt.entry_count,
             receipt.max_depth,
@@ -298,6 +308,22 @@ def verify_msvc42(root: Path) -> None:
                 f"portable tree authority differs for {relative}: "
                 f"expected {tree_authority!r}, received {received!r}"
             )
+
+
+def verify_msvc42_cmake_frontend(root: Path) -> None:
+    """Authenticate the two migration-only NMake files used by CMake import."""
+
+    requested_root = root.expanduser()
+    if requested_root.is_symlink() or not requested_root.is_dir():
+        raise ProvisionError(
+            f"toolchain root is absent, not a directory, or redirected: {requested_root}"
+        )
+    admitted_root = requested_root.resolve(strict=True)
+    for relative, authority in _CMAKE_FRONTEND_FILES.items():
+        _require_file(
+            admitted_root.joinpath(*relative.split("/")),
+            authority,
+        )
 
 
 def provision_msvc42(
@@ -319,9 +345,9 @@ def provision_msvc42(
         return destination
 
     destination.parent.mkdir(parents=True, exist_ok=True)
-    temporary = Path(
-        tempfile.mkdtemp(prefix=".reprobit-msvc42-", dir=destination.parent)
-    ).resolve(strict=True)
+    temporary = Path(tempfile.mkdtemp(prefix=".reprobit-msvc42-", dir=destination.parent)).resolve(
+        strict=True
+    )
     try:
         checkout_42 = temporary / "msvc420"
         checkout_50 = temporary / "msvc500"
@@ -338,7 +364,7 @@ def provision_msvc42(
         _emit(progress, f"fetching msvc500 redist@{MSVC500_REVISION[:12]}")
         _checkout(checkout_50, MSVC500_REPOSITORY, MSVC500_REVISION, ("redist",))
 
-        for relative in _FILES:
+        for relative in (*_FILES, *_CMAKE_FRONTEND_FILES):
             if relative in {"bin/MSVCRT40.dll", "bin/msvcrt20.dll"}:
                 continue
             _copy_file(checkout_42, payload, relative)
@@ -366,11 +392,13 @@ def provision_msvc42(
         _patch_c2(payload / "bin" / "C2.EXE")
         _emit(progress, "authenticating files and portable input trees")
         verify_msvc42(payload)
+        verify_msvc42_cmake_frontend(payload)
         payload.replace(destination)
         _emit(progress, f"published exact toolchain at {destination}")
         return destination
     finally:
         shutil.rmtree(temporary, ignore_errors=True)
+
 
 __all__ = [
     "MSVC420_REPOSITORY",
@@ -381,4 +409,5 @@ __all__ = [
     "ProvisionError",
     "provision_msvc42",
     "verify_msvc42",
+    "verify_msvc42_cmake_frontend",
 ]

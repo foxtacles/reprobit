@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 
 from reprobit.model import Digest
 from reprobit.report import Report
-from reprobit.report_io import render_report_html
+from reprobit.report_io import render_report_html, report_json_href
 from reprobit.secure_paths import atomic_publish_new_relative, read_relative_file
 from reprobit.strict_json import canonical_json, strict_loads
 
@@ -132,9 +132,22 @@ def _secure_location(path: Path) -> tuple[Path, str]:
     return Path(absolute.anchor), PurePosixPath(*absolute.parts[1:]).as_posix()
 
 
-def _receipt_material(report: Report, nonce: str) -> dict[str, object]:
+def _rendered_report_html(report: Report, report_path: Path, html_path: Path) -> bytes:
+    return render_report_html(
+        report,
+        canonical_json_href=report_json_href(html_path, report_path),
+    ).encode("utf-8")
+
+
+def _receipt_material(
+    report: Report,
+    nonce: str,
+    *,
+    report_path: Path,
+    html_path: Path,
+) -> dict[str, object]:
     expected_json = canonical_json(report)
-    expected_html = render_report_html(report).encode("utf-8")
+    expected_html = _rendered_report_html(report, report_path, html_path)
     return {
         "schema_version": 1,
         "nonce": nonce,
@@ -165,7 +178,7 @@ def publish_action_completion(
     if any(character in str(path) for path in paths for character in ("\r", "\n")):
         raise ValueError("Action report or receipt path contains a forbidden line break")
     expected_json = canonical_json(report)
-    expected_html = render_report_html(report).encode("utf-8")
+    expected_html = _rendered_report_html(report, report_path, html_path)
     report_root, report_relative = _secure_location(report_path)
     html_root, html_relative = _secure_location(html_path)
     received_json, _ = read_relative_file(report_root, report_relative)
@@ -178,7 +191,14 @@ def publish_action_completion(
     atomic_publish_new_relative(
         receipt_root,
         receipt_relative,
-        canonical_json(_receipt_material(report, nonce)),
+        canonical_json(
+            _receipt_material(
+                report,
+                nonce,
+                report_path=report_path,
+                html_path=html_path,
+            )
+        ),
     )
 
 
@@ -191,9 +211,14 @@ def _read_current_report(report_path: Path, receipt_path: Path, nonce: str) -> R
     html_path = report_path.with_suffix(".html")
     html_root, html_relative = _secure_location(html_path)
     html_bytes, _ = read_relative_file(html_root, html_relative)
-    if html_bytes != render_report_html(report).encode("utf-8"):
+    if html_bytes != _rendered_report_html(report, report_path, html_path):
         raise ValueError("report HTML is absent or differs from the canonical JSON report")
-    expected = _receipt_material(report, nonce)
+    expected = _receipt_material(
+        report,
+        nonce,
+        report_path=report_path,
+        html_path=html_path,
+    )
     receipt_root, receipt_relative = _secure_location(receipt_path)
     receipt_bytes, _ = read_relative_file(receipt_root, receipt_relative)
     received = strict_loads(receipt_bytes)
@@ -237,10 +262,12 @@ def main(argv: list[str] | None = None) -> int:
                 raise ValueError("Action report JSON is not canonical")
             html_root, html_relative = _secure_location(report_path.with_suffix(".html"))
             html_bytes, _ = read_relative_file(html_root, html_relative)
-            if html_bytes != render_report_html(report).encode("utf-8"):
-                raise ValueError(
-                    "report HTML is absent or differs from the canonical JSON report"
-                )
+            if html_bytes != _rendered_report_html(
+                report,
+                report_path,
+                report_path.with_suffix(".html"),
+            ):
+                raise ValueError("report HTML is absent or differs from the canonical JSON report")
         else:
             report = _read_current_report(report_path, receipt_path, parsed.nonce)
     except (OSError, ValueError) as exc:

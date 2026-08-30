@@ -51,7 +51,7 @@ from reprobit.report import (
     StageTiming,
     TargetComparisonSummary,
 )
-from reprobit.report_io import render_report_html
+from reprobit.report_io import render_report_html, report_json_href
 from reprobit.scheduler import TaskScheduler, TaskSpec
 from reprobit.schema import ProjectBundle
 from reprobit.secure_paths import (
@@ -126,8 +126,6 @@ def _publish_report_payloads(
                 "secure report rollback failed: " + "; ".join(rollback_errors)
             ) from original
         raise
-
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -446,7 +444,6 @@ class BuildPlanExecutor:
                 raise EngineError(
                     f"step {consumer!r} consumes {path} from {producer!r} without a dependency"
                 )
-
 
 
 @dataclass(frozen=True, slots=True)
@@ -873,14 +870,18 @@ class ReproductionEngine:
         if request.reports.json is not None:
             report_payloads[request.reports.json] = canonical_json(report)
         if request.reports.html is not None:
-            report_payloads[request.reports.html] = render_report_html(report).encode("utf-8")
+            report_payloads[request.reports.html] = render_report_html(
+                report,
+                canonical_json_href=report_json_href(
+                    request.reports.html,
+                    request.reports.json,
+                ),
+            ).encode("utf-8")
         if report_payloads:
             _publish_report_payloads(report_payloads, final_reseal=reseal)
         else:
             reseal()
         return EngineResult(build, target_receipts, evidence, verdict, report)
-
-
 
 
 def _command_digest(step: BuildStep, cwd: Path) -> Digest:

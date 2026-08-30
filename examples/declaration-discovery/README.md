@@ -6,10 +6,10 @@ used to prepare the local reference object. A second run reuses all four
 results; an extended request adds exactly one new state.
 
 Discovery is a preview. A proposal is useful review evidence, but it is not a
-proof, a source edit, or permission to add an intervention to a certified build.
+proof, a source edit, or permission to add anything to a verified build.
 
 Start with the [shared prerequisites](../README.md), then run these commands
-from this directory:
+from the ReproBit repository root:
 
 ```console
 cd examples/declaration-discovery
@@ -97,5 +97,5 @@ range without throwing away completed compiler work.
   unchanged campaign arguments. Compiler version and switches are part of the
   experiment.
 
-All generated files in this directory are disposable. None of them become
-certified project authority automatically.
+All generated files in this directory are disposable. None of them are saved
+to a verified ReproBit project automatically.

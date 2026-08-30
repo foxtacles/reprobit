@@ -7,11 +7,7 @@ from pathlib import Path
 
 from reprobit.cli_output import human_command
 from reprobit.project_loader import load_project, load_project_tree
-
-_BUILD_AUTHORITY_GUIDE = (
-    "https://github.com/foxtacles/reprobit/blob/main/"
-    "docs/cli.md#complete-project-build-authority"
-)
+from reprobit.schema import SourceManifestDocument
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,8 +44,12 @@ def _real_file(path: Path) -> bool:
     return path.is_file() and not path.is_symlink()
 
 
+def _real_directory(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink()
+
+
 def _json_documents(path: Path) -> tuple[Path, ...]:
-    if path.is_symlink() or not path.is_dir():
+    if not _real_directory(path):
         return ()
     return tuple(
         child
@@ -100,81 +100,121 @@ def inspect_project_readiness(root: Path) -> ProjectReadiness:
     source = project_path(spec.layout.source_manifest)
     build_plan = project_path(spec.layout.build_plan)
     graph = project_path(spec.layout.producer_graph)
-    intervention_documents = _json_documents(project_path(spec.layout.interventions))
-    proof_documents = _json_documents(project_path(spec.layout.proofs))
-    oracle_documents = _json_documents(project_path(spec.layout.oracles))
+    interventions_directory = project_path(spec.layout.interventions)
+    proofs_directory = project_path(spec.layout.proofs)
+    oracles_directory = project_path(spec.layout.oracles)
+    intervention_documents = _json_documents(interventions_directory)
+    proof_documents = _json_documents(proofs_directory)
+    oracle_documents = _json_documents(oracles_directory)
     references = tuple(project_path(target.oracle) for target in spec.targets)
 
-    structural = (
-        ("toolchain_lock", "Compiler lock", _real_file(lock), str(lock)),
-        ("source_manifest", "Source lock", _real_file(source), str(source)),
-        ("build_plan", "Build plan", _real_file(build_plan), str(build_plan)),
-        ("producer_graph", "Build graph", _real_file(graph), str(graph)),
-    )
+    source_ready = False
+    source_detail = f"missing {source}"
+    if _real_file(source):
+        try:
+            source_document = SourceManifestDocument.model_validate_json(source.read_bytes())
+        except (OSError, ValueError) as error:
+            source_detail = f"invalid {source}: {error}"
+        else:
+            source_ready = source_document.complete
+            source_detail = (
+                "ready"
+                if source_ready
+                else "source review is incomplete; preview and lock the tracked files"
+            )
+
     items: list[ReadinessItem] = [
-        ReadinessItem("project", "Project", True, f"{spec.project_id} uses schema 3")
+        ReadinessItem("project", "Project", True, f"{spec.project_id} uses schema 3"),
+        ReadinessItem(
+            "toolchain_lock",
+            "Compiler lock",
+            _real_file(lock),
+            "ready" if _real_file(lock) else f"missing {lock}",
+            (None if _real_file(lock) else human_command(("rbit", "setup", candidate))),
+        ),
+        ReadinessItem(
+            "source_manifest",
+            "Source lock",
+            source_ready,
+            source_detail,
+            (
+                None
+                if source_ready
+                else human_command(("rbit", "source", "lock", "--project", candidate))
+            ),
+        ),
     ]
-    next_commands = {
-        "toolchain_lock": human_command(("rbit", "setup", candidate)),
-        "source_manifest": human_command(
-            ("rbit", "source", "lock", "--project", candidate)
-        ),
-        "producer_graph": human_command(
-            ("rbit", "graph", "configure", "--project", candidate)
-        ),
-    }
-    for identifier, label, present, path in structural:
-        missing_detail = f"missing {path}"
-        if identifier == "build_plan":
-            missing_detail += (
-                "; machine setup can be complete, but the project still needs reviewed "
-                f"build authority. Guide: {_BUILD_AUTHORITY_GUIDE}"
-            )
-        items.append(
-            ReadinessItem(
-                identifier,
-                label,
-                present,
-                "ready" if present else missing_detail,
-                None if present else next_commands.get(identifier),
-            )
-        )
-    for identifier, label, documents, directory in (
-        (
-            "interventions",
-            "Interventions",
-            intervention_documents,
-            project_path(spec.layout.interventions),
-        ),
-        ("proofs", "Proofs", proof_documents, project_path(spec.layout.proofs)),
-        ("oracles", "Reference metadata", oracle_documents, project_path(spec.layout.oracles)),
-    ):
-        items.append(
-            ReadinessItem(
-                identifier,
-                label,
-                bool(documents),
-                (
-                    f"{len(documents)} document(s)"
-                    if documents
-                    else f"add reviewed JSON documents beneath {directory}"
-                ),
-            )
-        )
+
     missing_references = tuple(path for path in references if not _real_file(path))
+    if not missing_references:
+        reference_detail = f"{len(references)} reference file(s) ready"
+    elif len(missing_references) == 1:
+        reference_detail = f"Place the original at {missing_references[0]}"
+    else:
+        reference_detail = "Place the originals at " + ", ".join(
+            str(path) for path in missing_references
+        )
     items.append(
         ReadinessItem(
             "references",
             "Protected references",
             not missing_references,
-            (
-                f"{len(references)} reference file(s) ready"
-                if not missing_references
-                else "missing " + ", ".join(str(path) for path in missing_references)
-            ),
+            reference_detail,
         )
     )
 
+    import_command = human_command(("rbit", "import", "cmake", candidate))
+    for identifier, label, path in (
+        ("build_plan", "Build plan", build_plan),
+        ("producer_graph", "Build graph", graph),
+    ):
+        present = _real_file(path)
+        items.append(
+            ReadinessItem(
+                identifier,
+                label,
+                present,
+                "ready" if present else f"missing {path}",
+                None if present or missing_references else import_command,
+            )
+        )
+    for identifier, label, documents, directory, documents_required in (
+        (
+            "interventions",
+            "Interventions",
+            intervention_documents,
+            interventions_directory,
+            False,
+        ),
+        ("proofs", "Proofs", proof_documents, proofs_directory, False),
+        (
+            "oracles",
+            "Reference metadata",
+            oracle_documents,
+            oracles_directory,
+            True,
+        ),
+    ):
+        directory_ready = _real_directory(directory)
+        ready = directory_ready and (bool(documents) or not documents_required)
+        if documents:
+            detail = f"{len(documents)} document(s)"
+        elif not directory_ready:
+            detail = f"create the folder {directory}"
+        elif documents_required:
+            detail = f"add reviewed JSON documents beneath {directory}"
+        elif identifier == "interventions":
+            detail = "0 documents (valid when no build adjustment is needed)"
+        else:
+            detail = "0 documents (valid when there is nothing to prove)"
+        items.append(
+            ReadinessItem(
+                identifier,
+                label,
+                ready,
+                detail,
+            )
+        )
     prerequisites_ready = all(item.ready for item in items)
     validation_detail = "complete the missing items above"
     validated = False
@@ -192,9 +232,7 @@ def inspect_project_readiness(root: Path) -> ProjectReadiness:
             "Authority",
             validated,
             validation_detail,
-            None
-            if validated
-            else human_command(("rbit", "validate", candidate)),
+            None if validated else human_command(("rbit", "validate", candidate)),
         )
     )
     return ProjectReadiness(candidate, tuple(items))

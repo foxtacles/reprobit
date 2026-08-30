@@ -191,9 +191,7 @@ class ProvenanceNode(StrictModel):
             if len(self.parents) != 1:
                 raise ValueError("object_transform provenance requires one parent")
             if self.intervention_id is not None or self.certificate_ids:
-                raise ValueError(
-                    "object_transform provenance uses its dedicated attestation"
-                )
+                raise ValueError("object_transform provenance uses its dedicated attestation")
         if self.kind is ProvenanceKind.INTERVENTION and self.intervention_id is None:
             raise ValueError("intervention provenance requires intervention_id")
         return self
@@ -252,8 +250,7 @@ class SemanticProof(StrictModel):
         if (self.input_statement is None) != (self.output_statement is None):
             raise ValueError("semantic-proof statements must be carried together")
         if self.input_statement is not None and (
-            Digest.from_bytes(canonical_json(self.input_statement))
-            != self.input_statement_digest
+            Digest.from_bytes(canonical_json(self.input_statement)) != self.input_statement_digest
             or Digest.from_bytes(canonical_json(self.output_statement))
             != self.output_statement_digest
         ):
@@ -272,6 +269,8 @@ class Certificate(StrictModel):
 
     id: Identifier
     intervention_id: Identifier
+    intervention_authority_digest: Digest
+    intervention_cost_digest: Digest
     obligations: Annotated[tuple[ProofObligation, ...], Field(min_length=1)]
     artifact_ids: Annotated[tuple[Identifier, ...], Field(min_length=1)]
     semantic_proofs: tuple[SemanticProof, ...] = ()

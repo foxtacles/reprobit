@@ -39,10 +39,6 @@ from reprobit.cli_paths import (
 )
 from reprobit.costs import CostBreakdown, InterventionCost, calculate_cost
 from reprobit.discovery_cli import command_discover
-from reprobit.discovery_grind_cli import (
-    command_discover_grind,
-    command_discover_grind_init,
-)
 from reprobit.model import AuthenticityPolicy, Digest
 from reprobit.producer_graph import producer_graph_accepts_source
 from reprobit.progress import ProgressKind
@@ -56,7 +52,6 @@ from reprobit.schema import (
     ProjectBundle,
     ProjectSpec,
     SourceManifestDocument,
-    SourceManifestEntry,
     TargetSpec,
     ToolchainRef,
     source_manifest_digest,
@@ -75,6 +70,14 @@ try:
     _VERSION = version("reprobit")
 except PackageNotFoundError:
     _VERSION = "0.1.0.dev0"
+
+
+def _command_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:
+    """Load the one-off CMake importer only when that command is selected."""
+
+    from reprobit.cli_cmake_import import command_cmake_import
+
+    return command_cmake_import(args, output)
 
 
 def _toml_string(value: str) -> str:
@@ -134,6 +137,8 @@ def _command_init(args: argparse.Namespace, output: CLIOutput) -> int:
     if root.exists() and (not root.is_dir() or root.is_symlink()):
         raise CLIError(f"initialization target is not a real directory: {root}")
     root.mkdir(parents=True, exist_ok=True)
+    artifact = args.artifact or f"build/{args.target}.exe"
+    oracle = args.oracle or f"reference/{args.target}.exe"
     spec = ProjectSpec(
         schema_version=3,
         project_id=args.project_id or _derived_project_id(root),
@@ -144,19 +149,16 @@ def _command_init(args: argparse.Namespace, output: CLIOutput) -> int:
             build=args.logical_build,
             toolchain=args.logical_toolchain,
         ),
-        targets=(TargetSpec(id=args.target, artifact=args.artifact, oracle=args.oracle),),
+        targets=(TargetSpec(id=args.target, artifact=artifact, oracle=oracle),),
     )
     project_data = _render_initial_project(spec)
     initial_manifest = SourceManifestDocument(
         schema_version=3,
-        complete=True,
-        entries=(
-            SourceManifestEntry(
-                path="reprobit.toml",
-                size=len(project_data),
-                digest=Digest.from_bytes(project_data),
-            ),
-        ),
+        # Initialization has not reviewed any project inputs yet.  A
+        # certifying manifest only becomes complete through ``rbit source
+        # lock``.
+        complete=False,
+        entries=(),
     )
     transaction = CASTransaction(root)
     transaction.write("reprobit.toml", project_data, expected_sha256=None)
@@ -169,8 +171,7 @@ def _command_init(args: argparse.Namespace, output: CLIOutput) -> int:
     next_command = human_command(("rbit", "setup", root))
     output.emit(
         "initialized",
-        f"Created ReproBit project {spec.project_id!r} at {root}\n"
-        f"Next: {next_command}",
+        f"Created ReproBit project {spec.project_id!r} at {root}\nNext: {next_command}",
         project_root=root,
         project_id=spec.project_id,
         changed_paths=result.changed_paths,
@@ -1335,8 +1336,7 @@ def _command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
     quarantine_bytes = sum(item.byte_count for item in result.verdict.quarantines)
     if accepted:
         message_lines = [
-            f"Verification passed: {exact_targets}/{len(result.targets)} targets "
-            "are byte-identical"
+            f"Verification passed: {exact_targets}/{len(result.targets)} targets are byte-identical"
         ]
         if result.verdict.clean:
             message_lines.append("Authenticity: clean; every required claim passed")
@@ -1379,12 +1379,22 @@ def _command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
 def _command_discover_grind(args: argparse.Namespace, output: CLIOutput) -> int:
     """Delegate the bounded admission workflow without growing this CLI module."""
 
+    from reprobit.discovery_grind_cli import command_discover_grind
+
     return command_discover_grind(
         args,
         output,
         prepare_run=_prepare_producer_graph_run,
         verify_command=_command_verify,
     )
+
+
+def _command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> int:
+    """Load the guided grind setup only when that command is selected."""
+
+    from reprobit.discovery_grind_cli import command_discover_grind_init
+
+    return command_discover_grind_init(args, output)
 
 
 def _command_report(args: argparse.Namespace, output: CLIOutput) -> int:
@@ -1397,7 +1407,7 @@ def _command_report(args: argparse.Namespace, output: CLIOutput) -> int:
         else source.with_suffix(".html")
     )
     report = read_report_json(source)
-    write_report_html(report, destination)
+    write_report_html(report, destination, canonical_json_path=source)
     output.emit(
         "report_written",
         f"wrote self-contained report to {destination}",
@@ -1603,8 +1613,7 @@ def _add_execution_options(
             choices=tuple(item.value for item in KeepWorkspace),
             default=KeepWorkspace.ON_FAILURE.value,
             help=(
-                "retain run-private diagnostics never, on failure, or always "
-                "(default: on-failure)"
+                "retain run-private diagnostics never, on failure, or always (default: on-failure)"
             ),
         )
     advanced = command.add_argument_group(
@@ -1694,13 +1703,11 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--target", default="program", help="first target name")
     init.add_argument(
         "--artifact",
-        default="build/program.exe",
-        help="candidate output path (default: build/program.exe)",
+        help="candidate output path (default: build/TARGET.exe)",
     )
     init.add_argument(
         "--oracle",
-        default="reference/program.exe",
-        help="original/reference binary path (default: reference/program.exe)",
+        help="original/reference binary path (default: reference/TARGET.exe)",
     )
     init_advanced = init.add_argument_group("advanced logical path options")
     init_advanced.add_argument("--logical-source", default=r"R:\source")
@@ -1759,9 +1766,7 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--toolchain-root")
     doctor.set_defaults(handler=_command_doctor)
 
-    toolchain = subcommands.add_parser(
-        "toolchain", help="install and record exact compiler files"
-    )
+    toolchain = subcommands.add_parser("toolchain", help="install and record exact compiler files")
     toolchain_commands = toolchain.add_subparsers(dest="toolchain_command", required=True)
     provision = toolchain_commands.add_parser(
         "provision",
@@ -1836,6 +1841,73 @@ def _parser() -> argparse.ArgumentParser:
     )
     source_lock.set_defaults(handler=_command_source_lock)
 
+    import_command = subcommands.add_parser(
+        "import", help="turn an existing project build into ReproBit build authority"
+    )
+    import_commands = import_command.add_subparsers(dest="import_command", required=True)
+    cmake_import = import_commands.add_parser(
+        "cmake",
+        help="prepare and record an ordinary CMake project in one guided run",
+    )
+    cmake_import.add_argument(
+        "project", nargs="?", default=".", help="project directory (default: .)"
+    )
+    cmake_import.add_argument(
+        "--target",
+        action="append",
+        default=[],
+        metavar="TARGET=CMAKE_TARGET",
+        help="map a ReproBit target when its CMake target has a different name",
+    )
+    cmake_import.add_argument(
+        "--keep-workspace",
+        choices=tuple(item.value for item in KeepWorkspace),
+        default=KeepWorkspace.ON_FAILURE.value,
+        help="retain temporary import files: never, on-failure (default), or always",
+    )
+    cmake_import_advanced = cmake_import.add_argument_group("advanced host and graph options")
+    cmake_import_advanced.add_argument(
+        "--toolchain-root",
+        metavar="DIRECTORY",
+        help="compiler installation override (normally remembered by `rbit setup`)",
+    )
+    cmake_import_advanced.add_argument(
+        "--compiler-transport",
+        metavar="PATH",
+        help="compiler frontend override used only while CMake configures",
+    )
+    cmake_import_advanced.add_argument(
+        "--resource-transport",
+        metavar="PATH",
+        help="resource-compiler frontend paired with --compiler-transport",
+    )
+    cmake_import_advanced.add_argument(
+        "--cmake",
+        default="cmake",
+        metavar="PATH_OR_NAME",
+        help="CMake executable (default: resolve cmake from PATH)",
+    )
+    cmake_import_advanced.add_argument(
+        "--configuration",
+        default="RelWithDebInfo",
+        help="single-configuration CMake build type (default: RelWithDebInfo)",
+    )
+    cmake_import_advanced.add_argument(
+        "--timeout",
+        type=_positive_seconds,
+        default=600.0,
+        metavar="SECONDS",
+        help="bounded configure deadline (default: 600)",
+    )
+    cmake_import_advanced.add_argument(
+        "--directive-input",
+        action="append",
+        default=[],
+        metavar="TARGET=LIBRARY",
+        help="record one prelink-discovered default library edge (repeatable)",
+    )
+    cmake_import.set_defaults(handler=_command_cmake_import)
+
     graph = subcommands.add_parser(
         "graph", help="record the compiler and linker steps used by direct builds"
     )
@@ -1908,6 +1980,12 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         metavar="DIRECTORY",
         help="migration source tree whose physical paths match the configured commands",
+    )
+    graph_extract.add_argument(
+        "--effective-source-digest",
+        required=True,
+        metavar="SHA256",
+        help="source receipt printed by the matching `rbit graph configure` run",
     )
     graph_extract.add_argument(
         "--toolchain-root",
@@ -2064,7 +2142,7 @@ def _parser() -> argparse.ArgumentParser:
         metavar="PROJECT_RELATIVE_PATH",
         help="new plan path (default: reprobit/discovery.json)",
     )
-    discover_init.set_defaults(handler=command_discover_grind_init)
+    discover_init.set_defaults(handler=_command_discover_grind_init)
 
     discover_run = discover_commands.add_parser(
         "run",
@@ -2079,18 +2157,12 @@ def _parser() -> argparse.ArgumentParser:
     discover_run.add_argument(
         "--report-json",
         metavar="PATH",
-        help=(
-            "canonical JSON report beside the request "
-            "(default: REQUEST_STEM.report.json)"
-        ),
+        help=("canonical JSON report beside the request (default: REQUEST_STEM.report.json)"),
     )
     discover_run.add_argument(
         "--report-html",
         metavar="PATH",
-        help=(
-            "human review report beside the JSON report "
-            "(default: REQUEST_STEM.report.html)"
-        ),
+        help=("human review report beside the JSON report (default: REQUEST_STEM.report.html)"),
     )
     discover_run.add_argument(
         "--state-directory",
@@ -2141,12 +2213,34 @@ def _parser() -> argparse.ArgumentParser:
         "project",
         nargs="?",
         default=".",
-        help="project containing reprobit/discovery.json (default: .)",
+        help="ReproBit project to search (default: .)",
     )
     discover_grind.add_argument(
         "--accept-exact",
         action="store_true",
         help="rerun the proof and save an exact solution if it still passes",
+    )
+    discover_grind.add_argument(
+        "--project-wide",
+        action="store_true",
+        help="try a bounded set of eligible project functions instead of one plan",
+    )
+    discover_grind.add_argument(
+        "--reference-object",
+        action="append",
+        default=[],
+        metavar="TU=PROJECT_PATH",
+        help=(
+            "pair a translation unit with a reference .obj in project-wide mode; "
+            "repeat for additional units"
+        ),
+    )
+    discover_grind.add_argument(
+        "--max-symbols",
+        type=int,
+        default=8,
+        metavar="COUNT",
+        help="maximum project functions to try in deterministic order (default: 8; max: 64)",
     )
     discover_grind.add_argument(
         "--plan",

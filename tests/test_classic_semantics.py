@@ -586,16 +586,12 @@ def _coff_object(
             auxiliary_count=1,
         ),
         # Section-definition auxiliary: selection=2 (pick any).
-            struct.pack(
-                "<IHHIhBBH", len(body), int(has_relocation), 0, 0, 0, 2, 0, 0
-            ),
+        struct.pack("<IHHIhBBH", len(body), int(has_relocation), 0, 0, 0, 2, 0, 0),
         _symbol(definition, section=1, symbol_type=definition_type, storage=2),
     ]
     if reference is not None:
         target_index = 3
-        symbols.append(
-            _symbol(reference, section=0, symbol_type=reference_type, storage=2)
-        )
+        symbols.append(_symbol(reference, section=0, symbol_type=reference_type, storage=2))
         if has_relocation:
             relocation = struct.pack(
                 "<IIH", relocation_offset_in_section, target_index, relocation_type
@@ -637,14 +633,10 @@ def _coff_function_provider_with_auxiliary(
     second_function_index = 6 if next_definition is not None else 0
     second_tag_index = 8 if next_definition is not None else 0
     effective_next_function_index = (
-        second_function_index
-        if next_function_index is None
-        else next_function_index
+        second_function_index if next_function_index is None else next_function_index
     )
     effective_begin_next_tag_index = (
-        second_tag_index
-        if begin_next_tag_index is None
-        else begin_next_tag_index
+        second_tag_index if begin_next_tag_index is None else begin_next_tag_index
     )
 
     def function_auxiliary(tag_index: int, next_index: int) -> bytes:
@@ -696,11 +688,7 @@ def _coff_function_provider_with_auxiliary(
             )
         )
     symbol_table = b"".join(symbols)
-    line_target = (
-        first_function_index
-        if line_zero_target_index is None
-        else line_zero_target_index
-    )
+    line_target = first_function_index if line_zero_target_index is None else line_zero_target_index
     line_table = struct.pack("<IH", line_target, 0)
     symbol_offset = line_offset + len(line_table)
     header = struct.pack(
@@ -754,9 +742,7 @@ def _coff_const_pool(
     relocation_bytes = struct.pack("<IIH", 0, 2, 6) if relocation else b""
     symbol_table = b"".join(symbols)
     symbol_offset = section_table_end + len(body) + len(relocation_bytes)
-    header = struct.pack(
-        "<HHIIIHH", 0x14C, 1, 0xAABBCCDD, symbol_offset, len(symbols), 0, 0
-    )
+    header = struct.pack("<HHIIIHH", 0x14C, 1, 0xAABBCCDD, symbol_offset, len(symbols), 0, 0)
     section = b".rdata\0\0" + struct.pack(
         "<IIIIIIHHI",
         0,
@@ -792,17 +778,13 @@ def _coff_object_with_associative_chain(
         struct.pack("<IHHIhBBH", len(bodies[0]), 0, 0, 0, 0, 2, 0, 0),
         _symbol(definition, section=1, symbol_type=32, storage=2),
         _symbol(".debug$F", section=2, symbol_type=0, storage=3, auxiliary_count=1),
-        struct.pack(
-            "<IHHIhBBH", len(bodies[1]), 0, 0, 0, second_parent, 5, 0, 0
-        ),
+        struct.pack("<IHHIhBBH", len(bodies[1]), 0, 0, 0, second_parent, 5, 0, 0),
         _symbol(".debug$S", section=3, symbol_type=0, storage=3, auxiliary_count=1),
         struct.pack("<IHHIhBBH", len(bodies[2]), 0, 0, 0, third_parent, 5, 0, 0),
     )
     symbol_table = b"".join(symbols)
     symbol_offset = body_offsets[2] + len(bodies[2])
-    header = struct.pack(
-        "<HHIIIHH", 0x14C, 3, 0xAABBCCDD, symbol_offset, len(symbols), 0, 0
-    )
+    header = struct.pack("<HHIIIHH", 0x14C, 3, 0xAABBCCDD, symbol_offset, len(symbols), 0, 0)
 
     def section(name: bytes, size: int, offset: int, characteristics: int) -> bytes:
         return name.ljust(8, b"\0") + struct.pack(
@@ -860,9 +842,7 @@ def _coff_object_with_unreachable_helper_dependency(
         symbols.append(_symbol(extra_undefined, section=0, symbol_type=32, storage=2))
     symbol_table = b"".join(symbols)
     symbol_offset = helper_relocation_offset + 10
-    header = struct.pack(
-        "<HHIIIHH", 0x14C, 2, 0xAABBCCDD, symbol_offset, len(symbols), 0, 0
-    )
+    header = struct.pack("<HHIIIHH", 0x14C, 2, 0xAABBCCDD, symbol_offset, len(symbols), 0, 0)
     retained_section = b".text\0\0\0" + struct.pack(
         "<IIIIIIHHI",
         0,
@@ -986,9 +966,7 @@ def _coff_object_with_ordered_archive_seed(
                 auxiliary_count,
             )
         )
-        symbols.extend(
-            auxiliary[index : index + 18] for index in range(0, len(auxiliary), 18)
-        )
+        symbols.extend(auxiliary[index : index + 18] for index in range(0, len(auxiliary), 18))
 
     add_symbol(
         retained_section_name,
@@ -1073,8 +1051,8 @@ def _coff_object_with_ordered_archive_seed(
     retained_relocation_offset = (
         helper_offset + len(helper_body) if retained_reference is not None else 0
     )
-    helper_relocation_offset = helper_offset + len(helper_body) + (
-        10 if retained_reference is not None else 0
+    helper_relocation_offset = (
+        helper_offset + len(helper_body) + (10 if retained_reference is not None else 0)
     )
     retained_relocation = (
         struct.pack("<IIH", 0, symbol_indexes[retained_reference], 0x14)
@@ -1097,9 +1075,7 @@ def _coff_object_with_ordered_archive_seed(
     helper_relocations = b"".join(helper_relocation_rows)
     symbol_table = b"".join(symbols)
     symbol_offset = helper_relocation_offset + len(helper_relocations)
-    header = struct.pack(
-        "<HHIIIHH", 0x14C, 2, 0xAABBCCDD, symbol_offset, len(symbols), 0, 0
-    )
+    header = struct.pack("<HHIIIHH", 0x14C, 2, 0xAABBCCDD, symbol_offset, len(symbols), 0, 0)
     retained_section = retained_section_name.encode("ascii").ljust(8, b"\0") + struct.pack(
         "<IIIIIIHHI",
         0,
@@ -2443,18 +2419,10 @@ def test_ordered_archive_seed_cannot_drop_the_data_binding_seat() -> None:
         _coff_object_with_ordered_archive_seed(
             data_target="_existing_data", data_relocation_type=0x14
         ),
-        _coff_object_with_ordered_archive_seed(
-            data_target="_existing_data", data_addend=1
-        ),
-        _coff_object_with_ordered_archive_seed(
-            data_target="_existing_data", data_row_value=1
-        ),
-        _coff_object_with_ordered_archive_seed(
-            data_target="_existing_data", data_row_type=0x20
-        ),
-        _coff_object_with_ordered_archive_seed(
-            data_target="_existing_data", data_row_storage=105
-        ),
+        _coff_object_with_ordered_archive_seed(data_target="_existing_data", data_addend=1),
+        _coff_object_with_ordered_archive_seed(data_target="_existing_data", data_row_value=1),
+        _coff_object_with_ordered_archive_seed(data_target="_existing_data", data_row_type=0x20),
+        _coff_object_with_ordered_archive_seed(data_target="_existing_data", data_row_storage=105),
         _coff_object_with_ordered_archive_seed(
             data_target="_existing_data", data_row_auxiliary_count=1
         ),
@@ -2469,10 +2437,8 @@ def test_ordered_archive_seed_rejects_an_inexact_data_binding(payload: bytes) ->
 
 
 def test_ordered_archive_seed_cannot_hide_an_unrelocated_undefined_row() -> None:
-    clean, effective, excluded, dependencies = (
-        _ordered_archive_seed_evidence(
-            _coff_object_with_ordered_archive_seed(extra_undefined="_evil")
-        )
+    clean, effective, excluded, dependencies = _ordered_archive_seed_evidence(
+        _coff_object_with_ordered_archive_seed(extra_undefined="_evil")
     )
 
     with pytest.raises(ClassicSemanticError, match="closed COFF semantic envelope"):
@@ -2485,9 +2451,7 @@ def test_ordered_archive_seed_cannot_hide_an_unrelocated_undefined_row() -> None
 
 
 def test_ordered_archive_seed_rejects_swapped_undefined_row_order() -> None:
-    payload = _coff_object_with_ordered_archive_seed(
-        undefined_order=("_pull_a", "_pull_b")
-    )
+    payload = _coff_object_with_ordered_archive_seed(undefined_order=("_pull_a", "_pull_b"))
 
     with pytest.raises(ClassicSemanticError, match="do not reverse first-use order"):
         _ordered_archive_seed_evidence(payload)
@@ -2578,9 +2542,7 @@ def test_msvc_function_auxiliary_rejects_an_inexact_canonical_binding(
     changes: dict[str, object],
 ) -> None:
     with pytest.raises(ClassicSemanticError, match="inexact auxiliary"):
-        _function_auxiliary_receipt(
-            _coff_function_provider_with_auxiliary("_pull_a", **changes)
-        )
+        _function_auxiliary_receipt(_coff_function_provider_with_auxiliary("_pull_a", **changes))
 
 
 def _ordered_archive_seed_isolation_trace(
@@ -2873,9 +2835,12 @@ def test_ordered_archive_seed_data_binding_requires_retained_demand() -> None:
             "system-library/data0.lib",
         ),
     )
-    assert trace["ordered_archive_seed_dependencies"][-1][
-        "retained_linker_demands"
-    ][0]["undefined_external_row"]["relocation_sites"][0]["type"] == 0x14
+    assert (
+        trace["ordered_archive_seed_dependencies"][-1]["retained_linker_demands"][0][
+            "undefined_external_row"
+        ]["relocation_sites"][0]["type"]
+        == 0x14
+    )
 
 
 def test_ordered_archive_seed_accepts_an_unrelocated_undefined_demand_row() -> None:
@@ -2892,9 +2857,9 @@ def test_ordered_archive_seed_accepts_an_unrelocated_undefined_demand_row() -> N
         ),
     )
 
-    demand = trace["ordered_archive_seed_dependencies"][-1][
-        "retained_linker_demands"
-    ][0]["undefined_external_row"]
+    demand = trace["ordered_archive_seed_dependencies"][-1]["retained_linker_demands"][0][
+        "undefined_external_row"
+    ]
     assert demand["relocation_sites"] == []
 
 
@@ -3096,9 +3061,12 @@ def test_ordered_archive_seed_accepts_a_later_typed_baseline_reference(
         "first_linker_input_ordinal": 1,
         "relative_to_seed_owner": "after",
     }
-    assert dependency["retained_linker_demands"][0]["undefined_external_row"][
-        "relocation_sites"
-    ][0]["type"] == relocation_type
+    assert (
+        dependency["retained_linker_demands"][0]["undefined_external_row"]["relocation_sites"][0][
+            "type"
+        ]
+        == relocation_type
+    )
 
 
 def test_ordered_archive_seed_accepts_a_later_unrelocated_function_demand_row() -> None:
@@ -3125,9 +3093,9 @@ def test_ordered_archive_seed_accepts_a_later_unrelocated_function_demand_row() 
         ),
     )
 
-    demand = trace["ordered_archive_seed_dependencies"][0][
-        "retained_linker_demands"
-    ][0]["undefined_external_row"]
+    demand = trace["ordered_archive_seed_dependencies"][0]["retained_linker_demands"][0][
+        "undefined_external_row"
+    ]
     assert demand["symbol_index"] == 3
     assert demand["relocation_sites"] == []
 
@@ -3188,9 +3156,7 @@ def test_ordered_archive_seed_requires_one_ordinary_archive_provider(
     linker_inputs = ["build/obj/seed.obj", "system-library/b.lib"]
     for index in range(provider_count):
         reference = f"system-library/a{index}.lib"
-        archives.append(
-            ArchiveInput(reference, _coff_archive("a.obj", _coff_object("_pull_a")))
-        )
+        archives.append(ArchiveInput(reference, _coff_archive("a.obj", _coff_object("_pull_a"))))
         linker_inputs.append(reference)
 
     with pytest.raises(
@@ -3215,9 +3181,7 @@ def test_ordered_archive_seed_requires_provider_archive_after_owner_object() -> 
 
 
 def test_ordered_archive_seed_accepts_a_retention_root() -> None:
-    trace = _ordered_archive_seed_isolation_trace(
-        retention_root_symbols=("_pull_a",)
-    )
+    trace = _ordered_archive_seed_isolation_trace(retention_root_symbols=("_pull_a",))
 
     dependencies = trace["ordered_archive_seed_dependencies"]
     assert dependencies[0]["retention_linker_root"] is True
@@ -3226,9 +3190,7 @@ def test_ordered_archive_seed_accepts_a_retention_root() -> None:
 
 def test_ordered_archive_seed_rejects_an_initial_demand_root() -> None:
     with pytest.raises(ClassicSemanticError, match="initial demand linker root"):
-        _ordered_archive_seed_isolation_trace(
-            demand_root_symbols=("_pull_a",)
-        )
+        _ordered_archive_seed_isolation_trace(demand_root_symbols=("_pull_a",))
 
 
 def test_ordered_archive_seed_records_a_later_directive_demand() -> None:
@@ -4246,10 +4208,7 @@ def _base_authority(
                     id="linker",
                     path="bin/LINK.EXE",
                     digest=Digest(
-                        value=(
-                            "6ca5a19155e4170e8df08247769b4586f"
-                            "a951743f09f1d8fcec838fc4eb9750e"
-                        )
+                        value=("6ca5a19155e4170e8df08247769b4586fa951743f09f1d8fcec838fc4eb9750e")
                     ),
                     size=514_048,
                     roles=("linker",),
@@ -4404,12 +4363,10 @@ def _base_authority(
     )
     graph = ProducerGraphDocument(
         schema_version=2,
-        source_topology_digest=source_topology_digest(
-            item.path for item in manifest.entries
-        ),
+        source_topology_digest=source_topology_digest(item.path for item in manifest.entries),
         toolchain_lock_digest=toolchain_document_digest(toolchain),
         path_profile_id=paths.id,
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(
             *compiler_nodes,
             ProducerNode(
@@ -4645,9 +4602,7 @@ def _certified_project_overlay_authority(
     )
     graph = graph.model_copy(
         update={
-            "source_topology_digest": source_topology_digest(
-                item.path for item in manifest.entries
-            )
+            "source_topology_digest": source_topology_digest(item.path for item in manifest.entries)
         }
     )
     clean_object = clean_object_payload or _coff_object("_main")
@@ -4826,9 +4781,7 @@ def test_overlay_semantics_ignore_non_code_source_authority(tmp_path: Path) -> N
     )
     graph = graph.model_copy(
         update={
-            "source_topology_digest": source_topology_digest(
-                item.path for item in manifest.entries
-            )
+            "source_topology_digest": source_topology_digest(item.path for item in manifest.entries)
         }
     )
 
@@ -5560,9 +5513,7 @@ def _with_secondary_compiler_reader(
     )
     graph = ProducerGraphDocument(
         schema_version=graph.schema_version,
-        source_topology_digest=source_topology_digest(
-            item.path for item in manifest.entries
-        ),
+        source_topology_digest=source_topology_digest(item.path for item in manifest.entries),
         toolchain_lock_digest=graph.toolchain_lock_digest,
         path_profile_id=graph.path_profile_id,
         extractor=graph.extractor,
@@ -5868,9 +5819,7 @@ def test_unreachable_helper_generator_in_a_header_fails_planning(tmp_path: Path)
     )
     graph = graph.model_copy(
         update={
-            "source_topology_digest": source_topology_digest(
-                item.path for item in manifest.entries
-            )
+            "source_topology_digest": source_topology_digest(item.path for item in manifest.entries)
         }
     )
 
@@ -6148,9 +6097,7 @@ def test_generated_epoch_namespace_is_explicitly_referenced_and_validated(
     bundle, graph, _overlay, _donor, _consumer, clean, effective = _base_authority(
         tmp_path, generated_carrier=True
     )
-    compiler_tool = next(
-        item for item in bundle.toolchain_lock.tools if "compiler" in item.roles
-    )
+    compiler_tool = next(item for item in bundle.toolchain_lock.tools if "compiler" in item.roles)
     bundle = bundle.model_copy(
         update={
             "toolchain_lock": bundle.toolchain_lock.model_copy(
@@ -7105,9 +7052,7 @@ def test_certified_ordinary_overlay_feeds_a_cross_target_donor_lane_and_binds_it
             donor_lanes=(lane,),
             link_closures=(
                 *snapshot.link_closures,
-                TargetLinkClosure(
-                    "config", (compiler.id,), demand_root_symbols=("_main",)
-                ),
+                TargetLinkClosure("config", (compiler.id,), demand_root_symbols=("_main",)),
             ),
         ),
     )
@@ -7519,9 +7464,7 @@ def _direct_carrier_trace(
     canonical_identity: bool = True,
     carrier_generator_kinds: tuple[str, ...] = ("fixture",),
 ) -> dict[str, object]:
-    ordinary_payload = ordinary_payload or _coff_object(
-        "_shared", body_payload=b"\x90\xc3"
-    )
+    ordinary_payload = ordinary_payload or _coff_object("_shared", body_payload=b"\x90\xc3")
     carrier_payload = carrier_payload or _coff_object("_shared", body_payload=b"\xc3")
     products = {
         "compiler.app.0000": CompilerProduct(
@@ -7550,9 +7493,7 @@ def _direct_carrier_trace(
             archives,
         ),
         linker_arguments=(
-            linker_arguments
-            if linker_arguments is not None
-            else ("/INCREMENTAL:NO", "/OPT:REF")
+            linker_arguments if linker_arguments is not None else ("/INCREMENTAL:NO", "/OPT:REF")
         ),
         linker_inputs=(
             linker_inputs
@@ -7767,9 +7708,7 @@ def test_archive_cannot_hide_an_exact_generated_carrier_clone(tmp_path: Path) ->
     "directive",
     (b"/merge:.text=.data", b"/disallowlib:runtime.lib"),
 )
-def test_carrier_cannot_change_global_linker_controls(
-    directive: bytes, tmp_path: Path
-) -> None:
+def test_carrier_cannot_change_global_linker_controls(directive: bytes, tmp_path: Path) -> None:
     bundle, *_ = _base_authority(tmp_path, generated_carrier=True)
 
     with pytest.raises(ClassicSemanticError, match="global linker control"):

@@ -11,6 +11,9 @@ from types import SimpleNamespace
 
 import pytest
 
+import reprobit.cmake_graph as cmake_graph
+import reprobit.cmake_import as cmake_import
+from reprobit.backends import NativeWindowsBackend
 from reprobit.cache import IncrementalCache, cache_key
 from reprobit.classic_project import ClassicProjectError
 from reprobit.cli import (
@@ -21,12 +24,18 @@ from reprobit.cli import (
 )
 from reprobit.cli_output import CLIOutput, human_command
 from reprobit.cli_paths import CLIError
-from reprobit.costs import calculate_cost
+from reprobit.cmake_source import effective_source_digest
+from reprobit.costs import (
+    calculate_cost,
+    calculate_intervention_cost,
+    intervention_cost_row_digest,
+)
 from reprobit.discovery_cli import (
     _discovery_wineserver_lifecycle,
     _resolve_paths,
     _run_discovery_wineserver_command,
 )
+from reprobit.discovery_project_grind import enumerate_project_grind_campaign
 from reprobit.incremental import IncrementalBuildSummary
 from reprobit.migration import MigrationOutput
 from reprobit.model import (
@@ -35,7 +44,9 @@ from reprobit.model import (
     ArtifactOrigin,
     AuthenticityPolicy,
     ByteRange,
+    Certificate,
     Digest,
+    ProofObligation,
     ProvenanceKind,
     ProvenanceNode,
     Scope,
@@ -79,16 +90,18 @@ from reprobit.schema import (
     OracleInstallRange,
     ProjectBundle,
     ProofDocument,
+    SourceManifestDocument,
     StateCarrierIntervention,
     ToolchainLock,
     ToolchainProfileSource,
+    intervention_authority_digest,
     source_manifest_digest,
 )
 from reprobit.source_lock import build_source_manifest
 from reprobit.state import KeepWorkspace, RunArena
 from reprobit.strict_json import canonical_json, strict_load
 from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES, profile_source_pins_for_paths
-from reprobit.transactions import CASTransaction, TransactionResult
+from reprobit.transactions import CASTransaction, TransactionConflict, TransactionResult
 
 
 def _initialize(root: Path) -> None:
@@ -123,12 +136,7 @@ def test_cli_treats_a_closed_output_pipe_as_normal_completion(
 
 
 def _write_discovery_request(tmp_path: Path, *, source: str | None = None) -> Path:
-    example = (
-        Path(__file__).parents[1]
-        / "examples"
-        / "declaration-discovery"
-        / "campaign.json"
-    )
+    example = Path(__file__).parents[1] / "examples" / "declaration-discovery" / "campaign.json"
     document = strict_load(example)
     assert isinstance(document, dict)
     if source is not None:
@@ -464,6 +472,36 @@ def test_default_source_lock_omits_intentionally_deleted_tracked_file(
     assert [item["path"] for item in document["entries"]] == ["reprobit.toml"]
 
 
+def test_fresh_source_preview_does_not_report_the_unreviewed_project_file_as_removed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _initialize(tmp_path)
+    source = tmp_path / "src/unit.cpp"
+    source.parent.mkdir()
+    source.write_text("int main() { return 0; }\n", encoding="utf-8")
+    subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
+    subprocess.run(("git", "add", "src/unit.cpp"), cwd=tmp_path, check=True)
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "source",
+                "preview",
+                "--project",
+                str(tmp_path),
+            ]
+        )
+        == 0
+    )
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["added"] == ["src/unit.cpp"]
+    assert event["removed"] == []
+
+
 def test_source_preview_reports_stale_tu_and_lock_preserves_reviewed_authority(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -664,6 +702,20 @@ def _complete_project(root: Path, *, command_build: bool = False) -> None:
             ),
             encoding="utf-8",
         )
+        assert (
+            main(
+                [
+                    "source",
+                    "lock",
+                    "--project",
+                    str(root),
+                    "--path",
+                    "reprobit.toml",
+                ]
+            )
+            == 0
+        )
+    else:
         assert (
             main(
                 [
@@ -940,6 +992,7 @@ def test_graph_configure_exposes_closed_migration_receipt(
         return SimpleNamespace(
             configured_build_root=workspace / "build",
             effective_source_root=workspace / "source",
+            effective_source_digest=Digest.from_bytes(b"effective source"),
             toolchain_root=toolchain,
             target_plan=workspace / "build/reprobit-target-plan.json",
             compile_database=workspace / "build/compile_commands.json",
@@ -949,7 +1002,7 @@ def test_graph_configure_exposes_closed_migration_receipt(
             duration_seconds=1.25,
         )
 
-    monkeypatch.setattr("reprobit.classic_migration.configure_classic_producer_graph", configure)
+    monkeypatch.setattr("reprobit.cmake_configure.configure_cmake_project", configure)
     assert (
         main(
             [
@@ -981,8 +1034,514 @@ def test_graph_configure_exposes_closed_migration_receipt(
     assert event["event"] == "producer_graph_configured"
     assert event["certification_runtime"] is False
     assert event["configured_build_root"] == str(workspace / "build")
+    assert event["effective_source_digest"] == Digest.from_bytes(b"effective source").value
     assert captured["timeout_seconds"] == 30.0
     assert captured["workspace_root"] == workspace
+
+
+def _fresh_cmake_import_project(root: Path) -> None:
+    _complete_project(root)
+    for directory in ("interventions", "proofs", "oracles"):
+        for document in (root / "reprobit" / directory).glob("*.json"):
+            document.unlink()
+
+
+@pytest.mark.parametrize(
+    "raced_path",
+    (
+        "reprobit.toml",
+        "reprobit/source-manifest.json",
+        "reprobit/toolchain.lock.json",
+        "reference/program.bin",
+    ),
+)
+def test_cmake_scaffold_binds_every_prevalidated_input(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    raced_path: str,
+) -> None:
+    project = tmp_path / "project"
+    _fresh_cmake_import_project(project)
+    spec = load_project(project)
+
+    class RacingTransaction(CASTransaction):
+        def commit(self) -> TransactionResult:
+            authority = project / raced_path
+            authority.write_bytes(authority.read_bytes() + b"\n")
+            return super().commit()
+
+    monkeypatch.setattr(cmake_import, "CASTransaction", RacingTransaction)
+    with pytest.raises(TransactionConflict, match="expected"):
+        cmake_import.scaffold_cmake_authority(project, spec, ["program=app"])
+    assert not (project / "reprobit/build-plan.json").exists()
+
+
+def _mock_cmake_graph_result(project: Path) -> SimpleNamespace:
+    return SimpleNamespace(
+        graph=SimpleNamespace(nodes=("compile", "link"), extractor="fixture"),
+        output=Path("reprobit/producer-graph.json"),
+        role_counts={
+            "compiler": 1,
+            "resource-compiler": 0,
+            "librarian": 0,
+            "linker": 1,
+        },
+        graph_digest=Digest.from_bytes(b"fixture graph"),
+        transaction_id="fixture-transaction",
+        translation_units=1,
+        skipped_translation_units=0,
+    )
+
+
+def test_cmake_import_scaffolds_and_runs_the_guided_graph_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _fresh_cmake_import_project(project)
+    capsys.readouterr()
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "reprobit.toolchains.ClassicMSVCToolchain.doctor",
+        lambda self, lock: SimpleNamespace(require_ok=lambda: None),
+    )
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import.verify_msvc42_cmake_frontend",
+        lambda root: None,
+    )
+
+    def configure(bundle: ProjectBundle, **options: object) -> SimpleNamespace:
+        captured.update(options)
+        assert bundle.build_plan is not None
+        assert [(gate.target_id, gate.build_target) for gate in bundle.build_plan.target_gates] == [
+            ("program", "app")
+        ]
+        workspace = options["workspace_root"]
+        assert isinstance(workspace, Path)
+        return SimpleNamespace(
+            configured_build_root=workspace / "build",
+            effective_source_root=workspace / "source",
+            effective_source_digest=Digest.from_bytes(b"effective source"),
+            target_plan=workspace / "build/reprobit-target-plan.json",
+        )
+
+    extracted: dict[str, object] = {}
+
+    def extract(**options: object) -> SimpleNamespace:
+        extracted.update(options)
+        return _mock_cmake_graph_result(project)
+
+    real_load = load_project_tree
+
+    def load(root: Path, **options: object) -> object:
+        bundle = real_load(root, **options)
+        if options.get("include_producer_graph") is False:
+            return bundle
+        return SimpleNamespace(
+            producer_graph=SimpleNamespace(nodes=("compile", "link")),
+            build_plan=SimpleNamespace(translation_units=("unit",)),
+        )
+
+    monkeypatch.setattr("reprobit.cli_cmake_import.configure_cmake_project", configure)
+    monkeypatch.setattr("reprobit.cli_cmake_import.record_cmake_graph", extract)
+    monkeypatch.setattr("reprobit.cli_cmake_import.load_project_tree", load)
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "import",
+                "cmake",
+                str(project),
+                "--target",
+                "program=app",
+                "--toolchain-root",
+                str(toolchain),
+                "--compiler-transport",
+                sys.executable,
+                "--resource-transport",
+                sys.executable,
+                "--cmake",
+                sys.executable,
+            ]
+        )
+        == 0
+    )
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert events[-1]["event"] == "cmake_imported"
+    assert events[-1]["nodes"] == 2
+    assert events[-1]["translation_units"] == 1
+    assert captured["defer_project_plan"] is True
+    assert extracted["directive_inputs"] == []
+    plan = BuildPlanDocument.model_validate_json(
+        (project / "reprobit/build-plan.json").read_bytes()
+    )
+    assert [(gate.target_id, gate.build_target) for gate in plan.target_gates] == [
+        ("program", "app")
+    ]
+    oracle = OracleDocument.model_validate_json(
+        (project / "reprobit/oracles/program.json").read_bytes()
+    )
+    assert oracle.image_digest == Digest.from_bytes(b"expected")
+    assert (project / "reprobit/interventions/program.json").is_file()
+    assert (project / "reprobit/proofs/program.json").is_file()
+
+
+def test_cmake_import_uses_authenticated_nmake_on_native_windows(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _fresh_cmake_import_project(project)
+    capsys.readouterr()
+    toolchain = tmp_path / "toolchain"
+    for relative in (
+        "bin/CL.EXE",
+        "bin/RC.EXE",
+        "bin/NMAKE.EXE",
+        "bin/NMAKE.ERR",
+    ):
+        path = toolchain / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fixture")
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import.backend_for_host",
+        lambda: NativeWindowsBackend(),
+    )
+    monkeypatch.setattr(
+        "reprobit.toolchains.ClassicMSVCToolchain.doctor",
+        lambda self, lock: SimpleNamespace(require_ok=lambda: None),
+    )
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import.verify_msvc42_cmake_frontend",
+        lambda root: None,
+    )
+
+    def configure(bundle: ProjectBundle, **options: object) -> SimpleNamespace:
+        del bundle
+        captured.update(options)
+        workspace = options["workspace_root"]
+        assert isinstance(workspace, Path)
+        return SimpleNamespace(
+            configured_build_root=workspace / "build",
+            effective_source_root=workspace / "source",
+            effective_source_digest=Digest.from_bytes(b"effective source"),
+            target_plan=workspace / "build/reprobit-target-plan.json",
+        )
+
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import.configure_cmake_project",
+        configure,
+    )
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import.record_cmake_graph",
+        lambda **options: _mock_cmake_graph_result(project),
+    )
+    real_load = load_project_tree
+
+    def load(root: Path, **options: object) -> object:
+        bundle = real_load(root, **options)
+        if options.get("include_producer_graph") is False:
+            return bundle
+        return SimpleNamespace(
+            producer_graph=SimpleNamespace(nodes=("compile", "link")),
+            build_plan=SimpleNamespace(translation_units=("unit",)),
+        )
+
+    monkeypatch.setattr("reprobit.cli_cmake_import.load_project_tree", load)
+
+    assert (
+        main(
+            [
+                "import",
+                "cmake",
+                str(project),
+                "--toolchain-root",
+                str(toolchain),
+                "--cmake",
+                sys.executable,
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+    assert captured["generator"] == "NMake Makefiles"
+    assert captured["make_program"] == toolchain / "bin/NMAKE.EXE"
+    assert captured["compiler_transport"] == toolchain / "bin/CL.EXE"
+    assert captured["resource_transport"] == toolchain / "bin/RC.EXE"
+
+
+@pytest.mark.parametrize(
+    "race",
+    (
+        None,
+        "source-manifest",
+        "toolchain-lock",
+        "effective-source",
+        "effective-source-at-commit",
+        "new-write",
+    ),
+)
+def test_cmake_import_atomically_creates_project_grind_tu_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    race: str | None,
+) -> None:
+    project = tmp_path / "project"
+    _complete_project(project)
+    project_file = project / "reprobit.toml"
+    project_file.write_text(
+        project_file.read_text(encoding="utf-8").replace(
+            'artifact = "out/program.bin"', 'artifact = "build/APP.EXE"'
+        ),
+        encoding="utf-8",
+    )
+    source = project / "src/unit.cpp"
+    source.parent.mkdir()
+    source.write_text("int main() { return 0; }\n", encoding="utf-8")
+    assert (
+        main(
+            [
+                "source",
+                "lock",
+                "--project",
+                str(project),
+                "--path",
+                "reprobit.toml",
+                "--path",
+                "src/unit.cpp",
+            ]
+        )
+        == 0
+    )
+    for directory in ("interventions", "proofs", "oracles"):
+        for document in (project / "reprobit" / directory).glob("*.json"):
+            document.unlink()
+    capsys.readouterr()
+
+    configured = tmp_path / "configured"
+    configured.mkdir()
+    effective = tmp_path / "effective"
+    (effective / "src").mkdir(parents=True)
+    (effective / "reprobit.toml").write_bytes(project_file.read_bytes())
+    effective_source = effective / "src/unit.cpp"
+    effective_source.write_bytes(source.read_bytes())
+    toolchain = tmp_path / "toolchain"
+    compiler = toolchain / "wine/x86/cl"
+    resource = toolchain / "wine/x86/rc"
+    linker = toolchain / "wine/x86/link"
+    for producer in (compiler, resource, linker):
+        producer.parent.mkdir(parents=True, exist_ok=True)
+        producer.write_text("fixture\n", encoding="utf-8")
+    object_path = "CMakeFiles/program.dir/src/unit.cpp.obj"
+    (configured / "compile_commands.json").write_text(
+        json.dumps(
+            [
+                {
+                    "directory": str(configured),
+                    "file": str(effective_source),
+                    "command": " ".join(
+                        (
+                            str(compiler),
+                            "/nologo",
+                            f"/Fo{object_path}",
+                            f"/Fd{object_path}.pdb",
+                            "/c",
+                            str(effective_source),
+                        )
+                    ),
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+    link_directory = configured / "CMakeFiles/program.dir"
+    link_directory.mkdir(parents=True)
+    (link_directory / "link.txt").write_text(
+        f"{linker} {object_path} /out:APP.EXE\n",
+        encoding="utf-8",
+    )
+    target_plan = configured / "reprobit-target-plan.json"
+    target_plan.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "targets": [
+                    {
+                        "name": "program",
+                        "artifact_id": "program",
+                        "output": str(configured / "APP.EXE"),
+                        "pdb": None,
+                    }
+                ],
+                "link_admissions": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "reprobit.toolchains.ClassicMSVCToolchain.doctor",
+        lambda self, lock: SimpleNamespace(require_ok=lambda: None),
+    )
+
+    def configure(bundle: ProjectBundle, **options: object) -> SimpleNamespace:
+        del bundle, options
+        return SimpleNamespace(
+            configured_build_root=configured,
+            effective_source_root=effective,
+            effective_source_digest=effective_source_digest(effective),
+            target_plan=target_plan,
+        )
+
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import.configure_cmake_project",
+        configure,
+    )
+
+    if race == "effective-source-at-commit":
+        real_transaction = cmake_graph.CASTransaction
+        mutated = False
+
+        class RacingGraphTransaction(real_transaction):
+            def commit(self) -> TransactionResult:
+                nonlocal mutated
+                if not mutated:
+                    effective_source.write_bytes(effective_source.read_bytes() + b"\n")
+                    mutated = True
+                return super().commit()
+
+        monkeypatch.setattr(cmake_graph, "CASTransaction", RacingGraphTransaction)
+
+    if race is not None:
+        real_validate = cmake_graph.validate_project_files
+        validation_calls = 0
+
+        def validate_with_race(
+            files: dict[PurePosixPath, bytes],
+        ) -> ProjectBundle:
+            nonlocal validation_calls
+            received = real_validate(files)
+            validation_calls += 1
+            if race in {"source-manifest", "toolchain-lock"} and validation_calls == 1:
+                authority = project / (
+                    "reprobit/source-manifest.json"
+                    if race == "source-manifest"
+                    else "reprobit/toolchain.lock.json"
+                )
+                authority.write_bytes(authority.read_bytes() + b"\n")
+            elif race == "effective-source" and validation_calls == 1:
+                effective_source.write_bytes(effective_source.read_bytes() + b"\n")
+            elif race == "new-write" and validation_calls == 2:
+                relative = next(
+                    path
+                    for path in files
+                    if path.name.startswith("tu.") and "interventions" in path.parts
+                )
+                destination = project.joinpath(*relative.parts)
+                destination.write_bytes(b"raced authority\n")
+            return received
+
+        monkeypatch.setattr(cmake_graph, "validate_project_files", validate_with_race)
+
+    exit_code = main(
+        [
+            "--format",
+            "ndjson",
+            "import",
+            "cmake",
+            str(project),
+            "--toolchain-root",
+            str(toolchain),
+            "--compiler-transport",
+            str(compiler),
+            "--resource-transport",
+            str(resource),
+            "--cmake",
+            sys.executable,
+        ]
+    )
+    if race is not None:
+        assert exit_code == 2
+        events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+        assert events[-1]["event"] == "error"
+        assert events[-1]["error_type"] == (
+            "CMakeGraphError"
+            if race in {"effective-source", "effective-source-at-commit"}
+            else "TransactionConflict"
+        )
+        assert not (project / "reprobit/producer-graph.json").exists()
+        return
+    assert exit_code == 0
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    extraction = next(event for event in events if event["event"] == "producer_graph_extracted")
+    assert extraction["translation_units"] == 1
+    assert extraction["skipped_translation_units"] == 0
+    bundle = load_project_tree(project)
+    assert bundle.build_plan is not None
+    assert len(bundle.build_plan.translation_units) == 1
+    unit = bundle.build_plan.translation_units[0]
+    assert unit.source == "src/unit.cpp"
+    assert (project / "reprobit/interventions" / f"{unit.id}.json").is_file()
+    assert (project / "reprobit/proofs" / f"{unit.id}.json").is_file()
+    campaign = enumerate_project_grind_campaign(project)
+    assert campaign.eligible_units == 1
+
+
+def test_failed_cmake_import_removes_only_its_fresh_scaffold(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _fresh_cmake_import_project(project)
+    capsys.readouterr()
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    monkeypatch.setattr(
+        "reprobit.toolchains.ClassicMSVCToolchain.doctor",
+        lambda self, lock: SimpleNamespace(require_ok=lambda: None),
+    )
+
+    def fail_configure(bundle: ProjectBundle, **options: object) -> None:
+        del bundle, options
+        raise RuntimeError("fixture configure failure")
+
+    monkeypatch.setattr("reprobit.cli_cmake_import.configure_cmake_project", fail_configure)
+    assert (
+        main(
+            [
+                "import",
+                "cmake",
+                str(project),
+                "--toolchain-root",
+                str(toolchain),
+                "--compiler-transport",
+                sys.executable,
+                "--resource-transport",
+                sys.executable,
+                "--cmake",
+                sys.executable,
+            ]
+        )
+        == 2
+    )
+    assert "fixture configure failure" in capsys.readouterr().err
+    assert not (project / "reprobit/build-plan.json").exists()
+    for directory in ("interventions", "proofs", "oracles"):
+        assert not tuple((project / "reprobit" / directory).glob("*.json"))
+    assert (project / "reprobit/source-manifest.json").is_file()
+    assert (project / "reprobit/toolchain.lock.json").is_file()
+    assert (project / "reference/program.bin").read_bytes() == b"expected"
+    assert len(tuple((project / ".reprobit-state/runs").glob("import-*"))) == 1
 
 
 def test_init_is_transactional_and_emits_stable_ndjson(
@@ -1009,9 +1568,24 @@ def test_init_is_transactional_and_emits_stable_ndjson(
     initialized = load_project(root)
     assert initialized.project_id == "sample"
     assert initialized.build.kind == "producer-graph"
+    source = SourceManifestDocument.model_validate_json(
+        (root / initialized.layout.source_manifest).read_bytes()
+    )
+    assert not source.complete
+    assert source.entries == ()
 
     assert main(["init", str(root), "--project-id", "sample"]) == 2
     assert "preimage conflict" in capsys.readouterr().err
+
+
+def test_init_target_drives_human_default_output_paths(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    assert main(["init", str(root), "--target", "game"]) == 0
+
+    target = load_project(root).targets[0]
+    assert target.id == "game"
+    assert target.artifact == "build/game.exe"
+    assert target.oracle == "reference/game.exe"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Wine backend is supported only on POSIX")
@@ -1135,6 +1709,11 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     )
     capsys.readouterr()
 
+    effective = tmp_path / "effective"
+    effective_source = effective / "src/unit.cpp"
+    effective_source.parent.mkdir(parents=True)
+    (effective / "reprobit.toml").write_bytes(project_file.read_bytes())
+    effective_source.write_bytes(source.read_bytes())
     configured = tmp_path / "configured"
     toolchain = tmp_path / "toolchain"
     compiler = toolchain / "wine/x86/cl"
@@ -1150,7 +1729,7 @@ def test_graph_extract_commits_closed_direct_producer_authority(
             [
                 {
                     "directory": str(configured),
-                    "file": str(source),
+                    "file": str(effective_source),
                     "command": " ".join(
                         (
                             str(compiler),
@@ -1158,7 +1737,7 @@ def test_graph_extract_commits_closed_direct_producer_authority(
                             f"/Fo{object_path}",
                             f"/Fd{pdb_path}",
                             "/c",
-                            str(source),
+                            str(effective_source),
                         )
                     ),
                 }
@@ -1200,7 +1779,9 @@ def test_graph_extract_commits_closed_direct_producer_authority(
                 "--configured-build-root",
                 str(configured),
                 "--effective-source-root",
-                str(project),
+                str(effective),
+                "--effective-source-digest",
+                effective_source_digest(effective).value,
                 "--toolchain-root",
                 str(toolchain),
                 "--directive-input",
@@ -1252,7 +1833,9 @@ def test_graph_extract_commits_closed_direct_producer_authority(
                 "--configured-build-root",
                 str(configured),
                 "--effective-source-root",
-                str(project),
+                str(effective),
+                "--effective-source-digest",
+                effective_source_digest(effective).value,
                 "--toolchain-root",
                 str(toolchain),
             ]
@@ -1285,7 +1868,9 @@ def test_graph_extract_commits_closed_direct_producer_authority(
                     "--configured-build-root",
                     str(configured),
                     "--effective-source-root",
-                    str(project),
+                    str(effective),
+                    "--effective-source-digest",
+                    effective_source_digest(effective).value,
                     "--toolchain-root",
                     str(toolchain),
                     *invalid_arguments,
@@ -1307,7 +1892,9 @@ def test_graph_extract_commits_closed_direct_producer_authority(
                 "--configured-build-root",
                 str(configured),
                 "--effective-source-root",
-                str(project),
+                str(effective),
+                "--effective-source-digest",
+                effective_source_digest(effective).value,
                 "--toolchain-root",
                 str(toolchain),
             ]
@@ -1496,9 +2083,7 @@ def test_redirected_progress_reports_latest_count_when_execution_fails() -> None
     lines = human.getvalue().splitlines()
     assert lines[0] == "build..."
     assert "1/100" in lines[1]
-    assert lines[2] == (
-        "build: failed (9/100; compile: unit.nine; error: producer failed)"
-    )
+    assert lines[2] == ("build: failed (9/100; compile: unit.nine; error: producer failed)")
 
 
 def test_incremental_summary_is_complete_in_text_and_ndjson() -> None:
@@ -2057,7 +2642,7 @@ def test_manifest_preview_and_apply_use_the_cas_transaction(
                 source_topology_digest=Digest.from_bytes(b"stale source topology"),
                 toolchain_lock_digest=Digest.from_bytes(b"stale toolchain"),
                 path_profile_id="dos-stable-v1",
-                extractor="cmake-unix-makefiles-v1",
+                extractor="cmake-makefiles-v1",
                 nodes=(
                     ProducerNode(
                         id="compiler.stale",
@@ -2150,12 +2735,45 @@ def test_primary_help_uses_human_terms_for_common_workflows(
     assert "cold exact solution" not in top_level
 
 
+def test_primary_help_does_not_load_specialized_command_stacks() -> None:
+    script = """
+import contextlib
+import io
+import sys
+
+import reprobit.cli as cli
+
+with contextlib.redirect_stdout(io.StringIO()):
+    try:
+        cli.main(["--help"])
+    except SystemExit as error:
+        if error.code != 0:
+            raise
+for module in (
+    "reprobit.cli_cmake_import",
+    "reprobit.discovery_grind_cli",
+    "reprobit.discovery_project",
+):
+    if module in sys.modules:
+        raise AssertionError(f"base CLI help eagerly loaded {module}")
+"""
+
+    subprocess.run(
+        (sys.executable, "-c", script),
+        cwd=Path(__file__).parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_report_and_cmake_module_commands(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     project = tmp_path / "project"
     _complete_project(project)
     bundle = load_project_tree(project)
+    intervention = next(item for item in bundle.interventions if item.id == "state.one")
     component_digest = Digest.from_bytes(b"fixture component")
     target = bundle.spec.targets[0]
     target_digest = Digest.from_bytes(b"expected")
@@ -2225,7 +2843,24 @@ def test_report_and_cmake_module_commands(
                 artifact_id=artifact.id,
             ),
         ),
-        certificates=(),
+        certificates=(
+            Certificate(
+                id="certificate.state.one",
+                intervention_id="state.one",
+                intervention_authority_digest=intervention_authority_digest(intervention),
+                intervention_cost_digest=intervention_cost_row_digest(
+                    calculate_intervention_cost(intervention)
+                ),
+                obligations=(
+                    ProofObligation(
+                        name="state-carrier-reviewed",
+                        passed=True,
+                        evidence_digest=Digest.from_bytes(b"state carrier proof"),
+                    ),
+                ),
+                artifact_ids=(artifact.id,),
+            ),
+        ),
         producers=(
             ProducerSummary(
                 id="producer.program",

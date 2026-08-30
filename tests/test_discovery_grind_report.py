@@ -115,6 +115,7 @@ def test_grind_report_layers_success_funnel_decision_and_technical_details() -> 
         cold_report_html="cold-verification.html",
         cold_report_json="cold-verification.json",
     )
+    assert rendered.count('<svg class="brand-mark"') == 1
     structure = _HTMLStructure()
     structure.feed(rendered)
 
@@ -127,16 +128,24 @@ def test_grind_report_layers_success_funnel_decision_and_technical_details() -> 
         "technical-details",
     } <= structure.ids
     assert sum(tag == "figure" for tag, _attrs in structure.tags) == 2
-    assert '<code>sample.project</code>' in rendered
-    assert '<code>widget.target</code>' in rendered
-    assert '<code>?Transform@Widget@@QAEHH@Z</code>' in rendered
+    assert "<code>sample.project</code>" in rendered
+    assert "<code>widget.target</code>" in rendered
+    assert "<code>?Transform@Widget@@QAEHH@Z</code>" in rendered
     assert "Search funnel" in rendered
     assert "Why states stopped" in rendered
+    assert rendered.index('<section class="section" id="decision"') < rendered.index(
+        '<section class="section" id="funnel"'
+    )
+    assert "Exact adjustment saved" in rendered
+    assert "Fresh verification passed" in rendered
     assert "Candidate did not match the reference function" in rendered
     assert "Final executable did not match" in rendered
     assert "Project files updated" in rendered
-    assert "Two intervention records and their matching proof records were saved." in rendered
+    assert (
+        "Two adjustment records and their supporting verification records were saved." in rendered
+    )
     assert "Changed files" in rendered
+    assert "Review the changed project files" in rendered
     assert "git diff\nrbit verify ." in rendered
     assert "<code>discovery.declaration_shape.c1.f10</code>" in rendered
     assert "<code>discovery.equal_body.transform</code>" in rendered
@@ -144,6 +153,8 @@ def test_grind_report_layers_success_funnel_decision_and_technical_details() -> 
     assert "Path: <code>cold-verification.html</code>" in rendered
     assert '<details class="advanced" id="technical-details">' in rendered
     assert '<details class="advanced" id="technical-details" open>' not in rendered
+    assert "Donor intervention" in rendered
+    assert "Cold trials" in rendered
     assert "Every recorded grind rejection" in rendered
     assert "<script src=" not in rendered
 
@@ -159,7 +170,7 @@ def test_grind_report_explains_bounded_failure_without_a_verification_link() -> 
         result,
         plan_relative="reprobit/discovery.json",
     )
-    assert "No exact intervention within these bounds" in rendered
+    assert "No exact adjustment within these search limits" in rendered
     assert "No state chosen" in rendered
     assert "Project files unchanged" in rendered
     assert "candidate object does not match the reference symbol" in rendered
@@ -176,10 +187,9 @@ def test_grind_preview_shows_the_exact_approval_command_and_prospective_files() 
 
     assert "Files approval would change" in rendered
     assert "Changed files:" not in rendered
-    assert (
-        "rbit discover grind . --plan reprobit/discovery.json --accept-exact"
-        in rendered
-    )
+    assert "Exact adjustment ready for review" in rendered
+    assert "Approval will save two adjustment records" in rendered
+    assert "rbit discover grind . --plan reprobit/discovery.json --accept-exact" in rendered
 
 
 def _args(root: Path, *, accept_exact: bool) -> argparse.Namespace:
@@ -219,7 +229,7 @@ def test_cli_writes_a_human_grind_report_for_no_solution(
     report = tmp_path / ".reprobit-state/reports/grind/report.html"
     assert status == 1
     assert report.is_file()
-    assert "No exact intervention within these bounds" in report.read_text(encoding="utf-8")
+    assert "No exact adjustment within these search limits" in report.read_text(encoding="utf-8")
     complete = next(
         item
         for item in (json.loads(line) for line in machine.getvalue().splitlines())
@@ -227,6 +237,31 @@ def test_cli_writes_a_human_grind_report_for_no_solution(
     )
     assert complete["grind_report_html"] == str(report)
     assert complete["cold_verification_report_html"] is None
+
+
+def test_cli_cold_report_links_its_actual_json_sibling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_cli_result(monkeypatch, _result(solution=_solution()))
+    monkeypatch.setattr(grind_cli, "canonical_json", lambda _value: b"{}")
+    observed_hrefs: list[str | None] = []
+
+    def render_cold(_report: object, *, canonical_json_href: str | None) -> str:
+        observed_hrefs.append(canonical_json_href)
+        return "<!doctype html><title>Cold verification</title>"
+
+    monkeypatch.setattr(grind_cli, "render_report_html", render_cold)
+
+    status = grind_cli.command_discover_grind(
+        _args(tmp_path, accept_exact=False),
+        CLIOutput("ndjson", StringIO(), StringIO()),
+        prepare_run=lambda *_args, **_kwargs: None,
+        verify_command=lambda *_args, **_kwargs: 0,
+    )
+
+    assert status == 0
+    assert observed_hrefs == ["cold-verification.json"]
 
 
 def test_report_failure_after_publication_is_an_explicit_nonfatal_event(
@@ -241,7 +276,7 @@ def test_report_failure_after_publication_is_an_explicit_nonfatal_event(
     monkeypatch.setattr(
         grind_cli,
         "render_report_html",
-        lambda _report: "<!doctype html><title>Cold verification</title>",
+        lambda _report, **_kwargs: "<!doctype html><title>Cold verification</title>",
     )
     monkeypatch.setattr(
         grind_cli,
@@ -278,7 +313,7 @@ def test_cold_report_failure_still_writes_the_human_grind_report(
     monkeypatch.setattr(
         grind_cli,
         "render_report_html",
-        lambda _report: (_ for _ in ()).throw(OSError("cold report unavailable")),
+        lambda _report, **_kwargs: (_ for _ in ()).throw(OSError("cold report unavailable")),
     )
     machine = StringIO()
 

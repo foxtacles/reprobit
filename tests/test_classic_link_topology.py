@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from reprobit.classic.source_overlay import _ancestor_compilers, _graph_archives
 from reprobit.classic_link_topology import terminal_link_input_topology
-from reprobit.classic_orchestration import _compiler_terminal_consumer_targets
+from reprobit.classic_orchestration import compiler_terminal_consumer_targets
 from reprobit.model import Digest
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole
 
@@ -86,7 +86,7 @@ def _linked_target_graph() -> tuple[ProducerGraphDocument, dict[str, ProducerNod
         source_topology_digest=Digest.from_bytes(b"source topology"),
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=tuple(sorted(nodes, key=lambda node: node.id.casefold())),
     )
     return graph, {
@@ -122,7 +122,7 @@ def test_terminal_link_topology_follows_inputs_and_stops_at_linker() -> None:
 def test_semantic_and_orchestration_closures_share_linker_boundary() -> None:
     graph, nodes = _linked_target_graph()
 
-    consumers = _compiler_terminal_consumer_targets(graph)
+    consumers = compiler_terminal_consumer_targets(graph)
 
     assert consumers[nodes["upstream"].id] == frozenset({"upstream"})
     assert consumers[nodes["app"].id] == frozenset({"downstream"})

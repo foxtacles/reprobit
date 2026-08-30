@@ -54,10 +54,7 @@ def test_cli_creates_a_ready_to_grind_project_plan_without_compiling(
     assert plan.symbol == "?Transform@Widget@@QAEHH@Z"
     rendered = capsys.readouterr().out
     assert "No compiler was run" in rendered
-    assert (
-        f"Next: rbit discover grind {tmp_path} --plan plans/widget.json"
-        in rendered
-    )
+    assert f"Next: rbit discover grind {tmp_path} --plan plans/widget.json" in rendered
 
 
 def test_grind_help_does_not_promise_workspace_retention(
@@ -67,7 +64,11 @@ def test_grind_help_does_not_promise_workspace_retention(
         main(["discover", "grind", "--help"])
 
     assert raised.value.code == 0
-    assert "--keep-workspace" not in capsys.readouterr().out
+    rendered = capsys.readouterr().out
+    assert "--keep-workspace" not in rendered
+    assert "--project-wide" in rendered
+    assert "--reference-object TU=PROJECT_PATH" in rendered
+    assert "--max-symbols COUNT" in rendered
 
 
 def test_cli_grind_plan_scaffold_refuses_to_overwrite_an_existing_plan(
@@ -103,4 +104,6 @@ def test_cli_grind_plan_scaffold_refuses_to_overwrite_an_existing_plan(
         == 2
     )
     assert destination.read_bytes() == b"existing plan"
-    assert "target has unknown contents" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    assert "transaction preimage conflict" in error
+    assert "expected None" in error

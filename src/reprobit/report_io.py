@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path, PurePosixPath
+from urllib.parse import quote
 
 from reprobit.report import Report
 from reprobit.report_html import render_report_html as _render_report_html
 from reprobit.secure_paths import atomic_publish_relative
-from reprobit.strict_json import JsonValue, StrictJSONError, canonical_json, strict_load
+from reprobit.strict_json import JsonValue, StrictJSONError, canonical_json, strict_loads
 
 
 def _atomic_write(path: str | Path, data: bytes) -> None:
@@ -31,22 +32,58 @@ def read_report_json(path: str | Path) -> Report:
 
     source = Path(path)
     try:
-        value = strict_load(source)
-        return Report.model_validate_json(canonical_json(value))
-    except (StrictJSONError, ValueError) as exc:
+        payload = source.read_bytes()
+        # The strict parser is the ambiguity gate.  Discard its temporary tree
+        # before Pydantic validates the original JSON bytes so large evidence
+        # reports are never held as a Python tree and reserialized copy at once.
+        strict_loads(payload)
+        return Report.model_validate_json(payload)
+    except (OSError, StrictJSONError, ValueError) as exc:
         raise ValueError(f"invalid report {source}: {exc}") from exc
 
 
-def render_report_html(report: Report) -> str:
+def report_json_href(
+    html_path: str | Path,
+    json_path: str | Path | None,
+) -> str | None:
+    """Return a portable local link from one report artifact to its JSON sibling."""
+
+    if json_path is None:
+        return None
+    html = Path(os.path.abspath(html_path))
+    canonical_json = Path(os.path.abspath(json_path))
+    try:
+        relative = os.path.relpath(canonical_json, start=html.parent)
+    except ValueError:
+        return None
+    return quote(Path(relative).as_posix(), safe="/.")
+
+
+def render_report_html(
+    report: Report,
+    *,
+    canonical_json_href: str | None = None,
+) -> str:
     """Render a deterministic local report with no external runtime or assets."""
 
-    return _render_report_html(report)
+    return _render_report_html(report, canonical_json_href=canonical_json_href)
 
 
-def write_report_html(report: Report, path: str | Path) -> None:
+def write_report_html(
+    report: Report,
+    path: str | Path,
+    *,
+    canonical_json_path: str | Path | None = None,
+) -> None:
     """Write a self-contained report atomically."""
 
-    _atomic_write(path, render_report_html(report).encode("utf-8"))
+    _atomic_write(
+        path,
+        render_report_html(
+            report,
+            canonical_json_href=report_json_href(path, canonical_json_path),
+        ).encode("utf-8"),
+    )
 
 
 def report_json_schema() -> JsonValue:
@@ -71,6 +108,7 @@ def write_report_json_schema(path: str | Path) -> None:
 __all__ = [
     "read_report_json",
     "render_report_html",
+    "report_json_href",
     "report_json_schema",
     "write_report_html",
     "write_report_json",

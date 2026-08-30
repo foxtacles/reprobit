@@ -115,14 +115,13 @@ def _render_quarantine_details(report: Report) -> str:
     )
 
 
-def _render_identity_details(report: Report) -> str:
+def _render_identity_details(report: Report, canonical_json_href: str | None) -> str:
     build = report.proof.runtime.preimage.build
     step_total = sum(item.duration_seconds for item in build.steps)
     previous = "none"
     if report.previous is not None:
         previous = (
-            f"{report.previous.report_digest.value} · cost delta "
-            f"{report.previous.cost_delta:+d}"
+            f"{report.previous.report_digest.value} · cost delta {report.previous.cost_delta:+d}"
         )
     values = (
         ("Project", report.project_id),
@@ -140,8 +139,7 @@ def _render_identity_details(report: Report) -> str:
         ("Summed step time", format_seconds(step_total)),
     )
     definitions = "".join(
-        f"<dt>{escape(label)}</dt><dd><code>{escape(value)}</code></dd>"
-        for label, value in values
+        f"<dt>{escape(label)}</dt><dd><code>{escape(value)}</code></dd>" for label, value in values
     )
     slowest = sorted(
         build.steps,
@@ -163,10 +161,15 @@ def _render_identity_details(report: Report) -> str:
         slow_rows,
         caption="25 slowest execution steps",
     )
+    machine_record = (
+        f"in <code>{escape(canonical_json_href)}</code>"
+        if canonical_json_href is not None
+        else "in the machine-readable JSON report"
+    )
     return f"""
 <dl class="identity-list">{definitions}</dl>
 <p>The complete input, output, build-step, target, producer, artifact, provenance, and
-certificate records are available in <code>report.json</code>.</p>
+ certificate records are available {machine_record}.</p>
 {slow_table}"""
 
 
@@ -227,8 +230,7 @@ def _render_evidence_details(report: Report) -> str:
     issue_table = table(
         ("Claim", "Code", "Message"),
         tuple(
-            (code(item.claim), code(item.code), item.message)
-            for item in report.proof.audit_issues
+            (code(item.claim), code(item.code), item.message) for item in report.proof.audit_issues
         ),
         caption="All unresolved audit issues",
     )
@@ -263,17 +265,17 @@ def _render_cost_details(report: Report) -> str:
             (
                 "Project total",
                 format_integer(report.costs.project_total),
-                "All typed work; intervention IDs deduplicated",
+                "All intervention cost in this project",
             ),
             (
-                "Attributed to functions",
+                "Assigned to functions",
                 format_integer(attributed),
-                "Direct function work plus allocated shares of shared work",
+                "Function-specific cost plus assigned shares of broader adjustments",
             ),
             (
-                "Unallocated project/TU shared",
+                "Shared project/TU cost",
                 format_integer(report.costs.unallocated_shared_cost),
-                f"{unallocated_percent:.1f}% of the project total",
+                f"{unallocated_percent:.1f}% is not assigned to one function",
             ),
         ),
         caption="Project-to-function cost reconciliation",
@@ -321,23 +323,27 @@ def _render_function_details(report: Report) -> str:
   <strong>Allocated shared</strong> is its equal share of broader work.
   <strong>Attributed total</strong> adds those two values. <strong>Exposure</strong> shows the
   full shared intervention cost touching the function and is non-additive; do not sum it.</p>"""
-    return explanation + filter_control(
-        table_id=table_id,
-        label="Filter by target, TU, or function",
-        count=len(rows),
-    ) + table(
-        (
-            "Target",
-            "TU",
-            "Function",
-            "Direct",
-            "Allocated shared",
-            "Exposure",
-            "Attributed total",
-        ),
-        rows,
-        caption="Function-level cost attribution rows",
-        table_id=table_id,
+    return (
+        explanation
+        + filter_control(
+            table_id=table_id,
+            label="Filter by target, TU, or function",
+            count=len(rows),
+        )
+        + table(
+            (
+                "Target",
+                "TU",
+                "Function",
+                "Direct",
+                "Allocated shared",
+                "Exposure",
+                "Attributed total",
+            ),
+            rows,
+            caption="Function-level cost attribution rows",
+            table_id=table_id,
+        )
     )
 
 
@@ -394,8 +400,19 @@ def _render_intervention_details(report: Report) -> str:
     )
 
 
-def render_advanced(report: Report) -> str:
+def render_advanced(report: Report, *, canonical_json_href: str | None) -> str:
     """Render collapsed, complete-enough-for-review technical report sections."""
+
+    if canonical_json_href is None:
+        machine_record = (
+            "<p><small>No machine-readable JSON report is linked from this page.</small></p>"
+        )
+    else:
+        machine_record = f"""
+    <a class="machine-link" href="{escape(canonical_json_href)}">Open full
+      <code>{escape(canonical_json_href)}</code></a>
+    <p><small>Keep this HTML report and <code>{escape(canonical_json_href)}</code> together
+      when sharing a run.</small></p>"""
 
     sections = [
         details(
@@ -424,7 +441,7 @@ def render_advanced(report: Report) -> str:
                 identity="identity-details",
                 title="Run identity and build records",
                 meta=f"{len(report.proof.runtime.preimage.build.steps)} steps",
-                body=_render_identity_details(report),
+                body=_render_identity_details(report, canonical_json_href),
             ),
             details(
                 identity="toolchain-details",
@@ -469,12 +486,10 @@ def render_advanced(report: Report) -> str:
   <p class="eyebrow">For debugging and audit</p><h2 id="advanced-title">Advanced evidence</h2>
   <div class="advanced-intro">
     <p>The sections below expose the most useful technical records without crowding the summary.
-      The complete machine-readable record is kept in <code>report.json</code> beside this page.</p>
-    <a class="machine-link" href="report.json">Open full <code>report.json</code></a>
-    <p><small>Keep <code>report.html</code> and <code>report.json</code> together
-      when sharing a run.</small></p>
+      The complete machine-readable record can be kept alongside this page.</p>
+    {machine_record}
   </div>
-  {''.join(sections)}
+  {"".join(sections)}
 </section>"""
 
 

@@ -68,6 +68,22 @@ def test_automatic_preimage_is_still_compare_and_swap(tmp_path: Path) -> None:
     assert target.read_bytes() == b"raced"
 
 
+def test_prepared_preimage_conflict_preserves_concurrent_file_and_cleans_staging(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "new.txt"
+    transaction = CASTransaction(tmp_path)
+    transaction.write("new.txt", b"transaction", expected_sha256=None)
+    target.write_bytes(b"concurrent")
+
+    with pytest.raises(TransactionConflict, match="transaction preimage conflict"):
+        transaction.commit()
+
+    assert target.read_bytes() == b"concurrent"
+    state_root = tmp_path / ".reprobit-transactions"
+    assert tuple(path for path in state_root.iterdir() if path.is_dir()) == ()
+
+
 def test_compare_only_precondition_is_not_rewritten_or_reported_changed(
     tmp_path: Path,
 ) -> None:

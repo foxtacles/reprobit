@@ -4,13 +4,21 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
+from copy import deepcopy
 from enum import StrEnum
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, Literal, Self, TypeAlias
 
-from pydantic import Field, TypeAdapter, WithJsonSchema, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    WithJsonSchema,
+    field_validator,
+    model_validator,
+)
 from pydantic import JsonValue as PydanticJsonValue
 
 from reprobit.model import (
@@ -324,13 +332,29 @@ class SourceManifestEntry(StrictModel):
 class SourceManifestDocument(StrictModel):
     """Complete clean-source authority, separate from effective overlays and migration lineage."""
 
+    model_config = ConfigDict(
+        json_schema_extra={
+            "allOf": [
+                {
+                    "if": {
+                        "properties": {"complete": {"const": True}},
+                        "required": ["complete"],
+                    },
+                    "then": {"properties": {"entries": {"minItems": 1}}},
+                }
+            ]
+        }
+    )
+
     schema_version: Literal[3]
     algorithm: Literal["portable-source-v1"] = "portable-source-v1"
     complete: bool
-    entries: Annotated[tuple[SourceManifestEntry, ...], Field(min_length=1)]
+    entries: tuple[SourceManifestEntry, ...]
 
     @model_validator(mode="after")
     def entries_are_canonical(self) -> SourceManifestDocument:
+        if self.complete and not self.entries:
+            raise ValueError("complete source manifest requires at least one entry")
         ordered = sorted(self.entries, key=lambda item: (item.path.casefold(), item.path))
         if list(self.entries) != ordered:
             raise ValueError("source manifest entries must be canonically ordered")
@@ -369,22 +393,17 @@ class ToolchainLock(StrictModel):
         folded_paths = [path.casefold() for path in locked_paths]
         if len(folded_paths) != len(set(folded_paths)):
             raise ValueError("locked toolchain paths collide under DOS case folding")
-        source_keys = [
-            (source.repository, source.revision) for source in self.profile_sources
-        ]
+        source_keys = [(source.repository, source.revision) for source in self.profile_sources]
         if len(source_keys) != len(set(source_keys)):
             raise ValueError("toolchain profile-source repository revision is repeated")
-        source_paths = [
-            path for source in self.profile_sources for path in source.paths
-        ]
+        source_paths = [path for source in self.profile_sources for path in source.paths]
         folded_source_paths = [path.casefold() for path in source_paths]
         if len(folded_source_paths) != len(set(folded_source_paths)):
             raise ValueError("toolchain profile-source path is assigned more than once")
         unknown_paths = set(folded_source_paths) - set(folded_paths)
         if unknown_paths:
             raise ValueError(
-                "toolchain profile-source mapping names unlocked paths: "
-                f"{sorted(unknown_paths)}"
+                f"toolchain profile-source mapping names unlocked paths: {sorted(unknown_paths)}"
             )
         return self
 
@@ -655,9 +674,7 @@ class ClassicRecipeIntervention(InterventionBase):
             if self.symbol is None:
                 raise ValueError("classic function recipe requires symbol")
             if self.scope.function != self.symbol:
-                raise ValueError(
-                    "classic function recipe scope must name its exact symbol"
-                )
+                raise ValueError("classic function recipe scope must name its exact symbol")
             if len(self.dependencies) != 1:
                 raise ValueError("classic function recipe requires one primary donor")
         else:
@@ -665,15 +682,9 @@ class ClassicRecipeIntervention(InterventionBase):
                 raise ValueError("only classic function recipes may name a symbol")
             if self.scope.function is not None:
                 raise ValueError("classic donor/project recipe cannot have function scope")
-        if (
-            self.role is ClassicRecipeRole.DONOR
-            and self.scope.translation_unit is None
-        ):
+        if self.role is ClassicRecipeRole.DONOR and self.scope.translation_unit is None:
             raise ValueError("classic donor recipe requires translation-unit scope")
-        if (
-            self.role is ClassicRecipeRole.PROJECT
-            and self.scope.translation_unit is not None
-        ):
+        if self.role is ClassicRecipeRole.PROJECT and self.scope.translation_unit is not None:
             raise ValueError("classic project recipe requires target scope")
         if self.family is ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION:
             raise ValueError("simulated elision must use legacy.oracle_install quarantine")
@@ -768,6 +779,22 @@ Intervention: TypeAlias = Annotated[
 ]
 
 
+def intervention_authority_digest(intervention: Intervention) -> Digest:
+    """Bind the complete canonical authority of one typed intervention."""
+
+    return Digest.from_bytes(
+        canonical_json(
+            {
+                "schema": "reprobit-intervention-authority-v1",
+                "intervention": intervention.model_dump(
+                    mode="json",
+                    exclude_computed_fields=True,
+                ),
+            }
+        )
+    )
+
+
 class InterventionDocument(StrictModel):
     schema_version: Literal[3]
     target_id: Identifier
@@ -788,10 +815,7 @@ class InterventionDocument(StrictModel):
         for item in self.interventions:
             if item.scope.target != self.target_id:
                 raise ValueError(f"intervention {item.id!r} targets a different target")
-            if (
-                self.translation_unit_id is None
-                and item.scope.translation_unit is not None
-            ):
+            if self.translation_unit_id is None and item.scope.translation_unit is not None:
                 raise ValueError(
                     f"translation-unit-scoped intervention {item.id!r} requires a "
                     "translation-unit shard"
@@ -1013,10 +1037,9 @@ class BuildPlanDocument(StrictModel):
         _require_unique(sdk_source_list, "project SDK archive path")
         overlap = set(sdk_source_list) & set(archive_sources)
         if overlap:
-            raise ValueError(
-                f"archive paths cannot hold two authority classes: {sorted(overlap)}"
-            )
+            raise ValueError(f"archive paths cannot hold two authority classes: {sorted(overlap)}")
         return self
+
 
 def classic_analysis_pdb_paths(bundle: ProjectBundle) -> tuple[tuple[str, str], ...]:
     """Derive analysis PDB outputs without admitting protected project paths."""
@@ -1034,9 +1057,7 @@ def classic_analysis_pdb_paths(bundle: ProjectBundle) -> tuple[tuple[str, str], 
         folded = relative.replace("\\", "/").casefold()
         previous = claims.get(folded)
         if previous is not None:
-            raise ValueError(
-                f"analysis PDB path {relative!r} aliases protected {previous}"
-            )
+            raise ValueError(f"analysis PDB path {relative!r} aliases protected {previous}")
         claims[folded] = owner
 
     for target in bundle.spec.targets:
@@ -1066,17 +1087,12 @@ def classic_analysis_pdb_paths(bundle: ProjectBundle) -> tuple[tuple[str, str], 
         relative = PurePosixPath(target.artifact).with_suffix(".PDB").as_posix()
         folded = relative.casefold()
         protected_root = next(
-            (
-                root
-                for root in protected_roots
-                if folded == root or folded.startswith(root + "/")
-            ),
+            (root for root in protected_roots if folded == root or folded.startswith(root + "/")),
             None,
         )
         if protected_root is not None:
             raise ValueError(
-                f"analysis PDB path {relative!r} enters protected project root "
-                f"{protected_root!r}"
+                f"analysis PDB path {relative!r} enters protected project root {protected_root!r}"
             )
         claim(relative, f"analysis PDB for {target.id!r}")
         derived.append((target.id, relative))
@@ -1425,7 +1441,12 @@ class ProjectBundle(StrictModel):
                 raise ValueError(
                     f"intervention {item.id!r} has dangling dependencies: {sorted(unknown)}"
                 )
-        _validate_classic_donor_beneficiaries(interventions)
+        receipts = tuple(
+            receipt
+            for document in self.proof_documents
+            for receipt in document.expected_observations
+        )
+        _validate_classic_donor_beneficiaries(interventions, receipts)
         _reject_dependency_cycles(interventions)
         if self.build_plan is not None:
             overlay_ids = {
@@ -1475,11 +1496,6 @@ class ProjectBundle(StrictModel):
                     raise ValueError(
                         f"build-plan translation unit {unit_id!r} does not match its shard"
                     )
-        receipts = tuple(
-            receipt
-            for document in self.proof_documents
-            for receipt in document.expected_observations
-        )
         _require_unique((item.id for item in receipts), "classic receipt id")
         _require_unique(
             (item.intervention_id for item in receipts),
@@ -1568,18 +1584,103 @@ def _require_unique(values: Iterable[str], label: str) -> None:
         raise ValueError(f"duplicate {label}: {', '.join(sorted(duplicates))}")
 
 
+def candidate_auxiliary_donor_ids(
+    values: Mapping[str, object],
+    expected_values: Mapping[str, object] | None = None,
+) -> tuple[str, ...]:
+    """Return every non-primary donor selected by runtime candidate constraints."""
+
+    merged = deepcopy(dict(values))
+    expected = expected_values or {}
+    for name in ("target_donor", "complete_donor", "instruction_donor", "donor_variants"):
+        if name not in expected:
+            continue
+        if name in merged and merged[name] != expected[name]:
+            raise ValueError(f"candidate constraint {name!r} conflicts with recipe intent")
+        merged[name] = deepcopy(expected[name])
+    for path in sorted(expected):
+        value = expected[path]
+        match = re.fullmatch(r"donor_variants\[([0-9]+)\]\.donor", path)
+        if match is None:
+            continue
+        variants = merged.get("donor_variants")
+        index = int(match.group(1))
+        if not isinstance(variants, list) or index >= len(variants):
+            raise ValueError(f"candidate constraint {path!r} leaves its array")
+        variant = variants[index]
+        if not isinstance(variant, dict):
+            raise ValueError(f"candidate constraint {path!r} crosses a scalar")
+        if "donor" in variant and variant["donor"] != value:
+            raise ValueError(f"candidate constraint {path!r} conflicts with recipe intent")
+        variant["donor"] = deepcopy(value)
+
+    donor_ids: set[str] = set()
+    for name in ("target_donor", "complete_donor", "instruction_donor"):
+        value = merged.get(name)
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            raise ValueError(f"candidate {name} is malformed")
+        donor_ids.add(value)
+
+    raw_variants = merged.get("donor_variants", [])
+    if not isinstance(raw_variants, list):
+        raise ValueError("candidate donor variants are malformed")
+    for item in raw_variants:
+        donor = item.get("donor") if isinstance(item, dict) else None
+        if not isinstance(donor, str):
+            raise ValueError("candidate donor variant is malformed")
+        donor_ids.add(donor)
+    return tuple(sorted(donor_ids))
+
+
 def _validate_classic_donor_beneficiaries(
     interventions: tuple[Intervention, ...],
+    receipts: tuple[ClassicProofReceipt, ...],
 ) -> None:
-    """Keep donor cost allocation identical to its dependency consumers."""
+    """Keep donor cost allocation identical to every runtime consumer."""
 
     consumers: dict[str, dict[tuple[str, str, str], Scope]] = {}
+    donors = {
+        intervention.id: intervention
+        for intervention in interventions
+        if isinstance(intervention, ClassicRecipeIntervention)
+        and intervention.role is ClassicRecipeRole.DONOR
+    }
+    receipts_by_intervention: dict[str, list[ClassicProofReceipt]] = {}
+    for receipt in receipts:
+        receipts_by_intervention.setdefault(receipt.intervention_id, []).append(receipt)
     for intervention in interventions:
         scope = intervention.scope
         if scope.function is None or scope.translation_unit is None:
             continue
         key = (scope.target, scope.translation_unit, scope.function)
-        for dependency in intervention.dependencies:
+        donor_ids = set(intervention.dependencies)
+        if (
+            isinstance(intervention, ClassicRecipeIntervention)
+            and intervention.role is ClassicRecipeRole.FUNCTION
+        ):
+            matches = receipts_by_intervention.get(intervention.id, ())
+            if len(matches) != 1:
+                raise ValueError(f"intervention {intervention.id!r} requires one proof receipt")
+            values = {field.name: field.value for field in intervention.parameters}
+            auxiliary_ids = set(candidate_auxiliary_donor_ids(values, matches[0].expected_values))
+            for donor_id in auxiliary_ids:
+                donor = donors.get(donor_id)
+                if donor is None:
+                    raise ValueError(
+                        f"classic function {intervention.id!r} names an unknown "
+                        f"auxiliary donor: {donor_id!r}"
+                    )
+                if donor.scope.target != scope.target or (
+                    donor.scope.translation_unit != scope.translation_unit
+                ):
+                    raise ValueError(
+                        f"classic function {intervention.id!r} auxiliary donor "
+                        f"{donor_id!r} is outside its target/TU"
+                    )
+            donor_ids.update(auxiliary_ids)
+        for dependency in donor_ids:
             consumers.setdefault(dependency, {})[key] = scope
 
     for intervention in interventions:
@@ -1594,8 +1695,7 @@ def _validate_classic_donor_beneficiaries(
         )
         if intervention.beneficiaries != expected:
             raise ValueError(
-                f"classic donor {intervention.id!r} beneficiaries differ from "
-                "its dependency consumers"
+                f"classic donor {intervention.id!r} beneficiaries differ from its runtime consumers"
             )
 
 
@@ -1617,8 +1717,6 @@ def _reject_dependency_cycles(interventions: tuple[Intervention, ...]) -> None:
 
     for node in graph:
         visit(node)
-
-
 
 
 def schema_catalog() -> JsonValue:
@@ -1779,7 +1877,9 @@ __all__ = [
     "ToolchainProfileSource",
     "ToolchainRef",
     "VerifierSpec",
+    "candidate_auxiliary_donor_ids",
     "classic_analysis_pdb_paths",
+    "intervention_authority_digest",
     "legacy_allowlist_digest",
     "project_document_schemas",
     "schema_catalog",

@@ -84,6 +84,30 @@ def test_complete_verification_rejects_transport_mutation(
         provisioner.verify_msvc42(tmp_path)
 
 
+def test_cmake_frontend_verification_is_exact_and_finite(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = {
+        "bin/NMAKE.EXE": b"nmake",
+        "bin/NMAKE.ERR": b"messages",
+    }
+    authorities = {
+        relative: provisioner.FileAuthority(len(payload), hashlib.sha256(payload).hexdigest())
+        for relative, payload in payloads.items()
+    }
+    monkeypatch.setattr(provisioner, "_CMAKE_FRONTEND_FILES", authorities)
+    for relative, payload in payloads.items():
+        path = tmp_path.joinpath(*relative.split("/"))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+
+    provisioner.verify_msvc42_cmake_frontend(tmp_path)
+    (tmp_path / "bin/NMAKE.ERR").write_bytes(b"changed")
+    with pytest.raises(provisioner.ProvisionError, match="file authority differs"):
+        provisioner.verify_msvc42_cmake_frontend(tmp_path)
+
+
 @pytest.mark.skipif(os.name != "posix", reason="portable symlink creation")
 def test_provision_rejects_redirected_destination(tmp_path: Path) -> None:
     real = tmp_path / "real"

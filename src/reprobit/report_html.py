@@ -27,7 +27,7 @@ from reprobit.report_html_format import (
     human_label,
     readable_function,
 )
-from reprobit.report_html_style import REPORT_CSS, REPORT_SCRIPT
+from reprobit.report_html_style import REPORT_CSS, REPORT_SCRIPT, REPROBIT_MARK_SVG
 
 
 def _status_copy(report: Report) -> tuple[str, str, str]:
@@ -50,11 +50,7 @@ def _status_copy(report: Report) -> tuple[str, str, str]:
             "At least one rebuilt target differs from its reference. Start with the target "
             f"cards and {starting_point} below.",
         )
-    if (
-        report.verdict.cold
-        and report.verdict.logic_certified
-        and report.verdict.quarantined
-    ):
+    if report.verdict.cold and report.verdict.logic_certified and report.verdict.quarantined:
         return (
             "warn",
             "Exact match, with authenticity exceptions",
@@ -64,18 +60,20 @@ def _status_copy(report: Report) -> tuple[str, str, str]:
         )
     issues: list[str] = []
     if not report.verdict.cold:
-        issues.append("the result did not come from a cold build")
+        issues.append("the result was not built from scratch")
     if not report.verdict.logic_certified:
         issues.append("the required logic checks did not pass")
     if report.verdict.quarantined:
         issues.append("some bytes came from disclosed reference data")
     elif not report.verdict.toolchain_origin:
-        issues.append("fresh-output origin is not fully proven")
+        issues.append("the output is not fully traced to the declared inputs")
     if len(issues) == 1:
         heading = {
-            "the result did not come from a cold build": "Exact match, but not cold-verified",
+            "the result was not built from scratch": "Exact match, but not built from scratch",
             "the required logic checks did not pass": "Exact match, with failed logic checks",
-            "fresh-output origin is not fully proven": "Exact match, with origin evidence issues",
+            "the output is not fully traced to the declared inputs": (
+                "Exact match, with incomplete input tracing"
+            ),
         }.get(issues[0], "Exact match, with authenticity exceptions")
         issue_text = issues[0]
     elif len(issues) == 2:
@@ -109,11 +107,11 @@ def _render_overview(report: Report) -> str:
             _claim("Byte identity", report.verdict.byte_exact),
             _claim("Logic checks", report.verdict.logic_certified),
             _claim(
-                "Fresh-output origin",
+                "Built from declared inputs",
                 report.verdict.toolchain_origin,
                 warning=report.verdict.quarantined,
             ),
-            _claim("Cold build", report.verdict.cold),
+            _claim("Built from scratch", report.verdict.cold),
         )
     )
     quarantine = ""
@@ -188,7 +186,7 @@ def _render_target_cards(report: Report) -> str:
   <div class="section-heading"><div><p class="eyebrow">What was rebuilt</p>
     <h2 id="targets-title">Target results</h2></div>
     <p>{sum(item.byte_exact for item in report.targets)} of {len(report.targets)} exact</p></div>
-  <div class="card-grid">{''.join(cards)}</div>
+  <div class="card-grid">{"".join(cards)}</div>
 </section>"""
 
 
@@ -263,11 +261,7 @@ def _render_costs(report: Report) -> str:
             ),
             value=float(function_total(item)),
             display_value=format_fraction(function_total(item)),
-            tone=(
-                "hot"
-                if _scope_key(item.scope) in quarantine_scopes
-                else "normal"
-            ),
+            tone=("hot" if _scope_key(item.scope) in quarantine_scopes else "normal"),
         )
         for item in hotspots
     )
@@ -282,7 +276,7 @@ def _render_costs(report: Report) -> str:
             bar_chart(
                 identity="cost-target-chart",
                 title="Cost by target",
-                description="Which output carries the intervention work.",
+                description="Which rebuilt output carries the intervention cost.",
                 bars=target_bars,
             ),
         )
@@ -290,7 +284,7 @@ def _render_costs(report: Report) -> str:
     hotspot_chart = bar_chart(
         identity="cost-hotspot-chart",
         title="Top function hotspots",
-        description="Direct cost plus the function's allocated share of broader work.",
+        description="Functions carrying the most direct and shared intervention cost.",
         bars=hotspot_bars,
     )
     attributed = report.costs.project_total - report.costs.unallocated_shared_cost
@@ -305,23 +299,24 @@ def _render_costs(report: Report) -> str:
     <h2 id="costs-title">Cost overview</h2></div>
     <p><strong>{format_integer(report.costs.project_total)}</strong> relative points</p></div>
   <p class="explain"><strong>Cost ranks interventions; it is not elapsed time.</strong>
-    Higher scores mark more invasive or less authentic work. A TU is one source file as the
+    Higher scores mean a larger departure from an ordinary build. A TU is one source file as the
     compiler sees it. <code>Oracle install</code> identifies the disclosed reference-byte
     exceptions and is deliberately weighted heavily.</p>
   <div class="card-grid cost-reconciliation" aria-label="Function cost attribution">
     <div class="card"><h3>Project total</h3>
       <div class="value">{format_integer(report.costs.project_total)}</div>
-      <p>All typed work; intervention IDs deduplicated</p></div>
-    <div class="card"><h3>Attributed to functions</h3>
+      <p>All intervention cost in this project</p></div>
+    <div class="card"><h3>Assigned to functions</h3>
       <div class="value">{format_integer(attributed)}</div>
-      <p>Direct work plus allocated shares</p></div>
-    <div class="card"><h3>Unallocated project/TU shared</h3>
+      <p>Function-specific cost plus assigned shares of broader adjustments</p></div>
+    <div class="card"><h3>Shared project/TU cost</h3>
       <div class="value">{format_integer(report.costs.unallocated_shared_cost)}</div>
-      <p>{unallocated_percent:.1f}% of the project total</p></div>
+      <p>{unallocated_percent:.1f}% is not assigned to one function</p></div>
   </div>
-  <p class="explain"><strong>Function totals are direct cost plus allocated shared cost.</strong>
-    The advanced table also shows exposure: the full shared intervention cost touching each
-    function. Exposure is context, not an additive total, so do not sum it.</p>
+  <p class="explain"><strong>Each function total includes its own adjustments plus its assigned
+    share of broader project or TU adjustments.</strong> The advanced table also shows the full
+    shared cost touching a function as <em>exposure</em>. That is context, so do not add it to the
+    total again.</p>
   <div class="chart-grid">{charts}</div>
   <div style="margin-top:1rem">{hotspot_chart}</div>
 </section>"""
@@ -358,10 +353,7 @@ def _render_timings(report: Report) -> str:
 def _next_steps(report: Report) -> tuple[tuple[str, Content], ...]:
     if not report.verdict.byte_exact:
         mismatches = tuple(item.id for item in report.targets if not item.byte_exact)
-        mismatch_html = (
-            ", ".join(code(item).html for item in mismatches)
-            or "the target receipts"
-        )
+        mismatch_html = ", ".join(code(item).html for item in mismatches) or "the target receipts"
         mismatch_markup = Markup(
             "Inspect " + mismatch_html + " before changing interventions.",
             "Inspect "
@@ -374,12 +366,19 @@ def _next_steps(report: Report) -> tuple[tuple[str, Content], ...]:
                 mismatch_markup,
             ),
             (
-                "Use the highest-cost hotspot as a guide",
-                "Review the responsible intervention and its exact semantic receipt.",
+                "Try bounded discovery for unsolved functions",
+                join_markup(
+                    (
+                        "Run ",
+                        code("rbit discover grind . --project-wide"),
+                        " to look for low-cost exact adjustments when reference objects are "
+                        "available.",
+                    )
+                ),
             ),
             (
-                "Rerun cold",
-                "Confirm the next result from a fresh build before treating a match as stable.",
+                "Verify the next result from scratch",
+                "Use a fresh run workspace before treating a match as stable.",
             ),
         )
     if not report.verdict.cold or not report.verdict.logic_certified:
@@ -387,8 +386,8 @@ def _next_steps(report: Report) -> tuple[tuple[str, Content], ...]:
         if not report.verdict.cold:
             steps.append(
                 (
-                    "Confirm the match with a cold build",
-                    "Rebuild from a clean workspace before treating the byte match as stable.",
+                    "Confirm the match with a fresh build",
+                    "Rebuild from an empty run workspace before treating the byte match as stable.",
                 )
             )
         if not report.verdict.logic_certified:
@@ -410,15 +409,16 @@ def _next_steps(report: Report) -> tuple[tuple[str, Content], ...]:
         elif not report.verdict.toolchain_origin:
             steps.append(
                 (
-                    "Restore fresh-output origin evidence",
-                    "Use the audit details below to trace every output back to this run.",
+                    "Restore declared-input tracing",
+                    "Use the audit details below to trace every output back to this run's "
+                    "sources and locked tools.",
                 )
             )
         if len(steps) < 3:
             steps.append(
                 (
                     "Keep release blocked until every check passes",
-                    "Require a cold, exact, logic-certified, clean report in CI.",
+                    "Require a fresh, exact, logic-certified, clean report in CI.",
                 )
             )
         return tuple(steps[:3])
@@ -430,14 +430,13 @@ def _next_steps(report: Report) -> tuple[tuple[str, Content], ...]:
                 "target byte-for-byte exact.",
             ),
             (
-                "Confirm the result with another cold build",
+                "Confirm the result with another fresh build",
                 "The next milestone is an exact result with complete origin evidence and no "
                 "authenticity exceptions.",
             ),
             (
                 "Keep byte identity enforced in CI",
-                "Continue checking every target digest while the remaining exceptions are "
-                "removed.",
+                "Continue checking every target digest while the remaining exceptions are removed.",
             ),
         )
     if report.proof.audit_issues or not report.verdict.toolchain_origin:
@@ -448,7 +447,8 @@ def _next_steps(report: Report) -> tuple[tuple[str, Content], ...]:
             ),
             (
                 "Rerun against the locked toolchain",
-                "A cold run should close both byte identity and origin checks.",
+                "A build from an empty run workspace should close both byte identity and input "
+                "tracing checks.",
             ),
             (
                 "Promote only a clean result",
@@ -460,7 +460,7 @@ def _next_steps(report: Report) -> tuple[tuple[str, Content], ...]:
             "Keep this result reproducible",
             "Retain the source, toolchain lock, interventions, and canonical report together.",
         ),
-        ("Enforce it in CI", "Require a cold, exact, clean report for future changes."),
+        ("Enforce it in CI", "Require a fresh, exact, clean report for future changes."),
         (
             "Investigate cost only when useful",
             "Lower cost improves maintainability, but this result already satisfies "
@@ -482,7 +482,6 @@ def _render_next_steps(report: Report) -> str:
 </section>"""
 
 
-
 def _render_navigation(report: Report) -> str:
     links = [
         ("Overview", "#overview"),
@@ -493,13 +492,16 @@ def _render_navigation(report: Report) -> str:
         links.append(("Timing", "#timing"))
     links.extend((("Next steps", "#next-steps"), ("Advanced", "#advanced")))
     items = "".join(
-        f'<li><a href="{escape(target)}">{escape(label)}</a></li>'
-        for label, target in links
+        f'<li><a href="{escape(target)}">{escape(label)}</a></li>' for label, target in links
     )
     return f'<nav class="section-nav" aria-label="Report sections"><ul>{items}</ul></nav>'
 
 
-def render_report_html(report: Report) -> str:
+def render_report_html(
+    report: Report,
+    *,
+    canonical_json_href: str | None = None,
+) -> str:
     """Render a deterministic, dependency-free report with layered evidence detail."""
 
     title = f"{report.project_id} — ReproBit report"
@@ -515,7 +517,9 @@ def render_report_html(report: Report) -> str:
 <body>
 <a class="skip-link" href="#overview">Skip to report</a>
 <header class="topbar"><div class="topbar-inner">
-  <div class="brand">ReproBit · <code>{escape(report.project_id)}</code></div>
+  <div class="brand">{REPROBIT_MARK_SVG}<span class="brand-label">
+    ReproBit · <code>{escape(report.project_id)}</code>
+  </span></div>
   <div class="run-label">Run <code>{escape(short_digest(report.run_id.value))}</code></div>
 </div></header>
 {_render_navigation(report)}
@@ -525,7 +529,7 @@ def render_report_html(report: Report) -> str:
 {_render_costs(report)}
 {_render_timings(report)}
 {_render_next_steps(report)}
-{render_advanced(report)}
+{render_advanced(report, canonical_json_href=canonical_json_href)}
 </main>
 <footer class="footer"><div class="footer-inner">
   ReproBit report schema <code>v{report.schema_version}</code> · deterministic local HTML ·

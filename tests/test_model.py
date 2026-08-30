@@ -86,6 +86,8 @@ def test_certificate_passed_is_derived() -> None:
     certificate = Certificate(
         id="proof-one",
         intervention_id="action-one",
+        intervention_authority_digest=Digest.from_bytes(b"action-one authority"),
+        intervention_cost_digest=Digest.from_bytes(b"action-one cost"),
         obligations=(
             ProofObligation(name="body-equal", passed=True, evidence_digest=digest()),
             ProofObligation(name="relocations-equal", passed=False),

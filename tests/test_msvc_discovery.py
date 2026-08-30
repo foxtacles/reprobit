@@ -9,12 +9,14 @@ import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 from pydantic import ValidationError
 
 import reprobit.msvc_discovery as msvc_discovery
 import reprobit.msvc_discovery_analysis as msvc_discovery_analysis
+import reprobit.msvc_discovery_coff as msvc_discovery_coff
 from reprobit.coff import CoffObject
 from reprobit.discovery_contracts import (
     CompileReceipt,
@@ -45,8 +47,9 @@ from reprobit.msvc_discovery import (
     MsvcDiscoveryRequest,
     msvc_discovery_request_json_schema,
 )
-from reprobit.msvc_discovery_analysis import (
+from reprobit.msvc_discovery_coff import (
     MsvcFunctionReference,
+    isolated_msvc_function_symbols,
     qualify_msvc_reference_object,
 )
 from reprobit.process import CancellationToken, ProcessCancelled
@@ -119,9 +122,7 @@ def _coff(
             + _section_aux(len(body), 2)
         )
         symbol_count += 2
-        symbols.extend(
-            encoded(symbol) + struct.pack("<IhHBB", 0, section_number, 0x20, 2, 0)
-        )
+        symbols.extend(encoded(symbol) + struct.pack("<IhHBB", 0, section_number, 0x20, 2, 0))
         symbol_count += 1
     if associated_body is not None:
         symbols.extend(
@@ -356,6 +357,38 @@ def test_observation_indexes_every_emitted_function(tmp_path: Path) -> None:
     assert all(item.comdat_selection == 2 for item in product.observation.functions)
 
 
+def test_project_grind_enumerates_only_unambiguous_isolated_functions() -> None:
+    reference = _coff(
+        [
+            (TARGET, bytes.fromhex("b801000000c3")),
+            (HELPER, bytes.fromhex("33c0c3")),
+        ]
+    )
+    ambiguous = _coff(
+        [
+            (TARGET, bytes.fromhex("b801000000c3")),
+            (TARGET, bytes.fromhex("b802000000c3")),
+        ]
+    )
+
+    assert isolated_msvc_function_symbols(reference) == (HELPER, TARGET)
+    assert isolated_msvc_function_symbols(ambiguous) == ()
+
+
+def test_project_grind_stops_before_indexing_more_than_4096_functions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reference = _coff([(TARGET, bytes.fromhex("c3"))])
+    monkeypatch.setattr(
+        msvc_discovery_coff,
+        "msvc_function_records",
+        lambda _coff, _index: tuple(object() for _ in range(4_097)),
+    )
+
+    with pytest.raises(DiscoveryError, match="per-object limit is 4096"):
+        isolated_msvc_function_symbols(reference)
+
+
 def test_exact_candidate_yields_validated_whole_and_private_donor_proposals(
     tmp_path: Path,
 ) -> None:
@@ -382,9 +415,7 @@ def test_exact_candidate_yields_validated_whole_and_private_donor_proposals(
         DiscoveryFindingKind.PRIVATE_DONOR,
     }
     whole = next(item for item in proposals if item.kind is DiscoveryFindingKind.WHOLE_BODY)
-    private = next(
-        item for item in proposals if item.kind is DiscoveryFindingKind.PRIVATE_DONOR
-    )
+    private = next(item for item in proposals if item.kind is DiscoveryFindingKind.PRIVATE_DONOR)
     assert whole.scope.function is None
     assert private.scope.function == TARGET
     assert whole.intervention.kind == "state_carrier"
@@ -589,24 +620,16 @@ def test_adapter_cache_material_is_stable_and_json_safe() -> None:
     assert "discovery.py" in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
     assert "discovery_contracts.py" in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
     assert "discovery.py" in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS
-    assert (
-        "discovery_contracts.py"
-        in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS
-    )
+    assert "discovery_contracts.py" in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS
     assert "cache.py" in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
     assert "secure_paths.py" in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
     assert "msvc_discovery.py" in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
-    assert (
-        "msvc_discovery_analysis.py"
-        not in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
-    )
-    assert (
-        "msvc_discovery.py" in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS
-    )
-    assert (
-        "msvc_discovery_analysis.py"
-        in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS
-    )
+    assert "msvc_discovery_analysis.py" not in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
+    assert "msvc_discovery.py" in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS
+    assert "msvc_discovery_analysis.py" in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS
+    assert "msvc_discovery_coff.py" in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS
+    assert "msvc_discovery_mosaic.py" in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS
+    assert "msvc_discovery_proposals.py" in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS
     assert not any(
         path.startswith("classic")
         for path in (
@@ -652,10 +675,7 @@ def test_request_schema_matches_adversarial_model_boundaries() -> None:
     assert definitions["Range1To99"]["properties"]["stop"]["maximum"] == 99
     assert definitions["Range1To100"]["properties"]["stop"]["maximum"] == 100
     assert (
-        definitions["DiscoveryPlan"]["properties"]["max_observed_functions"][
-            "maximum"
-        ]
-        == 100_000
+        definitions["DiscoveryPlan"]["properties"]["max_observed_functions"]["maximum"] == 100_000
     )
     source_schema = schema["properties"]["source"]
     assert isinstance(source_schema, dict)
@@ -687,12 +707,7 @@ def test_request_schema_matches_adversarial_model_boundaries() -> None:
 
 
 def test_committed_request_example_is_neutral_and_valid() -> None:
-    example = (
-        Path(__file__).parents[1]
-        / "examples"
-        / "declaration-discovery"
-        / "campaign.json"
-    )
+    example = Path(__file__).parents[1] / "examples" / "declaration-discovery" / "campaign.json"
     request = MsvcDiscoveryRequest.model_validate_json(example.read_bytes())
 
     assert request.plan.target == "sample"
@@ -716,9 +731,7 @@ def test_analysis_parses_each_product_once_for_multiple_symbols(
     )
     symbols = tuple(sorted((TARGET, HELPER), key=str.casefold))
     base = _plan(1)
-    plan = DiscoveryPlan.model_validate(
-        {**base.model_dump(mode="python"), "symbols": symbols}
-    )
+    plan = DiscoveryPlan.model_validate({**base.model_dump(mode="python"), "symbols": symbols})
     state = enumerate_declaration_states(plan)[0]
     product = _product(
         adapter,
@@ -726,8 +739,12 @@ def test_analysis_parses_each_product_once_for_multiple_symbols(
         tmp_path / "candidate.obj",
         _coff([(TARGET, target_body), (HELPER, helper_body)]),
     )
+    observed_functions = product.observation.functions
+    counted_functions = MagicMock(spec=tuple)
+    counted_functions.__iter__.side_effect = lambda: iter(observed_functions)
+    object.__setattr__(product.observation, "functions", counted_functions)
     product_parses = 0
-    parse_coff = msvc_discovery_analysis._parse_coff
+    parse_coff = msvc_discovery_coff.parse_msvc_coff
 
     def counted_parse(payload: bytes, context: str) -> CoffObject:
         nonlocal product_parses
@@ -735,7 +752,7 @@ def test_analysis_parses_each_product_once_for_multiple_symbols(
             product_parses += 1
         return parse_coff(payload, context)
 
-    monkeypatch.setattr(msvc_discovery_analysis, "_parse_coff", counted_parse)
+    monkeypatch.setattr(msvc_discovery_coff, "parse_msvc_coff", counted_parse)
     proposals = adapter.analyze(
         campaign_id="campaign.neutral",
         plan=plan,
@@ -743,10 +760,9 @@ def test_analysis_parses_each_product_once_for_multiple_symbols(
     )
 
     assert product_parses == 1
+    assert counted_functions.__iter__.call_count == 1
     assert {
-        item.symbol
-        for item in proposals
-        if item.kind is DiscoveryFindingKind.WHOLE_BODY
+        item.symbol for item in proposals if item.kind is DiscoveryFindingKind.WHOLE_BODY
     } == set(symbols)
 
 

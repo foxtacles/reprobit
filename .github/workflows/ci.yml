@@ -45,6 +45,7 @@ jobs:
         run: >-
           ruby -e 'require "yaml";
           YAML.safe_load(File.read("action.yml"), aliases: true)'
+      - run: python -m ruff format --check src tests
       - run: python -m ruff check src tests
       - run: python -m mypy src/reprobit
       - run: python -m build
@@ -143,8 +144,9 @@ jobs:
           tests/test_process.py
           tests/test_backends.py
           tests/test_toolchains.py
+          tests/test_cmake_import_windows.py
           tests/test_msvc_discovery_integration.py
-      - name: Run the public grind sample end to end
+      - name: Run the project-wide grind sample end to end
         run: >-
           python -m pytest -q
           --junitxml="$env:RUNNER_TEMP\grind-tests.xml"

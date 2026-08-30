@@ -22,6 +22,7 @@ from reprobit.project_loader import (
 from reprobit.schema import (
     BuildPlanDocument,
     ClassicArchiveAuthority,
+    ClassicField,
     ClassicGroupOrderPlan,
     ClassicProofReceipt,
     ClassicRecipeFamily,
@@ -113,18 +114,10 @@ def test_analysis_pdb_path_cannot_alias_a_verification_oracle(tmp_path: Path) ->
     assert baseline.source_manifest is not None
     target = baseline.spec.targets[0]
     spec = baseline.spec.model_copy(
-        update={
-            "targets": (
-                target.model_copy(update={"oracle": "build/program.PDB"}),
-            )
-        }
+        update={"targets": (target.model_copy(update={"oracle": "build/program.PDB"}),)}
     )
     plan = _build_plan_with_link_options(("/DEBUG",)).model_copy(
-        update={
-            "source_manifest_digest": source_manifest_digest(
-                baseline.source_manifest
-            )
-        }
+        update={"source_manifest_digest": source_manifest_digest(baseline.source_manifest)}
     )
     bundle = baseline.model_copy(update={"spec": spec, "build_plan": plan})
 
@@ -334,7 +327,7 @@ def test_classic_function_recipe_requires_one_primary_donor(
         )
 
 
-def test_classic_donor_beneficiaries_are_exact_dependency_consumers(
+def test_classic_donor_beneficiaries_cover_primary_and_auxiliary_consumers_once(
     tmp_path: Path,
 ) -> None:
     create_tree(tmp_path)
@@ -345,7 +338,10 @@ def test_classic_donor_beneficiaries_are_exact_dependency_consumers(
         function="work()",
     )
 
-    def bundle_with(beneficiaries: tuple[Scope, ...]) -> ProjectBundle:
+    def bundle_with(
+        primary_beneficiaries: tuple[Scope, ...],
+        auxiliary_beneficiaries: tuple[Scope, ...],
+    ) -> ProjectBundle:
         donor = ClassicRecipeIntervention(
             id="donor",
             scope=Scope(target="program", translation_unit="main"),
@@ -353,17 +349,34 @@ def test_classic_donor_beneficiaries_are_exact_dependency_consumers(
             family=ClassicRecipeFamily.DECLARATION_SHAPE,
             role=ClassicRecipeRole.DONOR,
             build_target="program",
-            beneficiaries=beneficiaries,
+            beneficiaries=primary_beneficiaries,
+        )
+        auxiliary = ClassicRecipeIntervention(
+            id="auxiliary",
+            scope=Scope(target="program", translation_unit="main"),
+            rationale="auxiliary donor allocation fixture",
+            family=ClassicRecipeFamily.PAD_SHAPE,
+            role=ClassicRecipeRole.DONOR,
+            build_target="program",
+            beneficiaries=auxiliary_beneficiaries,
         )
         function = ClassicRecipeIntervention(
             id="function",
             scope=function_scope,
             rationale="dependency allocation fixture",
             dependencies=(donor.id,),
-            family=ClassicRecipeFamily.EQUAL_BODY_STRICT,
+            family=ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC,
             role=ClassicRecipeRole.FUNCTION,
             build_target="program",
             symbol="work()",
+            parameters=(
+                ClassicField(
+                    name="donor_variants",
+                    value=[{"donor": auxiliary.id}],
+                ),
+                ClassicField(name="instruction_donor", value=auxiliary.id),
+                ClassicField(name="target_donor", value=auxiliary.id),
+            ),
         )
         return ProjectBundle(
             root=baseline.root,
@@ -378,7 +391,7 @@ def test_classic_donor_beneficiaries_are_exact_dependency_consumers(
                     target_id="program",
                     translation_unit_id="main",
                     build_target="program",
-                    interventions=(donor, function),
+                    interventions=(donor, auxiliary, function),
                 ),
             ),
             proof_documents=(
@@ -393,9 +406,15 @@ def test_classic_donor_beneficiaries_are_exact_dependency_consumers(
                             family=donor.family,
                         ),
                         ClassicProofReceipt(
+                            id="auxiliary-proof",
+                            intervention_id=auxiliary.id,
+                            family=auxiliary.family,
+                        ),
+                        ClassicProofReceipt(
                             id="function-proof",
                             intervention_id=function.id,
                             family=function.family,
+                            expected_values={"complete_donor": auxiliary.id},
                         ),
                     ),
                 ),
@@ -403,10 +422,12 @@ def test_classic_donor_beneficiaries_are_exact_dependency_consumers(
             oracle_documents=baseline.oracle_documents,
         )
 
-    accepted = bundle_with((function_scope,))
-    assert accepted.interventions[0].beneficiaries == (function_scope,)
-    with pytest.raises(ValidationError, match="dependency consumers"):
-        bundle_with(())
+    accepted = bundle_with((function_scope,), (function_scope,))
+    by_id = {item.id: item for item in accepted.interventions}
+    assert by_id["donor"].beneficiaries == (function_scope,)
+    assert by_id["auxiliary"].beneficiaries == (function_scope,)
+    with pytest.raises(ValidationError, match="runtime consumers"):
+        bundle_with((function_scope,), ())
 
 
 def test_strict_json_rejects_ambiguous_documents() -> None:
@@ -644,7 +665,7 @@ def test_project_tree_binds_closed_producer_graph(tmp_path: Path) -> None:
             mode="json"
         ),
         "path_profile_id": baseline.spec.paths.id,
-        "extractor": "cmake-unix-makefiles-v1",
+        "extractor": "cmake-makefiles-v1",
         "nodes": [
             {
                 "id": "linker.program",
@@ -731,18 +752,14 @@ def test_quarantine_archive_edges_require_exact_build_plan_and_source_pins(
         source_overlay_digest=Digest.from_bytes(b"empty overlay"),
         source_overlay_interventions=(),
         archives=(authority,),
-        target_gates=(
-            ClassicTargetGate(target_id="program", build_target="program"),
-        ),
+        target_gates=(ClassicTargetGate(target_id="program", build_target="program"),),
     )
     graph = ProducerGraphDocument(
         schema_version=2,
-        source_topology_digest=source_topology_digest(
-            item.path for item in manifest.entries
-        ),
+        source_topology_digest=source_topology_digest(item.path for item in manifest.entries),
         toolchain_lock_digest=toolchain_document_digest(baseline.toolchain_lock),
         path_profile_id=baseline.spec.paths.id,
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(
             ProducerNode(
                 id="linker.program",
@@ -858,8 +875,25 @@ def test_generated_schemas_describe_the_project_overlay_primary_boundary() -> No
     manifest_schema = schemas["source-manifest-v3.schema.json"]
     assert "clean-source authority" in manifest_schema["description"]
     assert "clean source baseline" in manifest_schema["$defs"]["SourceManifestEntry"]["description"]
+    assert manifest_schema["allOf"][0]["then"]["properties"]["entries"]["minItems"] == 1
 
     build_plan_description = schemas["build-plan-v3.schema.json"]["description"]
     assert "source_overlay_graph" in build_plan_description
     assert "donor_source_overlay" in build_plan_description
     assert "primary compiler seat" in build_plan_description
+
+
+def test_incomplete_source_manifest_can_start_empty_but_complete_cannot() -> None:
+    incomplete = SourceManifestDocument(
+        schema_version=3,
+        complete=False,
+        entries=(),
+    )
+    assert incomplete.entries == ()
+
+    with pytest.raises(ValidationError, match="requires at least one entry"):
+        SourceManifestDocument(
+            schema_version=3,
+            complete=True,
+            entries=(),
+        )

@@ -172,9 +172,12 @@ def _graph_compile_records(
             for value in node.outputs
             if value.casefold().endswith(".pdb")
         )
+        parsed_pdb = cast(str, parsed["Fd"][1])
+        if parsed_pdb.endswith(("/", "\\")):
+            parsed_pdb = parsed_pdb + "vc40.pdb"
         if normalize_logical_path(parsed["Fo"][1].replace("/", "\\")) != _logical_join(
             bundle.spec.paths.build, object_relative
-        ) or normalize_logical_path(parsed["Fd"][1].replace("/", "\\")) != _logical_join(
+        ) or normalize_logical_path(parsed_pdb.replace("/", "\\")) != _logical_join(
             bundle.spec.paths.build, pdb_relative
         ):
             raise ClassicProjectError(

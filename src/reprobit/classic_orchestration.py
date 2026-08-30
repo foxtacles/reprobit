@@ -58,6 +58,7 @@ from reprobit.schema import (
     ClassicTranslationUnitPlan,
     LegacyOracleInstallIntervention,
     ProjectBundle,
+    candidate_auxiliary_donor_ids,
 )
 from reprobit.strict_json import canonical_json
 
@@ -109,9 +110,7 @@ def _parameters(intervention: ClassicRecipeIntervention) -> dict[str, object]:
 
 def _receipt_index(bundle: ProjectBundle) -> tuple[ClassicProofReceipt, ...]:
     return tuple(
-        receipt
-        for document in bundle.proof_documents
-        for receipt in document.expected_observations
+        receipt for document in bundle.proof_documents for receipt in document.expected_observations
     )
 
 
@@ -130,33 +129,26 @@ def _temporary_classic_legacy_action_authority(
             ),
         )
         for document in bundle.intervention_documents
-        if any(
-            isinstance(item, LegacyOracleInstallIntervention)
-            for item in document.interventions
-        )
+        if any(isinstance(item, LegacyOracleInstallIntervention) for item in document.interventions)
     )
     if not action_documents:
         return MappingProxyType({})
     plan = bundle.build_plan
     if plan is None:
-        raise ClassicProjectError(
-            "temporary classic legacy-action authority requires a build plan"
-        )
+        raise ClassicProjectError("temporary classic legacy-action authority requires a build plan")
     planned_units = {unit.id: unit for unit in plan.translation_units}
     grouped: dict[str, list[LegacyOracleInstallIntervention]] = {}
     for document, actions in action_documents:
         unit_id = document.translation_unit_id
         if unit_id is None or unit_id not in planned_units:
             raise ClassicProjectError(
-                f"legacy action {actions[0].id!r} is outside a planned "
-                "translation-unit shard"
+                f"legacy action {actions[0].id!r} is outside a planned translation-unit shard"
             )
         unit = planned_units[unit_id]
         donors = {
             item.id
             for item in document.interventions
-            if isinstance(item, ClassicRecipeIntervention)
-            and item.role is ClassicRecipeRole.DONOR
+            if isinstance(item, ClassicRecipeIntervention) and item.role is ClassicRecipeRole.DONOR
         }
         for action in actions:
             if action.scope.translation_unit != unit_id or action.scope.function is None:
@@ -185,17 +177,16 @@ def _temporary_classic_legacy_action_authority(
                 )
             grouped.setdefault(unit_id, []).append(action)
     return MappingProxyType(
-        {
-            unit_id: tuple(actions)
-            for unit_id, actions in sorted(grouped.items())
-        }
+        {unit_id: tuple(actions) for unit_id, actions in sorted(grouped.items())}
     )
 
 
 _COMPILER_SOURCE_SUFFIXES = frozenset({".c", ".cc", ".cpp", ".cxx"})
 
 
-def _compiler_source(node: ProducerNode) -> str:
+def compiler_source(node: ProducerNode) -> str:
+    """Return the one source input consumed by a compiler graph node."""
+
     sources = tuple(
         reference.removeprefix("source/")
         for reference in node.inputs
@@ -203,21 +194,17 @@ def _compiler_source(node: ProducerNode) -> str:
         and PurePosixPath(reference).suffix.casefold() in _COMPILER_SOURCE_SUFFIXES
     )
     if len(sources) != 1:
-        raise ClassicProjectError(
-            f"compiler node {node.id!r} lacks one translation-unit source"
-        )
+        raise ClassicProjectError(f"compiler node {node.id!r} lacks one translation-unit source")
     return sources[0]
 
 
-def _compiler_terminal_consumer_targets(
+def compiler_terminal_consumer_targets(
     graph: ProducerGraphDocument,
 ) -> Mapping[str, frozenset[str]]:
     """Map compiler nodes to terminal targets reached through actual build inputs."""
 
     consumers: dict[str, set[str]] = {
-        node.id: set()
-        for node in graph.nodes
-        if node.role is ProducerRole.COMPILER
+        node.id: set() for node in graph.nodes if node.role is ProducerRole.COMPILER
     }
     for linker in (node for node in graph.nodes if node.role is ProducerRole.LINKER):
         if linker.target_id is None:
@@ -229,10 +216,7 @@ def _compiler_terminal_consumer_targets(
         for compiler_id in topology.compiler_node_ids:
             consumers[compiler_id].add(linker.target_id)
     return MappingProxyType(
-        {
-            node_id: frozenset(target_ids)
-            for node_id, target_ids in consumers.items()
-        }
+        {node_id: frozenset(target_ids) for node_id, target_ids in consumers.items()}
     )
 
 
@@ -259,10 +243,10 @@ def classic_compiler_translation_unit_authority(
     for node in graph.nodes:
         if node.role is not ProducerRole.COMPILER:
             continue
-        identity = (node.owner.casefold(), _compiler_source(node).casefold())
+        identity = (node.owner.casefold(), compiler_source(node).casefold())
         compilers_by_identity.setdefault(identity, []).append(node)
 
-    consumers = _compiler_terminal_consumer_targets(graph)
+    consumers = compiler_terminal_consumer_targets(graph)
     result: dict[str, ClassicTranslationUnitPlan] = {}
     for identity, unit in planned_by_identity.items():
         matches = compilers_by_identity.get(identity, [])
@@ -324,27 +308,23 @@ def _rdata_repack_materialization(
             f"rdata repack {intervention.id!r} must be a project image-binary-repack recipe"
         )
     if set(values) != {"rdata_pool_repack"}:
-        raise ClassicProjectError(
-            f"rdata repack {intervention.id!r} declaration is not closed"
-        )
+        raise ClassicProjectError(f"rdata repack {intervention.id!r} declaration is not closed")
     raw_declaration = raw_values.get("rdata_pool_repack")
     declaration = values.get("rdata_pool_repack")
     if not isinstance(raw_declaration, dict) or not isinstance(declaration, dict):
-        raise ClassicProjectError(
-            f"rdata repack {intervention.id!r} has an invalid selector"
-        )
+        raise ClassicProjectError(f"rdata repack {intervention.id!r} has an invalid selector")
     if declaration.get("schema") != "rdata_pool_repack_v1":
         raise ClassicProjectError(
             f"rdata repack {intervention.id!r} has an unsupported selector schema"
         )
     raw_object = raw_declaration.get("object")
     object_path = declaration.get("object")
-    if not isinstance(raw_object, str) or not raw_object or (
-        not isinstance(object_path, str) or not object_path
+    if (
+        not isinstance(raw_object, str)
+        or not raw_object
+        or (not isinstance(object_path, str) or not object_path)
     ):
-        raise ClassicProjectError(
-            f"rdata repack {intervention.id!r} has an invalid object path"
-        )
+        raise ClassicProjectError(f"rdata repack {intervention.id!r} has an invalid object path")
     if raw_object != object_path:
         raise ClassicProjectError(
             f"rdata repack {intervention.id!r} proof changes its selected object"
@@ -352,9 +332,7 @@ def _rdata_repack_materialization(
     if len(matching_receipts) != 1:
         # The materializer normally closes this condition.  Keep the returned
         # receipt identity explicit rather than relying on a lossy dictionary.
-        raise ClassicProjectError(
-            f"rdata repack {intervention.id!r} lacks one proof receipt"
-        )
+        raise ClassicProjectError(f"rdata repack {intervention.id!r} lacks one proof receipt")
     return matching_receipts[0], MappingProxyType(dict(values)), object_path
 
 
@@ -416,9 +394,7 @@ def classic_rdata_repack_authority(
     """Select one exact pre-link object repack declaration and proof receipt."""
 
     receipt_values = _receipt_index(bundle)
-    matches: list[
-        tuple[ClassicRecipeIntervention, ClassicProofReceipt, Mapping[str, object]]
-    ] = []
+    matches: list[tuple[ClassicRecipeIntervention, ClassicProofReceipt, Mapping[str, object]]] = []
     for intervention in bundle.interventions:
         if not isinstance(intervention, ClassicRecipeIntervention) or (
             intervention.scope.target != target_id
@@ -462,7 +438,7 @@ def classic_rdata_repack_graph_authority(
                 node,
                 object_path,
             )
-    compiler_consumers = _compiler_terminal_consumer_targets(graph)
+    compiler_consumers = compiler_terminal_consumer_targets(graph)
 
     receipt_values = _receipt_index(bundle)
     selected: dict[
@@ -476,11 +452,7 @@ def classic_rdata_repack_graph_authority(
         ],
     ] = {}
     for intervention in sorted(
-        (
-            item
-            for item in bundle.interventions
-            if isinstance(item, ClassicRecipeIntervention)
-        ),
+        (item for item in bundle.interventions if isinstance(item, ClassicRecipeIntervention)),
         key=lambda item: item.id,
     ):
         materialized = _rdata_repack_materialization(intervention, receipt_values)
@@ -491,8 +463,7 @@ def classic_rdata_repack_graph_authority(
         producers = produced_objects.get(object_identity, {})
         if not producers:
             raise ClassicProjectError(
-                f"rdata repack {intervention.id!r} names an unproduced object: "
-                f"{object_path!r}"
+                f"rdata repack {intervention.id!r} names an unproduced object: {object_path!r}"
             )
         canonical_object = next(iter(producers.values()))[1]
         if object_path != canonical_object:
@@ -511,9 +482,7 @@ def classic_rdata_repack_graph_authority(
                 f"rdata repack {intervention.id!r} targets {canonical_object!r}, "
                 f"which target {target_id!r} does not consume"
             )
-        selected.setdefault(object_identity, []).append(
-            (intervention, receipt, values)
-        )
+        selected.setdefault(object_identity, []).append((intervention, receipt, values))
 
     result: dict[
         str,
@@ -526,8 +495,7 @@ def classic_rdata_repack_graph_authority(
         if len(matches) != 1:
             identities = ", ".join(repr(item[0].id) for item in matches)
             raise ClassicProjectError(
-                f"multiple rdata repacks name {canonical_object!r}: "
-                f"{identities}"
+                f"multiple rdata repacks name {canonical_object!r}: {identities}"
             )
         if len(producers) != 1:
             identities = ", ".join(repr(node_id) for node_id in sorted(producers))
@@ -547,19 +515,16 @@ def classic_rdata_repack_graph_authority(
         object_outputs = tuple(
             reference
             for reference in producer.outputs
-            if reference.startswith("build/")
-            and reference.casefold().endswith(".obj")
+            if reference.startswith("build/") and reference.casefold().endswith(".obj")
         )
         pdb_outputs = tuple(
             reference
             for reference in producer.outputs
-            if reference.startswith("build/")
-            and reference.casefold().endswith(".pdb")
+            if reference.startswith("build/") and reference.casefold().endswith(".pdb")
         )
         if len(object_outputs) != 1 or len(pdb_outputs) != 1:
             raise ClassicProjectError(
-                f"rdata repack compiler {producer.id!r} must publish exactly one "
-                "object and one PDB"
+                f"rdata repack compiler {producer.id!r} must publish exactly one object and one PDB"
             )
         selected_producers[object_identity] = producer
         result[object_identity] = matches[0]
@@ -593,8 +558,10 @@ def _canonical_overlay_operations(
                 raise ClassicProjectError("source-overlay output is malformed")
             path = raw.get("path")
             operations = raw.get("ops")
-            if not isinstance(path, str) or not isinstance(operations, list) or (
-                any(not isinstance(item, dict) for item in operations)
+            if (
+                not isinstance(path, str)
+                or not isinstance(operations, list)
+                or (any(not isinstance(item, dict) for item in operations))
             ):
                 raise ClassicProjectError("source-overlay operation list is malformed")
             if path in result:
@@ -611,9 +578,7 @@ def _donor_source(
     values = matching_candidate_constraints(intervention, receipts).materialize()
     value = values.get("donor_source", owning_source)
     if not isinstance(value, str) or not value:
-        raise ClassicProjectError(
-            f"donor {intervention.id!r} has an invalid source declaration"
-        )
+        raise ClassicProjectError(f"donor {intervention.id!r} has an invalid source declaration")
     return value
 
 
@@ -652,8 +617,7 @@ def prepare_classic_units(
         donors = tuple(
             item
             for item in unit_interventions
-            if isinstance(item, ClassicRecipeIntervention)
-            and item.role is ClassicRecipeRole.DONOR
+            if isinstance(item, ClassicRecipeIntervention) and item.role is ClassicRecipeRole.DONOR
         )
         functions = tuple(
             item
@@ -673,9 +637,7 @@ def prepare_classic_units(
         )
         admitted_ids = {item.id for item in donors}
         consumers_by_donor = {
-            donor.id: tuple(
-                function for function in functions if donor.id in function.dependencies
-            )
+            donor.id: tuple(function for function in functions if donor.id in function.dependencies)
             for donor in donors
         }
         for function in (*functions, *legacy):
@@ -685,9 +647,7 @@ def prepare_classic_units(
                     f"function {function.id!r} has non-donor dependencies: {sorted(unknown)}"
                 )
             if not function.dependencies:
-                raise ClassicProjectError(
-                    f"function {function.id!r} has no fresh donor dependency"
-                )
+                raise ClassicProjectError(f"function {function.id!r} has no fresh donor dependency")
         rendered_donors: list[ClassicPreparedDonor] = []
         for donor in donors:
             logical_source = _donor_source(donor, receipts, plan.source)
@@ -695,17 +655,14 @@ def prepare_classic_units(
             effective = effective_sources.get(logical_source)
             if clean is None or effective is None:
                 raise ClassicProjectError(
-                    f"donor {donor.id!r} source is outside source authority: "
-                    f"{logical_source!r}"
+                    f"donor {donor.id!r} source is outside source authority: {logical_source!r}"
                 )
             operation_replay = canonical_operations.get(logical_source)
             overlay_clean_inputs: Mapping[str, bytes] | None = None
             if donor.family is ClassicRecipeFamily.DONOR_SOURCE_OVERLAY:
                 renderings = _parameters(donor).get("renderings")
                 if not isinstance(renderings, list) or not renderings:
-                    raise ClassicProjectError(
-                        f"overlay donor {donor.id!r} has no rendering paths"
-                    )
+                    raise ClassicProjectError(f"overlay donor {donor.id!r} has no rendering paths")
                 selected: dict[str, bytes] = {}
                 for raw_rendering in renderings:
                     if not isinstance(raw_rendering, dict) or not isinstance(
@@ -744,9 +701,7 @@ def prepare_classic_units(
                     overlay_receipts=request.overlay_receipts,
                 )
             except ValueError as exc:
-                raise ClassicProjectError(
-                    f"cannot prepare donor {donor.id!r}: {exc}"
-                ) from exc
+                raise ClassicProjectError(f"cannot prepare donor {donor.id!r}: {exc}") from exc
             rendered_donors.append(ClassicPreparedDonor(donor, request))
         unit_receipts = tuple(
             item
@@ -813,8 +768,7 @@ def compose_classic_unit(
                 f"fresh donor material key differs from {material.intervention.id!r}"
             )
     donor_objects = {
-        donor_id: material.donor_object
-        for donor_id, material in donor_materials.items()
+        donor_id: material.donor_object for donor_id, material in donor_materials.items()
     }
     donor_sources = {
         item.intervention.id: item.request.logical_outputs.get(unit.plan.source)
@@ -823,12 +777,8 @@ def compose_classic_unit(
     donor_ids = frozenset(expected_donors)
     output = seed_object
     witnesses: list[InterventionWitness] = []
-    donor_uses: dict[str, list[DonorSemanticUse]] = {
-        donor_id: [] for donor_id in expected_donors
-    }
-    quarantined_uses: dict[str, dict[str, Digest]] = {
-        donor_id: {} for donor_id in expected_donors
-    }
+    donor_uses: dict[str, list[DonorSemanticUse]] = {donor_id: [] for donor_id in expected_donors}
+    quarantined_uses: dict[str, dict[str, Digest]] = {donor_id: {} for donor_id in expected_donors}
     dispatcher = ClassicFamilyDispatcher()
     for action in unit.actions:
         if isinstance(action, LegacyOracleInstallIntervention):
@@ -836,17 +786,11 @@ def compose_classic_unit(
                 raise ClassicProjectError(
                     f"legacy action {action.id!r} lacks its sealed oracle capability"
                 )
-            matches = [
-                item for item in unit.receipts if item.intervention_id == action.id
-            ]
+            matches = [item for item in unit.receipts if item.intervention_id == action.id]
             if len(matches) != 1:
-                raise ClassicProjectError(
-                    f"legacy action {action.id!r} requires one proof receipt"
-                )
+                raise ClassicProjectError(f"legacy action {action.id!r} requires one proof receipt")
             if len(action.dependencies) != 1:
-                raise ClassicProjectError(
-                    f"legacy action {action.id!r} requires one fresh donor"
-                )
+                raise ClassicProjectError(f"legacy action {action.id!r} requires one fresh donor")
             from reprobit.classic_legacy import compose_legacy_simulated_elision
 
             result = compose_legacy_simulated_elision(
@@ -875,11 +819,14 @@ def compose_classic_unit(
         values = matching_candidate_constraints(function, unit.receipts).materialize()
         primary_id = function.dependencies[0]
         primary = donor_objects[primary_id]
+        unknown_auxiliary_donors = set(candidate_auxiliary_donor_ids(values)) - donor_ids
+        if unknown_auxiliary_donors:
+            raise ClassicProjectError(
+                f"function names unknown auxiliary donors: {sorted(unknown_auxiliary_donors)}"
+            )
         target_donor_id = _named_donor_id(values, "target_donor", donor_ids)
         complete_donor_id = _named_donor_id(values, "complete_donor", donor_ids)
-        instruction_donor_id = _named_donor_id(
-            values, "instruction_donor", donor_ids
-        )
+        instruction_donor_id = _named_donor_id(values, "instruction_donor", donor_ids)
         function_donor_inputs = {
             primary_id: f"dependency:{primary_id}",
         }
@@ -898,16 +845,12 @@ def compose_classic_unit(
                     raise ClassicProjectError("donor variant declaration is malformed")
                 resolved_donor_id = cast(str, item["donor"])
                 if resolved_donor_id not in donor_ids:
-                    raise ClassicProjectError(
-                        f"donor variant is unknown: {resolved_donor_id!r}"
-                    )
+                    raise ClassicProjectError(f"donor variant is unknown: {resolved_donor_id!r}")
                 additional[resolved_donor_id] = donor_objects[resolved_donor_id]
                 function_donor_inputs.setdefault(
                     resolved_donor_id, f"additional_donor:{resolved_donor_id}"
                 )
-        request = next(
-            item.request for item in unit.donors if item.intervention.id == primary_id
-        )
+        request = next(item.request for item in unit.donors if item.intervention.id == primary_id)
         try:
             candidate = dispatcher.dispatch(
                 function,
@@ -915,14 +858,10 @@ def compose_classic_unit(
                     seed_object=output,
                     donor_object=primary,
                     target_donor_object=(
-                        donor_objects[target_donor_id]
-                        if target_donor_id is not None
-                        else primary
+                        donor_objects[target_donor_id] if target_donor_id is not None else primary
                     ),
                     complete_donor_object=(
-                        donor_objects[complete_donor_id]
-                        if complete_donor_id is not None
-                        else None
+                        donor_objects[complete_donor_id] if complete_donor_id is not None else None
                     ),
                     instruction_donor_object=(
                         donor_objects[instruction_donor_id]
@@ -1014,12 +953,7 @@ def compose_classic_unit(
         group_input_digest,
         group_input_size,
         MappingProxyType(donor_semantic_proofs),
-        MappingProxyType(
-            {
-                donor_id: tuple(uses)
-                for donor_id, uses in sorted(donor_uses.items())
-            }
-        ),
+        MappingProxyType({donor_id: tuple(uses) for donor_id, uses in sorted(donor_uses.items())}),
     )
 
 
@@ -1041,9 +975,7 @@ def apply_classic_terminal_pipeline(
     witnesses: list[InterventionWitness] = []
     dispatcher = ClassicFamilyDispatcher()
     for intervention in interventions:
-        constraints = matching_candidate_constraints(
-            intervention, receipts
-        ).materialize()
+        constraints = matching_candidate_constraints(intervention, receipts).materialize()
         result = dispatcher.dispatch_project(
             intervention,
             output,
@@ -1110,6 +1042,8 @@ __all__ = [
     "classic_rdata_repack_authority",
     "classic_rdata_repack_graph_authority",
     "classic_terminal_pipeline_authority",
+    "compiler_source",
+    "compiler_terminal_consumer_targets",
     "compose_classic_unit",
     "prepare_classic_units",
 ]

@@ -39,7 +39,7 @@ from reprobit.discovery_project import (
     resolve_project_grind_context,
 )
 from reprobit.execution import classic_semantic_obligation_name
-from reprobit.msvc_discovery_analysis import qualify_msvc_reference_object
+from reprobit.msvc_discovery_coff import qualify_msvc_reference_object
 from reprobit.progress import ProgressKind
 from reprobit.project_loader import load_project_tree
 from reprobit.report import Report
@@ -211,8 +211,7 @@ def _validate_cold_report(
         return "cold report cost differs from the admitted intervention delta"
 
     certificates = {
-        certificate.intervention_id: certificate
-        for certificate in report.proof.certificates
+        certificate.intervention_id: certificate for certificate in report.proof.certificates
     }
     for record in authored.records:
         intervention = record.intervention
@@ -376,9 +375,7 @@ def run_project_grind(
             completed += 1
             _advance(progress, completed, total, "grind-donors", donor_id)
 
-        donor_objects = dict(
-            callbacks.probe_donors(staged_root, donor_ids, donor_progress)
-        )
+        donor_objects = dict(callbacks.probe_donors(staged_root, donor_ids, donor_progress))
         if donor_completed != len(donor_ids):
             raise GrindError("donor compiler probe omitted completion progress")
         if set(donor_objects) != set(donor_ids) or any(
@@ -387,9 +384,7 @@ def run_project_grind(
             raise GrindError("donor probe returned an incomplete compiler result set")
         reference_object = context.reference_path.read_bytes()
         qualified: list[_QualifiedCandidate] = []
-        original_ids = {
-            item.id for item in context.intervention_document.interventions
-        }
+        original_ids = {item.id for item in context.intervention_document.interventions}
         for state, provisional_record in provisional:
             state_id = declaration_state_id(state)
             classes, functions = _state_shape(state)
@@ -418,9 +413,7 @@ def run_project_grind(
                     authored.records,
                 )
                 reused_donor = authored.donor.intervention.id in original_ids
-                merged_shard_cost = calculate_cost(
-                    final_documents[0].interventions
-                ).project_total
+                merged_shard_cost = calculate_cost(final_documents[0].interventions).project_total
                 added_cost = merged_shard_cost - original_shard_cost
                 if added_cost <= 0:
                     raise GrindError("qualified discovery did not add positive intervention cost")
@@ -455,9 +448,7 @@ def run_project_grind(
                     state_id,
                 )
 
-        qualified.sort(
-            key=lambda item: (item.added_cost, canonical_json(item.state))
-        )
+        qualified.sort(key=lambda item: (item.added_cost, canonical_json(item.state)))
         for candidate in qualified:
             state_id = declaration_state_id(candidate.state)
             final_documents = candidate.documents

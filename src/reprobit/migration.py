@@ -46,6 +46,7 @@ from reprobit.schema import (
     SourceManifestEntry,
     ToolchainLock,
     ToolchainProfileSource,
+    candidate_auxiliary_donor_ids,
     source_manifest_digest,
 )
 from reprobit.strict_json import JsonValue, StrictJSONError, canonical_json, strict_load
@@ -631,8 +632,7 @@ def _legacy_compile_lane_owners(
                 (
                     argument[3:]
                     for argument in arguments
-                    if argument.casefold().startswith(("/fo", "-fo"))
-                    and len(argument) > 3
+                    if argument.casefold().startswith(("/fo", "-fo")) and len(argument) > 3
                 ),
                 None,
             )
@@ -700,8 +700,7 @@ def _migrate_donor_references(
                 continue
             if not isinstance(legacy_id, str) or legacy_id not in donor_ids:
                 raise MigrationError(
-                    f"{context} instruction_ranges[{index}] names unknown donor "
-                    f"{legacy_id!r}"
+                    f"{context} instruction_ranges[{index}] names unknown donor {legacy_id!r}"
                 )
             migrated_ranges.append({**raw, "donor": donor_ids[legacy_id]})
         values["instruction_ranges"] = migrated_ranges
@@ -1070,9 +1069,7 @@ def _migrated_link_authority(
         path = item.get("path")
         sha256 = item.get("sha256")
         if not isinstance(path, str) or not isinstance(sha256, str):
-            raise MigrationError(
-                f"legacy project SDK library {index} lacks a path or SHA-256"
-            )
+            raise MigrationError(f"legacy project SDK library {index} lacks a path or SHA-256")
         libraries.append(
             ClassicSdkArchiveAuthority(
                 path=path,
@@ -1102,15 +1099,10 @@ def _migrated_group_order(
     elif mode in {"restore_comdat_group_order", "compose_equal_body_comdat"}:
         operation = "restore_comdat_group_order"
     else:
-        raise MigrationError(
-            f"translation unit {source!r} has no supported group-order operation"
-        )
+        raise MigrationError(f"translation unit {source!r} has no supported group-order operation")
     return ClassicGroupOrderPlan(
         operation=operation,
-        orders=tuple(
-            tuple(order) if isinstance(order, list) else (order,)
-            for order in raw_orders
-        ),
+        orders=tuple(tuple(order) if isinstance(order, list) else (order,) for order in raw_orders),
     )
 
 
@@ -1691,6 +1683,7 @@ def _convert_v2_manifest(
                 },
             )
             pins = _ProofPins({}, {})
+            consumer_donor_ids: set[str] = set()
             if family is ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION:
                 for key in sorted(function):
                     if key not in {"mangled", "splice_class", "donor"}:
@@ -1739,6 +1732,7 @@ def _convert_v2_manifest(
                     donor_ids,
                     context=f"function {symbol!r}",
                 )
+                consumer_donor_ids.update(candidate_auxiliary_donor_ids(values))
                 rationale = values.pop("rationale", "Migrated compiler-entropy intervention.")
                 if not isinstance(rationale, str) or not rationale:
                     rationale = "Migrated compiler-entropy intervention."
@@ -1762,8 +1756,10 @@ def _convert_v2_manifest(
             interventions.append(intervention)
             receipts.append(proof_receipt)
             if dependency:
-                key = (scope.target, scope.translation_unit or "", scope.function or "")
-                beneficiary_map[dependency][key] = scope
+                consumer_donor_ids.add(dependency)
+            key = (scope.target, scope.translation_unit or "", scope.function or "")
+            for donor_id in consumer_donor_ids:
+                beneficiary_map[donor_id][key] = scope
 
         for legacy_id, donor in donor_entries.items():
             recipe = donor.get("recipe")

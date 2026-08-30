@@ -184,7 +184,7 @@ def _bundle(root: Path, *, protected: bool = False) -> ProjectBundle:
         source_topology_digest=source_topology_digest(files),
         toolchain_lock_digest=toolchain_document_digest(toolchain),
         path_profile_id=spec.paths.id,
-        extractor="cmake-unix-makefiles-v1",
+        extractor="cmake-makefiles-v1",
         nodes=(compiler, linker),
     )
     interventions = (

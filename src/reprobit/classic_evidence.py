@@ -16,6 +16,7 @@ from reprobit.classic_runtime_graph import (
     ClassicCompileRecord,
     classic_compiler_product_refs,
 )
+from reprobit.costs import calculate_intervention_cost, intervention_cost_row_digest
 from reprobit.execution import (
     FileReceipt,
     ObjectTransformAttestation,
@@ -49,6 +50,7 @@ from reprobit.schema import (
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
     LegacyOracleInstallIntervention,
+    intervention_authority_digest,
 )
 from reprobit.secure_paths import SecureFileSnapshot
 from reprobit.strict_json import canonical_json
@@ -252,10 +254,7 @@ def _terminal_stage_logical_path(
     if index == count - 1:
         return public_path
     suffix = PurePosixPath(public_path).suffix
-    return (
-        f".reprobit/stages/terminal/{target_id}/"
-        f"{index:04d}-{intervention_id}{suffix}"
-    )
+    return f".reprobit/stages/terminal/{target_id}/{index:04d}-{intervention_id}{suffix}"
 
 
 def _evidence_identifier(prefix: str, *material: object) -> str:
@@ -438,9 +437,7 @@ class _ClassicEvidenceAssembler:
             reference = f"build/{_safe_relative(value)}"
             identity = reference.casefold()
             if identity in repacks:
-                raise ClassicProjectError(
-                    f"multiple rdata repacks own object {reference!r}"
-                )
+                raise ClassicProjectError(f"multiple rdata repacks own object {reference!r}")
             repacks[identity] = (reference, intervention)
         return repacks
 
@@ -485,9 +482,9 @@ class _ClassicEvidenceAssembler:
         if provenance_id in self.provenance:
             raise ClassicProjectError("evidence provenance identity collision")
         self.artifacts[artifact.id] = artifact
-        self.artifact_ids_by_receipt.setdefault(
-            (artifact.digest.value, artifact.size), []
-        ).append(artifact.id)
+        self.artifact_ids_by_receipt.setdefault((artifact.digest.value, artifact.size), []).append(
+            artifact.id
+        )
         self.provenance[provenance_id] = ProvenanceNode(
             id=provenance_id,
             kind=kind,
@@ -1004,9 +1001,7 @@ class _ClassicEvidenceAssembler:
         cached = self.semantic_receipt_keys.get(key)
         if cached is not None:
             return cached
-        statement = (
-            proof.input_statement if relation == "input" else proof.output_statement
-        )
+        statement = proof.input_statement if relation == "input" else proof.output_statement
         receipts = _statement_receipt_keys(statement)
         self.semantic_receipt_keys[key] = receipts
         return receipts
@@ -1060,6 +1055,10 @@ class _ClassicEvidenceAssembler:
         self.certificates[witness.intervention_id] = Certificate(
             id=certificate_id,
             intervention_id=witness.intervention_id,
+            intervention_authority_digest=intervention_authority_digest(intervention),
+            intervention_cost_digest=intervention_cost_row_digest(
+                calculate_intervention_cost(intervention)
+            ),
             obligations=tuple(sorted(obligations, key=lambda item: item.name)),
             artifact_ids=tuple(sorted(set(artifact_ids))),
             semantic_proofs=semantic_proofs,
@@ -1168,16 +1167,14 @@ class _ClassicEvidenceAssembler:
         if witness.legacy_oracle_install:
             legacy_statement = witness.semantic_output_statement
             if legacy_statement is None or (
-                Digest.from_bytes(canonical_json(legacy_statement))
-                != witness.evidence_digest
+                Digest.from_bytes(canonical_json(legacy_statement)) != witness.evidence_digest
             ):
                 raise ClassicProjectError(
                     f"legacy intervention {witness.intervention_id!r} has unbound evidence"
                 )
             if (
                 witness.output_digest is None
-                or legacy_statement.get("output_sha256")
-                != witness.output_digest.value
+                or legacy_statement.get("output_sha256") != witness.output_digest.value
                 or legacy_statement.get("output_size") != witness.output_size
             ):
                 raise ClassicProjectError(
@@ -1190,13 +1187,9 @@ class _ClassicEvidenceAssembler:
                 statement=legacy_statement,
             )
         proof_candidate = (
-            _statement_candidate_receipt(proof.output_statement)
-            if proof is not None
-            else None
+            _statement_candidate_receipt(proof.output_statement) if proof is not None else None
         )
-        statement_candidate = _statement_candidate_receipt(
-            witness.semantic_output_statement
-        )
+        statement_candidate = _statement_candidate_receipt(witness.semantic_output_statement)
         if (
             proof_candidate is not None
             and statement_candidate is not None
@@ -1239,9 +1232,7 @@ class _ClassicEvidenceAssembler:
             digest, size = fallback_receipt.digest, fallback_receipt.size
         else:
             digest, size = candidate
-        inputs = tuple(
-            dict.fromkeys((current_id, *additional_inputs, *legacy_inputs))
-        )
+        inputs = tuple(dict.fromkeys((current_id, *additional_inputs, *legacy_inputs)))
         artifact_id = _evidence_identifier(
             "artifact", "transform", witness.intervention_id, digest, size
         )
@@ -1277,9 +1268,7 @@ class _ClassicEvidenceAssembler:
                 else ("metadata_transform" if metadata else "classic_transform")
             ),
             origin=(
-                ArtifactOrigin.ORACLE
-                if witness.legacy_oracle_install
-                else ArtifactOrigin.COMPOSED
+                ArtifactOrigin.ORACLE if witness.legacy_oracle_install else ArtifactOrigin.COMPOSED
             ),
             parent_artifacts=inputs,
             intervention_id=witness.intervention_id,
@@ -1379,8 +1368,7 @@ class _ClassicEvidenceAssembler:
                     "unit": unit.plan.model_dump(mode="json"),
                     "output": receipt.output_digest.value,
                     "witnesses": [
-                        self.witnesses[action.id].evidence_digest.value
-                        for action in unit.actions
+                        self.witnesses[action.id].evidence_digest.value for action in unit.actions
                     ],
                     "group_order": receipt.evidence_digest.value,
                 }
@@ -1469,8 +1457,7 @@ class _ClassicEvidenceAssembler:
                     self.artifacts[current].size != receipt.size
                 ):
                     raise ClassicProjectError(
-                        "semantic object stages differ from the final output: "
-                        f"{object_reference!r}"
+                        f"semantic object stages differ from the final output: {object_reference!r}"
                     )
             self.current_by_reference[object_reference.casefold()] = current
         if applied_object_transforms != set(self.object_transforms):
