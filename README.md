@@ -101,6 +101,14 @@ Open `build/reprobit-report/report.html` in a browser. Its first view explains
 the overall result and each target; detailed symbols, commands, and evidence are
 available in collapsed Advanced sections.
 
+The declared binary remains the only output used for byte-exact certification
+or release. If an imported MSVC link asks for debug data, ReproBit also writes a
+matched binary and `.PDB` under the sibling `reprobit-debug/` directory—for
+example, `build/reprobit-debug/GAME.EXE` and
+`build/reprobit-debug/GAME.PDB`. Give analysis tools those two files together.
+ReproBit chooses the paths automatically and caches the pair during incremental
+builds.
+
 Failed builds keep a private workspace so problems can be inspected. Reclaim
 those workspaces with `rbit clean .`; the reusable build cache is kept by
 default. Use `rbit clean . --cache` when you also want to reclaim cache space,

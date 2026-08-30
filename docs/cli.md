@@ -230,6 +230,17 @@ Both commands use the compiler location remembered by `rbit setup`. `build` is
 the fast incremental loop; `verify` always builds from scratch and writes the
 trust report.
 
+### Matched comparison files
+
+If an imported MSVC link asks for debug data, ReproBit automatically writes a
+matched binary and `.PDB` inside the sibling `reprobit-debug/` directory. For
+example, the pair for `build/GAME.EXE` is
+`build/reprobit-debug/GAME.EXE` and `build/reprobit-debug/GAME.PDB`. Tools that
+read symbols must use those two files together; do not mix the `.PDB` with the
+declared `build/GAME.EXE`. The declared binary remains the only output used for
+byte-exact certification or release. There are no extra paths to configure, and
+incremental builds cache and restore both comparison files together.
+
 ### Reading the report
 
 Open `build/reprobit-report/report.html` in a browser. Start with the overall
