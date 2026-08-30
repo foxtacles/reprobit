@@ -24,7 +24,8 @@ from reprobit.classic_publication import (
     ClassicPublicationRequest,
     publish_classic_output_set,
 )
-from reprobit.execution import BuildExecutionReceipt, FileReceipt
+from reprobit.classic_runtime_receipts import _held_publication_receipt
+from reprobit.execution import BuildExecutionReceipt
 from reprobit.incremental import (
     producer_cache_implementation,
     revalidate_producer_implementation,
@@ -337,14 +338,9 @@ def execute_classic_incremental_plan(
             outputs = tuple(
                 sorted(
                     (
-                        FileReceipt(
-                            item.snapshot.path,
-                            item.snapshot.digest,
-                            item.snapshot.size,
-                            True,
-                            item.request.producer_step,
-                            item.snapshot.device,
-                            item.snapshot.inode,
+                        _held_publication_receipt(
+                            item.snapshot,
+                            producer_step=item.request.producer_step,
                         )
                         for item in published_outputs
                     ),

@@ -114,7 +114,7 @@ from reprobit.sealed_namespace import (
     SealedNamespaceLease,
     SealedNamespaceSnapshot,
 )
-from reprobit.secure_path_contracts import SecurePathError
+from reprobit.secure_path_contracts import SecureFileSnapshot, SecurePathError
 from reprobit.secure_paths import atomic_publish_relative
 from reprobit.toolchains import ClassicMSVCToolchain
 
@@ -2873,6 +2873,37 @@ def test_cold_debug_pair_publication_binds_both_members_without_certifying_them(
         project_root,
         executor.record,
     )
+
+
+def test_held_windows_publication_receipt_uses_python_stat_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path = tmp_path / "program.exe"
+    payload = b"held publication"
+    path.write_bytes(payload)
+    metadata = path.lstat()
+    snapshot = SecureFileSnapshot(
+        path=path,
+        digest=Digest.from_bytes(payload),
+        size=len(payload),
+        device=metadata.st_dev + 1,
+        inode=metadata.st_ino + 1,
+        mtime_ns=metadata.st_mtime_ns,
+        mode=metadata.st_mode,
+        ctime_ns=metadata.st_ctime_ns,
+        windows_file_id=b"strong-file-id",
+    )
+    monkeypatch.setattr(classic_runtime_receipts.os, "name", "nt")
+
+    receipt = classic_runtime_receipts._held_publication_receipt(
+        snapshot,
+        producer_step="publish.program",
+    )
+
+    assert (receipt.device, receipt.inode) == (metadata.st_dev, metadata.st_ino)
+    assert receipt.digest == snapshot.digest
+    assert receipt.size == snapshot.size
 
 
 def test_cold_debug_pair_second_member_failure_rolls_back_exact_and_companion(

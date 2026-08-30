@@ -99,6 +99,7 @@ from reprobit.classic_runtime_producer import (
     ClassicProgressReporter,
 )
 from reprobit.classic_runtime_receipts import (
+    _held_publication_receipt,
     _internal_step,
     _receipt,
     _step_receipt,
@@ -1119,6 +1120,13 @@ class ClassicProducerGraphBuildExecutor:
                     raise ClassicProjectError(
                         "classic progress did not cover every successful publication step"
                     )
+                published_target_paths = {
+                    image.final_path.resolve(strict=False) for image in images
+                }
+                if published_target_paths != {path.resolve(strict=False) for path in expected}:
+                    raise ClassicProjectError(
+                        "published target set differs from the required output set"
+                    )
                 output_receipts = [
                     _receipt(
                         path,
@@ -1128,22 +1136,24 @@ class ClassicProducerGraphBuildExecutor:
                     for path in sorted(physical_graph_outputs, key=str)
                 ]
                 output_receipts.extend(
-                    _receipt(path, fresh=True, producer_step=None)
-                    for path in sorted(expected, key=str)
+                    _held_publication_receipt(
+                        image.final_snapshot,
+                        producer_step=None,
+                    )
+                    for image in sorted(images, key=lambda value: str(value.final_path))
                 )
                 output_receipts.extend(
-                    _receipt(
-                        path,
-                        fresh=True,
+                    _held_publication_receipt(
+                        snapshot,
                         producer_step=companion.publish_step_id,
                     )
                     for companion in sorted(
                         debug_companions,
                         key=lambda value: value.target_id.casefold(),
                     )
-                    for path in (
-                        companion.image_snapshot.path,
-                        companion.pdb_snapshot.path,
+                    for snapshot in (
+                        companion.image_snapshot,
+                        companion.pdb_snapshot,
                     )
                 )
                 output_receipts_by_path = {
@@ -1153,10 +1163,7 @@ class ClassicProducerGraphBuildExecutor:
                     receipt = output_receipts_by_path.get(image.final_path.resolve(strict=False))
                     snapshot = image.final_snapshot
                     if receipt is None or (
-                        receipt.digest != snapshot.digest
-                        or receipt.size != snapshot.size
-                        or receipt.device != snapshot.device
-                        or receipt.inode != snapshot.inode
+                        receipt.digest != snapshot.digest or receipt.size != snapshot.size
                     ):
                         raise ClassicProjectError(
                             f"published target {image.target_id!r} receipt differs "
@@ -1169,10 +1176,7 @@ class ClassicProducerGraphBuildExecutor:
                     ):
                         receipt = output_receipts_by_path.get(snapshot.path.resolve(strict=False))
                         if receipt is None or (
-                            receipt.digest != snapshot.digest
-                            or receipt.size != snapshot.size
-                            or receipt.device != snapshot.device
-                            or receipt.inode != snapshot.inode
+                            receipt.digest != snapshot.digest or receipt.size != snapshot.size
                         ):
                             raise ClassicProjectError(
                                 f"published debug-companion {kind} "

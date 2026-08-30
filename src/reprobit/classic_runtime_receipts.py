@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import stat
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -11,6 +12,7 @@ from reprobit.classic_runtime_files import _digest_path
 from reprobit.execution import FileReceipt, StepExecutionReceipt
 from reprobit.model import Digest
 from reprobit.process import CommandSpec, ProcessResult
+from reprobit.secure_path_contracts import SecureFileSnapshot
 from reprobit.strict_json import canonical_json
 
 
@@ -34,6 +36,63 @@ def _receipt(path: Path, *, fresh: bool, producer_step: str | None) -> FileRecei
         producer_step,
         after.st_dev,
         after.st_ino,
+    )
+
+
+def _held_publication_receipt(
+    snapshot: SecureFileSnapshot,
+    *,
+    producer_step: str | None,
+) -> FileReceipt:
+    """Bind a held publication snapshot to Python's current stat identity.
+
+    Windows' secure path layer records both the legacy 64-bit file index and
+    the full native file ID.  Python 3.14 exposes the latter through ``st_ino``,
+    while older Python versions expose the former.  Content and native identity
+    remain protected by the surrounding held-publication context; the receipt
+    uses ``Path.stat`` only so the later literal verifier speaks the same
+    platform/Python identity dialect.
+    """
+
+    path = snapshot.path
+    metadata = path.lstat()
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise ClassicProjectError(f"classic publication is absent or redirected: {path}")
+    if metadata.st_size != snapshot.size:
+        raise ClassicProjectError(
+            f"classic publication size differs from its held snapshot: {path}"
+        )
+    if os.name == "nt":
+        if not snapshot.windows_file_id:
+            raise ClassicProjectError(
+                f"classic Windows publication has no strong file identity: {path}"
+            )
+    elif (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+        metadata.st_mode,
+    ) != (
+        snapshot.device,
+        snapshot.inode,
+        snapshot.size,
+        snapshot.mtime_ns,
+        snapshot.ctime_ns,
+        snapshot.mode,
+    ):
+        raise ClassicProjectError(
+            f"classic publication identity differs from its held snapshot: {path}"
+        )
+    return FileReceipt(
+        path.resolve(strict=True),
+        snapshot.digest,
+        snapshot.size,
+        True,
+        producer_step,
+        metadata.st_dev,
+        metadata.st_ino,
     )
 
 
