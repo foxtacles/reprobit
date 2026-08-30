@@ -44,9 +44,14 @@ def test_declaration_discovery_requests_are_valid_and_extend_by_one_cell() -> No
 
 
 def test_example_helpers_have_working_help_and_review_only_output() -> None:
-    for script in ("prepare_reference.py", "review_report.py"):
+    scripts = (
+        DISCOVERY / "prepare_reference.py",
+        DISCOVERY / "review_report.py",
+        EXAMPLES / "grind" / "prepare_reference.py",
+    )
+    for script in scripts:
         result = subprocess.run(
-            (sys.executable, DISCOVERY / script, "--help"),
+            (sys.executable, script, "--help"),
             cwd=ROOT,
             check=False,
             capture_output=True,

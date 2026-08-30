@@ -21,7 +21,7 @@ from reprobit.discovery_contracts import (
 from reprobit.discovery_project import ProjectGrindPlan
 from reprobit.model import Digest
 from reprobit.msvc_compile import render_msvc_declaration_state
-from reprobit.msvc_discovery_analysis import MsvcFunctionReference
+from reprobit.msvc_discovery_coff import MsvcFunctionReference
 from reprobit.toolchains import MSVC_42, ClassicMSVCToolchain
 from reprobit.user_config import resolve_toolchain_root
 
