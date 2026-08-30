@@ -22,8 +22,8 @@ from reprobit.producer_graph import (
     materialize_reference,
     producer_graph_accepts_source,
     producer_graph_digest,
+    producer_graph_source_requirements,
     read_producer_graph,
-    source_topology_digest,
     write_producer_graph,
 )
 from reprobit.producer_graph_cmake import extract_cmake_makefiles_graph
@@ -137,6 +137,48 @@ def test_node_accepts_normalized_seated_and_relative_paths() -> None:
         outputs=("build/obj/unit.obj",),
     )
     assert node.arguments[0] == "/I${SOURCE}/include"
+
+
+@pytest.mark.parametrize(
+    "force_include",
+    (
+        ("/FI${SOURCE}/include/prefix.hpp",),
+        ("/FI", "${SOURCE}/include/prefix.hpp"),
+    ),
+)
+def test_graph_source_requirements_include_forced_include_files(
+    force_include: tuple[str, ...],
+) -> None:
+    node = ProducerNode(
+        id="compiler.unit",
+        role=ProducerRole.COMPILER,
+        owner="core",
+        arguments=(
+            "/I${SOURCE}/include",
+            *force_include,
+            "/c",
+            "${SOURCE}/src/unit.cpp",
+            "/Fo${BUILD}/obj/unit.obj",
+        ),
+        inputs=("source/src/unit.cpp",),
+        outputs=("build/obj/unit.obj",),
+    )
+    graph = ProducerGraphDocument(
+        schema_version=3,
+        toolchain_lock_digest=_digest("1"),
+        path_profile_id="stable",
+        extractor="cmake-makefiles-v1",
+        nodes=(node,),
+    )
+
+    assert producer_graph_source_requirements(graph) == frozenset(
+        {"include/prefix.hpp", "src/unit.cpp"}
+    )
+    assert producer_graph_accepts_source(
+        graph,
+        paths=("include/prefix.hpp", "src/unit.cpp"),
+    )
+    assert not producer_graph_accepts_source(graph, paths=("src/unit.cpp",))
 
 
 @pytest.mark.parametrize("option", ("/Fd", "/fd", "/fD", "-FD"))
@@ -283,8 +325,7 @@ def test_graph_requires_closed_build_dependencies() -> None:
     )
     with pytest.raises(ValidationError, match="without a direct dependency"):
         ProducerGraphDocument(
-            schema_version=2,
-            source_topology_digest=_digest("1"),
+            schema_version=3,
             toolchain_lock_digest=_digest("2"),
             path_profile_id="stable",
             extractor="cmake-makefiles-v1",
@@ -327,7 +368,7 @@ def test_linker_input_sequence_preserves_positional_kind_order_and_repeated_arch
     )
 
 
-def test_graph_v2_binds_path_topology_but_not_source_content() -> None:
+def test_graph_v3_requires_only_declared_source_inputs() -> None:
     node = ProducerNode(
         id="compiler.unit",
         role=ProducerRole.COMPILER,
@@ -337,8 +378,7 @@ def test_graph_v2_binds_path_topology_but_not_source_content() -> None:
         outputs=("build/obj/unit.obj",),
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=source_topology_digest(("include/unit.h", "src/unit.cpp")),
+        schema_version=3,
         toolchain_lock_digest=_digest("2"),
         path_profile_id="stable",
         extractor="cmake-makefiles-v1",
@@ -347,34 +387,37 @@ def test_graph_v2_binds_path_topology_but_not_source_content() -> None:
 
     assert producer_graph_accepts_source(
         graph,
-        paths=("src/unit.cpp", "include/unit.h"),
+        paths=("src/unit.cpp",),
     )
     assert producer_graph_accepts_source(
         graph,
-        paths=("include/unit.h", "src/unit.cpp"),
+        paths=("include/unrelated.h", "notes.txt", "src/unit.cpp"),
+    )
+    assert producer_graph_accepts_source(
+        graph,
+        paths=("notes.txt",),
+        overlay_outputs=("src/unit.cpp",),
     )
     assert not producer_graph_accepts_source(
         graph,
-        paths=("include/unit.h", "src/added.cpp", "src/unit.cpp"),
+        paths=("include/unrelated.h", "notes.txt"),
     )
 
 
 @pytest.mark.parametrize(
     "values",
     (
-        {"schema_version": 1, "source_topology_digest": _digest("1")},
+        {"schema_version": 1},
         {
             "schema_version": 2,
-            "source_manifest_digest": _digest("1"),
         },
         {
-            "schema_version": 2,
-            "source_manifest_digest": _digest("1"),
+            "schema_version": 3,
             "source_topology_digest": _digest("2"),
         },
     ),
 )
-def test_graph_rejects_obsolete_source_bindings(
+def test_graph_rejects_obsolete_schemas_and_source_bindings(
     values: dict[str, object],
 ) -> None:
     node = ProducerNode(
@@ -772,7 +815,6 @@ def test_extracts_closed_direct_graph_and_round_trips(tmp_path: Path) -> None:
         configured_build_root=build,
         effective_source_root=source,
         toolchain_root=toolchain,
-        source_topology_digest_value=_digest("3"),
         toolchain_lock_digest=_digest("4"),
         path_profile_id="stable",
         target_outputs={"app": "APP.EXE"},
@@ -783,8 +825,7 @@ def test_extracts_closed_direct_graph_and_round_trips(tmp_path: Path) -> None:
             )
         },
     )
-    assert graph.schema_version == 2
-    assert graph.source_topology_digest == _digest("3")
+    assert graph.schema_version == 3
     roles = [node.role for node in graph.nodes]
     assert roles.count(ProducerRole.COMPILER) == 1
     assert roles.count(ProducerRole.RESOURCE) == 1
@@ -822,7 +863,6 @@ def test_missing_terminal_target_reports_expected_and_observed_outputs(tmp_path:
             configured_build_root=build,
             effective_source_root=source,
             toolchain_root=toolchain,
-            source_topology_digest_value=_digest("3"),
             toolchain_lock_digest=_digest("4"),
             path_profile_id="stable",
             target_outputs={"app": "missing.exe"},
@@ -857,7 +897,6 @@ def test_extracts_nmake_terminal_command_embedded_in_build_make(
         configured_build_root=build,
         effective_source_root=source,
         toolchain_root=toolchain,
-        source_topology_digest_value=_digest("3"),
         toolchain_lock_digest=_digest("4"),
         path_profile_id="stable",
         target_outputs={"app": "APP.EXE"},
@@ -894,7 +933,6 @@ def test_rejects_unterminated_nmake_inline_link_metadata(tmp_path: Path) -> None
             configured_build_root=build,
             effective_source_root=source,
             toolchain_root=toolchain,
-            source_topology_digest_value=_digest("3"),
             toolchain_lock_digest=_digest("4"),
             path_profile_id="stable",
             target_outputs={"app": "APP.EXE"},
@@ -929,7 +967,6 @@ def test_directory_form_pdb_is_explicitly_isolated_per_translation_unit(
         configured_build_root=build,
         effective_source_root=source,
         toolchain_root=toolchain,
-        source_topology_digest_value=_digest("3"),
         toolchain_lock_digest=_digest("4"),
         path_profile_id="stable",
         target_outputs={"app": "APP.EXE"},
@@ -972,7 +1009,6 @@ def test_single_owner_directory_form_pdb_preserves_authentic_argv(
         configured_build_root=build,
         effective_source_root=source,
         toolchain_root=toolchain,
-        source_topology_digest_value=_digest("3"),
         toolchain_lock_digest=_digest("4"),
         path_profile_id="stable",
         target_outputs={"app": "APP.EXE"},
@@ -1010,7 +1046,6 @@ def test_nested_cmake_target_metadata_is_resolved_from_target_directory(
         configured_build_root=build,
         effective_source_root=source,
         toolchain_root=toolchain,
-        source_topology_digest_value=_digest("3"),
         toolchain_lock_digest=_digest("4"),
         path_profile_id="stable",
         target_outputs={"app": "subproject/APP.EXE"},
@@ -1065,7 +1100,6 @@ def test_extractor_rejects_invalid_directive_inputs(
             configured_build_root=build,
             effective_source_root=source,
             toolchain_root=toolchain,
-            source_topology_digest_value=_digest("3"),
             toolchain_lock_digest=_digest("4"),
             path_profile_id="stable",
             target_outputs={"app": "APP.EXE"},

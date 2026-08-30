@@ -80,9 +80,10 @@ workspace is retained for inspection.
 binding in one content-addressed transaction. Every admitted source file is a
 transaction precondition, so an edit racing the lock aborts rather than
 committing a stale receipt. Pass `--invalidate-producer-graph` when preview says
-the generated graph is stale; rerun `rbit import cmake .` afterward. A graph-v2
+the generated graph is stale; rerun `rbit import cmake .` afterward. A graph-v3
 command DAG remains valid when bytes change at an already admitted path, but a
-source-path addition or removal changes its topology receipt. The command does
+direct graph input cannot be removed without invalidating the graph. Unrelated
+manifest additions and removals leave the command DAG valid. The command does
 not rewrite translation-unit, intervention, or proof pins. If effective TU bytes
 or a clean overlay input changed, it refuses the transaction and requires the
 adapter's reviewed regeneration workflow.
@@ -205,11 +206,11 @@ non-empty workspace and detects any source mutation during CMake configuration.
 `graph extract` reads expanded compile commands, resource rules, response files,
 and link commands; converts physical paths into `${SOURCE}`, `${BUILD}`, and
 `${TOOLCHAIN}` seats; rejects unbound producers and paths; and transactionally
-publishes `reprobit/producer-graph.json`. Schema v2 binds the canonical admitted
-source path topology, toolchain lock, logical-path profile, exact target set,
-and terminal artifact paths; the source manifest and build plan separately bind
+publishes `reprobit/producer-graph.json`. Schema v3 binds the declared
+direct source inputs, toolchain lock, logical-path profile, exact target set, and
+terminal artifact paths; the source manifest and build plan separately bind
 current source contents. Certification reloads those documents and never
-executes CMake. Re-extract only when source topology or other command/build
+executes CMake. Re-extract only when a graph input or other command/build
 authority changes.
 Repeat `--directive-input TARGET=LIBRARY` for reviewed linker-only library
 edges discovered in COFF `.drectve` sections. The value must be a known target

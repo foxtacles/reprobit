@@ -203,7 +203,13 @@ def _inspect_candidate_source_authority(
     plan = _load_build_plan(build_plan_path).model_copy(
         update={"source_manifest_digest": document_digest}
     )
-    bundle = load_project_tree(root, verify_source_authority=False)
+    bundle = load_project_tree(
+        root,
+        verify_source_authority=False,
+        include_producer_graph=False,
+        source_manifest_override=document,
+        build_plan_override=plan,
+    )
     from reprobit.source_authority import inspect_source_authority
 
     return plan, inspect_source_authority(
@@ -275,15 +281,6 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
     added, removed, changed = _source_changes(current, document)
 
     producer_graph_path = safe_project_path(root, spec.layout.producer_graph)
-    graph_invalidation_required = False
-    if producer_graph_path.is_file():
-        from reprobit.producer_graph import read_producer_graph
-
-        graph_invalidation_required = not producer_graph_accepts_source(
-            read_producer_graph(producer_graph_path),
-            paths=(item.path for item in document.entries),
-        )
-
     authority_error: str | None = None
     report: Any | None = None
     try:
@@ -294,6 +291,15 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
         if not isinstance(exc, SourceAuthorityError):
             raise
         authority_error = str(exc)
+    graph_invalidation_required = False
+    if producer_graph_path.is_file():
+        from reprobit.producer_graph import read_producer_graph
+
+        graph_invalidation_required = not producer_graph_accepts_source(
+            read_producer_graph(producer_graph_path),
+            paths=(item.path for item in document.entries),
+            overlay_outputs=(report.overlay_outputs if report is not None else ()),
+        )
     stale_units = _stale_tu_fields(report)
     output.emit(
         "source_preview",
@@ -364,10 +370,11 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         if not producer_graph_accepts_source(
             graph,
             paths=(item.path for item in document.entries),
+            overlay_outputs=(report.overlay_outputs if report is not None else ()),
         ):
             if not args.invalidate_producer_graph:
                 raise CLIError(
-                    "source authority changed while a producer graph is committed; "
+                    "source authority removed an input used by the committed producer graph; "
                     "rerun with --invalidate-producer-graph, reconfigure the project, "
                     "then run `rbit graph extract`"
                 )

@@ -11,7 +11,6 @@ from reprobit.producer_graph import (
     ProducerGraphDocument,
     ProducerNode,
     ProducerRole,
-    source_topology_digest,
     toolchain_document_digest,
 )
 from reprobit.project_loader import (
@@ -217,6 +216,9 @@ def create_tree(root: Path) -> None:
         encoding="utf-8",
         newline="\n",
     )
+    source = b"int fixture;\n"
+    (root / "src").mkdir()
+    (root / "src/input.cpp").write_bytes(source)
     write_json(
         root / "reprobit/source-manifest.json",
         {
@@ -225,9 +227,9 @@ def create_tree(root: Path) -> None:
             "complete": True,
             "entries": [
                 {
-                    "path": "reprobit.toml",
-                    "size": len(PROJECT_TOML.encode("utf-8")),
-                    "digest": sha(PROJECT_TOML.encode("utf-8")),
+                    "path": "src/input.cpp",
+                    "size": len(source),
+                    "digest": sha(source),
                 }
             ],
         },
@@ -272,6 +274,28 @@ def create_tree(root: Path) -> None:
             "functions": [],
         },
     )
+
+
+def test_project_tree_rejects_entrypoint_as_source_authority(tmp_path: Path) -> None:
+    create_tree(tmp_path)
+    entrypoint = (tmp_path / "reprobit.toml").read_bytes()
+    write_json(
+        tmp_path / "reprobit/source-manifest.json",
+        {
+            "schema_version": 3,
+            "complete": True,
+            "entries": [
+                {
+                    "path": "reprobit.toml",
+                    "size": len(entrypoint),
+                    "digest": sha(entrypoint),
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(SchemaError, match=r"control, output, or oracle path 'reprobit\.toml'"):
+        load_project_tree(tmp_path)
 
 
 @pytest.mark.parametrize(
@@ -715,10 +739,7 @@ def test_project_tree_binds_closed_producer_graph(tmp_path: Path) -> None:
     baseline = load_project_tree(tmp_path)
     assert baseline.source_manifest is not None
     graph = {
-        "schema_version": 2,
-        "source_topology_digest": source_topology_digest(
-            item.path for item in baseline.source_manifest.entries
-        ).model_dump(mode="json"),
+        "schema_version": 3,
         "toolchain_lock_digest": toolchain_document_digest(baseline.toolchain_lock).model_dump(
             mode="json"
         ),
@@ -813,8 +834,7 @@ def test_quarantine_archive_edges_require_exact_build_plan_and_source_pins(
         target_gates=(ClassicTargetGate(target_id="program", build_target="program"),),
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=source_topology_digest(item.path for item in manifest.entries),
+        schema_version=3,
         toolchain_lock_digest=toolchain_document_digest(baseline.toolchain_lock),
         path_profile_id=baseline.spec.paths.id,
         extractor="cmake-makefiles-v1",
@@ -894,7 +914,7 @@ def test_generated_document_schemas_have_usable_roots_and_stable_ids(
         "toolchain-lock-v3.schema.json": "ToolchainLock",
         "source-manifest-v3.schema.json": "SourceManifestDocument",
         "build-plan-v3.schema.json": "BuildPlanDocument",
-        "producer-graph-v2.schema.json": "ProducerGraphDocument",
+        "producer-graph-v3.schema.json": "ProducerGraphDocument",
         "intervention-document-v3.schema.json": "InterventionDocument",
         "proof-document-v3.schema.json": "ProofDocument",
         "oracle-document-v3.schema.json": "OracleDocument",

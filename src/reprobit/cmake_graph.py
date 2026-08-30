@@ -17,7 +17,6 @@ from reprobit.producer_graph import (
     ProducerGraphDocument,
     graph_reference,
     producer_graph_digest,
-    source_topology_digest,
     toolchain_document_digest,
 )
 from reprobit.producer_graph_cmake import extract_cmake_makefiles_graph
@@ -316,9 +315,6 @@ def record_cmake_graph(
         configured_build_root=configured,
         effective_source_root=effective,
         toolchain_root=toolchain,
-        source_topology_digest_value=source_topology_digest(
-            item.path for item in source_document.entries
-        ),
         toolchain_lock_digest=toolchain_document_digest(lock_document),
         path_profile_id=spec.paths.id,
         target_outputs=outputs,

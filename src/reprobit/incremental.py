@@ -17,7 +17,6 @@ from reprobit.cache import cache_key
 from reprobit.implementation import scoped_package_import_closure_digest
 from reprobit.model import Digest
 from reprobit.paths import normalize_logical_path
-from reprobit.producer_graph import producer_graph_accepts_source
 from reprobit.schema import (
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
@@ -203,13 +202,6 @@ def current_worktree_authority(
         complete=True,
         entries=tuple(entries),
     )
-    if not producer_graph_accepts_source(
-        graph,
-        paths=(item.path for item in ephemeral_manifest.entries),
-    ):
-        raise IncrementalAuthorityError(
-            "committed producer graph does not admit the current source-path topology"
-        )
 
     changed_folded = {item.casefold() for item in changed}
     fixed_archives = {

@@ -32,8 +32,10 @@ in JSON shards.
 source-overlay IDs, explicit COMDAT group-order transforms, analysis-only link options, pinned
 project SDK libraries, archive exceptions, and target gates; it cannot name Python callables or
 shell fragments. `reprobit/producer-graph.json` separately records the complete direct compiler,
-resource-compiler, librarian, and linker DAG. Schema v2 binds it to the canonical source path
-topology, toolchain lock, logical-path profile, target set, and exact terminal artifact paths.
+resource-compiler, librarian, and linker DAG. Schema v3 binds it to the toolchain lock,
+logical-path profile, target set, exact terminal artifact paths, and every explicit direct source
+edge. Unrelated files may enter or leave the source manifest without changing commands; recursive
+include reads remain closed and sealed by the runtime source namespace.
 The toolchain lock keeps content and profile configuration deliberately separate: file/tree receipts
 are exact installed-byte authority, while each `profile_sources` entry freezes a reviewed immutable
 repository input associated with the selected profile's installed paths. This mapping is not origin
@@ -73,9 +75,9 @@ self-contained Draft 2020-12 root with a stable `urn:reprobit:schema:...` identi
 - `project-v3.schema.json` validates the `reprobit.toml` model.
 - `toolchain-lock-v3.schema.json`, `source-manifest-v3.schema.json`, and
   `build-plan-v3.schema.json` validate their corresponding committed documents.
-- `producer-graph-v2.schema.json` validates direct producer authority. It
-  separates the stable source path topology from independently locked source
-  contents so ordinary edits do not force command-graph extraction.
+- `producer-graph-v3.schema.json` validates direct producer authority. Every
+  graph source input must be in the source manifest or a reviewed source-overlay
+  output; unrelated manifest entries do not force command-graph extraction.
 - `intervention-document-v3.schema.json`, `proof-document-v3.schema.json`, and
   `oracle-document-v3.schema.json` validate individual shards.
 - `catalog-v3.schema.json` is the synthetic aggregate for tooling that needs every definition.

@@ -82,8 +82,7 @@ def _linked_target_graph() -> tuple[ProducerGraphDocument, dict[str, ProducerNod
     )
     nodes = (*compilers.values(), librarian, upstream, downstream)
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"source topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",

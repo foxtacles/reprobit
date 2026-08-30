@@ -77,8 +77,11 @@ from reprobit.report_io import write_report_json
 from reprobit.schema import (
     AuthenticitySettings,
     BuildPlanDocument,
+    ClassicField,
     ClassicProofReceipt,
     ClassicRecipeFamily,
+    ClassicRecipeIntervention,
+    ClassicRecipeRole,
     ClassicTargetGate,
     ClassicTranslationUnitPlan,
     InterventionDocument,
@@ -92,6 +95,7 @@ from reprobit.schema import (
     ProjectBundle,
     ProofDocument,
     SourceManifestDocument,
+    SourceManifestEntry,
     StateCarrierIntervention,
     ToolchainLock,
     ToolchainProfileSource,
@@ -451,10 +455,7 @@ def test_source_lock_transactionally_replaces_the_explicit_read_set(tmp_path: Pa
     document = strict_load(tmp_path / "reprobit/source-manifest.json")
     assert isinstance(document, dict)
     assert document["complete"] is True
-    assert [item["path"] for item in document["entries"]] == [
-        "CMakeLists.txt",
-        "reprobit.toml",
-    ]
+    assert [item["path"] for item in document["entries"]] == ["CMakeLists.txt"]
 
 
 def test_default_source_lock_omits_intentionally_deleted_tracked_file(
@@ -463,14 +464,20 @@ def test_default_source_lock_omits_intentionally_deleted_tracked_file(
     _initialize(tmp_path)
     removed = tmp_path / "obsolete.cpp"
     removed.write_bytes(b"int obsolete;\n")
+    retained = tmp_path / "current.cpp"
+    retained.write_bytes(b"int current;\n")
     subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
-    subprocess.run(("git", "add", "reprobit.toml", "obsolete.cpp"), cwd=tmp_path, check=True)
+    subprocess.run(
+        ("git", "add", "reprobit.toml", "obsolete.cpp", "current.cpp"),
+        cwd=tmp_path,
+        check=True,
+    )
     removed.unlink()
 
     assert main(["source", "lock", "--project", str(tmp_path)]) == 0
     document = strict_load(tmp_path / "reprobit/source-manifest.json")
     assert isinstance(document, dict)
-    assert [item["path"] for item in document["entries"]] == ["reprobit.toml"]
+    assert [item["path"] for item in document["entries"]] == ["current.cpp"]
 
 
 def test_fresh_source_preview_does_not_report_the_unreviewed_project_file_as_removed(
@@ -647,6 +654,158 @@ def test_source_lock_refreshes_unrelated_input_without_repinning_tu_or_proof(
     assert load_project_tree(project).build_plan == plan
 
 
+def test_source_lock_removes_pre_v3_entrypoint_authority(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    capsys.readouterr()
+    manifest_path = project / "reprobit/source-manifest.json"
+    plan_path = project / "reprobit/build-plan.json"
+    manifest = SourceManifestDocument.model_validate_json(manifest_path.read_bytes())
+    entrypoint = (project / "reprobit.toml").read_bytes()
+    legacy_manifest = manifest.model_copy(
+        update={
+            "entries": tuple(
+                sorted(
+                    (
+                        *manifest.entries,
+                        SourceManifestEntry(
+                            path="reprobit.toml",
+                            size=len(entrypoint),
+                            digest=Digest.from_bytes(entrypoint),
+                        ),
+                    ),
+                    key=lambda entry: entry.path.casefold(),
+                )
+            )
+        }
+    )
+    manifest_path.write_bytes(canonical_json(legacy_manifest))
+    plan = BuildPlanDocument.model_validate_json(plan_path.read_bytes()).model_copy(
+        update={"source_manifest_digest": source_manifest_digest(legacy_manifest)}
+    )
+    plan_path.write_bytes(canonical_json(plan))
+
+    assert (
+        main(
+            [
+                "source",
+                "lock",
+                "--project",
+                str(project),
+                "--path",
+                "notes.txt",
+                "--path",
+                "reprobit.toml",
+                "--path",
+                "src/unit.cpp",
+            ]
+        )
+        == 0
+    )
+    refreshed = SourceManifestDocument.model_validate_json(manifest_path.read_bytes())
+    assert "reprobit.toml" not in {entry.path.casefold() for entry in refreshed.entries}
+
+
+def test_source_lock_rejects_generated_overlay_manifest_collision(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_project(project)
+    capsys.readouterr()
+    generated = project / "GENERATED.cpp"
+    generated.write_bytes(b"int collision;\n")
+    overlay = ClassicRecipeIntervention(
+        id="overlay.generated",
+        scope=Scope(target="program"),
+        rationale="generated source fixture",
+        family=ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH,
+        role=ClassicRecipeRole.PROJECT,
+        build_target="program",
+        parameters=(
+            ClassicField(
+                name="graph",
+                value={
+                    "generated_tus": [{"path": "generated.cpp"}],
+                    "link_admissions": [],
+                },
+            ),
+            ClassicField(
+                name="outputs",
+                value=[
+                    {
+                        "path": "generated.cpp",
+                        "effective": Digest.from_bytes(b"\n").value,
+                        "size": 1,
+                        "ops": [{"op": "append", "gen": {"k": "lines", "n": 1}}],
+                    }
+                ],
+            ),
+            ClassicField(name="schema", value=2),
+        ),
+    )
+    manifest = SourceManifestDocument.model_validate_json(
+        (project / "reprobit/source-manifest.json").read_bytes()
+    )
+    plan = BuildPlanDocument(
+        schema_version=3,
+        source_manifest_digest=source_manifest_digest(manifest),
+        translation_units=(),
+        source_overlay_digest=Digest.from_bytes(canonical_json(overlay.model_dump(mode="json"))),
+        source_overlay_interventions=(overlay.id,),
+        archives=(),
+        target_gates=(ClassicTargetGate(target_id="program", build_target="program"),),
+    )
+    (project / "reprobit/build-plan.json").write_bytes(canonical_json(plan))
+    (project / "reprobit/interventions/program.json").write_bytes(
+        canonical_json(
+            InterventionDocument(
+                schema_version=3,
+                target_id="program",
+                interventions=(overlay,),
+            )
+        )
+    )
+    (project / "reprobit/proofs/program.proof.json").write_bytes(
+        canonical_json(
+            ProofDocument(
+                schema_version=3,
+                target_id="program",
+                expected_observations=(
+                    ClassicProofReceipt(
+                        id="proof.overlay.generated",
+                        intervention_id=overlay.id,
+                        family=overlay.family,
+                    ),
+                ),
+            )
+        )
+    )
+    manifest_path = project / "reprobit/source-manifest.json"
+    manifest_before = manifest_path.read_bytes()
+
+    assert (
+        main(
+            [
+                "source",
+                "lock",
+                "--project",
+                str(project),
+                "--path",
+                "project-input.txt",
+                "--path",
+                "GENERATED.cpp",
+            ]
+        )
+        == 2
+    )
+    assert "collides with source manifest" in capsys.readouterr().err
+    assert manifest_path.read_bytes() == manifest_before
+
+
 def test_source_lock_aborts_when_an_admitted_input_races_the_transaction(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -692,6 +851,7 @@ def test_source_lock_aborts_when_an_admitted_input_races_the_transaction(
 
 def _complete_project(root: Path, *, command_build: bool = False) -> None:
     _initialize(root)
+    (root / "project-input.txt").write_bytes(b"fixture source authority\n")
     if command_build:
         program = (
             "from pathlib import Path; Path('out').mkdir(exist_ok=True); "
@@ -746,7 +906,7 @@ def _complete_project(root: Path, *, command_build: bool = False) -> None:
                     "--project",
                     str(root),
                     "--path",
-                    "reprobit.toml",
+                    "project-input.txt",
                 ]
             )
             == 0
@@ -760,7 +920,7 @@ def _complete_project(root: Path, *, command_build: bool = False) -> None:
                     "--project",
                     str(root),
                     "--path",
-                    "reprobit.toml",
+                    "project-input.txt",
                 ]
             )
             == 0
@@ -2010,15 +2170,31 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     ]
     assert main(lock_argv) == 0
     assert (project / "reprobit/producer-graph.json").read_bytes() == committed_graph
+    locked = SourceManifestDocument.model_validate_json(
+        (project / "reprobit/source-manifest.json").read_bytes()
+    )
+    assert {entry.path for entry in locked.entries} == {"src/unit.cpp"}
     capsys.readouterr()
 
     added = project / "src/added.h"
     added.write_text("#pragma once\n", encoding="utf-8")
-    topology_change = [*lock_argv, "--path", "src/added.h"]
-    assert main(topology_change) == 2
+    unrelated_change = [*lock_argv, "--path", "src/added.h"]
+    assert main(unrelated_change) == 0
+    assert (project / "reprobit/producer-graph.json").read_bytes() == committed_graph
+    capsys.readouterr()
+
+    missing_graph_input = [
+        "source",
+        "lock",
+        "--project",
+        str(project),
+        "--path",
+        "src/added.h",
+    ]
+    assert main(missing_graph_input) == 2
     assert "--invalidate-producer-graph" in capsys.readouterr().err
     assert (project / "reprobit/producer-graph.json").is_file()
-    assert main([*topology_change, "--invalidate-producer-graph"]) == 0
+    assert main([*missing_graph_input, "--invalidate-producer-graph"]) == 0
     assert not (project / "reprobit/producer-graph.json").exists()
 
 
@@ -2681,7 +2857,7 @@ def test_verify_policy_override_can_narrow_but_never_broaden(
                 "--project",
                 str(project),
                 "--path",
-                "reprobit.toml",
+                "project-input.txt",
             ]
         )
         == 0
@@ -2743,8 +2919,7 @@ def test_manifest_preview_and_apply_use_the_cas_transaction(
     stale_graph.write_bytes(
         canonical_json(
             ProducerGraphDocument(
-                schema_version=2,
-                source_topology_digest=Digest.from_bytes(b"stale source topology"),
+                schema_version=3,
                 toolchain_lock_digest=Digest.from_bytes(b"stale toolchain"),
                 path_profile_id="dos-stable-v1",
                 extractor="cmake-makefiles-v1",

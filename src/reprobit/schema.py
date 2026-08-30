@@ -1281,24 +1281,16 @@ class ProjectBundle(StrictModel):
             raise ValueError("manifest document names an unknown target")
         if self.source_manifest is not None and not self.source_manifest.complete:
             raise ValueError("certifiable bundles require a complete portable source manifest")
-        if self.build_plan is not None:
-            if self.source_manifest is None:
-                raise ValueError("build plan requires a portable source manifest")
-            classic_debug_companion_paths(self)
-            actual_source_manifest_digest = source_manifest_digest(self.source_manifest)
-            if self.build_plan.source_manifest_digest != actual_source_manifest_digest:
-                raise ValueError("build-plan source manifest digest does not match its document")
+        if self.source_manifest is not None:
             forbidden_source_paths = {
-                target.artifact.replace("\\", "/").casefold() for target in self.spec.targets
-            } | {target.oracle.replace("\\", "/").casefold() for target in self.spec.targets}
-            forbidden_source_paths.update(
-                {
-                    self.spec.toolchain.lock_file.replace("\\", "/").casefold(),
-                    self.spec.layout.source_manifest.replace("\\", "/").casefold(),
-                    self.spec.layout.build_plan.replace("\\", "/").casefold(),
-                    self.spec.layout.producer_graph.replace("\\", "/").casefold(),
-                }
-            )
+                "reprobit.toml",
+                self.spec.toolchain.lock_file.replace("\\", "/").casefold(),
+                self.spec.layout.source_manifest.replace("\\", "/").casefold(),
+                self.spec.layout.build_plan.replace("\\", "/").casefold(),
+                self.spec.layout.producer_graph.replace("\\", "/").casefold(),
+                *(target.artifact.replace("\\", "/").casefold() for target in self.spec.targets),
+                *(target.oracle.replace("\\", "/").casefold() for target in self.spec.targets),
+            }
             forbidden_roots = tuple(
                 value.replace("\\", "/").rstrip("/").casefold() + "/"
                 for value in (
@@ -1314,6 +1306,13 @@ class ProjectBundle(StrictModel):
                     raise ValueError(
                         f"source manifest admits control, output, or oracle path {entry.path!r}"
                     )
+        if self.build_plan is not None:
+            if self.source_manifest is None:
+                raise ValueError("build plan requires a portable source manifest")
+            classic_debug_companion_paths(self)
+            actual_source_manifest_digest = source_manifest_digest(self.source_manifest)
+            if self.build_plan.source_manifest_digest != actual_source_manifest_digest:
+                raise ValueError("build-plan source manifest digest does not match its document")
             planned_targets = {item.target_id for item in self.build_plan.target_gates}
             if planned_targets != target_ids:
                 raise ValueError("build-plan target gates do not match project targets")
@@ -1343,14 +1342,51 @@ class ProjectBundle(StrictModel):
                         f"{sdk_archive.path!r}"
                     )
         interventions = self.interventions
+        overlay_outputs: dict[str, str] = {}
+        if self.source_manifest is not None:
+            manifest_source_paths = {
+                item.path.casefold(): item.path for item in self.source_manifest.entries
+            }
+            for intervention in interventions:
+                if not (
+                    isinstance(intervention, ClassicRecipeIntervention)
+                    and intervention.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
+                ):
+                    continue
+                values = {item.name: item.value for item in intervention.parameters}
+                outputs = values.get("outputs")
+                if not isinstance(outputs, list):
+                    raise ValueError("source-overlay outputs are malformed")
+                for output in outputs:
+                    if not isinstance(output, dict) or not isinstance(output.get("path"), str):
+                        raise ValueError("source-overlay output is malformed")
+                    output_path = output["path"]
+                    assert isinstance(output_path, str)
+                    canonical = _check_relative_path(output_path)
+                    folded = canonical.casefold()
+                    if folded in overlay_outputs:
+                        raise ValueError(f"source-overlay output repeats {canonical!r}")
+                    manifest_path = manifest_source_paths.get(folded)
+                    if "clean" in output:
+                        if manifest_path is None:
+                            raise ValueError(
+                                "clean source-overlay output is absent from the source "
+                                f"manifest: {canonical!r}"
+                            )
+                        if manifest_path != canonical:
+                            raise ValueError(
+                                "clean source-overlay output spelling differs from the "
+                                f"source manifest: {canonical!r}, {manifest_path!r}"
+                            )
+                    elif manifest_path is not None:
+                        raise ValueError(
+                            "generated source-overlay output collides with source manifest: "
+                            f"{canonical!r}, {manifest_path!r}"
+                        )
+                    overlay_outputs[folded] = canonical
         if self.producer_graph is not None:
             if self.source_manifest is None:
                 raise ValueError("producer graph requires a portable source manifest")
-            if not producer_graph_accepts_source(
-                self.producer_graph,
-                paths=(item.path for item in self.source_manifest.entries),
-            ):
-                raise ValueError("producer graph source-authority binding differs")
             if self.producer_graph.toolchain_lock_digest != toolchain_document_digest(
                 self.toolchain_lock
             ):
@@ -1378,34 +1414,12 @@ class ProjectBundle(StrictModel):
                         f"terminal producer {node.id!r} does not publish the exact "
                         f"project artifact {expected!r}"
                     )
-            overlay_outputs: set[str] = set()
-            for intervention in interventions:
-                if not (
-                    isinstance(intervention, ClassicRecipeIntervention)
-                    and intervention.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
-                ):
-                    continue
-                values = {item.name: item.value for item in intervention.parameters}
-                outputs = values.get("outputs")
-                if not isinstance(outputs, list):
-                    raise ValueError("source-overlay outputs are malformed")
-                for output in outputs:
-                    if isinstance(output, dict) and isinstance(output.get("path"), str):
-                        output_path = output.get("path")
-                        assert isinstance(output_path, str)
-                        overlay_outputs.add(output_path.replace("\\", "/").casefold())
-            admitted_sources = {
-                item.path.replace("\\", "/").casefold() for item in self.source_manifest.entries
-            } | overlay_outputs
-            for node in self.producer_graph.nodes:
-                for input_ref in node.inputs:
-                    if not input_ref.startswith("source/"):
-                        continue
-                    relative = input_ref.removeprefix("source/").casefold()
-                    if relative not in admitted_sources:
-                        raise ValueError(
-                            f"producer {node.id!r} reads unmanifested source {relative!r}"
-                        )
+            if not producer_graph_accepts_source(
+                self.producer_graph,
+                paths=(item.path for item in self.source_manifest.entries),
+                overlay_outputs=overlay_outputs.values(),
+            ):
+                raise ValueError("producer graph reads source outside reviewed authority")
             quarantine_references = {
                 input_ref.removeprefix("quarantine-archive/").casefold()
                 for node in self.producer_graph.nodes
@@ -1804,9 +1818,9 @@ def project_document_schemas() -> dict[str, JsonValue]:
             "urn:reprobit:schema:build-plan:3",
         ),
         (
-            "producer-graph-v2.schema.json",
+            "producer-graph-v3.schema.json",
             ProducerGraphDocument,
-            "urn:reprobit:schema:producer-graph:2",
+            "urn:reprobit:schema:producer-graph:3",
         ),
         (
             "intervention-document-v3.schema.json",

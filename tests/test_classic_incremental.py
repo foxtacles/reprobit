@@ -721,8 +721,7 @@ def _fixture_bundle(
         _linker(target, compiler) for target, compiler in zip(targets, compilers, strict=True)
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -2889,8 +2888,7 @@ def test_generated_epoch_waits_for_all_ordinary_transforms_and_resources(
         depends_on=(ordinary.id, generated.id, resource.id),
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"barrier-topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",

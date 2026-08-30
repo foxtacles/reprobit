@@ -127,6 +127,7 @@ def git_tracked_paths(root: Path) -> tuple[str, ...]:
 
 def _forbidden(spec: ProjectSpec) -> tuple[set[str], tuple[str, ...]]:
     exact = {
+        "reprobit.toml",
         spec.toolchain.lock_file.replace("\\", "/").casefold(),
         spec.layout.source_manifest.replace("\\", "/").casefold(),
         spec.layout.build_plan.replace("\\", "/").casefold(),

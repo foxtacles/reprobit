@@ -115,7 +115,6 @@ from reprobit.producer_graph import (
     ProducerGraphDocument,
     ProducerNode,
     ProducerRole,
-    source_topology_digest,
     toolchain_document_digest,
 )
 from reprobit.schema import (
@@ -4362,8 +4361,7 @@ def _base_authority(
         )
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=source_topology_digest(item.path for item in manifest.entries),
+        schema_version=3,
         toolchain_lock_digest=toolchain_document_digest(toolchain),
         path_profile_id=paths.id,
         extractor="cmake-makefiles-v1",
@@ -4387,6 +4385,68 @@ def _base_authority(
         ),
     )
     return bundle, graph, overlay, donor, consumer, clean, effective
+
+
+def _bundle_with_graph_and_manifest(
+    bundle: ProjectBundle,
+    graph: ProducerGraphDocument | None,
+    manifest: SourceManifestDocument,
+) -> ProjectBundle:
+    assert bundle.build_plan is not None
+    return ProjectBundle(
+        root=bundle.root,
+        spec=bundle.spec,
+        toolchain_lock=bundle.toolchain_lock,
+        source_manifest=manifest,
+        build_plan=bundle.build_plan.model_copy(
+            update={"source_manifest_digest": source_manifest_digest(manifest)}
+        ),
+        producer_graph=graph,
+        intervention_documents=bundle.intervention_documents,
+        proof_documents=bundle.proof_documents,
+        oracle_documents=bundle.oracle_documents,
+    )
+
+
+def test_clean_overlay_output_requires_exact_manifest_spelling(tmp_path: Path) -> None:
+    bundle, _graph, _overlay, _donor, _consumer, _clean, _effective = _base_authority(
+        tmp_path,
+        generated_carrier=False,
+    )
+    assert bundle.source_manifest is not None
+    entry = bundle.source_manifest.entries[0]
+    manifest = bundle.source_manifest.model_copy(
+        update={"entries": (entry.model_copy(update={"path": "SRC/unit.cpp"}),)}
+    )
+
+    with pytest.raises(ValueError, match="spelling differs"):
+        _bundle_with_graph_and_manifest(bundle, None, manifest)
+
+
+def test_generated_overlay_output_cannot_case_collide_with_manifest(tmp_path: Path) -> None:
+    bundle, _graph, _overlay, _donor, _consumer, _clean, _effective = _base_authority(
+        tmp_path,
+        generated_carrier=True,
+    )
+    assert bundle.source_manifest is not None
+    collision = SourceManifestEntry(
+        path="SRC/carrier.cpp",
+        size=0,
+        digest=Digest.from_bytes(b""),
+    )
+    manifest = bundle.source_manifest.model_copy(
+        update={
+            "entries": tuple(
+                sorted(
+                    (*bundle.source_manifest.entries, collision),
+                    key=lambda item: item.path.casefold(),
+                )
+            )
+        }
+    )
+
+    with pytest.raises(ValueError, match="collides with source manifest"):
+        _bundle_with_graph_and_manifest(bundle, None, manifest)
 
 
 def _donor_snapshot(
@@ -4600,11 +4660,6 @@ def _certified_project_overlay_authority(
             ),
         }
     )
-    graph = graph.model_copy(
-        update={
-            "source_topology_digest": source_topology_digest(item.path for item in manifest.entries)
-        }
-    )
     clean_object = clean_object_payload or _coff_object("_main")
     effective_object = effective_object_payload or clean_object
     compiler_node = next(node for node in graph.nodes if node.role is ProducerRole.COMPILER)
@@ -4779,12 +4834,6 @@ def test_overlay_semantics_ignore_non_code_source_authority(tmp_path: Path) -> N
             ),
         }
     )
-    graph = graph.model_copy(
-        update={
-            "source_topology_digest": source_topology_digest(item.path for item in manifest.entries)
-        }
-    )
-
     plan = plan_project_overlay_compiler_epochs(
         bundle,
         graph,
@@ -5513,7 +5562,6 @@ def _with_secondary_compiler_reader(
     )
     graph = ProducerGraphDocument(
         schema_version=graph.schema_version,
-        source_topology_digest=source_topology_digest(item.path for item in manifest.entries),
         toolchain_lock_digest=graph.toolchain_lock_digest,
         path_profile_id=graph.path_profile_id,
         extractor=graph.extractor,
@@ -5675,7 +5723,6 @@ def test_resource_reader_closure_rejects_an_overlaid_header_read(tmp_path: Path)
     )
     graph = ProducerGraphDocument(
         schema_version=graph.schema_version,
-        source_topology_digest=graph.source_topology_digest,
         toolchain_lock_digest=graph.toolchain_lock_digest,
         path_profile_id=graph.path_profile_id,
         extractor=graph.extractor,
@@ -5817,12 +5864,6 @@ def test_unreachable_helper_generator_in_a_header_fails_planning(tmp_path: Path)
             ),
         }
     )
-    graph = graph.model_copy(
-        update={
-            "source_topology_digest": source_topology_digest(item.path for item in manifest.entries)
-        }
-    )
-
     with pytest.raises(ClassicSemanticError, match="header helpers are unsupported"):
         plan_project_overlay_compiler_epochs(
             bundle,

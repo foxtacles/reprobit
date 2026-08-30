@@ -530,7 +530,6 @@ def extract_cmake_makefiles_graph(
     configured_build_root: Path,
     effective_source_root: Path,
     toolchain_root: Path,
-    source_topology_digest_value: Digest,
     toolchain_lock_digest: Digest,
     path_profile_id: str,
     target_outputs: Mapping[str, str],
@@ -587,8 +586,7 @@ def extract_cmake_makefiles_graph(
         directive_inputs=normalized_directive_inputs,
     )
     return ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=source_topology_digest_value,
+        schema_version=3,
         toolchain_lock_digest=toolchain_lock_digest,
         path_profile_id=path_profile_id,
         extractor="cmake-makefiles-v1",

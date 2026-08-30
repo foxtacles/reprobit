@@ -75,9 +75,9 @@ If only the manifest binding changed, run `rbit source lock --project .`; add
 `--invalidate-producer-graph` when preview requires it, then rerun the guided
 `rbit import cmake .` command described in [Import a CMake project](cmake.md).
 The separate `rbit graph configure` and `rbit graph extract` commands are only
-for advanced imports that need manual control. With a graph-v2
-document, ordinary byte edits at existing admitted paths do not require that
-invalidation; additions and removals do. If preview says authority regeneration
+for advanced imports that need manual control. With a graph-v3 document,
+ordinary byte edits and unrelated manifest additions or removals do not require
+invalidation; removing a graph input does. If preview says authority regeneration
 is required, do not edit the old digest or rerun lock to bless it. Regenerate
 the affected TU, intervention, and proof documents with the adapter and publish
 them only after their zero-loss and literal gates pass together.

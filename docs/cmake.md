@@ -148,13 +148,11 @@ Review and commit that graph, then discard the ignored configure tree. Later
 `rbit build` (warm by default), `rbit build --cold`, and `rbit verify` runs
 expand only its symbolic
 `${SOURCE}`, `${BUILD}`, and `${TOOLCHAIN}` seats and invoke the locked producer
-roles directly. Graph schema v2 binds the canonical admitted source path set,
-not file contents: changing bytes at an existing admitted path leaves the
-command DAG reusable, while the source manifest and build plan still bind those
-new bytes independently. Adding or removing an admitted path, or changing the
-toolchain lock, logical-path profile, target set, terminal artifact path, or
-producer commands invalidates the graph and requires a new import
-extraction.
+roles directly. Graph schema v3 requires every source edge to resolve through
+the source manifest or a reviewed overlay output. Unrelated manifest entries
+may be added or removed without changing the command DAG; removing a graph
+input, or changing the toolchain lock, logical-path profile, target set,
+terminal artifact path, or producer commands requires a new import extraction.
 
 Warm `build` stores non-certifying node artifacts in the leased project-local
 CAS. The first run normally misses; an unchanged second run should be all-hit

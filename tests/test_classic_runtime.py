@@ -444,8 +444,7 @@ def test_cold_prepare_rejects_cross_target_rdata_before_runtime(
         for target in ("app", "tool")
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -614,8 +613,7 @@ def test_compiler_translation_unit_authority_rejects_wrong_or_shared_target(
         ),
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -686,8 +684,7 @@ def test_compiler_and_rdata_authorities_stop_at_upstream_linker_boundary(
         depends_on=(upstream.id,),
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -891,8 +888,7 @@ def test_cold_rdata_authority_rejects_before_runtime_setup(
         depends_on=(compiler.id,),
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -1033,8 +1029,7 @@ def test_shared_rdata_authority_closes_canonical_object_dataflow(
         depends_on=tuple(node.id for node in compilers),
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -1236,8 +1231,7 @@ def test_prepare_failure_releases_logical_drive_and_uses_stable_temporary(
     toolchain_root = tmp_path / "toolchain"
     toolchain_root.mkdir()
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"source topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -1472,8 +1466,7 @@ def _source_sdk_library_fixture(
         outputs=("build/APP.EXE",),
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"source topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -2002,8 +1995,7 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
         outputs=("build/obj/Unit.obj", "build/obj/Unit.pdb"),
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"source topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -2175,8 +2167,7 @@ def test_counterfactual_compiler_audit_rejects_a_plan_mismatch(tmp_path: Path) -
     )
     executor = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     executor.graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"source topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -2285,8 +2276,7 @@ def test_effective_compiler_capture_freezes_raw_products_and_epoch_visibility(
         outputs=("build/carrier.obj", "build/carrier.pdb"),
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"source topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -2445,8 +2435,7 @@ def _link_control_executor(
     )
     executor = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     executor.graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"source topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -3087,8 +3076,7 @@ def _dependent_link_control_executor(
     linkers = (app_linker, library_linker, tool_linker)
     overlay = object.__new__(classic_runtime_overlay.ClassicOverlayEpochs)
     overlay.graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"source topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -3227,7 +3215,6 @@ def test_link_control_audit_does_not_borrow_upstream_default_library_edge(
         by_id = {node.id: node for node in replacements}
         return ProducerGraphDocument(
             schema_version=executor.graph.schema_version,
-            source_topology_digest=executor.graph.source_topology_digest,
             toolchain_lock_digest=executor.graph.toolchain_lock_digest,
             path_profile_id=executor.graph.path_profile_id,
             extractor=executor.graph.extractor,
@@ -3277,8 +3264,7 @@ def test_link_control_audit_requires_final_compiler_ancestry(tmp_path: Path) -> 
         update={"depends_on": tuple(sorted((*app_linker.depends_on, orphan.id), key=str.casefold))}
     )
     executor.graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=executor.graph.source_topology_digest,
+        schema_version=3,
         toolchain_lock_digest=executor.graph.toolchain_lock_digest,
         path_profile_id=executor.graph.path_profile_id,
         extractor=executor.graph.extractor,
@@ -4715,8 +4701,7 @@ def test_donor_invocation_replays_only_dependency_tracked_donors(
     executor.session_root = session_root
     executor.compile_records = (record,)
     executor.graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"source topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",
@@ -5000,8 +4985,7 @@ def test_exact_compiler_probe_returns_raw_outputs_and_closes_runtime(
         outputs=("build/unit.obj", "build/unit.pdb"),
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=Digest.from_bytes(b"source topology"),
+        schema_version=3,
         toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
         path_profile_id="fixture",
         extractor="cmake-makefiles-v1",

@@ -22,7 +22,6 @@ from reprobit.producer_graph import (
     ProducerGraphDocument,
     ProducerNode,
     ProducerRole,
-    source_topology_digest,
     toolchain_document_digest,
 )
 from reprobit.schema import (
@@ -191,8 +190,7 @@ def _bundle(root: Path, *, protected: bool = False) -> ProjectBundle:
         depends_on=("compiler.unit",),
     )
     graph = ProducerGraphDocument(
-        schema_version=2,
-        source_topology_digest=source_topology_digest(files),
+        schema_version=3,
         toolchain_lock_digest=toolchain_document_digest(toolchain),
         path_profile_id=spec.paths.id,
         extractor="cmake-makefiles-v1",

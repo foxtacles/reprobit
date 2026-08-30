@@ -633,8 +633,7 @@ class ProducerNode(StrictModel):
 class ProducerGraphDocument(StrictModel):
     """Portable authority for every byte-producing child process."""
 
-    schema_version: Literal[2]
-    source_topology_digest: Digest
+    schema_version: Literal[3]
     toolchain_lock_digest: Digest
     path_profile_id: Identifier
     extractor: Literal["cmake-makefiles-v1"]
@@ -700,42 +699,93 @@ def producer_graph_digest(graph: ProducerGraphDocument) -> Digest:
     return Digest.from_bytes(canonical_json(graph))
 
 
-def source_topology_digest(paths: Iterable[str]) -> Digest:
-    """Bind the canonical source path set without coupling commands to contents.
+def producer_graph_source_requirements(graph: ProducerGraphDocument) -> frozenset[str]:
+    """Return canonical source files explicitly consumed by the graph.
 
-    Producer argv and dependency topology do not change merely because an
-    already-admitted source or header changes bytes.  Graph v2 therefore binds
-    this path-set receipt while the source manifest and build plan continue to
-    bind current contents independently.
+    Compiler translation units are declared as input edges. MSVC forced-include
+    operands are also file reads, but the CMake compile database records them
+    only in argv, so source-root ``/FI`` operands are promoted into this closed
+    validation view. Include-directory options remain namespace roots rather
+    than individual file requirements.
     """
 
-    canonical = tuple(
-        sorted(
-            (_relative(path, label="source path") for path in paths),
-            key=str.casefold,
-        )
-    )
-    folded = [path.casefold() for path in canonical]
-    if len(folded) != len(set(folded)):
-        raise ProducerGraphError("source topology contains colliding paths")
-    return Digest.from_bytes(
-        canonical_json(
-            {
-                "schema_version": 1,
-                "paths": canonical,
-            }
-        )
-    )
+    required: dict[str, str] = {}
+
+    def add(reference: str) -> None:
+        if not reference.startswith("source/"):
+            return
+        relative = _relative(reference.removeprefix("source/"), label="graph source input")
+        folded = relative.casefold()
+        previous = required.get(folded)
+        if previous is not None and previous != relative:
+            raise ProducerGraphError(
+                f"producer graph source inputs collide: {previous!r}, {relative!r}"
+            )
+        required[folded] = relative
+
+    for node in graph.nodes:
+        for input_ref in node.inputs:
+            add(input_ref)
+        if node.role is not ProducerRole.COMPILER:
+            continue
+        index = 0
+        while index < len(node.arguments):
+            argument = node.arguments[index]
+            folded = argument.casefold()
+            operand: str | None = None
+            if folded in {"/fi", "-fi"}:
+                if index + 1 >= len(node.arguments):  # Model validation is defensive too.
+                    raise ProducerGraphError(
+                        f"compiler {node.id!r} has an incomplete force-include option"
+                    )
+                operand = node.arguments[index + 1]
+                index += 1
+            elif folded.startswith(("/fi", "-fi")) and len(argument) > 3:
+                operand = argument[3:]
+            if operand is not None:
+                try:
+                    add(_argument_reference(operand))
+                except ValueError as exc:
+                    raise ProducerGraphError(
+                        f"compiler {node.id!r} has an unseated force-include file"
+                    ) from exc
+            index += 1
+    return frozenset(required.values())
 
 
 def producer_graph_accepts_source(
     graph: ProducerGraphDocument,
     *,
     paths: Iterable[str],
+    overlay_outputs: Iterable[str] = (),
 ) -> bool:
-    """Return whether current source paths satisfy the committed graph."""
+    """Return whether reviewed source authority covers every graph source edge.
 
-    return graph.source_topology_digest == source_topology_digest(paths)
+    The producer graph owns only the files it actually reads.  The manifest
+    and reviewed overlay outputs may therefore admit additional files without
+    changing command authority, but removing any graph-referenced source fails
+    closed.
+    """
+
+    def canonical(values: Iterable[str], *, label: str) -> frozenset[str]:
+        admitted: dict[str, str] = {}
+        for value in values:
+            relative = _relative(value, label=label)
+            folded = relative.casefold()
+            previous = admitted.get(folded)
+            if previous is not None and previous != relative:
+                raise ProducerGraphError(
+                    f"{label} contains colliding paths: {previous!r}, {relative!r}"
+                )
+            admitted[folded] = relative
+        return frozenset(admitted)
+
+    admitted = canonical(paths, label="source manifest") | canonical(
+        overlay_outputs,
+        label="reviewed overlay output",
+    )
+    required = {path.casefold() for path in producer_graph_source_requirements(graph)}
+    return required <= admitted
 
 
 def toolchain_document_digest(document: StrictModel) -> Digest:
@@ -863,8 +913,8 @@ __all__ = [
     "materialize_reference",
     "producer_graph_accepts_source",
     "producer_graph_digest",
+    "producer_graph_source_requirements",
     "read_producer_graph",
-    "source_topology_digest",
     "toolchain_document_digest",
     "validate_graph_reference",
     "write_producer_graph",

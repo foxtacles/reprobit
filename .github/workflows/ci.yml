@@ -84,7 +84,7 @@ jobs:
               "share/reprobit/schemas/catalog-v3.schema.json",
               "share/reprobit/schemas/intervention-document-v3.schema.json",
               "share/reprobit/schemas/oracle-document-v3.schema.json",
-              "share/reprobit/schemas/producer-graph-v2.schema.json",
+              "share/reprobit/schemas/producer-graph-v3.schema.json",
               "share/reprobit/schemas/project-v3.schema.json",
               "share/reprobit/schemas/proof-document-v3.schema.json",
               "share/reprobit/schemas/report-v2.schema.json",

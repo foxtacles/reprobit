@@ -93,6 +93,8 @@ def load_project_tree(
     verify_source_authority: bool = True,
     overlay_render_session: ClassicOverlayRenderSession | None = None,
     include_producer_graph: bool = True,
+    source_manifest_override: SourceManifestDocument | None = None,
+    build_plan_override: BuildPlanDocument | None = None,
 ) -> ProjectBundle:
     """Load and cross-validate committed schema-v3 project authority.
 
@@ -100,6 +102,10 @@ def load_project_tree(
     migration path.  It lets that path configure a replacement after an
     independently reviewed toolchain lock changes; normal project loading and
     every certifying build continue to require the committed graph.
+
+    The two authority overrides are reserved for source-preview/lock candidate
+    validation. They let that transaction prove a narrowed manifest before
+    replacing a now-forbidden control-file entry in the committed manifest.
     """
 
     project_root = Path(root).resolve()
@@ -120,9 +126,12 @@ def load_project_tree(
         except ToolchainError as exc:
             raise SchemaError(f"invalid {lock_path}: {exc}") from exc
     source_manifest_path = _safe_child(project_root, spec.layout.source_manifest)
-    source_manifest = _load_json_model(source_manifest_path, SourceManifestDocument)
+    source_manifest = source_manifest_override or _load_json_model(
+        source_manifest_path,
+        SourceManifestDocument,
+    )
     build_plan_path = _safe_child(project_root, spec.layout.build_plan)
-    build_plan = (
+    build_plan = build_plan_override or (
         _load_json_model(build_plan_path, BuildPlanDocument) if build_plan_path.is_file() else None
     )
     producer_graph_path = _safe_child(project_root, spec.layout.producer_graph)
