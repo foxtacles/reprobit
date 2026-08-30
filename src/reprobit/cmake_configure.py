@@ -13,7 +13,7 @@ import math
 import os
 import re
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePath, PurePosixPath
 
 from reprobit.classic_project import (
     ClassicProjectError,
@@ -109,6 +109,12 @@ def _configure_environment(
 def _require_regular_output(path: Path, *, label: str) -> None:
     if path.is_symlink() or not path.is_file():
         raise CMakeConfigureError(f"{label} is absent or redirected: {path}")
+
+
+def _cmake_path(path: PurePath) -> str:
+    """Render a filesystem path without CMake string escapes."""
+
+    return path.as_posix()
 
 
 def configure_cmake_project(
@@ -242,26 +248,26 @@ def configure_cmake_project(
     command = (
         str(cmake),
         "-S",
-        str(effective_root),
+        _cmake_path(effective_root),
         "-B",
-        str(configured_root),
+        _cmake_path(configured_root),
         "-G",
         generator,
         f"-DCMAKE_BUILD_TYPE={configuration}",
         "-DCMAKE_SYSTEM_NAME=Windows",
-        f"-DCMAKE_C_COMPILER={compiler}",
-        f"-DCMAKE_CXX_COMPILER={compiler}",
-        f"-DCMAKE_RC_COMPILER={resource}",
-        f"-DCMAKE_LINKER={linker}",
-        f"-DCMAKE_AR={librarian}",
+        f"-DCMAKE_C_COMPILER={_cmake_path(compiler)}",
+        f"-DCMAKE_CXX_COMPILER={_cmake_path(compiler)}",
+        f"-DCMAKE_RC_COMPILER={_cmake_path(resource)}",
+        f"-DCMAKE_LINKER={_cmake_path(linker)}",
+        f"-DCMAKE_AR={_cmake_path(librarian)}",
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
-        f"-DREPROBIT_CMAKE_MODULE={module}",
-        f"-DREPROBIT_PROJECT_PLAN={project_plan}",
-        f"-DREPROBIT_TARGET_PLAN={target_plan}",
-        f"-DREPROBIT_EFFECTIVE_SOURCE_ROOT={effective_root}",
+        f"-DREPROBIT_CMAKE_MODULE={_cmake_path(module)}",
+        f"-DREPROBIT_PROJECT_PLAN={_cmake_path(project_plan)}",
+        f"-DREPROBIT_TARGET_PLAN={_cmake_path(target_plan)}",
+        f"-DREPROBIT_EFFECTIVE_SOURCE_ROOT={_cmake_path(effective_root)}",
         "-DREPROBIT_TERMINAL=ON",
-        *((f"-DCMAKE_MAKE_PROGRAM={make}",) if make is not None else ()),
-        *((f"-DCMAKE_PROJECT_INCLUDE={bootstrap}",) if bootstrap is not None else ()),
+        *((f"-DCMAKE_MAKE_PROGRAM={_cmake_path(make)}",) if make is not None else ()),
+        *((f"-DCMAKE_PROJECT_INCLUDE={_cmake_path(bootstrap)}",) if bootstrap is not None else ()),
     )
     include_directories: tuple[Path, ...] = ()
     library_directories: tuple[Path, ...] = ()

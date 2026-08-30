@@ -6,7 +6,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from types import SimpleNamespace
 from typing import cast
 
@@ -81,6 +81,13 @@ def _executable(path: Path, payload: str = "#!/bin/sh\nexit 0\n") -> Path:
     path.write_text(payload, encoding="utf-8")
     path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
     return path
+
+
+def test_cmake_paths_use_forward_slashes_for_native_windows_values() -> None:
+    assert (
+        cmake_configure._cmake_path(PureWindowsPath(r"D:\a\_temp\archaic-msvc42\bin\RC.EXE"))
+        == "D:/a/_temp/archaic-msvc42/bin/RC.EXE"
+    )
 
 
 @pytest.mark.skipif(os.name != "posix", reason="executable transport fixture is POSIX")
