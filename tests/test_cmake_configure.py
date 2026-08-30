@@ -162,15 +162,21 @@ def test_graph_configure_surfaces_the_bounded_process_failure(
 
 
 @pytest.mark.parametrize(
-    ("mutate_source", "link_admission"),
-    ((False, False), (True, False), (False, True)),
+    ("mutate_source", "link_admission", "generator"),
+    (
+        (False, False, "Unix Makefiles"),
+        (True, False, "Unix Makefiles"),
+        (False, True, "Unix Makefiles"),
+        (False, False, "NMake Makefiles"),
+    ),
 )
-@pytest.mark.skipif(os.name != "posix", reason="migration uses POSIX Unix Makefiles transports")
+@pytest.mark.skipif(os.name != "posix", reason="executable transport fixture is POSIX")
 def test_graph_configure_is_fresh_bounded_and_never_builds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mutate_source: bool,
     link_admission: bool,
+    generator: str,
 ) -> None:
     project_root = tmp_path / "project"
     project_root.mkdir()
@@ -181,6 +187,7 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
     for name in ("cl", "rc", "link", "lib"):
         _executable(transports / name)
         (transports / f"{name}.exe").symlink_to(name)
+    make_program = _executable(transports / "nmake") if generator == "NMake Makefiles" else None
     module_root = tmp_path / "cmake"
     module_root.mkdir()
     (module_root / "ReproBit.cmake").write_bytes(
@@ -269,6 +276,8 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
                 compiler_transport=transports / "cl",
                 resource_transport=transports / "rc",
                 timeout_seconds=30,
+                generator=generator,
+                make_program=make_program,
             )
         assert (workspace / "build/configure.log").is_file()
         return
@@ -287,6 +296,8 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
                 compiler_transport=transports / "cl",
                 resource_transport=transports / "rc",
                 timeout_seconds=30,
+                generator=generator,
+                make_program=make_program,
             )
         return
 
@@ -300,6 +311,8 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
         resource_transport=transports / "rc",
         timeout_seconds=30,
         defer_project_plan=True,
+        generator=generator,
+        make_program=make_program,
     )
 
     assert result.configured_build_root == (workspace / "build").resolve()
@@ -312,7 +325,16 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
         list[str],
         json.loads((workspace / "build/argv.json").read_text(encoding="utf-8")),
     )
-    assert arguments[arguments.index("-G") + 1] == "Unix Makefiles"
+    assert arguments[arguments.index("-G") + 1] == generator
+    forced_options = {
+        "-DCMAKE_C_COMPILER_FORCED=ON",
+        "-DCMAKE_CXX_COMPILER_FORCED=ON",
+    }
+    if generator == "NMake Makefiles":
+        assert forced_options <= set(arguments)
+        assert f"-DCMAKE_MAKE_PROGRAM={make_program}" in arguments
+    else:
+        assert forced_options.isdisjoint(arguments)
     assert "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" in arguments
     assert f"-DREPROBIT_EFFECTIVE_SOURCE_ROOT={workspace / 'source'}" in arguments
     assert "-DREPROBIT_TERMINAL=ON" in arguments

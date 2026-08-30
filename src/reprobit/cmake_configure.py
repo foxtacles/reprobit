@@ -245,6 +245,22 @@ def configure_cmake_project(
         )
     source_digest = effective_source_digest(effective_root)
 
+    # The authenticated NMake import only extracts CMake's producer graph; it
+    # does not certify the compiler.  The caller has already required a clean
+    # toolchain doctor result, and the direct build later certifies every
+    # producer invocation.  Keep CMake's compiler-ID pass (which selects the
+    # MSVC platform rules), but skip its redundant ABI/working-compiler
+    # try_compile projects.  Besides adding no authority, those probes can
+    # exceed NMake's legacy 250-character object-directory limit.
+    compiler_probe_options = (
+        (
+            "-DCMAKE_C_COMPILER_FORCED=ON",
+            "-DCMAKE_CXX_COMPILER_FORCED=ON",
+        )
+        if generator == "NMake Makefiles"
+        else ()
+    )
+
     command = (
         str(cmake),
         "-S",
@@ -257,6 +273,7 @@ def configure_cmake_project(
         "-DCMAKE_SYSTEM_NAME=Windows",
         f"-DCMAKE_C_COMPILER={_cmake_path(compiler)}",
         f"-DCMAKE_CXX_COMPILER={_cmake_path(compiler)}",
+        *compiler_probe_options,
         f"-DCMAKE_RC_COMPILER={_cmake_path(resource)}",
         f"-DCMAKE_LINKER={_cmake_path(linker)}",
         f"-DCMAKE_AR={_cmake_path(librarian)}",

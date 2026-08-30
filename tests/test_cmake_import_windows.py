@@ -11,6 +11,7 @@ import pytest
 from reprobit.cli import main
 from reprobit.discovery_project_grind import enumerate_project_grind_campaign
 from reprobit.model import Digest, Scope
+from reprobit.producer_graph import ProducerRole
 from reprobit.project_loader import load_project_tree
 from reprobit.schema import (
     ClassicField,
@@ -208,6 +209,8 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
             "program=grind",
             "--toolchain-root",
             str(toolchain),
+            "--keep-workspace",
+            "always",
         ],
     )
 
@@ -217,6 +220,17 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
     assert len(bundle.build_plan.translation_units) == 1
     unit = bundle.build_plan.translation_units[0]
     assert unit.source == "transform.cpp"
+    configure_logs = tuple(
+        (project / ".reprobit-state/runs").glob("import-*/cmake/build/configure.log")
+    )
+    assert len(configure_logs) == 1
+    assert "The CXX compiler identification is MSVC 10.20" in configure_logs[0].read_text(
+        encoding="utf-8"
+    )
+    compiler = next(
+        node for node in bundle.producer_graph.nodes if node.role is ProducerRole.COMPILER
+    )
+    assert {"/zi", "/o2", "/ob1"} <= {argument.casefold() for argument in compiler.arguments}
     assert (project / "reprobit/interventions" / f"{unit.id}.json").is_file()
     assert (project / "reprobit/proofs" / f"{unit.id}.json").is_file()
     assert enumerate_project_grind_campaign(project).eligible_units == 1
