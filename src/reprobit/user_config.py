@@ -43,9 +43,7 @@ def _platform_name() -> str:
     return sys.platform
 
 
-def _absolute_environment_path(
-    environment: Mapping[str, str], name: str
-) -> Path | None:
+def _absolute_environment_path(environment: Mapping[str, str], name: str) -> Path | None:
     raw = environment.get(name)
     if raw is None or not raw.strip():
         return None
@@ -107,9 +105,7 @@ def _read_roots(path: Path) -> dict[str, str]:
         if not isinstance(key, str) or not isinstance(value, str):
             raise UserConfigError(f"user settings contain invalid toolchain roots: {path}")
         if not value.strip() or not Path(value).expanduser().is_absolute():
-            raise UserConfigError(
-                f"user settings contain non-absolute toolchain roots: {path}"
-            )
+            raise UserConfigError(f"user settings contain non-absolute toolchain roots: {path}")
         normalized[key] = value
     return normalized
 
@@ -176,9 +172,7 @@ def _write_roots(path: Path, roots: Mapping[str, str]) -> None:
         + "\n"
     ).encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(
-        prefix=f".{path.name}.", dir=path.parent
-    )
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)
     try:
         with os.fdopen(descriptor, "wb") as stream:

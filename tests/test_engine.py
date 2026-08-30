@@ -10,7 +10,7 @@ import pytest
 import reprobit.engine as engine_module
 from reprobit.artifacts import digest_bytes
 from reprobit.build import BuildPlan, BuildStep
-from reprobit.classic_overlay import render_classic_overlay_declarations
+from reprobit.classic_overlay_document import render_classic_overlay_declarations
 from reprobit.costs import calculate_intervention_cost, intervention_cost_row_digest
 from reprobit.engine import (
     BuildPlanExecutor,

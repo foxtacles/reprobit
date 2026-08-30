@@ -20,11 +20,7 @@ class AdvisoryFileLock:
         if create:
             path.parent.mkdir(parents=True, exist_ok=True)
         self.path = path
-        flags = (
-            os.O_RDWR
-            | getattr(os, "O_BINARY", 0)
-            | getattr(os, "O_NOFOLLOW", 0)
-        )
+        flags = os.O_RDWR | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         if create:
             flags |= os.O_CREAT
         descriptor = os.open(path, flags, 0o600)
@@ -111,9 +107,7 @@ class AdvisoryFileLock:
 
                 native_msvcrt: Any = msvcrt
                 self.stream.seek(0)
-                native_msvcrt.locking(
-                    self.stream.fileno(), native_msvcrt.LK_UNLCK, 1
-                )
+                native_msvcrt.locking(self.stream.fileno(), native_msvcrt.LK_UNLCK, 1)
             else:
                 import fcntl
 

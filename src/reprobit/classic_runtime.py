@@ -19,11 +19,14 @@ from reprobit.classic.semantic_contracts import (
 )
 from reprobit.classic_evidence import (
     CLASSIC_RUNTIME_EVIDENCE_PROVIDER_ID,
+    assemble_classic_runtime_evidence,
+)
+from reprobit.classic_execution_records import (
+    ClassicActiveCompilerEpoch,
     ClassicProducedImage,
     ClassicProducedPdb,
     ClassicProducerGraphExecutionRecord,
     ClassicRuntimeEvidenceInputs,
-    assemble_classic_runtime_evidence,
 )
 from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
@@ -41,8 +44,14 @@ from reprobit.classic_publication import (
     publish_classic_output_set,
 )
 from reprobit.classic_runtime_environment import (
-    _digest_path,
     _toolchain_tree_files,
+)
+from reprobit.classic_runtime_files import (
+    _digest_path,
+    _require_declared_tree_writes,
+    _require_unchanged_tree,
+    _safe_relative,
+    _tree_file_seal,
 )
 from reprobit.classic_runtime_graph import (
     ClassicCompileRecord,
@@ -70,31 +79,24 @@ from reprobit.schema import (
     ProjectBundle,
     classic_analysis_pdb_paths,
 )
-from reprobit.secure_paths import (
-    SecurePathError,
-    reseal_relative_file,
-)
+from reprobit.secure_path_contracts import SecurePathError
+from reprobit.secure_paths import reseal_relative_file
 
 if TYPE_CHECKING:
     pass
 
 
 from reprobit.classic_runtime_donor import ClassicDonorComposition
-from reprobit.classic_runtime_overlay import (
-    ClassicActiveCompilerEpoch,
-    ClassicOverlayEpochs,
-)
+from reprobit.classic_runtime_overlay import ClassicOverlayEpochs
 from reprobit.classic_runtime_producer import (
     ClassicAnalysisLinkExecution,
     ClassicProducerExecution,
     ClassicProgressReporter,
+)
+from reprobit.classic_runtime_receipts import (
     _internal_step,
     _receipt,
-    _require_declared_tree_writes,
-    _require_unchanged_tree,
-    _safe_relative,
     _step_receipt,
-    _tree_file_seal,
 )
 
 
@@ -152,9 +154,7 @@ def _reseal_published_targets(
     for image in record.images:
         artifact = artifacts.get(image.target_id)
         if artifact is None:
-            raise ClassicProjectError(
-                f"published target {image.target_id!r} is no longer declared"
-            )
+            raise ClassicProjectError(f"published target {image.target_id!r} is no longer declared")
         try:
             reseal_relative_file(
                 project_root,
@@ -674,9 +674,7 @@ class ClassicProducerGraphBuildExecutor:
         _require_declared_tree_writes(
             composition_seal,
             root=self.build_root,
-            allowed_outputs=(
-                self.donors.record_for_unit(unit).object_path for unit in self.units
-            ),
+            allowed_outputs=(self.donors.record_for_unit(unit).object_path for unit in self.units),
             phase="composition phase",
         )
 
@@ -697,9 +695,7 @@ class ClassicProducerGraphBuildExecutor:
                 *PurePosixPath(_safe_relative(object_value)).parts
             ).resolve(strict=False)
             if str(object_path).casefold() not in declared_graph_outputs:
-                raise ClassicProjectError(
-                    "rdata repack object is not a committed producer output"
-                )
+                raise ClassicProjectError("rdata repack object is not a committed producer output")
             self.producer.require_regular(object_path, label="rdata repack object")
             started = time.monotonic()
             applied = classic_rdata_repack(
@@ -764,6 +760,7 @@ class ClassicProducerGraphBuildExecutor:
             witnesses,
             donor_semantic_lanes=self.donors.semantic_lanes(),
         )
+
     def _prepare_pending_publication(
         self,
         *,
@@ -1152,7 +1149,6 @@ class ClassicProducerGraphBuildExecutor:
                 f"classic target/PDB set could not be published safely: {exc}"
             ) from exc
 
-
     def _execute(
         self,
         plan: BuildPlan,
@@ -1252,6 +1248,7 @@ class ClassicProducerGraphBuildExecutor:
             witnesses=witnesses,
             output_steps=output_steps,
         )
+
 
 __all__ = [
     "ClassicProducerGraphBuildExecutor",

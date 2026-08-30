@@ -27,57 +27,43 @@ PUSH = bytes.fromhex("52")
 class DerivationTest(unittest.TestCase):
     def test_a_push_moved_before_a_load_raises_its_displacement(self):
         body = LOAD + PUSH
-        found = schedule_algorithms.ia32_schedule_stack_adjustments(
-            body, decode(body), [1, 0], "w"
-        )
+        found = schedule_algorithms.ia32_schedule_stack_adjustments(body, decode(body), [1, 0], "w")
         self.assertEqual(found, [[0, 3, 0x18, 0x1C]])
 
     def test_a_push_moved_after_a_load_lowers_its_displacement(self):
         body = PUSH + LOAD
-        found = schedule_algorithms.ia32_schedule_stack_adjustments(
-            body, decode(body), [1, 0], "w"
-        )
+        found = schedule_algorithms.ia32_schedule_stack_adjustments(body, decode(body), [1, 0], "w")
         self.assertEqual(found, [[1, 4, 0x18, 0x14]])
 
     def test_a_lea_of_an_esp_address_is_adjusted_too(self):
         body = LEA + PUSH
-        found = schedule_algorithms.ia32_schedule_stack_adjustments(
-            body, decode(body), [1, 0], "w"
-        )
+        found = schedule_algorithms.ia32_schedule_stack_adjustments(body, decode(body), [1, 0], "w")
         self.assertEqual(found, [[0, 3, 0x14, 0x18]])
 
     def test_no_push_means_no_adjustment(self):
         body = LOAD + PLAIN
         self.assertEqual(
-            schedule_algorithms.ia32_schedule_stack_adjustments(
-                body, decode(body), [1, 0], "w"
-            ),
+            schedule_algorithms.ia32_schedule_stack_adjustments(body, decode(body), [1, 0], "w"),
             [],
         )
 
     def test_an_operand_that_does_not_cross_the_push_is_untouched(self):
         body = LOAD + PLAIN + PUSH
         self.assertEqual(
-            schedule_algorithms.ia32_schedule_stack_adjustments(
-                body, decode(body), [1, 0, 2], "w"
-            ),
+            schedule_algorithms.ia32_schedule_stack_adjustments(body, decode(body), [1, 0, 2], "w"),
             [],
         )
 
     def test_a_displacement_that_would_overflow_its_field_refuses(self):
         body = bytes.fromhex("8b44247f") + PUSH
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.ia32_schedule_stack_adjustments(
-                body, decode(body), [1, 0], "w"
-            )
+            schedule_algorithms.ia32_schedule_stack_adjustments(body, decode(body), [1, 0], "w")
         self.assertIn("would overflow", str(caught.exception))
 
     def test_an_esp_base_with_no_displacement_byte_refuses(self):
         body = bytes.fromhex("8b0424") + PUSH
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.ia32_schedule_stack_adjustments(
-                body, decode(body), [1, 0], "w"
-            )
+            schedule_algorithms.ia32_schedule_stack_adjustments(body, decode(body), [1, 0], "w")
         self.assertIn("no displacement byte", str(caught.exception))
 
 
@@ -115,14 +101,13 @@ class ObligationTest(unittest.TestCase):
         )
         self.assertEqual([edge[:2] for edge in edges], [[0, 1]])
 
+
 class ApplicationTest(unittest.TestCase):
     def test_the_image_carries_the_adjusted_displacement(self):
         body = LOAD + PUSH
         order = [1, 0]
         instructions = decode(body)
-        stack = schedule_algorithms.ia32_schedule_stack_adjustments(
-            body, instructions, order, "w"
-        )
+        stack = schedule_algorithms.ia32_schedule_stack_adjustments(body, instructions, order, "w")
         _facts, edges = schedule_algorithms.ia32_schedule_dependence_edges(
             instructions, "w", body, True
         )

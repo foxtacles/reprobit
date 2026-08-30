@@ -15,12 +15,12 @@ from reprobit.classic.source_refactor_semantics import (
     _require_integral_type,
     validate_donor_source_semantics,
 )
-from reprobit.classic_overlay import (
+from reprobit.classic_overlay_document import render_classic_overlay_declarations
+from reprobit.classic_overlay_generator import render_classic_overlay_generator
+from reprobit.classic_overlay_types import (
     ClassicOverlayAnchorReceipt,
     ClassicOverlayOperationReceipt,
     ClassicOverlayOutputReceipt,
-    render_classic_overlay_declarations,
-    render_classic_overlay_generator,
 )
 from reprobit.model import Scope
 from reprobit.schema import (

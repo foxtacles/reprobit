@@ -10,9 +10,11 @@ from pathlib import Path, PurePosixPath
 
 from reprobit.assets import runtime_asset_path
 from reprobit.model import Digest
-from reprobit.secure_paths import (
+from reprobit.secure_path_contracts import (
     SecureFileSnapshot,
     SecurePathError,
+)
+from reprobit.secure_paths import (
     digest_relative_file,
     read_relative_file,
 )
@@ -103,10 +105,10 @@ def scoped_package_implementation_digest(relative_paths: Sequence[str]) -> Diges
 def _canonical_root_modules(root_modules: Sequence[str]) -> tuple[str, ...]:
     roots = tuple(root_modules)
     if not roots or any(
-            not isinstance(root, str)
-            or not root
-            or any(not part.isidentifier() for part in root.split("."))
-            for root in roots
+        not isinstance(root, str)
+        or not root
+        or any(not part.isidentifier() for part in root.split("."))
+        for root in roots
     ):
         raise RuntimeError("ReproBit import-closure roots must be non-empty and canonical")
     if roots != tuple(sorted(set(roots))):
@@ -131,8 +133,7 @@ def _package_module_paths(package_root: Path) -> dict[str, Path]:
         if path.is_symlink() or not path.is_file():
             relative_path = path.relative_to(package_root).as_posix()
             raise RuntimeError(
-                "ReproBit import-closure module is absent or redirected: "
-                f"{relative_path}"
+                f"ReproBit import-closure module is absent or redirected: {relative_path}"
             )
         relative_module = path.relative_to(package_root).with_suffix("")
         parts = relative_module.parts
@@ -150,8 +151,7 @@ def _package_module_paths(package_root: Path) -> dict[str, Path]:
         prior_module = folded_modules.get(folded)
         if prior_module is not None and prior_module != module:
             raise RuntimeError(
-                "ReproBit import closure has case-colliding modules: "
-                f"{prior_module}, {module}"
+                f"ReproBit import closure has case-colliding modules: {prior_module}, {module}"
             )
         modules[module] = path
         folded_modules[folded] = module
@@ -271,18 +271,13 @@ def _static_internal_dependencies(
             module=module,
             package_file=path.name == "__init__.py",
         )
-        if node.level and not (
-            base == package or base.startswith(f"{package}.")
-        ):
-            raise RuntimeError(
-                f"ReproBit import closure has an invalid relative import: {module}"
-            )
+        if node.level and not (base == package or base.startswith(f"{package}.")):
+            raise RuntimeError(f"ReproBit import closure has an invalid relative import: {module}")
         if base in modules:
             dependencies.add(base)
         elif base == package or base.startswith(f"{package}."):
             raise RuntimeError(
-                "ReproBit import closure references an absent module: "
-                f"{module} -> {base}"
+                f"ReproBit import closure references an absent module: {module} -> {base}"
             )
         for alias in node.names:
             if alias.name == "*":
@@ -332,9 +327,7 @@ def _package_import_closure_entries(
             ancestor = ".".join(parts[:width])
             ancestor_path = modules.get(ancestor)
             if ancestor_path is None or ancestor_path.name != "__init__.py":
-                raise RuntimeError(
-                    f"ReproBit import closure lacks package ancestor: {ancestor}"
-                )
+                raise RuntimeError(f"ReproBit import closure lacks package ancestor: {ancestor}")
             if ancestor not in visited:
                 heapq.heappush(pending, ancestor)
 
@@ -350,10 +343,7 @@ def _package_import_closure_entries(
 
     return tuple(
         sorted(
-            (
-                (modules[module], snapshots[module][0], snapshots[module][1])
-                for module in visited
-            ),
+            ((modules[module], snapshots[module][0], snapshots[module][1]) for module in visited),
             key=lambda item: item[0].relative_to(package_root).as_posix(),
         )
     )

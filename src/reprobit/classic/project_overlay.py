@@ -156,13 +156,9 @@ def _ordered_seed_demand_evidence(
             include_counts[name] += 1
 
     undefined_rows = tuple(symbol for symbol in coff.symbols if symbol.section == 0)
-    undefined_ordinals = {
-        symbol.index: ordinal for ordinal, symbol in enumerate(undefined_rows)
-    }
+    undefined_ordinals = {symbol.index: ordinal for ordinal, symbol in enumerate(undefined_rows)}
     demanded_names = set(include_counts)
-    demanded_names.update(
-        symbol.name for symbol in undefined_rows if symbol.name in expected_types
-    )
+    demanded_names.update(symbol.name for symbol in undefined_rows if symbol.name in expected_types)
 
     result: dict[str, dict[str, object]] = {}
     for name in sorted(demanded_names, key=str.casefold):
@@ -313,9 +309,7 @@ def _msvc_function_auxiliary_receipt(
         "line_pointer": line_pointer,
         "line_zero_symbol_index": first_line.target_index,
         "next_function_index": next_function_index,
-        "next_function_symbol": (
-            next_function.name if next_function is not None else None
-        ),
+        "next_function_symbol": (next_function.name if next_function is not None else None),
     }
 
 
@@ -495,9 +489,7 @@ def _carrier_comdat_root(coff: _CoffObject, section: _CoffSection) -> int:
         seen.add(current.number)
         associated = current.comdat_associated
         if associated is None or not 0 < associated <= len(coff.sections):
-            raise ClassicSemanticError(
-                f"carrier {coff.label!r} has an orphaned associative COMDAT"
-            )
+            raise ClassicSemanticError(f"carrier {coff.label!r} has an orphaned associative COMDAT")
         current = coff.sections[associated - 1]
     if current.comdat_selection not in {1, 2, 3, 4, 6} or not (
         current.characteristics & _COFF_SCN_LNK_COMDAT
@@ -528,9 +520,7 @@ def _validate_carrier_comdat_topology(coff: _CoffObject) -> None:
         if selection == 5:
             _carrier_comdat_root(coff, section)
         elif associated not in {None, 0}:
-            raise ClassicSemanticError(
-                f"carrier {coff.label!r} has an associated primary COMDAT"
-            )
+            raise ClassicSemanticError(f"carrier {coff.label!r} has an associated primary COMDAT")
         else:
             owners = [
                 symbol
@@ -583,8 +573,7 @@ def _associated_carrier_receipt(
             "digest": Digest.from_bytes(section.body).value,
         }
         for section in coff.sections
-        if section.comdat_selection == 5
-        and _carrier_comdat_root(coff, section) == primary.number
+        if section.comdat_selection == 5 and _carrier_comdat_root(coff, section) == primary.number
     ]
 
 
@@ -626,8 +615,7 @@ def _carrier_noncomdat_trace(
             and not section.relocations
             and not section.line_numbers
             and not any(
-                symbol.storage == 2 and symbol.section == section.number
-                for symbol in coff.symbols
+                symbol.storage == 2 and symbol.section == section.number for symbol in coff.symbols
             )
         ):
             const_pool_sections.append(
@@ -641,8 +629,7 @@ def _carrier_noncomdat_trace(
             )
             continue
         raise ClassicSemanticError(
-            f"carrier {coff.label!r} has an unclassified non-COMDAT section "
-            f"{section.name!r}"
+            f"carrier {coff.label!r} has an unclassified non-COMDAT section {section.name!r}"
         )
     if is_const_pool and len(const_pool_sections) != 1:
         raise ClassicSemanticError(
@@ -696,8 +683,7 @@ def _carrier_isolation_trace(
                 archive_occurrences[reference.casefold()].append(ordinal)
             elif suffix != ".res":
                 raise ClassicSemanticError(
-                    f"target {target.target_id!r} has an unsupported positional input "
-                    f"{reference!r}"
+                    f"target {target.target_id!r} has an unsupported positional input {reference!r}"
                 )
         undeclared_archives = set(archive_occurrences) - {
             reference.casefold() for reference in target.archive_refs
@@ -794,9 +780,7 @@ def _carrier_isolation_trace(
     unique_carrier = set(carrier_definitions) - set(ordinary_definitions)
     for name in sorted(unique_carrier):
         rows = carrier_definitions[name]
-        owner_shapes = {
-            _carrier_primary_owner(coff, section, name) for coff, section in rows
-        }
+        owner_shapes = {_carrier_primary_owner(coff, section, name) for coff, section in rows}
         if len(owner_shapes) != 1 or (
             len(rows) > 1 and any(section.comdat_selection != 2 for _, section in rows)
         ):
@@ -842,8 +826,7 @@ def _carrier_isolation_trace(
         for coff, _ in ordinary_rows:
             _validate_carrier_comdat_topology(coff)
         owner_shapes = {
-            _carrier_primary_owner(coff, section, name, selection=2)
-            for coff, section in all_rows
+            _carrier_primary_owner(coff, section, name, selection=2) for coff, section in all_rows
         }
         if len(owner_shapes) != 1:
             raise ClassicSemanticError(
@@ -1090,9 +1073,7 @@ def _helper_isolation_trace(
     effective_objects: Mapping[str, _CoffObject],
     helper_sections: Mapping[str, frozenset[int]],
     crt_pull_dependencies: Mapping[str, tuple[_CrtPullLinkerDependency, ...]],
-    ordered_archive_seed_dependencies: Mapping[
-        str, tuple[_OrderedArchiveSeedDependency, ...]
-    ],
+    ordered_archive_seed_dependencies: Mapping[str, tuple[_OrderedArchiveSeedDependency, ...]],
 ) -> dict[str, object]:
     target_helpers = {
         node_id: helper_sections[node_id]
@@ -1155,9 +1136,7 @@ def _helper_isolation_trace(
     baseline_references: set[str] = set()
     baseline_definitions: set[str] = set()
     compiler_definitions: set[str] = set()
-    direct_definition_providers: dict[str, list[tuple[str, _CoffObject, int]]] = (
-        defaultdict(list)
-    )
+    direct_definition_providers: dict[str, list[tuple[str, _CoffObject, int]]] = defaultdict(list)
     baseline_libraries: set[str] = set()
     baseline_directive_demands: set[str] = set()
     baseline_directive_retention: set[str] = set()
@@ -1165,9 +1144,7 @@ def _helper_isolation_trace(
     seed_types: dict[str, int] = {}
     for node_id in sorted(target_helpers, key=str.casefold):
         for seed_dependency in ordered_archive_seed_dependencies.get(node_id, ()):
-            previous_type = seed_types.setdefault(
-                seed_dependency.name, seed_dependency.symbol_type
-            )
+            previous_type = seed_types.setdefault(seed_dependency.name, seed_dependency.symbol_type)
             if previous_type != seed_dependency.symbol_type:
                 raise ClassicSemanticError(
                     f"target {target.target_id!r} ordered archive seed dependency "
@@ -1400,9 +1377,7 @@ def _helper_isolation_trace(
                     f"target {target.target_id!r} ordered archive seed dependency "
                     f"{seed_dependency.name!r} has non-positional retained linker demand"
                 )
-            if any(
-                ordinal <= owner_input_ordinal for ordinal in retained_demand_ordinals
-            ):
+            if any(ordinal <= owner_input_ordinal for ordinal in retained_demand_ordinals):
                 raise ClassicSemanticError(
                     f"target {target.target_id!r} ordered archive seed dependency "
                     f"{seed_dependency.name!r} has retained linker demand before its "
@@ -1494,9 +1469,7 @@ def _helper_isolation_trace(
                     "retained_linker_demands": retained_demands,
                     "retained_demand_order": (
                         {
-                            "first_linker_input_ordinal": min(
-                                retained_demand_ordinals
-                            ),
+                            "first_linker_input_ordinal": min(retained_demand_ordinals),
                             "relative_to_seed_owner": "after",
                         }
                         if retained_demand_ordinals
@@ -1697,9 +1670,7 @@ def _helper_isolation_trace(
             )
 
     inbound_references.update(
-        reference
-        for archive in archive_objects
-        for reference in _external_references(archive.coff)
+        reference for archive in archive_objects for reference in _external_references(archive.coff)
     )
     imported_collisions = helper_definitions & import_definitions
     if imported_collisions:
@@ -2098,9 +2069,7 @@ def prove_source_overlay_semantics(
     effective_objects: dict[str, _CoffObject] = {}
     helper_sections: dict[str, frozenset[int]] = {}
     crt_pull_dependencies: dict[str, tuple[_CrtPullLinkerDependency, ...]] = {}
-    ordered_archive_seed_dependencies: dict[
-        str, tuple[_OrderedArchiveSeedDependency, ...]
-    ] = {}
+    ordered_archive_seed_dependencies: dict[str, tuple[_OrderedArchiveSeedDependency, ...]] = {}
     compiler_audit_trace: list[dict[str, object]] = []
     compiler_namespace_trace: list[dict[str, object]] = []
     if source_validation is not None:

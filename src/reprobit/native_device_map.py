@@ -155,8 +155,7 @@ class _LineageApi:
         self._set_last_error(0)
         if not self.CloseHandle(_handle(handle)):
             raise NativeDeviceMapError(
-                f"CloseHandle({label}) failed with Win32 error "
-                f"{self._get_last_error()}"
+                f"CloseHandle({label}) failed with Win32 error {self._get_last_error()}"
             )
 
     def process_authentication_id(self, process: int) -> tuple[int, int]:
@@ -164,9 +163,7 @@ class _LineageApi:
 
         token = ctypes.c_void_p()
         self._set_last_error(0)
-        if not self.OpenProcessToken(
-            _handle(process), _TOKEN_QUERY, ctypes.byref(token)
-        ):
+        if not self.OpenProcessToken(_handle(process), _TOKEN_QUERY, ctypes.byref(token)):
             raise NativeDeviceMapError(
                 f"OpenProcessToken failed with Win32 error {self._get_last_error()}"
             )
@@ -205,23 +202,18 @@ class _LineageApi:
         error = int(self._get_last_error())
         if error in {_ERROR_FILE_NOT_FOUND, _ERROR_PATH_NOT_FOUND}:
             return None
-        raise NativeDeviceMapError(
-            f"QueryDosDeviceW({drive}) failed with Win32 error {error}"
-        )
+        raise NativeDeviceMapError(f"QueryDosDeviceW({drive}) failed with Win32 error {error}")
 
     def define_local_drive(self, drive: str, target: str) -> None:
         """Define and verify one mapping in the caller's LUID-local namespace."""
 
         if self.query_drive(drive) is not None:
-            raise NativeDeviceMapError(
-                f"lineage-local logical drive {drive} already exists"
-            )
+            raise NativeDeviceMapError(f"lineage-local logical drive {drive} already exists")
         flags = _DDD_RAW_TARGET_PATH | _DDD_NO_BROADCAST_SYSTEM
         self._set_last_error(0)
         if not self.DefineDosDeviceW(flags, drive, target):
             raise NativeDeviceMapError(
-                f"DefineDosDeviceW({drive}) failed with Win32 error "
-                f"{self._get_last_error()}"
+                f"DefineDosDeviceW({drive}) failed with Win32 error {self._get_last_error()}"
             )
         try:
             if self.query_drive(drive) != target:
@@ -248,9 +240,7 @@ class _LineageApi:
                 f"{self._get_last_error()}"
             )
         if self.query_drive(drive) == target:
-            raise NativeDeviceMapError(
-                "lineage-local logical drive remained after exact removal"
-            )
+            raise NativeDeviceMapError("lineage-local logical drive remained after exact removal")
 
     def final_nt_path(self, path: Path) -> str:
         """Seal one directory to its final NT device-object path."""
@@ -300,7 +290,6 @@ class _LineageApi:
                 capacity = length
         finally:
             self.close_handle(handle, "logical-drive-root")
-
 
 
 def probe_native_device_map() -> NativeDeviceMapProbe:
@@ -404,9 +393,7 @@ class NativeDeviceMapLease(AbstractContextManager["NativeDeviceMapLease"]):
     """One sealed physical root plus a descendant-safe producer namespace."""
 
     def __init__(self, root: Path | str, drive_letter: str) -> None:
-        if not isinstance(drive_letter, str) or not re.fullmatch(
-            r"[A-Za-z]", drive_letter
-        ):
+        if not isinstance(drive_letter, str) or not re.fullmatch(r"[A-Za-z]", drive_letter):
             raise NativeDeviceMapError("logical drive must be one ASCII letter")
         self.root = Path(root)
         self.drive_letter = drive_letter.upper()
@@ -446,9 +433,7 @@ class NativeDeviceMapLease(AbstractContextManager["NativeDeviceMapLease"]):
                     f"native logical-drive root is not a plain directory: {resolved}"
                 )
             if re.match(r"^[A-Za-z]:\\", str(resolved)) is None:
-                raise NativeDeviceMapError(
-                    "native logical-drive root must reside on a local drive"
-                )
+                raise NativeDeviceMapError("native logical-drive root must reside on a local drive")
             authentication_id = api.process_authentication_id(_CURRENT_PROCESS)
             if authentication_id == _SYSTEM_AUTHENTICATION_ID:
                 raise NativeDeviceMapError(
@@ -465,19 +450,11 @@ class NativeDeviceMapLease(AbstractContextManager["NativeDeviceMapLease"]):
     def windows_lineage_plan(self, spec: CommandSpec) -> bytes:
         """Serialize the producer contract for the inherited-handle broker."""
 
-        if (
-            not self._active
-            or self._target is None
-            or self._controller_authentication_id is None
-        ):
-            raise NativeDeviceMapError(
-                "Windows lineage planning requires an active lineage lease"
-            )
+        if not self._active or self._target is None or self._controller_authentication_id is None:
+            raise NativeDeviceMapError("Windows lineage planning requires an active lineage lease")
         document = {
             "argv": list(spec.argv),
-            "controller_authentication_id": list(
-                self._controller_authentication_id
-            ),
+            "controller_authentication_id": list(self._controller_authentication_id),
             "cwd": str(spec.cwd),
             "drive": f"{self.drive_letter}:",
             "environment": [list(entry) for entry in spec.environment],
@@ -537,9 +514,7 @@ def _serialize_windows_environment(
             raise NativeDeviceMapError("Windows lineage broker environment is invalid")
         folded = key.casefold()
         if folded in seen:
-            raise NativeDeviceMapError(
-                f"duplicate Windows lineage broker environment key: {key}"
-            )
+            raise NativeDeviceMapError(f"duplicate Windows lineage broker environment key: {key}")
         seen.add(folded)
         normalized.append((key, value))
     ordered = sorted(normalized, key=lambda entry: (entry[0].casefold(), entry[0]))
@@ -577,8 +552,7 @@ def _duplicate_standard_handles(
             _DUPLICATE_SAME_ACCESS,
         ):
             raise NativeDeviceMapError(
-                f"DuplicateHandle({label}) failed with Win32 error "
-                f"{api._get_last_error()}"
+                f"DuplicateHandle({label}) failed with Win32 error {api._get_last_error()}"
             )
         if target.value is None:
             raise NativeDeviceMapError(f"DuplicateHandle({label}) returned null")
@@ -586,7 +560,6 @@ def _duplicate_standard_handles(
         stack.callback(api.close_handle, handle, label)
         duplicated.append(handle)
     return duplicated[0], duplicated[1], duplicated[2]
-
 
 
 def _read_lineage_plan() -> tuple[dict[str, Any], CommandSpec]:
@@ -723,9 +696,7 @@ def _run_logon_broker() -> int:
             "internal broker exceeds CreateProcessWithLogonW's command-line limit"
         )
     command_buffer = ctypes.create_unicode_buffer(command_line)
-    environment = _serialize_windows_environment(
-        _minimal_broker_environment(os.environ)
-    )
+    environment = _serialize_windows_environment(_minimal_broker_environment(os.environ))
     environment_buffer = (ctypes.c_wchar * len(environment))(*environment)
     startup = StartupInfo()
     startup.cb = ctypes.sizeof(startup)
@@ -807,9 +778,7 @@ def _run_logon_broker() -> int:
                 _LOGON_NETCREDENTIALS_ONLY,
                 sys.executable,
                 command_buffer,
-                _CREATE_SUSPENDED
-                | _CREATE_NEW_PROCESS_GROUP
-                | _CREATE_UNICODE_ENVIRONMENT,
+                _CREATE_SUSPENDED | _CREATE_NEW_PROCESS_GROUP | _CREATE_UNICODE_ENVIRONMENT,
                 ctypes.cast(environment_buffer, pointer),
                 str(Path(sys.executable).resolve(strict=True).parent),
                 ctypes.byref(startup),
@@ -832,9 +801,7 @@ def _run_logon_broker() -> int:
                 "LOGON_NETCREDENTIALS_ONLY did not create a fresh AuthenticationId"
             )
         if kernel32.ResumeThread(process.hThread) == 0xFFFFFFFF:
-            raise NativeDeviceMapError(
-                f"ResumeThread failed with Win32 error {get_last_error()}"
-            )
+            raise NativeDeviceMapError(f"ResumeThread failed with Win32 error {get_last_error()}")
         if kernel32.WaitForSingleObject(process.hProcess, 0xFFFFFFFF) != 0:
             raise NativeDeviceMapError(
                 f"WaitForSingleObject failed with Win32 error {get_last_error()}"
@@ -877,9 +844,7 @@ def _run_suspended_producer_tree(spec: CommandSpec) -> int:
             # A successful leader may deliberately leave a descendant doing
             # final work. Keep the LUID mapping until the complete tree exits.
             if not job.wait_empty(None):
-                raise NativeDeviceMapError(
-                    "lineage producer Job Object unexpectedly timed out"
-                )
+                raise NativeDeviceMapError("lineage producer Job Object unexpectedly timed out")
         else:
             # A failed leader does not get to leave work behind.
             job.terminate_and_drain(_BROKER_DRAIN_TIMEOUT_SECONDS)
@@ -912,9 +877,7 @@ def _run_suspended_producer_tree(spec: CommandSpec) -> int:
             if assigned:
                 try:
                     if not job.wait_empty(_BROKER_DRAIN_TIMEOUT_SECONDS):
-                        raise NativeDeviceMapError(
-                            "lineage producer Job Object did not drain"
-                        )
+                        raise NativeDeviceMapError("lineage producer Job Object did not drain")
                 except BaseException as cleanup_error:
                     cleanup_errors.append(cleanup_error)
         for item in cleanup_errors:
@@ -941,20 +904,14 @@ def _run_lineage_broker() -> int:
     expected = document["controller_authentication_id"]
     if not isinstance(drive, str) or re.fullmatch(r"[A-Z]:", drive) is None:
         raise NativeDeviceMapError("Windows lineage drive is invalid")
-    if (
-        not isinstance(target, str)
-        or "\0" in target
-        or not target.startswith("\\Device\\")
-    ):
+    if not isinstance(target, str) or "\0" in target or not target.startswith("\\Device\\"):
         raise NativeDeviceMapError("Windows lineage target is invalid")
     if (
         not isinstance(expected, list)
         or len(expected) != 2
         or any(isinstance(value, bool) or not isinstance(value, int) for value in expected)
     ):
-        raise NativeDeviceMapError(
-            "Windows lineage controller AuthenticationId is invalid"
-        )
+        raise NativeDeviceMapError("Windows lineage controller AuthenticationId is invalid")
 
     api = _LineageApi()
     authentication_id = api.process_authentication_id(_CURRENT_PROCESS)

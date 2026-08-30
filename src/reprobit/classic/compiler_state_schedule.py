@@ -118,9 +118,7 @@ def _stack_normalized_tokens(
 
 def _is_topological(edges: Sequence[Sequence[object]], order: Sequence[int]) -> bool:
     position = {source: target for target, source in enumerate(order)}
-    return all(
-        position[cast(int, edge[0])] < position[cast(int, edge[1])] for edge in edges
-    )
+    return all(position[cast(int, edge[0])] < position[cast(int, edge[1])] for edge in edges)
 
 
 def _window_declaration(
@@ -167,9 +165,7 @@ def _window_declaration(
                 body,
                 True,
                 private_stack_object=True,
-                adjusted_instructions=frozenset(
-                    row[0] for row in stack_adjustments
-                ),
+                adjusted_instructions=frozenset(row[0] for row in stack_adjustments),
             )
         except ByteIdentityError as retry_error:
             raise ClassicSemanticError(str(retry_error)) from retry_error
@@ -236,6 +232,7 @@ def _window_declaration(
     if reseat:
         result["relocation_reseat"] = reseat
     return result
+
 
 def _apply_schedules(
     state: _ImageState,
@@ -346,14 +343,10 @@ def _apply_schedules(
                     pair.debug_evidence.clean_body if pair.debug_evidence is not None else None
                 ),
                 fpo_evidence_receipt=(
-                    pair.fpo_evidence.receipt_digest
-                    if pair.fpo_evidence is not None
-                    else None
+                    pair.fpo_evidence.receipt_digest if pair.fpo_evidence is not None else None
                 ),
                 debug_evidence_receipt=(
-                    pair.debug_evidence.receipt_digest
-                    if pair.debug_evidence is not None
-                    else None
+                    pair.debug_evidence.receipt_digest if pair.debug_evidence is not None else None
                 ),
                 function_owner=pair.owner,
             )

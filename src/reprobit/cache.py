@@ -22,13 +22,15 @@ from types import MappingProxyType
 from typing import Self
 
 from reprobit.model import Digest
-from reprobit.secure_paths import (
+from reprobit.secure_path_contracts import (
     SecureFileSnapshot,
     SecurePathError,
+    canonical_system_path,
+)
+from reprobit.secure_paths import (
     atomic_copy_new_relative,
     atomic_publish_new_relative,
     atomic_publish_relative,
-    canonical_system_path,
     digest_relative_file,
     promote_relative_new,
     read_relative_file,
@@ -105,12 +107,8 @@ _DOMAIN = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _IMPLEMENTATION = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _INDEX = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 _LEASE = re.compile(r"^[0-9a-f]{32}\.lease$")
-_LEASE_PUBLICATION_TEMP = re.compile(
-    r"^\.(?:layout|[0-9a-f]{32}\.lease)\.reprobit-[0-9a-f]{32}$"
-)
-_RECORD_PUBLICATION_TEMP = re.compile(
-    r"^\.[0-9a-f]{64}\.json\.reprobit-[0-9a-f]{32}$"
-)
+_LEASE_PUBLICATION_TEMP = re.compile(r"^\.(?:layout|[0-9a-f]{32}\.lease)\.reprobit-[0-9a-f]{32}$")
+_RECORD_PUBLICATION_TEMP = re.compile(r"^\.[0-9a-f]{64}\.json\.reprobit-[0-9a-f]{32}$")
 _MAX_RECORD_BYTES = 16 * 1024 * 1024
 _MAX_INDEX_CANDIDATES = 16
 _LAYOUT_MARKER = b"reprobit-cache-layout-v1\n"
@@ -346,9 +344,7 @@ class IncrementalCache:
             self._records_root = self.format_root / "records"
             self._indexes_root = self.format_root / "indexes"
         marker = self.format_root / "format.json"
-        if _read_settled_immutable(marker, maximum=1024) != canonical_json(
-            {"schema": _FORMAT}
-        ):
+        if _read_settled_immutable(marker, maximum=1024) != canonical_json({"schema": _FORMAT}):
             raise CachePoisonError("cache format marker is invalid")
         gate_payload = (
             _read_settled_immutable(self._gate_path, maximum=1)
@@ -452,11 +448,7 @@ class IncrementalCache:
                         f"cache lease directory contains an unsafe entry: {path}"
                     )
                 continue
-            if (
-                not _LEASE.fullmatch(path.name)
-                or path.is_symlink()
-                or not path.is_file()
-            ):
+            if not _LEASE.fullmatch(path.name) or path.is_symlink() or not path.is_file():
                 raise CachePoisonError(f"cache lease directory contains an unsafe entry: {path}")
             try:
                 lock = AdvisoryFileLock(path, create=False)
@@ -622,9 +614,7 @@ class IncrementalCache:
 
     def _parse_record(self, path: Path, *, require_current: bool = True) -> CacheRecord:
         try:
-            value = strict_loads(
-                _read_settled_immutable(path, maximum=_MAX_RECORD_BYTES)
-            )
+            value = strict_loads(_read_settled_immutable(path, maximum=_MAX_RECORD_BYTES))
         except (TypeError, ValueError) as exc:
             raise CachePoisonError(f"cache record is malformed: {path}") from exc
         if not isinstance(value, dict) or set(value) != {
@@ -1129,8 +1119,7 @@ class CacheLease:
             existing = self.lookup(record.domain, record.key)
             if existing is None:
                 raise CachePoisonError(
-                    "immutable cache record publication failed: "
-                    f"{record.domain}/{record.key}"
+                    f"immutable cache record publication failed: {record.domain}/{record.key}"
                 ) from publication_error
             if record.outputs != existing.outputs or dict(existing.metadata) != normalized_metadata:
                 raise CachePoisonError(
@@ -1150,9 +1139,7 @@ class CacheLease:
     ) -> CacheRecord:
         """Stage blobs and immediately publish a record for simple callers."""
 
-        return self.publish_record(
-            self.stage_record(domain, key, outputs, metadata=metadata)
-        )
+        return self.publish_record(self.stage_record(domain, key, outputs, metadata=metadata))
 
     def restore(
         self,

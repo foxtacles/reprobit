@@ -66,9 +66,7 @@ def test_all_classic_profiles_are_explicit_and_revision_pinned() -> None:
         ("msvcrt20", "n"),
     )
     msvc42 = TOOLCHAIN_PROFILES[MSVC_42]
-    assert {
-        (source.repository, source.revision) for source in msvc42.sources
-    } == {
+    assert {(source.repository, source.revision) for source in msvc42.sources} == {
         (
             "https://github.com/archaic-msvc/msvc420.git",
             "b42c244f0a83ba15ba2ffb62b0dc240d7b2dea50",
@@ -109,15 +107,11 @@ def test_create_lock_returns_the_sole_schema_v3_document(
     assert decoded == schema_lock
     assert schema_lock.schema_version == 3
     assert tuple(
-        (source.repository, source.revision, source.paths)
-        for source in schema_lock.profile_sources
+        (source.repository, source.revision, source.paths) for source in schema_lock.profile_sources
     ) == tuple(
-        (source.repository, source.revision, source.paths)
-        for source in toolchain.profile.sources
+        (source.repository, source.revision, source.paths) for source in toolchain.profile.sources
     )
-    assert {item.path for item in schema_lock.tools} == set(
-        toolchain.profile.required_producers
-    )
+    assert {item.path for item in schema_lock.tools} == set(toolchain.profile.required_producers)
     assert {item.path for item in schema_lock.runtime_files} == set(
         toolchain.profile.required_runtime_files
     )
@@ -151,9 +145,7 @@ def test_schema_profile_source_cannot_name_an_unlocked_path(tmp_path: Path) -> N
     document = toolchain.create_lock().model_dump()
     sources = list(document["profile_sources"])
     first = dict(sources[0])
-    first["paths"] = tuple(
-        sorted((*first["paths"], "bin/UNLOCKED.EXE"), key=str.casefold)
-    )
+    first["paths"] = tuple(sorted((*first["paths"], "bin/UNLOCKED.EXE"), key=str.casefold))
     sources[0] = first
     document["profile_sources"] = tuple(sources)
 
@@ -162,15 +154,11 @@ def test_schema_profile_source_cannot_name_an_unlocked_path(tmp_path: Path) -> N
 
 
 @pytest.mark.parametrize("legacy_field", ("source_revision", "sources"))
-def test_schema_v3_rejects_pre_release_source_fields(
-    tmp_path: Path, legacy_field: str
-) -> None:
+def test_schema_v3_rejects_pre_release_source_fields(tmp_path: Path, legacy_field: str) -> None:
     toolchain = fake_installation(tmp_path, MSVC_42)
     document = toolchain.create_lock().model_dump()
     profile_sources = document.pop("profile_sources")
-    document[legacy_field] = (
-        "0" * 40 if legacy_field == "source_revision" else profile_sources
-    )
+    document[legacy_field] = "0" * 40 if legacy_field == "source_revision" else profile_sources
 
     with pytest.raises(ValidationError, match=legacy_field):
         SchemaToolchainLock.model_validate(document)
@@ -185,9 +173,7 @@ def test_toolchain_lock_rejects_runtime_files_in_the_tools_bucket(
     wrapper.write_bytes(b"pinned wrapper")
     schema_lock = toolchain.create_lock(runtime_paths=("wine/x86/cl",))
     assigned_paths = {
-        path.casefold()
-        for source in schema_lock.profile_sources
-        for path in source.paths
+        path.casefold() for source in schema_lock.profile_sources for path in source.paths
     }
     assert "wine/x86/cl" not in assigned_paths
 
@@ -241,9 +227,7 @@ def test_toolchain_lock_rejects_missing_required_producer(tmp_path: Path) -> Non
                 source.model_copy(
                     update={
                         "paths": tuple(
-                            path
-                            for path in source.paths
-                            if path.casefold() != omitted_path
+                            path for path in source.paths if path.casefold() != omitted_path
                         )
                     }
                 )
@@ -269,9 +253,7 @@ def test_toolchain_lock_rejects_missing_required_runtime_file(
                 source.model_copy(
                     update={
                         "paths": tuple(
-                            path
-                            for path in source.paths
-                            if path.casefold() != omitted_path
+                            path for path in source.paths if path.casefold() != omitted_path
                         )
                     }
                 )
@@ -584,7 +566,7 @@ def test_compile_receipt_is_independent_of_the_physical_source_root(tmp_path: Pa
         source.mkdir(parents=True)
         output.mkdir()
         unit = source / "unit.cpp"
-        unit.write_text("extern \"C\" int value() { return 7; }\n")
+        unit.write_text('extern "C" int value() { return 7; }\n')
         skeleton = LogicalPathSkeleton(
             (
                 LogicalSeat("source", source, r"R:\Users\builder\project\source"),
@@ -598,9 +580,7 @@ def test_compile_receipt_is_independent_of_the_physical_source_root(tmp_path: Pa
         )
         assert skeleton.to_logical(unit) == r"R:\Users\builder\project\source\unit.cpp"
         with skeleton.temporary_materialization(tmp_path / name / "skeletons") as materialized:
-            compiler_view = (
-                materialized.root / "Users" / "builder" / "project" / "source"
-            )
+            compiler_view = materialized.root / "Users" / "builder" / "project" / "source"
             assert compiler_view.resolve(strict=True) == source.resolve(strict=True)
         contexts.append(
             toolchain.compile_context(

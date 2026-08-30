@@ -190,9 +190,9 @@ def _crt_pull_linker_dependencies(
 
     clean_directives = _coff_directive_receipt(clean)
     directives = _coff_directive_receipt(effective)
-    rooted = (
-        set(directives.include_symbols) - set(clean_directives.include_symbols)
-    ) | (set(directives.export_symbols) - set(clean_directives.export_symbols))
+    rooted = (set(directives.include_symbols) - set(clean_directives.include_symbols)) | (
+        set(directives.export_symbols) - set(clean_directives.export_symbols)
+    )
     result: list[_CrtPullLinkerDependency] = []
     for name, sites in sorted(candidate_sites.items(), key=lambda item: item[0]):
         rows = [symbol for symbol in effective.symbols if symbol.name == name]
@@ -316,9 +316,9 @@ def _seed_order_dependencies(
 
     clean_directives = _coff_directive_receipt(clean)
     directives = _coff_directive_receipt(effective)
-    rooted = (
-        set(directives.include_symbols) - set(clean_directives.include_symbols)
-    ) | (set(directives.export_symbols) - set(clean_directives.export_symbols))
+    rooted = (set(directives.include_symbols) - set(clean_directives.include_symbols)) | (
+        set(directives.export_symbols) - set(clean_directives.export_symbols)
+    )
     rows_by_name: dict[str, _CoffSymbol] = {}
     for name, sites in candidate_sites.items():
         expected_type = 0x20 if binding_kinds[name] == "function-rel32" else 0

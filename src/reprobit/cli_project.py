@@ -1,0 +1,573 @@
+"""CLI commands for project creation, source authority, and inspection."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+from collections.abc import Mapping, Sequence
+from pathlib import Path
+from typing import Any
+
+from reprobit.cli_output import CLIOutput, human_command
+from reprobit.cli_paths import CLIError, project_root, relative_output, safe_project_path
+from reprobit.costs import CostBreakdown, InterventionCost, calculate_cost
+from reprobit.model import Digest
+from reprobit.producer_graph import producer_graph_accepts_source
+from reprobit.project_loader import load_project, load_project_tree
+from reprobit.schema import (
+    BuildPlanDocument,
+    Intervention,
+    LogicalPathProfile,
+    ProducerGraphBuildAdapter,
+    ProjectSpec,
+    SourceManifestDocument,
+    TargetSpec,
+    ToolchainRef,
+    source_manifest_digest,
+)
+from reprobit.strict_json import canonical_json, strict_load
+from reprobit.transactions import CASTransaction
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _render_initial_project(spec: ProjectSpec) -> bytes:
+    assert isinstance(spec.build, ProducerGraphBuildAdapter)
+    target = spec.targets[0]
+    lines = [
+        "schema_version = 3",
+        f"project_id = {_toml_string(spec.project_id)}",
+        f"state_dir = {_toml_string(spec.state_dir)}",
+        "",
+        "[build]",
+        'kind = "producer-graph"',
+        "",
+        "[toolchain]",
+        'adapter = "classic-msvc"',
+        f"profile = {_toml_string(spec.toolchain.profile)}",
+        f"lock_file = {_toml_string(spec.toolchain.lock_file)}",
+        "",
+        "[paths]",
+        f"id = {_toml_string(spec.paths.id)}",
+        f"source = {_toml_string(spec.paths.source)}",
+        f"build = {_toml_string(spec.paths.build)}",
+        f"toolchain = {_toml_string(spec.paths.toolchain)}",
+        "",
+        "[verifier]",
+        'kind = "literal"',
+        "",
+        "[authenticity]",
+        'policy = "clean"',
+        "",
+        "[[targets]]",
+        f"id = {_toml_string(target.id)}",
+        f"artifact = {_toml_string(target.artifact)}",
+        f"oracle = {_toml_string(target.oracle)}",
+        "",
+    ]
+    return "\n".join(lines).encode("utf-8")
+
+
+def _derived_project_id(root: Path) -> str:
+    """Derive a stable, schema-safe default from a project directory name."""
+
+    value = re.sub(r"[^a-z0-9._-]+", "-", root.name.casefold()).strip("._-")
+    if not value:
+        return "project"
+    if not value[0].isalpha():
+        value = f"project-{value}"
+    return value[:128].rstrip("._-") or "project"
+
+
+def command_init(args: argparse.Namespace, output: CLIOutput) -> int:
+    root = Path(args.path).expanduser().resolve(strict=False)
+    if root.exists() and (not root.is_dir() or root.is_symlink()):
+        raise CLIError(f"initialization target is not a real directory: {root}")
+    root.mkdir(parents=True, exist_ok=True)
+    artifact = args.artifact or f"build/{args.target}.exe"
+    oracle = args.oracle or f"reference/{args.target}.exe"
+    spec = ProjectSpec(
+        schema_version=3,
+        project_id=args.project_id or _derived_project_id(root),
+        build=ProducerGraphBuildAdapter(),
+        toolchain=ToolchainRef(profile=args.profile),
+        paths=LogicalPathProfile(
+            source=args.logical_source,
+            build=args.logical_build,
+            toolchain=args.logical_toolchain,
+        ),
+        targets=(TargetSpec(id=args.target, artifact=artifact, oracle=oracle),),
+    )
+    project_data = _render_initial_project(spec)
+    initial_manifest = SourceManifestDocument(
+        schema_version=3,
+        # Initialization has not reviewed any project inputs yet. A certifying
+        # manifest only becomes complete through ``rbit source lock``.
+        complete=False,
+        entries=(),
+    )
+    transaction = CASTransaction(root)
+    transaction.write("reprobit.toml", project_data, expected_sha256=None)
+    transaction.write(
+        spec.layout.source_manifest,
+        canonical_json(initial_manifest),
+        expected_sha256=None,
+    )
+    result = transaction.commit()
+    next_command = human_command(("rbit", "setup", root))
+    output.emit(
+        "initialized",
+        f"Created ReproBit project {spec.project_id!r} at {root}\nNext: {next_command}",
+        project_root=root,
+        project_id=spec.project_id,
+        changed_paths=result.changed_paths,
+        next_command=next_command,
+    )
+    return 0
+
+
+def _explicit_source_paths(root: Path, values: Sequence[str]) -> tuple[str, ...]:
+    paths: list[str] = []
+    for value in values:
+        relative = relative_output(root, value)
+        candidate = root / relative
+        if candidate.is_symlink() or not candidate.exists():
+            raise CLIError(f"source lock input is absent or redirected: {relative}")
+        if candidate.is_file():
+            paths.append(relative.as_posix())
+            continue
+        for child in sorted(candidate.rglob("*"), key=lambda item: item.as_posix()):
+            if child.is_symlink():
+                raise CLIError(f"source lock tree contains a symlink: {child}")
+            if child.is_file():
+                paths.append(child.relative_to(root).as_posix())
+    return tuple(paths)
+
+
+def _build_source_document(
+    root: Path,
+    spec: ProjectSpec,
+    values: Sequence[str],
+    output: CLIOutput,
+) -> SourceManifestDocument:
+    from reprobit.source_lock import build_source_manifest, git_tracked_paths
+
+    paths = _explicit_source_paths(root, values) if values else git_tracked_paths(root)
+    with output.activity("checking the project source files"):
+        return build_source_manifest(root, paths, spec=spec, complete=True)
+
+
+def _load_source_manifest(path: Path) -> SourceManifestDocument:
+    return SourceManifestDocument.model_validate_json(canonical_json(strict_load(path)))
+
+
+def _load_build_plan(path: Path) -> BuildPlanDocument:
+    return BuildPlanDocument.model_validate_json(canonical_json(strict_load(path)))
+
+
+def _source_changes(
+    before: SourceManifestDocument,
+    after: SourceManifestDocument,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[dict[str, Any], ...]]:
+    old = {item.path: item for item in before.entries}
+    new = {item.path: item for item in after.entries}
+    added = tuple(sorted(set(new) - set(old), key=lambda item: (item.casefold(), item)))
+    removed = tuple(sorted(set(old) - set(new), key=lambda item: (item.casefold(), item)))
+    changed = tuple(
+        {
+            "path": path,
+            "before_digest": old[path].digest.value,
+            "after_digest": new[path].digest.value,
+            "before_size": old[path].size,
+            "after_size": new[path].size,
+        }
+        for path in sorted(set(old) & set(new), key=lambda item: (item.casefold(), item))
+        if old[path].digest != new[path].digest or old[path].size != new[path].size
+    )
+    return added, removed, changed
+
+
+def _inspect_candidate_source_authority(
+    root: Path,
+    spec: ProjectSpec,
+    document: SourceManifestDocument,
+    document_digest: Digest,
+) -> tuple[BuildPlanDocument | None, Any | None]:
+    build_plan_path = safe_project_path(root, spec.layout.build_plan)
+    if not build_plan_path.is_file():
+        return None, None
+    plan = _load_build_plan(build_plan_path).model_copy(
+        update={"source_manifest_digest": document_digest}
+    )
+    bundle = load_project_tree(root, verify_source_authority=False)
+    from reprobit.source_authority import inspect_source_authority
+
+    return plan, inspect_source_authority(
+        bundle,
+        root,
+        source_manifest=document,
+        build_plan=plan,
+    )
+
+
+def _stale_tu_fields(report: Any | None) -> tuple[dict[str, Any], ...]:
+    if report is None:
+        return ()
+    return tuple(
+        {
+            "translation_unit_id": item.translation_unit_id,
+            "source": item.source,
+            "expected_digest": item.expected_digest,
+            "actual_digest": item.actual_digest,
+        }
+        for item in report.stale_translation_units
+    )
+
+
+def _source_preview_message(
+    *,
+    added: Sequence[str],
+    removed: Sequence[str],
+    changed: Sequence[Mapping[str, Any]],
+    entries: int,
+    graph_invalidation_required: bool,
+    authority_checked: bool,
+    authority_error: str | None,
+    stale_units: Sequence[Mapping[str, Any]],
+) -> str:
+    lines = [
+        f"Source preview: +{len(added)} -{len(removed)} ~{len(changed)}; "
+        f"{entries} selected input(s)"
+    ]
+    if added:
+        lines.append("  add: " + ", ".join(added))
+    if removed:
+        lines.append("  remove: " + ", ".join(removed))
+    if changed:
+        lines.append("  change: " + ", ".join(str(item["path"]) for item in changed))
+    if graph_invalidation_required:
+        lines.append("  build graph: update required after locking these source changes")
+    if authority_error is not None:
+        lines.append("  project records need regeneration: " + authority_error)
+    elif stale_units:
+        rendered = ", ".join(
+            f"{item['translation_unit_id']} ({item['source']})" for item in stale_units
+        )
+        lines.append("  project records need regeneration for: " + rendered)
+    elif not authority_checked:
+        lines.append("  no build plan; no TU or source-overlay records were checked")
+    else:
+        lines.append("  reviewed TU and source-overlay records remain valid")
+    return "\n".join(lines)
+
+
+def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
+    root = project_root(args.project)
+    spec = load_project(root)
+    document = _build_source_document(root, spec, args.path, output)
+    document_digest = source_manifest_digest(document)
+    current = _load_source_manifest(safe_project_path(root, spec.layout.source_manifest))
+    current_digest = source_manifest_digest(current)
+    added, removed, changed = _source_changes(current, document)
+
+    producer_graph_path = safe_project_path(root, spec.layout.producer_graph)
+    graph_invalidation_required = False
+    if producer_graph_path.is_file():
+        from reprobit.producer_graph import read_producer_graph
+
+        graph_invalidation_required = not producer_graph_accepts_source(
+            read_producer_graph(producer_graph_path),
+            paths=(item.path for item in document.entries),
+        )
+
+    authority_error: str | None = None
+    report: Any | None = None
+    try:
+        _, report = _inspect_candidate_source_authority(root, spec, document, document_digest)
+    except ValueError as exc:
+        from reprobit.source_authority import SourceAuthorityError
+
+        if not isinstance(exc, SourceAuthorityError):
+            raise
+        authority_error = str(exc)
+    stale_units = _stale_tu_fields(report)
+    output.emit(
+        "source_preview",
+        _source_preview_message(
+            added=added,
+            removed=removed,
+            changed=changed,
+            entries=len(document.entries),
+            graph_invalidation_required=graph_invalidation_required,
+            authority_checked=report is not None,
+            authority_error=authority_error,
+            stale_units=stale_units,
+        ),
+        before_source_manifest_digest=current_digest.value,
+        after_source_manifest_digest=document_digest.value,
+        entries=len(document.entries),
+        added=added,
+        removed=removed,
+        changed=changed,
+        unchanged=len(document.entries) - len(added) - len(changed),
+        producer_graph_invalidation_required=graph_invalidation_required,
+        checked_overlay_outputs=(report.overlay_outputs if report is not None else ()),
+        authority_checked=report is not None,
+        stale_translation_units=stale_units,
+        authority_regeneration_required=bool(authority_error or stale_units),
+        authority_error=authority_error,
+    )
+    return 0
+
+
+def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
+    root = project_root(args.project)
+    spec = load_project(root)
+    document = _build_source_document(root, spec, args.path, output)
+    document_digest = source_manifest_digest(document)
+
+    plan: BuildPlanDocument | None = None
+    report: Any | None = None
+    try:
+        plan, report = _inspect_candidate_source_authority(root, spec, document, document_digest)
+    except ValueError as exc:
+        from reprobit.source_authority import SourceAuthorityError
+
+        if not isinstance(exc, SourceAuthorityError):
+            raise
+        raise CLIError(
+            "source lock refused because reviewed source-overlay authority must be "
+            f"regenerated: {exc}"
+        ) from exc
+    stale_units = _stale_tu_fields(report)
+    if stale_units:
+        rendered = ", ".join(
+            f"{item['translation_unit_id']} ({item['source']})" for item in stale_units
+        )
+        raise CLIError(
+            "source lock refused because effective translation-unit bytes changed; "
+            "regenerate the affected intervention and proof authority instead of "
+            f"repinning it: {rendered}"
+        )
+
+    producer_graph_path = safe_project_path(root, spec.layout.producer_graph)
+    graph_invalidated = False
+    graph_present = producer_graph_path.is_file()
+    if producer_graph_path.is_file():
+        from reprobit.producer_graph import read_producer_graph
+
+        graph = read_producer_graph(producer_graph_path)
+        if not producer_graph_accepts_source(
+            graph,
+            paths=(item.path for item in document.entries),
+        ):
+            if not args.invalidate_producer_graph:
+                raise CLIError(
+                    "source authority changed while a producer graph is committed; "
+                    "rerun with --invalidate-producer-graph, reconfigure the project, "
+                    "then run `rbit graph extract`"
+                )
+            graph_invalidated = True
+
+    transaction = CASTransaction(root)
+    transaction.write(spec.layout.source_manifest, canonical_json(document))
+    if plan is not None:
+        transaction.write(spec.layout.build_plan, canonical_json(plan))
+    if graph_invalidated:
+        transaction.delete(spec.layout.producer_graph)
+    elif graph_present:
+        transaction.assert_unchanged(spec.layout.producer_graph)
+    for entry in document.entries:
+        transaction.assert_unchanged(entry.path, expected_sha256=entry.digest.value)
+    result = transaction.commit()
+    output.emit(
+        "source_locked",
+        f"locked {len(document.entries)} project source input(s)",
+        output=spec.layout.source_manifest,
+        entries=len(document.entries),
+        source_manifest_digest=document_digest.value,
+        producer_graph_invalidated=graph_invalidated,
+        transaction_id=result.transaction_id,
+    )
+    return 0
+
+
+def command_validate(args: argparse.Namespace, output: CLIOutput) -> int:
+    root = project_root(args.project)
+    bundle = load_project_tree(root)
+    if isinstance(bundle.spec.build, ProducerGraphBuildAdapter) and bundle.producer_graph is None:
+        raise CLIError(
+            "producer-graph project has no committed graph; run the migration "
+            "extractor before validation"
+        )
+    output.emit(
+        "validated",
+        f"validated {bundle.spec.project_id}: {len(bundle.spec.targets)} target(s), "
+        f"{len(bundle.interventions)} intervention(s)",
+        project_id=bundle.spec.project_id,
+        targets=len(bundle.spec.targets),
+        interventions=len(bundle.interventions),
+        proofs=sum(len(item.expected_observations) for item in bundle.proof_documents),
+    )
+    return 0
+
+
+def _scope_text(scope: Any) -> str:
+    values = [scope.target]
+    if scope.translation_unit is not None:
+        values.append(scope.translation_unit)
+    if scope.function is not None:
+        values.append(scope.function)
+    return "/".join(values)
+
+
+def _human_intervention_detail(item: Intervention, cost: InterventionCost) -> str:
+    units = ", ".join(
+        f"{unit.kind.value}: {unit.count} x {unit.unit_cost} = {unit.cost}" for unit in cost.units
+    )
+    dependencies = ", ".join(item.dependencies) or "none"
+    beneficiaries = ", ".join(_scope_text(scope) for scope in item.beneficiaries) or "none"
+    return "\n".join(
+        (
+            f"{item.id}: {item.kind}, cost={cost.cost}, scope={_scope_text(item.scope)}",
+            f"  cost class: {cost.cost_class.value}",
+            f"  typed units: {units}",
+            f"  dependencies: {dependencies}",
+            f"  shared beneficiaries: {beneficiaries}",
+            f"  rationale: {item.rationale}",
+        )
+    )
+
+
+def _human_cost_breakdown(result: CostBreakdown) -> str:
+    attributed = result.project_total - result.unallocated_shared_cost
+    lines = [
+        f"project intervention cost: {result.project_total} relative points "
+        f"(model v{result.model_version})",
+        f"function attribution: {attributed} attributed, "
+        f"{result.unallocated_shared_cost} unallocated project/TU shared",
+    ]
+    if result.by_target:
+        lines.append("targets:")
+        lines.extend(
+            f"  {item.target}: {item.cost} (interventions={item.interventions}, units={item.units})"
+            for item in result.by_target
+        )
+    if result.by_class:
+        lines.append("classes:")
+        lines.extend(
+            f"  {item.cost_class.value}: {item.cost} "
+            f"(interventions={item.interventions}, units={item.units})"
+            for item in result.by_class
+        )
+    return "\n".join(lines)
+
+
+def command_explain(args: argparse.Namespace, output: CLIOutput) -> int:
+    bundle = load_project_tree(project_root(args.project), verify_source_authority=False)
+    costs = {
+        item.intervention_id: item for item in calculate_cost(bundle.interventions).interventions
+    }
+    selected = tuple(
+        item
+        for item in bundle.interventions
+        if args.intervention is None or item.id == args.intervention
+    )
+    if args.intervention is not None and not selected:
+        raise CLIError(f"unknown intervention: {args.intervention}")
+    for item in selected:
+        cost = costs[item.id]
+        summary = f"{item.id}: {item.kind}, cost={cost.cost}, scope={_scope_text(item.scope)}"
+        output.emit(
+            "intervention",
+            (
+                _human_intervention_detail(item, cost)
+                if args.intervention is not None and output.output_format == "text"
+                else summary
+            ),
+            id=item.id,
+            kind=item.kind,
+            cost=cost.cost,
+            cost_class=cost.cost_class.value,
+            units=cost.units,
+            scope=item.scope,
+            rationale=item.rationale,
+            dependencies=item.dependencies,
+            beneficiaries=item.beneficiaries,
+        )
+    return 0
+
+
+def command_cost(args: argparse.Namespace, output: CLIOutput) -> int:
+    bundle = load_project_tree(project_root(args.project), verify_source_authority=False)
+    result = calculate_cost(bundle.interventions)
+    output.emit(
+        "cost",
+        (
+            _human_cost_breakdown(result)
+            if output.output_format == "text"
+            else (
+                f"project intervention cost: {result.project_total} relative points "
+                f"(model v{result.model_version})"
+            )
+        ),
+        breakdown=result,
+    )
+    return 0
+
+
+def command_status(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.project_readiness import (
+        inspect_project_readiness,
+        render_project_readiness,
+    )
+
+    root = project_root(args.project)
+    readiness = inspect_project_readiness(root)
+    output.emit(
+        "project_readiness",
+        render_project_readiness(readiness, include_ready=args.all),
+        ready=readiness.ready,
+        completed=readiness.completed,
+        total=len(readiness.items),
+        next_command=readiness.next_command,
+        checks=readiness.items,
+    )
+    return 0 if readiness.ready else 1
+
+
+def command_report(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.report_io import read_report_json, write_report_html
+
+    source = Path(args.input).expanduser().resolve(strict=True)
+    destination = (
+        Path(args.html).expanduser().resolve(strict=False)
+        if args.html
+        else source.with_suffix(".html")
+    )
+    report = read_report_json(source)
+    write_report_html(report, destination, canonical_json_path=source)
+    output.emit(
+        "report_written",
+        f"wrote self-contained report to {destination}",
+        input=source,
+        html=destination,
+        clean=report.verdict.clean,
+        total_cost=report.costs.project_total,
+    )
+    return 0
+
+
+__all__ = [
+    "command_cost",
+    "command_explain",
+    "command_init",
+    "command_report",
+    "command_source_lock",
+    "command_source_preview",
+    "command_status",
+    "command_validate",
+]

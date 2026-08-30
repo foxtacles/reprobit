@@ -11,7 +11,8 @@ import reprobit.implementation as implementation
 import reprobit.incremental as incremental
 from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.model import Digest
-from reprobit.secure_paths import SecureFileSnapshot, read_relative_file
+from reprobit.secure_path_contracts import SecureFileSnapshot
+from reprobit.secure_paths import read_relative_file
 
 ROOT = Path(__file__).parents[1]
 PACKAGE_ROOT = ROOT / "src" / "reprobit"
@@ -58,15 +59,19 @@ def test_classic_implementation_import_closure_has_exact_architecture_boundary()
         "classic/semantic_contracts.py",
         "classic/source_overlay_claims.py",
         "classic_evidence.py",
+        "classic_execution_records.py",
         "classic_publication.py",
         "classic_runtime.py",
-        "classic_runtime_developer.py",
+        "classic_runtime_probe.py",
         "classic_runtime_donor.py",
         "classic_runtime_environment.py",
+        "classic_runtime_files.py",
         "classic_runtime_graph.py",
         "classic_runtime_overlay.py",
         "classic_runtime_preparation.py",
         "classic_runtime_producer.py",
+        "classic_runtime_receipts.py",
+        "classic_runtime_warm.py",
         "implementation.py",
     }.issubset(relative)
     assert {
@@ -123,8 +128,11 @@ def test_incremental_producer_import_closure_has_a_narrow_product_boundary() -> 
         "classic_incremental.py",
         "classic_incremental_execution.py",
         "classic_incremental_planning.py",
+        "classic_execution_records.py",
         "classic_runtime.py",
+        "classic_runtime_files.py",
         "classic_runtime_producer.py",
+        "classic_runtime_receipts.py",
         "incremental.py",
         "incremental_executor.py",
     }.issubset(relative)
@@ -186,7 +194,10 @@ def test_incremental_producer_digest_excludes_non_output_product_surfaces(
     "relative",
     (
         "classic_incremental.py",
+        "classic_execution_records.py",
+        "classic_runtime_files.py",
         "classic_runtime_producer.py",
+        "classic_runtime_receipts.py",
         "incremental_executor.py",
     ),
 )
@@ -231,6 +242,9 @@ def test_incremental_producer_revalidation_rejects_a_changed_closure(
     (
         "classic/source_overlay_claims.py",
         "classic_runtime_producer.py",
+        "classic_runtime_files.py",
+        "classic_runtime_receipts.py",
+        "classic_execution_records.py",
         "classic_evidence.py",
         "classic_publication.py",
     ),

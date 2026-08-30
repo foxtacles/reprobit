@@ -36,7 +36,6 @@ _CREATE_SUSPENDED = 0x00000004
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 
 
-
 def test_native_device_map_rejects_non_letter_drive() -> None:
     with pytest.raises(NativeDeviceMapError, match="one ASCII letter"):
         NativeDeviceMapLease(Path.cwd(), "RR")
@@ -365,10 +364,7 @@ def test_lineage_drive_reaches_producer_and_descendant(
     decoy_target = api.final_nt_path(decoy.resolve(strict=True))
     api.define_local_drive(device, decoy_target)
     try:
-        assert (
-            Path(rf"{drive}:\marker.txt").read_text(encoding="utf-8")
-            == "controller-private"
-        )
+        assert Path(rf"{drive}:\marker.txt").read_text(encoding="utf-8") == "controller-private"
         with (
             NativeDeviceMapLease(root, drive) as lease,
             ProcessSupervisor() as supervisor,
@@ -382,10 +378,7 @@ def test_lineage_drive_reaches_producer_and_descendant(
                 ),
                 windows_lineage_planner=lease,
             )
-        assert (
-            Path(rf"{drive}:\marker.txt").read_text(encoding="utf-8")
-            == "controller-private"
-        )
+        assert Path(rf"{drive}:\marker.txt").read_text(encoding="utf-8") == "controller-private"
     finally:
         api.remove_local_drive(device, decoy_target)
 
@@ -445,9 +438,7 @@ def test_concurrent_fresh_luids_isolate_the_same_drive_letter(
     with ThreadPoolExecutor(max_workers=2) as executor:
         outputs = tuple(executor.map(run, range(2)))
 
-    assert outputs == tuple(
-        f"{label}{os.linesep}".encode() for label in labels
-    )
+    assert outputs == tuple(f"{label}{os.linesep}".encode() for label in labels)
 
 
 @pytest.mark.skipif(not _WINDOWS, reason="requires native Windows lineage namespace")
@@ -630,7 +621,7 @@ def test_native_backend_runs_the_authenticated_msvc42_producer_chain(
     source_root.mkdir()
     build_root.mkdir()
     (source_root / "smoke.cpp").write_text(
-        "extern \"C\" int main(void) { return 0; }\n",
+        'extern "C" int main(void) { return 0; }\n',
         encoding="ascii",
         newline="\r\n",
     )

@@ -11,9 +11,11 @@ from hashlib import sha256
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 
-from reprobit.secure_paths import (
+from reprobit.secure_path_contracts import (
     SecureFileSnapshot,
     SecurePathError,
+)
+from reprobit.secure_paths import (
     atomic_publish_new_relative,
     atomic_publish_new_relative_from_stream,
     atomic_publish_relative_if_current,
@@ -61,19 +63,13 @@ def _publication_transaction(state_root: Path) -> Iterator[None]:
         try:
             payload, snapshot = read_relative_file(state_root, relative)
         except SecurePathError as exc:
-            raise ClassicPublicationError(
-                f"classic publication lock is unsafe: {exc}"
-            ) from exc
+            raise ClassicPublicationError(f"classic publication lock is unsafe: {exc}") from exc
         if payload != marker:
-            raise ClassicPublicationError(
-                "classic publication lock marker is invalid"
-            ) from None
+            raise ClassicPublicationError("classic publication lock marker is invalid") from None
     try:
         lock = AdvisoryFileLock(snapshot.path, create=False)
     except (OSError, StateError) as exc:
-        raise ClassicPublicationError(
-            f"classic publication lock cannot be opened: {exc}"
-        ) from exc
+        raise ClassicPublicationError(f"classic publication lock cannot be opened: {exc}") from exc
     with lock:
         try:
             payload = lock.read_locked(maximum=len(marker))
@@ -82,9 +78,7 @@ def _publication_transaction(state_root: Path) -> Iterator[None]:
                 f"classic publication lock changed while acquiring it: {exc}"
             ) from exc
         if payload != marker:
-            raise ClassicPublicationError(
-                "classic publication lock changed while acquiring it"
-            )
+            raise ClassicPublicationError("classic publication lock changed while acquiring it")
         yield
 
 
@@ -154,10 +148,7 @@ def publish_classic_output_set(
                 metadata_matches = prior is not None and (
                     (
                         os.name == "posix"
-                        and (
-                            request.mode is None
-                            or stat.S_IMODE(prior.mode) == request.mode
-                        )
+                        and (request.mode is None or stat.S_IMODE(prior.mode) == request.mode)
                     )
                     or (
                         os.name == "nt"
@@ -205,8 +196,7 @@ def publish_classic_output_set(
                     )
                 ):
                     raise ClassicPublicationError(
-                        f"classic {request.kind} {request.owner_id!r} changed "
-                        "during publication"
+                        f"classic {request.kind} {request.owner_id!r} changed during publication"
                     )
                 published.append(ClassicPublishedOutput(request, snapshot, changed))
 
@@ -220,9 +210,7 @@ def publish_classic_output_set(
                     )
                     for item in published
                 )
-                committed = [
-                    (request, held[request.relative]) for request, _snapshot in committed
-                ]
+                committed = [(request, held[request.relative]) for request, _snapshot in committed]
                 yield held_outputs
     except BaseException as publication_error:
         rollback_errors: list[str] = []
@@ -243,11 +231,7 @@ def publish_classic_output_set(
                     ),
                     None,
                 )
-                if (
-                    prior_entry is None
-                    or prior_entry[1] is None
-                    or prior_entry[2] is None
-                ):
+                if prior_entry is None or prior_entry[1] is None or prior_entry[2] is None:
                     continue
                 prior_payload = prior_entry[1]
                 prior_snapshot = prior_entry[2]
@@ -255,11 +239,7 @@ def publish_classic_output_set(
                     project_root,
                     request.relative,
                     BytesIO(prior_payload),
-                    mode=(
-                        stat.S_IMODE(prior_snapshot.mode)
-                        if os.name == "posix"
-                        else None
-                    ),
+                    mode=(stat.S_IMODE(prior_snapshot.mode) if os.name == "posix" else None),
                     windows_attributes=(
                         prior_snapshot.windows_attributes if os.name == "nt" else None
                     ),
@@ -271,13 +251,11 @@ def publish_classic_output_set(
                     or restored.size != prior_snapshot.size
                     or (
                         os.name == "posix"
-                        and stat.S_IMODE(restored.mode)
-                        != stat.S_IMODE(prior_snapshot.mode)
+                        and stat.S_IMODE(restored.mode) != stat.S_IMODE(prior_snapshot.mode)
                     )
                     or (
                         os.name == "nt"
-                        and restored.windows_attributes
-                        != prior_snapshot.windows_attributes
+                        and restored.windows_attributes != prior_snapshot.windows_attributes
                     )
                 ):
                     raise ClassicPublicationError(

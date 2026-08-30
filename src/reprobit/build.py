@@ -132,9 +132,7 @@ class BuildPlan:
                         f"output {output!r} is produced by both {owner!r} and {step.id!r}"
                     )
                 output_owners[output] = step.id
-        if len({admission.id for admission in self.link_admissions}) != len(
-            self.link_admissions
-        ):
+        if len({admission.id for admission in self.link_admissions}) != len(self.link_admissions):
             raise BuildPlanError("link-admission ids must be unique")
         self._validate_acyclic(step_index)
 
@@ -234,8 +232,7 @@ class BuildPlan:
             )
             environment = raw.get("environment", {})
             if not isinstance(environment, Mapping) or not all(
-                isinstance(key, str) and isinstance(item, str)
-                for key, item in environment.items()
+                isinstance(key, str) and isinstance(item, str) for key, item in environment.items()
             ):
                 raise BuildPlanError("build-step environment must map strings to strings")
             steps.append(
@@ -247,9 +244,7 @@ class BuildPlan:
                     inputs=_strings(raw.get("inputs", []), "build-step inputs"),
                     outputs=_strings(raw.get("outputs", []), "build-step outputs"),
                     environment=tuple(sorted(environment.items())),
-                    timeout_seconds=_number(
-                        raw.get("timeout_seconds", 600), "build-step timeout"
-                    ),
+                    timeout_seconds=_number(raw.get("timeout_seconds", 600), "build-step timeout"),
                 )
             )
         admissions: list[LinkAdmission] = []
@@ -279,9 +274,7 @@ class BuildPlan:
                     insertion_index=_optional_int(raw.get("insertion_index"), "insertion index"),
                     before=_optional_string(raw.get("before"), "before selector"),
                     after=_optional_string(raw.get("after"), "after selector"),
-                    expected_symbol=_optional_string(
-                        raw.get("expected_symbol"), "expected symbol"
-                    ),
+                    expected_symbol=_optional_string(raw.get("expected_symbol"), "expected symbol"),
                 )
             )
         schema_version = value.get("schema_version")

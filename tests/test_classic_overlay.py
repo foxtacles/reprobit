@@ -10,15 +10,15 @@ from pathlib import Path
 import pytest
 
 from reprobit.artifacts import digest_bytes
-from reprobit.classic_overlay import (
-    ClassicOverlayRenderSession,
-    SourceEditError,
+from reprobit.classic_overlay_document import (
     render_classic_overlay,
     render_classic_overlay_declarations,
-    render_classic_overlay_generator,
     render_classic_overlay_leaf_subset,
     render_classic_overlay_subset,
 )
+from reprobit.classic_overlay_generator import render_classic_overlay_generator
+from reprobit.classic_overlay_tokens import ClassicOverlayRenderSession
+from reprobit.classic_overlay_types import SourceEditError
 from reprobit.migration_overlay import normalize_legacy_member_probe_return_types
 
 

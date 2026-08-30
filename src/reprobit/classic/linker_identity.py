@@ -117,9 +117,7 @@ def _source_is_canonical(lock: ToolchainLock) -> bool:
 
 def _tool_is_canonical(lock: ToolchainLock) -> bool:
     matches = [
-        tool
-        for tool in lock.tools
-        if tool.path.casefold() == _CANONICAL_LINKER.path.casefold()
+        tool for tool in lock.tools if tool.path.casefold() == _CANONICAL_LINKER.path.casefold()
     ]
     if len(matches) != 1:
         return False
@@ -131,9 +129,7 @@ def _tool_is_canonical(lock: ToolchainLock) -> bool:
         or received.roles != _CANONICAL_LINKER.roles
     ):
         return False
-    linker_tools = [
-        tool for tool in (*lock.tools, *lock.runtime_files) if "linker" in tool.roles
-    ]
+    linker_tools = [tool for tool in (*lock.tools, *lock.runtime_files) if "linker" in tool.roles]
     return len(linker_tools) == 1 and linker_tools[0] == received
 
 

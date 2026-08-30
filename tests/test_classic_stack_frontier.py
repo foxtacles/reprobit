@@ -159,9 +159,7 @@ def full_stack_frontier_window(body: bytes, start: int, end: int, order: list[in
 class StackFrontierProjectionTest(unittest.TestCase):
     def test_a_register_push_implicitly_conflicts_with_unknown_explicit_memory(self):
         body = PUSH + FRAME_LOAD
-        _facts, edges = schedule_algorithms.ia32_schedule_dependence_edges(
-            decode(body), "w", body
-        )
+        _facts, edges = schedule_algorithms.ia32_schedule_dependence_edges(decode(body), "w", body)
         self.assertEqual(edges, [[0, 1, ["memory"]]])
         with self.assertRaises(ByteIdentityError) as caught:
             schedule_algorithms.require_topological_instruction_order(2, edges, [1, 0], "w")
@@ -246,9 +244,7 @@ class BoundaryAuthenticityTest(unittest.TestCase):
         instructions = decode(body)
         flow = schedule_algorithms.ia32_web_control_flow(instructions, "w")
         self.assertIsNone(
-            frontier_balance._one_word_vcall_shape(
-                body, instructions, predecessors(flow), {}, 3
-            )
+            frontier_balance._one_word_vcall_shape(body, instructions, predecessors(flow), {}, 3)
         )
 
     def test_sub_esp_is_not_a_callee_clean_argument_push(self):
@@ -256,18 +252,14 @@ class BoundaryAuthenticityTest(unittest.TestCase):
         instructions = decode(body)
         flow = schedule_algorithms.ia32_web_control_flow(instructions, "w")
         self.assertIsNone(
-            frontier_balance._one_word_vcall_shape(
-                body, instructions, predecessors(flow), {}, 2
-            )
+            frontier_balance._one_word_vcall_shape(body, instructions, predecessors(flow), {}, 2)
         )
 
     def test_an_indirect_tail_jump_is_not_a_vcall_candidate(self) -> None:
         body = bytes.fromhex("8bce8b0652ff20")
         instructions = decode(body)
         self.assertIsNone(
-            frontier_balance._one_word_vcall_shape(
-                body, instructions, [[], [0], [1], [2]], {}, 3
-            )
+            frontier_balance._one_word_vcall_shape(body, instructions, [[], [0], [1], [2]], {}, 3)
         )
 
     def test_strong_vcall_binds_the_exact_receiver_vtable_lea_push_chain(self) -> None:
@@ -305,9 +297,7 @@ class BoundaryAuthenticityTest(unittest.TestCase):
         predecessor_rows = predecessors(flow)
         predecessor_rows[2].append(0)
         self.assertIsNone(
-            frontier_balance._one_word_vcall_shape(
-                body, instructions, predecessor_rows, {}, 4
-            )
+            frontier_balance._one_word_vcall_shape(body, instructions, predecessor_rows, {}, 4)
         )
 
     def test_strong_vcall_refuses_non_vftable_slots(self) -> None:
@@ -347,6 +337,7 @@ class BoundaryAuthenticityTest(unittest.TestCase):
         self.assertIsNotNone(msvc420_direct_cdecl_call(body, instructions, relocations, 0))
         member = {1: {"width": 4, "target": "?foo@@QAEJH@Z"}}
         self.assertIsNone(msvc420_direct_cdecl_call(body, instructions, member, 0))
+
 
 class StackFrontierApplicationTest(unittest.TestCase):
     def test_standard_frontier_uses_the_compiler_canonical_stack_dag(self) -> None:
@@ -530,9 +521,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
                 }
                 instructions = decode(body)
                 successors = schedule_algorithms.ia32_web_control_flow(instructions, "s")
-                sink = next(
-                    index for index, item in enumerate(instructions) if item["offset"] == 9
-                )
+                sink = next(index for index, item in enumerate(instructions) if item["offset"] == 9)
                 ancestor_set = ancestors(predecessors(successors), {sink})
                 floor, first_call = frame_floor(body, instructions, "s")
                 _depths, receipts = frontier_balance.derive_stack_depths(

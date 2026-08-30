@@ -76,9 +76,7 @@ def test_native_doctor_fails_closed_when_host_lacks_private_device_map() -> None
 
     assert report.ok is False
     assert report.executed_probe is True
-    mapping = next(
-        check for check in report.checks if check.name == "certifying logical drive"
-    )
+    mapping = next(check for check in report.checks if check.name == "certifying logical drive")
     assert mapping.required is True
     assert mapping.passed is False
     assert "require Windows" in mapping.detail

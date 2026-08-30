@@ -147,8 +147,7 @@ def test_failed_atomic_replace_keeps_previous_settings(
         b"{}\n",
         b'{"schema":"reprobit.user-config.v1","toolchain_roots":[]}\n',
         b'{"schema":"reprobit.user-config.v1","toolchain_roots":{"msvc_4_2":"relative"}}\n',
-        b'{"schema":"reprobit.user-config.v1","schema":"duplicate",'
-        b'"toolchain_roots":{}}\n',
+        b'{"schema":"reprobit.user-config.v1","schema":"duplicate","toolchain_roots":{}}\n',
     ),
 )
 def test_malformed_user_settings_are_not_ignored(
@@ -172,13 +171,7 @@ def test_platform_defaults_use_standard_user_data_locations(
 
     monkeypatch.setattr(user_config, "_platform_name", lambda: "darwin")
     assert default_toolchain_root(MSVC_42) == (
-        tmp_path
-        / "home"
-        / "Library"
-        / "Application Support"
-        / "ReproBit"
-        / "toolchains"
-        / MSVC_42
+        tmp_path / "home" / "Library" / "Application Support" / "ReproBit" / "toolchains" / MSVC_42
     )
 
     monkeypatch.setattr(user_config, "_platform_name", lambda: "linux")

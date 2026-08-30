@@ -305,9 +305,7 @@ class WineDriveBinding(AbstractContextManager["WineDriveBinding"]):
             raise BackendError("Wine drive mapping has no active lifetime seal")
         received = self._capture()
         if received != self._snapshot:
-            raise BackendError(
-                "Wine dosdevices mapping changed during producer execution"
-            )
+            raise BackendError("Wine dosdevices mapping changed during producer execution")
 
     def complete_lifetime(self) -> None:
         self.verify_lifetime()
@@ -449,9 +447,7 @@ class PosixWineBackend(ExecutionBackend):
         return (str(self.wine_pin.path), *_command(command))
 
     def _loader_environment(self, worker: WorkerSandbox | None) -> dict[str, str]:
-        pins = tuple(
-            pin for pin in (self.wine_pin, self.wineserver_pin) if pin is not None
-        )
+        pins = tuple(pin for pin in (self.wine_pin, self.wineserver_pin) if pin is not None)
         executable_directories = tuple(dict.fromkeys(str(pin.path.parent) for pin in pins))
         search_path = (*executable_directories, "/usr/bin", "/bin", "/usr/sbin", "/sbin")
         environment = {
@@ -483,9 +479,7 @@ class PosixWineBackend(ExecutionBackend):
         )
         if library_roots:
             variable = (
-                "DYLD_FALLBACK_LIBRARY_PATH"
-                if _host_system() == "Darwin"
-                else "LD_LIBRARY_PATH"
+                "DYLD_FALLBACK_LIBRARY_PATH" if _host_system() == "Darwin" else "LD_LIBRARY_PATH"
             )
             environment[variable] = os.pathsep.join(
                 dict.fromkeys(str(path) for path in library_roots)
@@ -616,8 +610,7 @@ class PosixWineBackend(ExecutionBackend):
                 pass
             else:
                 raise BackendError(
-                    f"foreground wineserver exited during lease creation: "
-                    f"{process.returncode}"
+                    f"foreground wineserver exited during lease creation: {process.returncode}"
                 )
             lease = _WineServerLease(
                 key,
@@ -688,9 +681,7 @@ class PosixWineBackend(ExecutionBackend):
                 for item in overrides.split(";")
                 if item
             ):
-                raise BackendError(
-                    "Wine bootstrap environment predefines winemenubuilder policy"
-                )
+                raise BackendError("Wine bootstrap environment predefines winemenubuilder policy")
             environment["WINEDLLOVERRIDES"] = ";".join(
                 item for item in (overrides, "winemenubuilder.exe=d") if item
             )
@@ -721,9 +712,7 @@ class PosixWineBackend(ExecutionBackend):
         except BaseException:
             try:
                 if bootstrap_started:
-                    self.terminate_worker_server(
-                        worker, timeout_seconds=min(timeout_seconds, 10)
-                    )
+                    self.terminate_worker_server(worker, timeout_seconds=min(timeout_seconds, 10))
             finally:
                 # Best-effort removal is still bounded to symlinks in this
                 # abandoned private prefix.  Any unsafe entry remains a hard
@@ -781,16 +770,12 @@ class PosixWineBackend(ExecutionBackend):
             if mapping == c_drive:
                 continue
             if not mapping.is_symlink():
-                raise BackendError(
-                    f"Wine runtime left an unowned drive entry: {mapping.name}"
-                )
+                raise BackendError(f"Wine runtime left an unowned drive entry: {mapping.name}")
             mapping.unlink()
         if tuple(dosdevices.iterdir()) != (c_drive,):
             raise BackendError("Wine runtime drive cleanup was incomplete")
 
-    def verify_worker_drive_mappings(
-        self, worker: WorkerSandbox, *, logical_drive: str
-    ) -> None:
+    def verify_worker_drive_mappings(self, worker: WorkerSandbox, *, logical_drive: str) -> None:
         """Require exactly private c: plus the currently owned logical drive."""
 
         if not re.fullmatch(r"[A-Za-z]", logical_drive):
@@ -828,8 +813,7 @@ class PosixWineBackend(ExecutionBackend):
             prefix_metadata = worker.wine_prefix.stat(follow_symlinks=False)
             if (
                 worker.wine_prefix.resolve(strict=True) != lease.prefix
-                or (prefix_metadata.st_dev, prefix_metadata.st_ino)
-                != lease.prefix_identity
+                or (prefix_metadata.st_dev, prefix_metadata.st_ino) != lease.prefix_identity
             ):
                 errors.append("private Wine prefix changed during its server lease")
         except OSError as exc:
@@ -878,9 +862,7 @@ class PosixWineBackend(ExecutionBackend):
                 errors.append("owned wineserver process group could not be reaped")
         else:
             if lease.process.returncode != 0:
-                errors.append(
-                    f"owned wineserver exited with code {lease.process.returncode}"
-                )
+                errors.append(f"owned wineserver exited with code {lease.process.returncode}")
         try:
             os.killpg(lease.process_group, 0)
         except ProcessLookupError:

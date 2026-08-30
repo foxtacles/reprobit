@@ -1041,9 +1041,7 @@ def compose_retail_exact_simulated_elision(
         assert region_owner is not None
         image_span_start = offset_map[region_owner["region_start"]]
         require(
-            image_span_start
-            <= image_offset
-            < image_span_start + region_owner["image_length"],
+            image_span_start <= image_offset < image_span_start + region_owner["image_length"],
             f"simulated-elision line row position at {seed_offset} leaves its region's image",
         )
         cursor = image_span_start
@@ -1095,9 +1093,7 @@ def compose_retail_exact_simulated_elision(
         start, width = row["offset"], row["width"]
         masked_image[start : start + width] = b"\0" * width
         masked_retail[start : start + width] = b"\0" * width
-    differing = sum(
-        left != right for left, right in zip(masked_image, masked_retail, strict=True)
-    )
+    differing = sum(left != right for left, right in zip(masked_image, masked_retail, strict=True))
     require(
         differing == 0,
         f"simulated-elision output is not retail-exact: {differing} "

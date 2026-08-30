@@ -84,12 +84,7 @@ class PadShapeSearch(StrictModel):
     def generator_domain(self) -> PadShapeSearch:
         if not 1 <= self.classes.start <= self.classes.stop <= 99:
             raise ValueError("pad-shape classes must stay in [1, 99]")
-        if not (
-            1
-            <= self.functions_per_class.start
-            <= self.functions_per_class.stop
-            <= 99
-        ):
+        if not (1 <= self.functions_per_class.start <= self.functions_per_class.stop <= 99):
             raise ValueError("pad-shape functions-per-class must stay in [1, 99]")
         return self
 
@@ -134,12 +129,10 @@ class ExternRunPairSearch(StrictModel):
 
 
 DeclarationSearch = Annotated[
-    DeclarationShapeSearch
-    | PadShapeSearch
-    | ForwardDeclarationSearch
-    | ExternRunPairSearch,
+    DeclarationShapeSearch | PadShapeSearch | ForwardDeclarationSearch | ExternRunPairSearch,
     Field(discriminator="family"),
 ]
+
 
 class MosaicLimits(StrictModel):
     enabled: bool = True
@@ -222,9 +215,7 @@ def enumerate_declaration_states(plan: DiscoveryPlan) -> tuple[DeclarationState,
         if identity in identities:
             raise DiscoveryError("declaration searches enumerate a duplicate state")
         if len(states) >= plan.max_cells:
-            raise DiscoveryError(
-                f"declaration campaign expands above max_cells {plan.max_cells}"
-            )
+            raise DiscoveryError(f"declaration campaign expands above max_cells {plan.max_cells}")
         identities.add(identity)
         states.append(state)
 
@@ -340,9 +331,7 @@ class MosaicRangeProposal(StrictModel):
     seed: Digest
     donor: Digest
     seed_instruction_lengths: Annotated[tuple[int, ...], Field(min_length=1, max_length=64)]
-    donor_instruction_lengths: Annotated[
-        tuple[int, ...], Field(min_length=1, max_length=64)
-    ]
+    donor_instruction_lengths: Annotated[tuple[int, ...], Field(min_length=1, max_length=64)]
 
     @model_validator(mode="after")
     def instruction_partitions(self) -> MosaicRangeProposal:
@@ -611,9 +600,7 @@ def discovery_report_json_schema() -> JsonValue:
 class DiscoveryCompileOutput:
     object_path: Path
     receipt: CompileReceipt
-    metadata: Mapping[str, JsonValue] = field(
-        default_factory=lambda: MappingProxyType({})
-    )
+    metadata: Mapping[str, JsonValue] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(frozen=True, slots=True)
@@ -690,6 +677,7 @@ class DiscoveryAdapter(Protocol):
         proposals: Sequence[DiscoveryProposal],
         products: Sequence[DiscoveryProduct],
     ) -> tuple[DiscoveryArtifactPayload, ...]: ...
+
 
 __all__ = [
     "CellObservation",

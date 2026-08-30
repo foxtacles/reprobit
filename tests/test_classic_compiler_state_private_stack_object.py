@@ -71,8 +71,7 @@ _RELOCATION_ROWS = (
     (
         219,
         20,
-        "?_Buynode@?$list@USampleNode@@V?$allocator@USampleNode@@@@@@"
-        "IAEPAU_Node@1@PAU21@0@Z",
+        "?_Buynode@?$list@USampleNode@@V?$allocator@USampleNode@@@@@@IAEPAU_Node@1@PAU21@0@Z",
     ),
     (
         309,
@@ -426,9 +425,7 @@ def test_private_stack_object_pair_requires_exact_displacement_rejoin(
     value: int,
 ) -> None:
     changes = {
-        "clean_body": _replace_byte(_CLEAN, offset, value)
-        if side == "clean"
-        else _CLEAN,
+        "clean_body": _replace_byte(_CLEAN, offset, value) if side == "clean" else _CLEAN,
         "effective_body": _replace_byte(_EFFECTIVE, offset, value)
         if side == "effective"
         else _EFFECTIVE,

@@ -17,7 +17,7 @@ from reprobit.schema import (
 from reprobit.source_lock import SourceLockError, receipt_source_input
 
 if TYPE_CHECKING:
-    from reprobit.classic_overlay import ClassicOverlayRenderSession
+    from reprobit.classic_overlay_tokens import ClassicOverlayRenderSession
 
 
 class SourceAuthorityError(ValueError):
@@ -97,9 +97,7 @@ def inspect_source_authority(
         graph = values.get("graph")
         schema = values.get("schema")
         if not isinstance(outputs, list) or not isinstance(graph, dict) or schema != 2:
-            raise SourceAuthorityError(
-                f"source-overlay authority {intervention.id!r} is malformed"
-            )
+            raise SourceAuthorityError(f"source-overlay authority {intervention.id!r} is malformed")
         for raw in outputs:
             if not isinstance(raw, dict):
                 raise SourceAuthorityError(
@@ -131,10 +129,8 @@ def inspect_source_authority(
             effective[entry.path] = data
 
     overlay_outputs: list[str] = []
-    from reprobit.classic_overlay import (
-        ClassicOverlayRenderSession,
-        render_classic_overlay,
-    )
+    from reprobit.classic_overlay_document import render_classic_overlay
+    from reprobit.classic_overlay_tokens import ClassicOverlayRenderSession
 
     owns_render_session = render_session is None
     active_render_session = render_session or ClassicOverlayRenderSession()
@@ -161,8 +157,7 @@ def inspect_source_authority(
                 )
             except ValueError as exc:
                 raise SourceAuthorityError(
-                    "source-overlay authority requires regeneration for "
-                    f"{intervention.id!r}: {exc}"
+                    f"source-overlay authority requires regeneration for {intervention.id!r}: {exc}"
                 ) from exc
             for receipt in rendered.receipts:
                 effective[receipt.path] = rendered.outputs[receipt.path]

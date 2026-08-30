@@ -17,7 +17,7 @@ from reprobit.classic.overlay_declarations import (
 from reprobit.classic.semantic_contracts import CleanSourceInput
 from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.classic.source_proofs import iter_source_overlay_tokens, source_overlay_tokens
-from reprobit.classic_overlay import ClassicOverlayOperationReceipt
+from reprobit.classic_overlay_types import ClassicOverlayOperationReceipt
 from reprobit.model import Digest
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole
 from reprobit.schema import ClassicRecipeIntervention
@@ -764,14 +764,19 @@ def _has_unconditional_standard_assert_include(payload: bytes, *, before_offset:
                 return False
             conditional_depth -= 1
             continue
-        if directive == "include" and conditional_depth == 0 and tokens == (
-            "#",
-            "include",
-            "<",
-            "assert",
-            ".",
-            "h",
-            ">",
+        if (
+            directive == "include"
+            and conditional_depth == 0
+            and tokens
+            == (
+                "#",
+                "include",
+                "<",
+                "assert",
+                ".",
+                "h",
+                ">",
+            )
         ):
             return True
     return False

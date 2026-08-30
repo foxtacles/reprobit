@@ -71,15 +71,12 @@ def _prove_whole_function_web(
             "MSVC 4.20 saved-prologue control flow changes outside its linear window",
         )
 
-    clean_incoming = _web_reaching_definitions(
-        clean_instructions, clean_successors, frozenset({0})
-    )
+    clean_incoming = _web_reaching_definitions(clean_instructions, clean_successors, frozenset({0}))
     effective_incoming = _web_reaching_definitions(
         effective_instructions, effective_successors, frozenset({0})
     )
     definition_map = {
-        ("entry", 0, register): ("entry", 0, register)
-        for register in IA32_GENERAL_REGISTER_NAMES
+        ("entry", 0, register): ("entry", 0, register) for register in IA32_GENERAL_REGISTER_NAMES
     }
     local_maps: list[dict[str, str]] = []
     rewritten_fields: list[dict[str, object]] = []
@@ -123,9 +120,7 @@ def _prove_whole_function_web(
         local: dict[str, str] = {}
         piece = bytearray(pair.clean_body[source_start : source_start + source_length])
         window_local = source_window_local.get(source_index)
-        adjustment = (
-            adjustment_by_local.get(window_local) if window_local is not None else None
-        )
+        adjustment = adjustment_by_local.get(window_local) if window_local is not None else None
         if adjustment is not None:
             _local_index, at, old, new = adjustment
             local_at = at - source_start
@@ -139,9 +134,7 @@ def _prove_whole_function_web(
                 int.from_bytes(piece[local_at : local_at + size], "little", signed=True) == old,
                 "MSVC 4.20 saved-prologue stack field changed before reconstruction",
             )
-            piece[local_at : local_at + size] = int(new).to_bytes(
-                size, "little", signed=True
-            )
+            piece[local_at : local_at + size] = int(new).to_bytes(size, "little", signed=True)
         for ordinal, (source_register, target_register) in enumerate(
             zip(source_fields, target_fields, strict=True)
         ):
@@ -175,12 +168,8 @@ def _prove_whole_function_web(
                 )
         for register in set(source_item["reads"]) | set(source_item["writes"]):
             local.setdefault(register, register)
-        mapped_reads = {
-            local[register] for register in source_item["reads"] if register != "esp"
-        }
-        mapped_writes = {
-            local[register] for register in source_item["writes"] if register != "esp"
-        }
+        mapped_reads = {local[register] for register in source_item["reads"] if register != "esp"}
+        mapped_writes = {local[register] for register in source_item["writes"] if register != "esp"}
         _require(
             mapped_reads == set(target_item["reads"]) - {"esp"}
             and mapped_writes == set(target_item["writes"]) - {"esp"}
@@ -266,13 +255,11 @@ def _prove_whole_function_web(
     )
 
     target_save_indexes = {
-        name: effective_window_indexes[target_position[save_by_register[name]]]
-        for name in cycle
+        name: effective_window_indexes[target_position[save_by_register[name]]] for name in cycle
     }
     for definition in cycle_definitions:
         _require(
-            definition["target_instruction"]
-            > target_save_indexes[definition["target_register"]],
+            definition["target_instruction"] > target_save_indexes[definition["target_register"]],
             "MSVC 4.20 saved-prologue defines a web before saving its image register",
         )
 

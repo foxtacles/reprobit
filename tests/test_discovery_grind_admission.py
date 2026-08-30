@@ -399,7 +399,5 @@ def test_publication_rejects_concurrent_authority_insertion(
         )
 
     assert inserted.read_bytes() == b"concurrent authority\n"
-    assert root.joinpath(intervention_relative).read_bytes() == canonical_json(
-        old_interventions
-    )
+    assert root.joinpath(intervention_relative).read_bytes() == canonical_json(old_interventions)
     assert root.joinpath(proof_relative).read_bytes() == canonical_json(old_proofs)

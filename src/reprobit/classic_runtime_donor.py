@@ -26,7 +26,8 @@ from reprobit.classic_donors import (
     DonorIncludeProjection,
     donor_requires_dependency_tracking,
 )
-from reprobit.classic_evidence import (
+from reprobit.classic_execution_records import (
+    ClassicActiveCompilerEpoch,
     ClassicDonorOutputReceipt,
     ClassicObjectTransformReceipt,
     ClassicProducerRead,
@@ -53,6 +54,13 @@ from reprobit.classic_runtime_environment import (
     _logical_join,
     _logical_relative_parts,
     _run,
+)
+from reprobit.classic_runtime_files import (
+    _path_is_within,
+    _require_declared_tree_writes,
+    _safe_relative,
+    _secure_remove_regular,
+    _tree_file_seal,
 )
 from reprobit.classic_runtime_graph import (
     ClassicCompileRecord,
@@ -92,17 +100,13 @@ if TYPE_CHECKING:
     from reprobit.legacy import PE32VirtualAddressReader
 
 
-from reprobit.classic_runtime_overlay import ClassicActiveCompilerEpoch
 from reprobit.classic_runtime_producer import (
     ClassicProducerExecution,
     ClassicProgressReporter,
+)
+from reprobit.classic_runtime_receipts import (
     _internal_step,
-    _path_is_within,
-    _require_declared_tree_writes,
-    _safe_relative,
-    _secure_remove_regular,
     _step_receipt,
-    _tree_file_seal,
 )
 
 
@@ -267,8 +271,7 @@ class ClassicDonorComposition:
         matches = [
             item
             for item in self.compile_records
-            if item.source == source
-            and item.build_target == donor.request.build_target
+            if item.source == source and item.build_target == donor.request.build_target
         ]
         if len(matches) != 1:
             raise ClassicProjectError(
@@ -901,9 +904,7 @@ class ClassicDonorComposition:
             )
             if compiler_node is None:
                 raise ClassicProjectError("group-order unit lacks its compiler node")
-            _source_reference, object_reference = classic_compiler_product_refs(
-                compiler_node
-            )
+            _source_reference, object_reference = classic_compiler_product_refs(compiler_node)
             object_transform = ClassicObjectTransformReceipt(
                 unit.plan.id,
                 object_reference,

@@ -178,7 +178,7 @@ def _probe_seed(
         prepare_run=prepare_run,
     )
     try:
-        outputs = prepared.developer.probe_compiler_nodes(
+        outputs = prepared.probes.probe_compiler_nodes(
             (node_id,),
             source_epoch="effective",
         )
@@ -205,7 +205,7 @@ def _probe_donors(
         prepare_run=prepare_run,
     )
     try:
-        outputs = prepared.developer.probe_donor_compilers(
+        outputs = prepared.probes.probe_donor_compilers(
             donor_ids,
             progress=progress,
         )

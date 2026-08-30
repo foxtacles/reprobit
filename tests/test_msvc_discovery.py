@@ -622,7 +622,10 @@ def test_adapter_cache_material_is_stable_and_json_safe() -> None:
     assert "discovery.py" in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS
     assert "discovery_contracts.py" in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS
     assert "cache.py" in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
+    assert "secure_path_contracts.py" in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
     assert "secure_paths.py" in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
+    assert "secure_paths_posix.py" in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
+    assert "secure_paths_windows.py" in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
     assert "msvc_discovery.py" in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
     assert "msvc_discovery_analysis.py" not in msvc_discovery._COMPILE_IMPLEMENTATION_PATHS
     assert "msvc_discovery.py" in msvc_discovery_analysis._ANALYSIS_IMPLEMENTATION_PATHS

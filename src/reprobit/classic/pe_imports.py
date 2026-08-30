@@ -367,10 +367,7 @@ def _validated_declaration(value: object) -> dict[str, object]:
             item = identity.get("value")
             if kind == "name":
                 require(
-                    isinstance(item, str)
-                    and item.isascii()
-                    and bool(item)
-                    and "\0" not in item,
+                    isinstance(item, str) and item.isascii() and bool(item) and "\0" not in item,
                     f"{where} name is invalid",
                 )
                 assert isinstance(item, str)

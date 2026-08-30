@@ -38,10 +38,12 @@ from reprobit.discovery_contracts import (
 from reprobit.model import Digest
 from reprobit.process import CancellationToken
 from reprobit.progress import ProgressEmitter, ProgressObserver
-from reprobit.secure_paths import (
+from reprobit.secure_path_contracts import (
     SecurePathError,
-    atomic_publish_new_relative,
     canonical_system_path,
+)
+from reprobit.secure_paths import (
+    atomic_publish_new_relative,
     read_relative_file,
 )
 from reprobit.strict_json import JsonValue, canonical_json
@@ -113,12 +115,8 @@ def _clear_discovery_workspace(path: Path, *, remove_directory: bool) -> None:
             metadata = entry.stat(follow_symlinks=False)
         except OSError as exc:
             raise DiscoveryError(f"cannot inspect discovery workspace entry: {entry.path}") from exc
-        if entry.name not in _DISCOVERY_WORKSPACE_FILES or not stat.S_ISREG(
-            metadata.st_mode
-        ):
-            raise DiscoveryError(
-                f"discovery workspace contains an unadmitted entry: {entry.path}"
-            )
+        if entry.name not in _DISCOVERY_WORKSPACE_FILES or not stat.S_ISREG(metadata.st_mode):
+            raise DiscoveryError(f"discovery workspace contains an unadmitted entry: {entry.path}")
         try:
             os.unlink(entry.path)
         except OSError as exc:
@@ -228,9 +226,7 @@ def _publish_selected_artifacts(
         )
         prior_state = states.setdefault(payload.cell_id, state)
         if prior_state != state:
-            raise DiscoveryError(
-                f"discovery cell has conflicting state exports: {payload.cell_id}"
-            )
+            raise DiscoveryError(f"discovery cell has conflicting state exports: {payload.cell_id}")
     return (
         tuple(sorted(states.values(), key=lambda item: item.cell_id)),
         tuple(sorted(artifacts.values(), key=lambda item: item.artifact_id)),
@@ -260,8 +256,7 @@ class DiscoveryCampaignRunner:
         self.adapter = adapter
         self.input_receipts = tuple(input_receipts)
         input_keys = tuple(
-            (item.role.value, item.symbol or "", item.logical_path)
-            for item in self.input_receipts
+            (item.role.value, item.symbol or "", item.logical_path) for item in self.input_receipts
         )
         if input_keys != tuple(sorted(set(input_keys))):
             raise DiscoveryError("discovery input receipts must be unique and canonical")
@@ -336,9 +331,10 @@ class DiscoveryCampaignRunner:
             # record operations are path-local and immutable-publication based;
             # its only invocation-local field is closed after this pool drains.
             # A concurrency regression test exercises lookup/restore/store races.
-            with cache.lease() as lease, self.emitter.phase(
-                "discovery-compile", "compiling declaration states"
-            ) as phase:
+            with (
+                cache.lease() as lease,
+                self.emitter.phase("discovery-compile", "compiling declaration states") as phase,
+            ):
 
                 def execute(state: DeclarationState) -> tuple[DiscoveryProduct, bool]:
                     cancellation.raise_if_cancelled()
@@ -401,8 +397,7 @@ class DiscoveryCampaignRunner:
                         receipt = CompileReceipt.model_validate(raw_receipt)
                         if receipt.working_directory != working_directory:
                             raise DiscoveryError(
-                                "compiler working directory differs from the cache key: "
-                                f"{cell_id}"
+                                f"compiler working directory differs from the cache key: {cell_id}"
                             )
                         restored = lease.restore_selected(
                             record,
@@ -430,8 +425,7 @@ class DiscoveryCampaignRunner:
                         receipt = output.receipt
                         if receipt.working_directory != working_directory:
                             raise DiscoveryError(
-                                "compiler working directory differs from the cache key: "
-                                f"{cell_id}"
+                                f"compiler working directory differs from the cache key: {cell_id}"
                             )
                         record = lease.store(
                             _CACHE_DOMAIN,
@@ -440,9 +434,7 @@ class DiscoveryCampaignRunner:
                             metadata={
                                 "schema_version": 3,
                                 "state_id": state_id,
-                                "compile_receipt": cast(
-                                    JsonValue, receipt.model_dump(mode="json")
-                                ),
+                                "compile_receipt": cast(JsonValue, receipt.model_dump(mode="json")),
                                 "adapter_metadata": _json_mapping(output.metadata),
                             },
                         )
@@ -507,12 +499,8 @@ class DiscoveryCampaignRunner:
                             {"candidate.obj": object_path},
                             metadata={
                                 "schema_version": 1,
-                                "object": cast(
-                                    JsonValue, object_digest.model_dump(mode="json")
-                                ),
-                                "observation": cast(
-                                    JsonValue, observation.model_dump(mode="json")
-                                ),
+                                "object": cast(JsonValue, object_digest.model_dump(mode="json")),
+                                "observation": cast(JsonValue, observation.model_dump(mode="json")),
                             },
                         )
                     return DiscoveryProduct(state, object_path, observation), hit
@@ -528,9 +516,7 @@ class DiscoveryCampaignRunner:
                     max_workers=worker_count,
                     thread_name_prefix="reprobit-discovery",
                 ) as pool:
-                    pending: dict[
-                        Future[tuple[DiscoveryProduct, bool]], DeclarationState
-                    ] = {}
+                    pending: dict[Future[tuple[DiscoveryProduct, bool]], DeclarationState] = {}
                     state_iterator = iter(states)
                     inflight_limit = worker_count * 2
 
@@ -559,9 +545,7 @@ class DiscoveryCampaignRunner:
                                 except Exception as exc:
                                     if not failures:
                                         failures[state_id] = exc
-                                        cancellation.cancel(
-                                            f"discovery cell {state_id} failed"
-                                        )
+                                        cancellation.cancel(f"discovery cell {state_id} failed")
                                     continue
                                 received_functions = len(product.observation.functions)
                                 if (
@@ -651,9 +635,7 @@ class DiscoveryCampaignRunner:
                     )
                     != analysis_authority
                 ):
-                    raise DiscoveryError(
-                        "discovery analysis authority changed during analysis"
-                    )
+                    raise DiscoveryError("discovery analysis authority changed during analysis")
                 if self.adapter.compile_implementation_digest() != compile_implementation:
                     raise DiscoveryError(
                         "discovery compiler implementation changed during analysis"

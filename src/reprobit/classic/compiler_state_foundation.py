@@ -231,9 +231,7 @@ def _instruction_token(
     ):
         relocation_type = raw.get("type")
         if not isinstance(relocation_type, int):
-            raise ClassicSemanticError(
-                "MSVC 4.20 compiler-state code relocation type is malformed"
-            )
+            raise ClassicSemanticError("MSVC 4.20 compiler-state code relocation type is malformed")
         width = RELOCATION_WIDTHS.get(relocation_type)
         if width is None or offset + width <= start or offset >= end:
             continue

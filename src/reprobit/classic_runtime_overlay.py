@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, cast
@@ -35,11 +35,8 @@ from reprobit.classic.semantic_contracts import (
     TargetLinkClosure,
 )
 from reprobit.classic.semantic_errors import ClassicSemanticError
-from reprobit.classic_evidence import (
+from reprobit.classic_execution_records import (
     ClassicCapturedProducerOutput,
-)
-from reprobit.classic_includes import (
-    SealedIncludeAuthority,
 )
 from reprobit.classic_link_closure import (
     ClassicLinkClosureError,
@@ -61,8 +58,15 @@ from reprobit.classic_project import (
     InterventionWitness,
     _effective_source_seal,
 )
+from reprobit.classic_resources import ResourceDependencyReceipt
 from reprobit.classic_runtime_environment import (
     _logical_join,
+)
+from reprobit.classic_runtime_files import (
+    _require_declared_tree_writes,
+    _require_unchanged_tree,
+    _safe_relative,
+    _tree_file_seal,
 )
 from reprobit.classic_runtime_graph import (
     ClassicProducerTarget,
@@ -93,21 +97,55 @@ if TYPE_CHECKING:
 from reprobit.classic_runtime_producer import (
     ClassicProducerExecution,
     ClassicProgressReporter,
+)
+from reprobit.classic_runtime_receipts import (
     _internal_step,
-    _project_overlay_resource_reader_closure,
-    _require_declared_tree_writes,
-    _require_unchanged_tree,
-    _safe_relative,
-    _tree_file_seal,
 )
 
 
-@dataclass(frozen=True, slots=True)
-class ClassicActiveCompilerEpoch:
-    namespace_id: str
-    include_authority: SealedIncludeAuthority
-    source_seal: Mapping[Path, tuple[int, Digest]]
-    generated: bool
+def _project_overlay_resource_reader_closure(
+    *,
+    source_root: str,
+    source_pairs: Sequence[ProjectOverlaySourcePair],
+    graph: ProducerGraphDocument,
+    receipts: Mapping[str, ResourceDependencyReceipt],
+) -> dict[str, object]:
+    """Prove that RC's exact recursive-read closure excludes overlay outputs."""
+
+    expected_nodes = {node.id for node in graph.nodes if node.role is ProducerRole.RESOURCE}
+    if set(receipts) != expected_nodes:
+        missing = sorted(expected_nodes - set(receipts), key=str.casefold)
+        extra = sorted(set(receipts) - expected_nodes, key=str.casefold)
+        raise ClassicProjectError(
+            "project-overlay resource reader closure differs from the producer graph; "
+            f"missing={missing}, extra={extra}"
+        )
+    overlay_logical_paths = {
+        _logical_join(source_root, pair.path).casefold(): pair.path for pair in source_pairs
+    }
+    overlay_reads = tuple(
+        sorted(
+            (
+                node_id,
+                overlay_logical_paths[read.logical_path.casefold()],
+                read.kind.value,
+            )
+            for node_id, receipt in receipts.items()
+            for read in receipt.reads
+            if read.logical_path.casefold() in overlay_logical_paths
+        )
+    )
+    if overlay_reads:
+        raise ClassicProjectError(
+            "project-overlay source is also a resource-compiler input; sparse compiler "
+            f"semantics do not admit this secondary reader: {overlay_reads}"
+        )
+    return {
+        "schema": 1,
+        "resource_nodes": sorted(receipts, key=str.casefold),
+        "resource_read_count": sum(len(receipt.reads) for receipt in receipts.values()),
+        "overlay_resource_reads": [],
+    }
 
 
 class ClassicOverlayEpochs:
@@ -1388,6 +1426,5 @@ class ClassicOverlayEpochs:
 
 
 __all__ = [
-    "ClassicActiveCompilerEpoch",
     "ClassicOverlayEpochs",
 ]

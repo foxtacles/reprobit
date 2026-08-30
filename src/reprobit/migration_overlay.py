@@ -10,16 +10,15 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 
-from reprobit.classic_overlay import (
-    SourceEditError,
+from reprobit.classic_overlay_cpp import _cpp_type, _render_cpp_type
+from reprobit.classic_overlay_document import validate_classic_overlay
+from reprobit.classic_overlay_generator_common import _string_array
+from reprobit.classic_overlay_tokens import _tokens
+from reprobit.classic_overlay_types import SourceEditError
+from reprobit.classic_overlay_validation import (
     _array,
-    _cpp_type,
     _object,
     _relative_path,
-    _render_cpp_type,
-    _string_array,
-    _tokens,
-    validate_classic_overlay,
 )
 
 
@@ -61,9 +60,7 @@ def _matching_token(
     return None
 
 
-def _parameter_arity(
-    tokens: Sequence[tuple[str, int, int]], opening: int, closing: int
-) -> int:
+def _parameter_arity(tokens: Sequence[tuple[str, int, int]], opening: int, closing: int) -> int:
     content = [token for token, _, _ in tokens[opening + 1 : closing]]
     if not content or content == ["void"]:
         return 0
@@ -90,9 +87,7 @@ def _return_type_before_member(
     first = boundary + 1
     candidates: list[tuple[int, str]] = []
     for start in range(first, member_index):
-        candidate = _type_text_from_tokens(
-            [token for token, _, _ in tokens[start:member_index]]
-        )
+        candidate = _type_text_from_tokens([token for token, _, _ in tokens[start:member_index]])
         try:
             parsed = _cpp_type(candidate, "member-probe inferred return type")
         except SourceEditError:

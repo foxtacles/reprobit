@@ -8,9 +8,10 @@ from typing import BinaryIO
 import pytest
 
 import reprobit.secure_paths as secure_paths
+import reprobit.secure_paths_windows as secure_paths_windows
 from reprobit.model import Digest
+from reprobit.secure_path_contracts import SecureFileSnapshot, SecurePathError
 from reprobit.secure_paths import (
-    SecurePathError,
     atomic_copy_new_relative,
     atomic_publish_new_relative,
     atomic_publish_new_relative_from_stream,
@@ -24,9 +25,7 @@ from reprobit.secure_paths import (
     reseal_relative_file,
 )
 
-pytestmark = pytest.mark.skipif(
-    os.name != "posix", reason="POSIX handle-relative implementation"
-)
+pytestmark = pytest.mark.skipif(os.name != "posix", reason="POSIX handle-relative implementation")
 
 
 def test_secure_read_rejects_redirected_ancestor(tmp_path: Path) -> None:
@@ -65,17 +64,11 @@ def test_atomic_publication_replaces_only_regular_targets_and_reseals(
     published = atomic_publish_relative(root, "build/APP.EXE", b"candidate")
 
     assert (root / "build/APP.EXE").read_bytes() == b"candidate"
-    assert reseal_relative_file(
-        root, "build/APP.EXE", expected=published
-    ) == published
-    replacement = atomic_publish_relative(
-        root, "build/APP.EXE", b"replacement"
-    )
+    assert reseal_relative_file(root, "build/APP.EXE", expected=published) == published
+    replacement = atomic_publish_relative(root, "build/APP.EXE", b"replacement")
     assert (root / "build/APP.EXE").read_bytes() == b"replacement"
     assert replacement.digest != published.digest
-    assert reseal_relative_file(
-        root, "build/APP.EXE", expected=replacement
-    ) == replacement
+    assert reseal_relative_file(root, "build/APP.EXE", expected=replacement) == replacement
 
     (root / "build/APP.EXE").write_bytes(b"same inode mutation")
     with pytest.raises(SecurePathError, match="changed before final seal"):
@@ -282,9 +275,7 @@ def test_secure_digest_and_copy_stream_without_hardlinking(tmp_path: Path) -> No
     assert published.digest == receipt.digest
     assert published.size == receipt.size
     assert destination.stat().st_ino != source.stat().st_ino
-    assert digest_relative_file(destination_root, "objects/large.bin").digest == (
-        receipt.digest
-    )
+    assert digest_relative_file(destination_root, "objects/large.bin").digest == (receipt.digest)
 
 
 def test_atomic_create_if_absent_rejects_final_symlink(tmp_path: Path) -> None:
@@ -465,16 +456,12 @@ def test_publication_rollback_removes_only_the_exact_snapshot(tmp_path: Path) ->
     root.mkdir()
     snapshot = atomic_publish_relative(root, "reports/report.json", b"first")
 
-    assert remove_published_relative(
-        root, "reports/report.json", expected=snapshot
-    )
+    assert remove_published_relative(root, "reports/report.json", expected=snapshot)
     assert not (root / "reports/report.json").exists()
 
     snapshot = atomic_publish_relative(root, "reports/report.json", b"second")
     (root / "reports/report.json").write_bytes(b"attacker replacement")
-    assert not remove_published_relative(
-        root, "reports/report.json", expected=snapshot
-    )
+    assert not remove_published_relative(root, "reports/report.json", expected=snapshot)
     assert (root / "reports/report.json").read_bytes() == b"attacker replacement"
 
 
@@ -513,7 +500,7 @@ def test_native_held_set_and_rollback_use_strong_write_excluding_capabilities(
         False,
         0x22,
     )
-    expected = secure_paths.SecureFileSnapshot(
+    expected = SecureFileSnapshot(
         root / "target.exe",
         Digest.from_bytes(payload),
         len(payload),
@@ -580,7 +567,7 @@ def test_native_held_set_and_rollback_use_strong_write_excluding_capabilities(
         return FakeHeld(path, api)
 
     monkeypatch.setattr(secure_paths.os, "name", "nt")
-    monkeypatch.setattr(secure_paths, "_HeldWindowsRoot", held_factory)
+    monkeypatch.setattr(secure_paths_windows, "_HeldWindowsRoot", held_factory)
 
     with hold_relative_file_set(root, {"target.exe": expected}):
         pass
@@ -615,7 +602,5 @@ def test_publication_rollback_never_follows_a_replacement_symlink(
     (root / "reports/report.json").unlink()
     (root / "reports/report.json").symlink_to(outside)
 
-    assert not remove_published_relative(
-        root, "reports/report.json", expected=snapshot
-    )
+    assert not remove_published_relative(root, "reports/report.json", expected=snapshot)
     assert outside.read_bytes() == b"outside"

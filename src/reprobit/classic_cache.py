@@ -173,9 +173,7 @@ class DonorTransformDependencyHint:
             "donors",
             "certifying",
         }:
-            raise ClassicCacheHintError(
-                "donor-transform cache record has no valid hint"
-            )
+            raise ClassicCacheHintError("donor-transform cache record has no valid hint")
         base_key = raw["base_key"]
         donors = raw["donors"]
         if (
@@ -195,9 +193,7 @@ class DonorTransformDependencyHint:
                 "working_directory",
                 "sources",
             }:
-                raise ClassicCacheHintError(
-                    "donor-transform dependency hint donor is malformed"
-                )
+                raise ClassicCacheHintError("donor-transform dependency hint donor is malformed")
             donor_id = donor["donor_id"]
             working_directory = donor["working_directory"]
             sources = donor["sources"]
@@ -268,9 +264,7 @@ def _require_canonical_donor_ids(values: Iterable[str]) -> tuple[str, ...]:
         or len({item.casefold() for item in donor_ids}) != len(donor_ids)
         or tuple(sorted(donor_ids, key=str.casefold)) != donor_ids
     ):
-        raise ClassicCacheHintError(
-            "projected donor dependency IDs are not unique and canonical"
-        )
+        raise ClassicCacheHintError("projected donor dependency IDs are not unique and canonical")
     return donor_ids
 
 
@@ -462,19 +456,13 @@ def _resolve_donor_transform_dependencies(
             if read.origin is not IncludeOrigin.DONOR_ARENA:
                 continue
             try:
-                common = ntpath.commonpath(
-                    (read.logical_path, context.expected_working_directory)
-                )
+                common = ntpath.commonpath((read.logical_path, context.expected_working_directory))
             except ValueError as exc:
                 raise ClassicCacheHintError(
                     "projected donor read leaves its private arena"
                 ) from exc
-            if ntpath.normcase(common) != ntpath.normcase(
-                context.expected_working_directory
-            ):
-                raise ClassicCacheHintError(
-                    "projected donor read leaves its private arena"
-                )
+            if ntpath.normcase(common) != ntpath.normcase(context.expected_working_directory):
+                raise ClassicCacheHintError("projected donor read leaves its private arena")
         resolved.append(DonorResolvedDependencies(trace.donor_id, reads))
     return tuple(resolved)
 
@@ -505,9 +493,7 @@ def donor_transform_authority_paths(
     """Map projected mirror reads back to their physical source authorities."""
 
     context_ids = _require_canonical_donor_ids(item.donor_id for item in contexts)
-    dependency_ids = _require_canonical_donor_ids(
-        item.donor_id for item in dependencies
-    )
+    dependency_ids = _require_canonical_donor_ids(item.donor_id for item in dependencies)
     if context_ids != dependency_ids:
         raise ClassicCacheHintError(
             "resolved donor dependencies differ from their current contexts"
@@ -536,9 +522,7 @@ def probe_donor_transform_cache(
     """Re-resolve bounded projected-donor hints and return only an exact hit."""
 
     _require_canonical_donor_ids(item.donor_id for item in contexts)
-    candidate_keys = lease.indexed_record_keys(
-        "producer", "donor-transform-base", base_key
-    )
+    candidate_keys = lease.indexed_record_keys("producer", "donor-transform-base", base_key)
     if not candidate_keys:
         return DonorTransformCacheProbe(
             None,

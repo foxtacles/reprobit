@@ -34,9 +34,7 @@ from reprobit.process import CancellationToken, CommandSpec, ProcessSupervisor
 from reprobit.strict_json import JsonValue, canonical_json
 
 _SOURCE_IDENTIFIER = re.compile(rb"[A-Za-z_][A-Za-z0-9_]*")
-_DECLARED_IDENTIFIER = re.compile(
-    rb"(?:class|void|int)[ \t]+([A-Za-z_][A-Za-z0-9_]*)"
-)
+_DECLARED_IDENTIFIER = re.compile(rb"(?:class|void|int)[ \t]+([A-Za-z_][A-Za-z0-9_]*)")
 _INCLUDE_DIRECTIVE = re.compile(
     rb"^[ \t]*\#[ \t]*include\b[^\r\n]*(?:\r\n|\n|\r|$)",
     re.MULTILINE,
@@ -134,6 +132,7 @@ def safe_msvc_compiler_arguments() -> tuple[str, ...]:
             }
         )
     )
+
 
 @dataclass(frozen=True, slots=True)
 class RenderedMsvcState:
@@ -273,8 +272,7 @@ def render_msvc_declaration_state(
     collisions = sorted(source_identifiers.intersection(identifiers))
     if collisions:
         raise DiscoveryError(
-            "generated declarations collide with source identifiers: "
-            + ", ".join(collisions[:8])
+            "generated declarations collide with source identifiers: " + ", ".join(collisions[:8])
         )
     return RenderedMsvcState(
         rendered_source,
@@ -514,9 +512,7 @@ class DirectMsvcCompiler:
                     ),
                     "generated_declarations": cast(
                         JsonValue,
-                        Digest.from_bytes(
-                            rendered.generated_declarations
-                        ).model_dump(mode="json"),
+                        Digest.from_bytes(rendered.generated_declarations).model_dump(mode="json"),
                     ),
                 }
             ),

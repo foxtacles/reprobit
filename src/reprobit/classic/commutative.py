@@ -12,9 +12,7 @@ from .registers import decode_ia32_bijection_body
 from .relational import ia32_relational_flow_walk
 
 COMMUTATIVE_OPERAND_FORM_KIND = "commutative_operand_form_v1"
-COMMUTATIVE_OPERAND_BOUNDARY_RESEAT_KIND = (
-    "commutative_operand_form_interior_boundary_reseat_v1"
-)
+COMMUTATIVE_OPERAND_BOUNDARY_RESEAT_KIND = "commutative_operand_form_interior_boundary_reseat_v1"
 
 _COMMUTATIVE_LOAD_WIDTH: dict[int, str] = {0xD9: "m32", 0xDD: "m64"}
 _COMMUTATIVE_OPERATOR_WIDTH: dict[int, str] = {0xD8: "m32", 0xDC: "m64"}
@@ -112,10 +110,8 @@ def _commutative_pair_image(
     )
     if not allow_interior_boundary_reseat:
         require(
-            len(new_load) == int(load["length"])
-            and len(new_operator) == int(operator["length"]),
-            f"{context}: the two instructions differ in length; the interior "
-            "boundary would move",
+            len(new_load) == int(load["length"]) and len(new_operator) == int(operator["length"]),
+            f"{context}: the two instructions differ in length; the interior boundary would move",
         )
     return (
         new_load + new_operator,
@@ -172,9 +168,7 @@ def apply_commutative_operand_form(
             not any(item.get("flow") == "computed" for item in items),
             f"{context}: computed control flow leaves the interior entry set open",
         )
-    branch_targets = {
-        item["target"] for item in items if item.get("target") is not None
-    }
+    branch_targets = {item["target"] for item in items if item.get("target") is not None}
     entry_offsets = {items[entry]["offset"] for entry in entries[1:]}
     decoded = decode_ia32_bijection_body(
         source,
@@ -206,14 +200,12 @@ def apply_commutative_operand_form(
         )
         end = int(operator["offset"]) + int(operator["length"])
         previous_end = end
-        pair_image, operation, width, seed_boundary, image_boundary = (
-            _commutative_pair_image(
-                source,
-                load,
-                operator,
-                site_context,
-                allow_interior_boundary_reseat=allow_interior_boundary_reseat,
-            )
+        pair_image, operation, width, seed_boundary, image_boundary = _commutative_pair_image(
+            source,
+            load,
+            operator,
+            site_context,
+            allow_interior_boundary_reseat=allow_interior_boundary_reseat,
         )
         require(
             site.get("operation") == operation,
@@ -270,9 +262,7 @@ def apply_commutative_operand_form(
             == expected_operator_operand,
             f"{site_context}: the image operator does not carry the fld's operand",
         )
-        rewritten = sorted(
-            offset for offset in range(at, end) if source[offset] != image[offset]
-        )
+        rewritten = sorted(offset for offset in range(at, end) if source[offset] != image[offset])
         declared_value = site.get("expected_rewritten_offsets")
         require(
             isinstance(declared_value, list),
@@ -281,8 +271,7 @@ def apply_commutative_operand_form(
         declared = cast(list[object], declared_value)
         require(
             declared == rewritten,
-            f"{site_context}: the rewritten offsets {rewritten} are not the declared "
-            f"{declared}",
+            f"{site_context}: the rewritten offsets {rewritten} are not the declared {declared}",
         )
         proved.append(
             {
@@ -300,9 +289,7 @@ def apply_commutative_operand_form(
     require(result != source, f"{context}: the image does not move the body")
     changed = {offset for offset in range(len(source)) if source[offset] != result[offset]}
     declared_offsets = {
-        offset
-        for site in proved
-        for offset in cast(list[int], site["expected_rewritten_offsets"])
+        offset for site in proved for offset in cast(list[int], site["expected_rewritten_offsets"])
     }
     require(
         changed == declared_offsets,
@@ -333,9 +320,7 @@ def apply_commutative_operand_form(
         seed_exterior == image_exterior
         and len(items) == len(image_items)
         and image_successors == successors
-        and {
-            item["target"] for item in image_items if item.get("target") is not None
-        }
+        and {item["target"] for item in image_items if item.get("target") is not None}
         == branch_targets
         and image_entries == entries,
         f"{context}: the image moved an exterior boundary, control edge, target, or entry",
@@ -418,9 +403,7 @@ def derive_commutative_operand_forms(
                 "pair_offset": at,
                 "operation": operation,
                 "expected_rewritten_offsets": [
-                    offset
-                    for offset in range(at, end)
-                    if source[offset] != target[offset]
+                    offset for offset in range(at, end) if source[offset] != target[offset]
                 ],
             }
         )

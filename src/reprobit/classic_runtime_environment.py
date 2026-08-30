@@ -9,7 +9,6 @@ import stat
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
-from hashlib import sha256
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import Condition, Lock
 from types import MappingProxyType
@@ -22,6 +21,7 @@ from reprobit.backends import (
     WorkerSandbox,
 )
 from reprobit.classic_project import ClassicProjectError
+from reprobit.classic_runtime_files import _digest_path
 from reprobit.model import Digest
 from reprobit.native_device_map import NativeDeviceMapLease
 from reprobit.paths import (
@@ -177,14 +177,6 @@ class _DirectLogicalWorkspace:
     build_root: Path
     toolchain_entry: Path
     materialized: MaterializedSkeleton
-
-
-def _digest_path(path: Path) -> Digest:
-    digest = sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return Digest(value=digest.hexdigest())
 
 
 def _logical_relative_parts(value: str, *, drive_letter: str) -> tuple[str, ...]:

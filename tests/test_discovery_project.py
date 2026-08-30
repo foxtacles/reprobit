@@ -51,6 +51,7 @@ def test_project_grind_plan_is_deliberately_small_and_project_aware() -> None:
     assert "mosaic" not in serialized
     assert "max_cells" not in serialized
 
+
 def test_project_grind_plan_loader_accepts_a_relative_project_root(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

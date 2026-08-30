@@ -226,18 +226,14 @@ class ProvenanceGraph:
             raise ProvenanceError(
                 f"artifact {artifact.artifact_id!r} references missing nodes: {sorted(missing)!r}"
             )
-        return frozenset(
-            origin for item in selected for origin in self.root_origins(item.node_id)
-        )
+        return frozenset(origin for item in selected for origin in self.root_origins(item.node_id))
 
     def has_oracle_ancestry(
         self, artifact: ArtifactRangeMap, span: ByteRange | None = None
     ) -> bool:
         return ByteOrigin.ORACLE in self.origins_for(artifact, span)
 
-    def has_clean_origin(
-        self, artifact: ArtifactRangeMap, span: ByteRange | None = None
-    ) -> bool:
+    def has_clean_origin(self, artifact: ArtifactRangeMap, span: ByteRange | None = None) -> bool:
         origins = self.origins_for(artifact, span)
         return bool(origins) and origins <= {
             ByteOrigin.TOOLCHAIN,

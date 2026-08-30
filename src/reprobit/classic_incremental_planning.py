@@ -65,7 +65,7 @@ from reprobit.schema import (
     ProjectBundle,
     classic_analysis_pdb_paths,
 )
-from reprobit.secure_paths import SecureFileSnapshot
+from reprobit.secure_path_contracts import SecureFileSnapshot
 from reprobit.strict_json import JsonValue
 from reprobit.toolchains import ClassicMSVCToolchain
 
@@ -143,7 +143,7 @@ def _render_sources(
     generated_translation_units: set[str] = set()
     generated_outputs: set[str] = set()
     try:
-        from reprobit.classic_overlay import render_classic_overlay
+        from reprobit.classic_overlay_document import render_classic_overlay
 
         for intervention in bundle.interventions:
             if not isinstance(intervention, ClassicRecipeIntervention) or (
@@ -438,8 +438,7 @@ def _donor_dependency_resolution_contexts(
         matches: list[tuple[ProducerNode, dict[str, object]]] = []
         for node_id, node in compiler_nodes.items():
             if (
-                compiler_sources[node_id].casefold()
-                != request.logical_source.casefold()
+                compiler_sources[node_id].casefold() != request.logical_source.casefold()
                 or node.owner != request.build_target
             ):
                 continue
@@ -483,9 +482,7 @@ def _donor_dependency_resolution_contexts(
 
         marker_stem = f"composed-{unit.plan.build_target}-{unit.plan.source.replace('/', '_')}"
         donor_root = PureWindowsPath(normalized_build_root).parent / "donors"
-        arena = normalize_logical_path(
-            str(donor_root / f"{marker_stem}-{request.compiler_seat}")
-        )
+        arena = normalize_logical_path(str(donor_root / f"{marker_stem}-{request.compiler_seat}"))
         record_source = logical_join(normalized_source_root, request.logical_source)
         private_includes: list[str] = []
         if is_overlay:
@@ -497,9 +494,7 @@ def _donor_dependency_resolution_contexts(
                         "inc/source" if parent == "." else f"inc/source/{parent}",
                     )
                 )
-        private_includes.append(
-            normalize_logical_path(str(PureWindowsPath(record_source).parent))
-        )
+        private_includes.append(normalize_logical_path(str(PureWindowsPath(record_source).parent)))
         include_directories = list(private_includes)
         for item in cast(Sequence[object], parsed["include_paths"]):
             raw = cast(tuple[int, str, bool], item)[1]

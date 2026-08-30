@@ -50,11 +50,7 @@ def normalize_logical_path(value: str | PureWindowsPath) -> str:
     if "/" in raw:
         raise PathContractError("logical paths must use DOS backslashes")
     drive, tail = ntpath.splitdrive(raw)
-    if (
-        len(drive) != 2
-        or drive[1] != ":"
-        or _DOS_DRIVE_LETTER.fullmatch(drive[0]) is None
-    ):
+    if len(drive) != 2 or drive[1] != ":" or _DOS_DRIVE_LETTER.fullmatch(drive[0]) is None:
         raise PathContractError(f"logical path is not drive-absolute: {raw!r}")
     if not tail.startswith("\\") or tail.startswith("\\\\"):
         raise PathContractError(f"logical path is not drive-absolute: {raw!r}")
@@ -69,8 +65,7 @@ def normalize_logical_path(value: str | PureWindowsPath) -> str:
         if (
             component.endswith((" ", "."))
             or any(
-                character in _DOS_FORBIDDEN_COMPONENT_CHARACTERS
-                or ord(character) < 32
+                character in _DOS_FORBIDDEN_COMPONENT_CHARACTERS or ord(character) < 32
                 for character in component
             )
             or basename in _DOS_RESERVED_NAMES
@@ -175,13 +170,16 @@ def _create_windows_junction(destination: Path, target: Path) -> None:
     substitute_bytes = substitute.encode("utf-16-le")
     print_bytes = print_name.encode("utf-16-le")
     path_buffer = substitute_bytes + b"\0\0" + print_bytes + b"\0\0"
-    payload = struct.pack(
-        "<HHHH",
-        0,
-        len(substitute_bytes),
-        len(substitute_bytes) + 2,
-        len(print_bytes),
-    ) + path_buffer
+    payload = (
+        struct.pack(
+            "<HHHH",
+            0,
+            len(substitute_bytes),
+            len(substitute_bytes) + 2,
+            len(print_bytes),
+        )
+        + path_buffer
+    )
     reparse_data = struct.pack("<IHH", 0xA0000003, len(payload), 0) + payload
 
     win_dll = getattr(ctypes, "WinDLL", None)
@@ -394,9 +392,7 @@ class LogicalPathSkeleton:
                 destination = staging.joinpath(*relative)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 if os.path.lexists(destination):
-                    raise PathContractError(
-                        f"logical skeleton entry already exists: {destination}"
-                    )
+                    raise PathContractError(f"logical skeleton entry already exists: {destination}")
                 try:
                     if os.name == "nt":
                         _create_windows_junction(destination, seat.physical_root)

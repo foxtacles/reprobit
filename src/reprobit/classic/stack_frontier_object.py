@@ -44,9 +44,7 @@ def _evidence_digest(value: str | None, label: str, context: str) -> str:
     return value
 
 
-def _thiscall_owner(
-    owner: str | None, debug_procedure: object, context: str
-) -> dict[str, object]:
+def _thiscall_owner(owner: str | None, debug_procedure: object, context: str) -> dict[str, object]:
     """Bind the entry ECX value to one ordinary VC 4.20 member owner.
 
     The first three bytes after an MSVC member scope encode member class,
@@ -78,10 +76,7 @@ def _thiscall_owner(
         components = owner[1:scope_end].split("@")
         if not components or any(
             not component
-            or any(
-                not (character.isalnum() or character in "_$")
-                for character in component
-            )
+            or any(not (character.isalnum() or character in "_$") for character in component)
             for component in components
         ):
             continue
@@ -114,9 +109,7 @@ def _fpo_frame_floor(
 ) -> tuple[int, int, dict[str, object]]:
     record = parse_fpo_data(fpo_body, expected_proc_size=len(body))
     require(
-        record["cbFrame"] == 0
-        and record["fHasSEH"] == 0
-        and record["fUseBP"] == 0,
+        record["cbFrame"] == 0 and record["fHasSEH"] == 0 and record["fUseBP"] == 0,
         f"{context}: paired FPO does not describe a frame-pointer-free non-EH function",
     )
     prolog_end = int(record["cbProlog"])
@@ -138,9 +131,7 @@ def _fpo_frame_floor(
     first = prologue[0]
     first_raw = body[int(first["offset"]) : int(first["offset"]) + int(first["length"])]
     allocation = (
-        len(first_raw) == 3
-        and first_raw[:2] == b"\x83\xec"
-        and first_raw[2] == locals_bytes
+        len(first_raw) == 3 and first_raw[:2] == b"\x83\xec" and first_raw[2] == locals_bytes
     ) or (
         len(first_raw) == 6
         and first_raw[:2] == b"\x81\xec"
@@ -173,8 +164,7 @@ def _fpo_frame_floor(
             require(change == 0, f"{context}: FPO prologue changes its fixed frame twice")
         floor += change
     require(
-        len(saved) == int(record["cbRegs"])
-        and floor == -(locals_bytes + len(saved) * 4),
+        len(saved) == int(record["cbRegs"]) and floor == -(locals_bytes + len(saved) * 4),
         f"{context}: paired FPO register/local counts differ from the code prologue",
     )
     return floor, boundary, record
@@ -369,9 +359,7 @@ def derive_private_stack_object_boundary(
     ]
     require(
         bool(window)
-        and int(instructions[window[-1]]["offset"])
-        + int(instructions[window[-1]]["length"])
-        == end
+        and int(instructions[window[-1]]["offset"]) + int(instructions[window[-1]]["length"]) == end
         and all(instructions[index]["flow"] == "fall" for index in window),
         f"{context}: private-stack window boundaries or control flow changed",
     )
@@ -516,8 +504,7 @@ def derive_private_stack_object_boundary(
             )
             assert isinstance(memory, dict)
             require(
-                address_form(body, stack_item)
-                == ("esp", None, 1, int(memory["displacement"])),
+                address_form(body, stack_item) == ("esp", None, 1, int(memory["displacement"])),
                 f"{context}: projected stack memory has a segment, index, or noncanonical address",
             )
             source_before = depths[stack_index]
@@ -535,9 +522,7 @@ def derive_private_stack_object_boundary(
                 f"{context}: stack operand has no direct displacement field",
             )
             target_displacement = int.from_bytes(
-                adjusted[
-                    int(displacement_at) : int(displacement_at) + displacement_size
-                ],
+                adjusted[int(displacement_at) : int(displacement_at) + displacement_size],
                 "little",
                 signed=True,
             )
@@ -548,8 +533,7 @@ def derive_private_stack_object_boundary(
             require(
                 source_span == target_span
                 and source_span == [source_before - 4, source_before]
-                and target_span
-                == [target_depths[stack_local] - 4, target_depths[stack_local]]
+                and target_span == [target_depths[stack_local] - 4, target_depths[stack_local]]
                 and source_before <= floor
                 and target_depths[stack_local] <= floor,
                 f"{context}: projected PUSH is not the same fresh seat below ESP in both orders",

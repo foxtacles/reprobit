@@ -55,11 +55,7 @@ def _hold_posix_unlink_until_competing_observation(
             if dir_fd is not None and matches_name(name)
             else None
         )
-        if (
-            not unlink_started.is_set()
-            and candidate is not None
-            and candidate.st_nlink == 2
-        ):
+        if not unlink_started.is_set() and candidate is not None and candidate.st_nlink == 2:
             publication_identity = (candidate.st_dev, candidate.st_ino)
             unlink_started.set()
             if not observation_started.wait(timeout=5):
@@ -233,15 +229,7 @@ def test_cache_restore_accepts_content_authorized_staging_link_settlement(
     with cache.lease() as lease:
         record = lease.store("producer", _key(settlement), {"build/a.obj": source})
     output = record.outputs[0]
-    blob = (
-        state
-        / "cache"
-        / "v1"
-        / "blobs"
-        / "sha256"
-        / output.digest[:2]
-        / output.digest
-    )
+    blob = state / "cache" / "v1" / "blobs" / "sha256" / output.digest[:2] / output.digest
     pending = state / "cache" / "v1" / "incoming" / f"pending-{settlement}"
     os.link(blob, pending)
     blob_identity = (blob.stat().st_dev, blob.stat().st_ino)
@@ -525,8 +513,9 @@ def test_concurrent_blob_validation_waits_for_posix_link_settlement(
     unlink_started, validation_started, unlink_finished = (
         _hold_posix_unlink_until_competing_observation(
             monkeypatch,
-            matches_name=lambda name: len(name) == 32
-            and all(character in "0123456789abcdef" for character in name),
+            matches_name=lambda name: (
+                len(name) == 32 and all(character in "0123456789abcdef" for character in name)
+            ),
             observation=observation,
         )
     )
@@ -583,11 +572,9 @@ def test_concurrent_immutable_publication_waits_for_posix_link_settlement(
     target = tmp_path / "marker"
     payload = b"immutable marker\n"
     barrier = threading.Barrier(2)
-    unlink_started, read_started, unlink_finished = (
-        _hold_posix_unlink_until_competing_observation(
-            monkeypatch,
-            matches_name=lambda name: name.startswith(".marker.reprobit-"),
-        )
+    unlink_started, read_started, unlink_finished = _hold_posix_unlink_until_competing_observation(
+        monkeypatch,
+        matches_name=lambda name: name.startswith(".marker.reprobit-"),
     )
     errors: list[BaseException] = []
 
@@ -646,11 +633,9 @@ def test_concurrent_record_lookup_waits_for_posix_link_settlement(
     source.write_bytes(b"stable")
     cache = IncrementalCache(state, implementation="test-implementation-v1")
     key = _key("a")
-    unlink_started, read_started, unlink_finished = (
-        _hold_posix_unlink_until_competing_observation(
-            monkeypatch,
-            matches_name=lambda name: name.startswith(f".{key}.json.reprobit-"),
-        )
+    unlink_started, read_started, unlink_finished = _hold_posix_unlink_until_competing_observation(
+        monkeypatch,
+        matches_name=lambda name: name.startswith(f".{key}.json.reprobit-"),
     )
     records, errors = _store_concurrently(cache, key, source)
     assert unlink_started.is_set()
@@ -745,11 +730,7 @@ def test_owned_publication_temp_may_disappear_during_scan(
     state.mkdir()
     cache = IncrementalCache(state, implementation="test-implementation-v1")
     if location == "lease":
-        temporary = (
-            cache.format_root
-            / "leases"
-            / f".{('a' * 32)}.lease.reprobit-{'b' * 32}"
-        )
+        temporary = cache.format_root / "leases" / f".{('a' * 32)}.lease.reprobit-{'b' * 32}"
     else:
         temporary = (
             cache.format_root
@@ -786,11 +767,7 @@ def test_owned_publication_temp_must_still_be_regular(
     state.mkdir()
     cache = IncrementalCache(state, implementation="test-implementation-v1")
     if location == "lease":
-        temporary = (
-            cache.format_root
-            / "leases"
-            / f".{('a' * 32)}.lease.reprobit-{'b' * 32}"
-        )
+        temporary = cache.format_root / "leases" / f".{('a' * 32)}.lease.reprobit-{'b' * 32}"
     else:
         temporary = (
             cache.format_root

@@ -106,26 +106,20 @@ def _paired_frame_pointer_free_proof(
         or len(evidence.receipt_digest) != 64
         or any(character not in "0123456789abcdef" for character in evidence.receipt_digest)
     ):
-        raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state FPO evidence receipt is malformed"
-        )
+        raise ClassicSemanticError("MSVC 4.20 compiler-state FPO evidence receipt is malformed")
     if len(pair.clean_body) != len(pair.effective_body):
         raise ClassicSemanticError(
             "MSVC 4.20 compiler-state paired FPO evidence spans unequal code sizes"
         )
     try:
-        clean_record = parse_fpo_data(
-            evidence.clean_body, expected_proc_size=len(pair.clean_body)
-        )
+        clean_record = parse_fpo_data(evidence.clean_body, expected_proc_size=len(pair.clean_body))
         effective_record = parse_fpo_data(
             evidence.effective_body, expected_proc_size=len(pair.effective_body)
         )
     except ByteIdentityError as error:
         raise ClassicSemanticError(str(error)) from error
     if any(
-        record["cbFrame"] != FPO_FRAME_KIND_FPO
-        or record["fHasSEH"] != 0
-        or record["fUseBP"] != 1
+        record["cbFrame"] != FPO_FRAME_KIND_FPO or record["fHasSEH"] != 0 or record["fUseBP"] != 1
         for record in (clean_record, effective_record)
     ):
         return None
@@ -185,8 +179,7 @@ def _prove_pair(
     clean_instruction_starts = {item["offset"] for item in clean_instructions}
     effective_instruction_starts = {item["offset"] for item in effective_instructions}
     invalid_entries = sorted(
-        set(pair.external_entries)
-        - (clean_instruction_starts & effective_instruction_starts)
+        set(pair.external_entries) - (clean_instruction_starts & effective_instruction_starts)
     )
     if invalid_entries:
         raise ClassicSemanticError(
@@ -347,9 +340,7 @@ def _compiler_invocation_statement(
             "tool_id": evidence.tool_id,
             "tool_digest": evidence.tool_digest,
             "invocation_digest": evidence.invocation_digest,
-            "arguments_digest": Digest.from_bytes(
-                canonical_json(list(evidence.arguments))
-            ).value,
+            "arguments_digest": Digest.from_bytes(canonical_json(list(evidence.arguments))).value,
         }
     )
 
@@ -389,13 +380,8 @@ def derive_msvc420_compiler_state_projection(
         raise ClassicSemanticError(
             "MSVC 4.20 compiler-state projection lacks a validated compiler identity"
         )
-    compiler_tools = tuple(
-        tool for tool in compiler_identity.tools if "compiler" in tool.roles
-    )
-    if (
-        len(compiler_tools) != 1
-        or compiler_evidence.tool_digest != compiler_tools[0].digest.value
-    ):
+    compiler_tools = tuple(tool for tool in compiler_identity.tools if "compiler" in tool.roles)
+    if len(compiler_tools) != 1 or compiler_evidence.tool_digest != compiler_tools[0].digest.value:
         raise ClassicSemanticError(
             "MSVC 4.20 compiler-state invocation is not bound to the validated compiler"
         )

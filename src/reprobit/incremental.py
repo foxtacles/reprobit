@@ -44,8 +44,7 @@ def revalidate_producer_implementation(expected: Digest) -> None:
 
     if producer_implementation_digest() != expected:
         raise RuntimeError(
-            "ReproBit incremental producer implementation changed during execution; "
-            "rerun the build"
+            "ReproBit incremental producer implementation changed during execution; rerun the build"
         )
 
 

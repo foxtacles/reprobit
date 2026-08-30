@@ -107,8 +107,7 @@ def _validate_range_bindings(
             declared.output_range.length,
         )
         received_values = tuple(
-            region.get(key)
-            for key in ("region_start", "region_end", "image_start", "image_length")
+            region.get(key) for key in ("region_start", "region_end", "image_start", "image_length")
         )
         _require(
             received_values == expected_values,
@@ -156,9 +155,7 @@ def _fetch_auxiliary_oracles(
             if symbol in bodies:
                 raise LegacyInstallError(f"legacy auxiliary oracle repeats symbol {symbol!r}")
             address = _address(item.get("address"), f"legacy {kind} oracle {symbol!r} address")
-            length = _positive_int(
-                item.get("length"), f"legacy {kind} oracle {symbol!r} length"
-            )
+            length = _positive_int(item.get("length"), f"legacy {kind} oracle {symbol!r} length")
             pinned_digest = _digest(
                 item.get("body_sha256"), f"legacy {kind} oracle {symbol!r} digest"
             )
@@ -217,8 +214,7 @@ def compose_legacy_simulated_elision(
     )
     _require(not receipt.redactions, "legacy proof receipt contains unavailable redactions")
     _require(
-        intervention.scope.function is not None
-        and intervention.scope.translation_unit is not None,
+        intervention.scope.function is not None and intervention.scope.translation_unit is not None,
         "legacy intervention must have translation-unit and function scope",
     )
     _require(
@@ -262,9 +258,7 @@ def compose_legacy_simulated_elision(
         == intervention.oracle_body_digest.value,
         "legacy receipt output-body digest differs from its intervention",
     )
-    retail_oracle = _mapping(
-        expected_values.get("retail_oracle"), "legacy main oracle declaration"
-    )
+    retail_oracle = _mapping(expected_values.get("retail_oracle"), "legacy main oracle declaration")
     main_address = _address(retail_oracle.get("address"), "legacy main oracle address")
     main_length = _positive_int(retail_oracle.get("length"), "legacy main oracle length")
     _require(

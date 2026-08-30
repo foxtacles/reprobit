@@ -42,11 +42,11 @@ from reprobit.classic_orchestration import (
     classic_rdata_repack_authority,
     classic_terminal_pipeline_authority,
 )
-from reprobit.classic_runtime_developer import (
+from reprobit.classic_runtime_donor import ClassicWarmDonorDependencyReplay
+from reprobit.classic_runtime_warm import (
     ClassicWarmCompilerReplay,
     ClassicWarmCompilerTransformResult,
 )
-from reprobit.classic_runtime_donor import ClassicWarmDonorDependencyReplay
 from reprobit.incremental import DeveloperAuthority
 from reprobit.incremental_executor import IncrementalProgress, PreparedNodeInputs
 from reprobit.model import Digest, Scope
@@ -66,7 +66,8 @@ from reprobit.schema import (
     LogicalPathProfile,
     ProducerGraphBuildAdapter,
 )
-from reprobit.secure_paths import SecurePathError, atomic_publish_relative
+from reprobit.secure_path_contracts import SecurePathError
+from reprobit.secure_paths import atomic_publish_relative
 from reprobit.strict_json import JsonValue, canonical_json
 from reprobit.toolchains import ClassicMSVCToolchain
 
@@ -252,7 +253,7 @@ class _FakeWarmExecutor:
 
 class _FakePrepared:
     def __init__(self, runtime: _FakeWarmExecutor) -> None:
-        self.developer = runtime
+        self.warm = runtime
         self.donors = runtime
         self.producer = runtime
         self.closed = False

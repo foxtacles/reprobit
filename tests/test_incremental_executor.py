@@ -279,9 +279,7 @@ def test_dependency_key_rebuilds_only_downstream_closure(tmp_path: Path) -> None
                 depends_on=(),
                 outputs={"build/first.obj": first},
                 key=lambda _deps: _node_key("first", source_version),
-                execute=lambda _runtime, _cancellation, _inputs: first.write_text(
-                    source_version
-                ),
+                execute=lambda _runtime, _cancellation, _inputs: first.write_text(source_version),
                 metadata=lambda _deps: {},
             ),
             IncrementalNode(
@@ -290,9 +288,7 @@ def test_dependency_key_rebuilds_only_downstream_closure(tmp_path: Path) -> None
                 depends_on=(),
                 outputs={"build/other.obj": unrelated},
                 key=lambda _deps: _node_key("other"),
-                execute=lambda _runtime, _cancellation, _inputs: unrelated.write_text(
-                    "other"
-                ),
+                execute=lambda _runtime, _cancellation, _inputs: unrelated.write_text("other"),
                 metadata=lambda _deps: {},
             ),
             IncrementalNode(
@@ -366,9 +362,7 @@ def test_key_decision_records_explicit_invalidation_reason(tmp_path: Path) -> No
                     depends_on=(),
                     outputs={"build/out.obj": output},
                     key=lambda _deps: NodeKeyDecision(_node_key("validate", generation), reason),
-                    execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(
-                        b"object"
-                    ),
+                    execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(b"object"),
                     metadata=lambda _deps: {},
                 ),
             )
@@ -409,9 +403,7 @@ def test_forced_miss_can_publish_a_post_execution_final_key(tmp_path: Path) -> N
                 depends_on=(),
                 outputs={"build/out.obj": output},
                 key=lambda _deps: NodeKeyDecision(None, "no prior recursive-read hint"),
-                execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(
-                    b"object"
-                ),
+                execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(b"object"),
                 final_key=lambda _deps: final,
                 metadata=lambda _deps: {"recursive_reads": ["source/unit.cpp"]},
             ),
@@ -445,9 +437,7 @@ def test_same_final_key_ignores_run_local_invalidation_reason(tmp_path: Path) ->
                     depends_on=(),
                     outputs={"build/out.obj": output},
                     key=lambda _deps: NodeKeyDecision(None, reason),
-                    execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(
-                        b"stable"
-                    ),
+                    execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(b"stable"),
                     final_key=lambda _deps: final,
                     metadata=lambda _deps: {"stable": True},
                 ),
@@ -729,9 +719,7 @@ def test_macos_var_workspace_alias_maps_to_private_var(tmp_path: Path) -> None:
                 depends_on=(),
                 outputs={"out.obj": output},
                 key=lambda _deps: _node_key("macos-alias"),
-                execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(
-                    b"object"
-                ),
+                execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(b"object"),
                 metadata=lambda _deps: {},
             ),
         )
@@ -889,9 +877,7 @@ def test_pre_store_input_race_leaves_no_cache_record(tmp_path: Path) -> None:
                     depends_on=(),
                     outputs={"build/out.obj": output},
                     key=lambda _deps: key,
-                    execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(
-                        b"object"
-                    ),
+                    execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(b"object"),
                     metadata=lambda _deps: {},
                     pre_store=lambda _runtime, _deps: (_ for _ in ()).throw(
                         RuntimeError("sampled input changed")
@@ -924,9 +910,7 @@ def test_runtime_close_failure_leaves_staged_record_unpublished(tmp_path: Path) 
             runtime_factory=object,
             runtime_close=fail_close,
             max_workers=1,
-            progress=lambda kind, _done, _total, _phase, _node, _reason: progress.append(
-                kind
-            ),
+            progress=lambda kind, _done, _total, _phase, _node, _reason: progress.append(kind),
         ).execute(
             (
                 IncrementalNode(
@@ -935,9 +919,7 @@ def test_runtime_close_failure_leaves_staged_record_unpublished(tmp_path: Path) 
                     depends_on=(),
                     outputs={"build/out.obj": output},
                     key=lambda _deps: key,
-                    execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(
-                        b"object"
-                    ),
+                    execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(b"object"),
                     metadata=lambda _deps: {},
                 ),
             )
@@ -967,9 +949,7 @@ def test_before_publish_reseal_failure_leaves_record_unpublished(tmp_path: Path)
             runtime_factory=object,
             runtime_close=lambda _runtime: None,
             max_workers=1,
-            before_publish=lambda: (_ for _ in ()).throw(
-                RuntimeError("implementation changed")
-            ),
+            before_publish=lambda: (_ for _ in ()).throw(RuntimeError("implementation changed")),
             progress=lambda kind, done, total, phase, node, _reason: progress.append(
                 (kind, done, total, phase, node)
             ),
@@ -981,9 +961,7 @@ def test_before_publish_reseal_failure_leaves_record_unpublished(tmp_path: Path)
                     depends_on=(),
                     outputs={"build/out.obj": output},
                     key=lambda _deps: key,
-                    execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(
-                        b"object"
-                    ),
+                    execute=lambda _runtime, _cancellation, _inputs: output.write_bytes(b"object"),
                     metadata=lambda _deps: {},
                 ),
             )
@@ -1047,9 +1025,7 @@ def test_final_workspace_reseal_covers_hit_and_miss_outcomes_before_publication(
                     depends_on=(),
                     outputs={"build/parent.obj": parent},
                     key=lambda _deps: parent_key,
-                    execute=lambda _runtime, _cancellation, _inputs: parent.write_bytes(
-                        b"parent"
-                    ),
+                    execute=lambda _runtime, _cancellation, _inputs: parent.write_bytes(b"parent"),
                     metadata=lambda _deps: {},
                 ),
                 IncrementalNode(

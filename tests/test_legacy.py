@@ -248,11 +248,15 @@ def _simulated_elision_fixture() -> tuple[
         byte_count=2,
         maximum_oracle_payload_bytes=11,
     )
-    return intervention, receipt, {
-        0x1000: main_body,
-        0x1020: callee_body,
-        0x1040: vtable_body,
-    }
+    return (
+        intervention,
+        receipt,
+        {
+            0x1000: main_body,
+            0x1020: callee_body,
+            0x1040: vtable_body,
+        },
+    )
 
 
 def test_schema_v3_simulated_elision_fetches_only_declared_va_material(

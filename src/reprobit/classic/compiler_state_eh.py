@@ -29,6 +29,7 @@ from .compiler_state_foundation import (
 
 _SYNCHRONOUS_EXCEPTION_MODEL = "msvc-4.20-synchronous-gx"
 
+
 def _register_source_value(
     body: bytes,
     instructions: Sequence[_Instruction],
@@ -152,9 +153,7 @@ def _derive_msvc_eh_state_slot(
         "64892500000000",  # mov fs:[__except_list], esp
     )
     if len(instructions) < len(expected):
-        raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state code has no complete MSVC EH prologue"
-        )
+        raise ClassicSemanticError("MSVC 4.20 compiler-state code has no complete MSVC EH prologue")
     measured = tuple(
         body[int(item["offset"]) : int(item["offset"]) + int(item["length"])].hex()
         for item in instructions[: len(expected)]
@@ -177,8 +176,7 @@ def _derive_msvc_eh_state_slot(
         or pair.eh_control_digest is None
     ):
         raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state code lacks one closed MSVC 4.20 EH "
-            "registration frame"
+            "MSVC 4.20 compiler-state code lacks one closed MSVC 4.20 EH registration frame"
         )
     # The pushed -1 is one 32-bit machine word below the EBP value established
     # immediately before it. The displacement is therefore derived, not chosen
@@ -294,8 +292,7 @@ def _require_fresh_allocation_base(
         and target == expected_target
     ):
         raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state EH window is not based on the locked "
-            "MSVC scalar operator new"
+            "MSVC 4.20 compiler-state EH window is not based on the locked MSVC scalar operator new"
         )
     call_end = call_start + int(instructions[call]["length"])
     window_start = int(instructions[before]["offset"])
@@ -336,8 +333,7 @@ def _ebp_relative_stack_depth(
             continue
         if "esp" in item["writes"]:
             raise ClassicSemanticError(
-                "MSVC 4.20 compiler-state frame schedule has an unknown "
-                "pre-window ESP update"
+                "MSVC 4.20 compiler-state frame schedule has an unknown pre-window ESP update"
             )
     return depth
 
@@ -381,14 +377,10 @@ def _apply_frame_push_schedule(
             "ebp" in instructions[position]["writes"]
             for position in range(3, inside_positions[-1] + 1)
         )
-        or any(
-            local not in pushes and "esp" in item["writes"]
-            for local, item in enumerate(inside)
-        )
+        or any(local not in pushes and "esp" in item["writes"] for local, item in enumerate(inside))
     ):
         raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state frame schedule is not one closed "
-            "single-push window"
+            "MSVC 4.20 compiler-state frame schedule is not one closed single-push window"
         )
     try:
         _spans, branch_targets = ia32_schedule_body_walk(
@@ -401,8 +393,7 @@ def _apply_frame_push_schedule(
     entries = frozenset(branch_targets) | frozenset(pair.external_entries)
     if any(start <= entry < end for entry in entries):
         raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state frame schedule has a branch or funclet "
-            "entry at its window"
+            "MSVC 4.20 compiler-state frame schedule has a branch or funclet entry at its window"
         )
     depth = _ebp_relative_stack_depth(state.body, instructions, inside_positions[0])
     push_span = set(range(depth - 4, depth))
@@ -434,8 +425,7 @@ def _apply_frame_push_schedule(
         )
         if span & push_span:
             raise ClassicSemanticError(
-                "MSVC 4.20 compiler-state frame schedule push aliases an "
-                "EBP-relative operand"
+                "MSVC 4.20 compiler-state frame schedule push aliases an EBP-relative operand"
             )
         memory_positions.add(local)
         memory_receipt.append(
@@ -454,8 +444,7 @@ def _apply_frame_push_schedule(
     )
     if declaration.get("expected_dependence_edges") != edges:
         raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state frame schedule dependence graph changed "
-            "after derivation"
+            "MSVC 4.20 compiler-state frame schedule dependence graph changed after derivation"
         )
     retained: list[list[object]] = []
     discharged = 0
@@ -470,8 +459,7 @@ def _apply_frame_push_schedule(
             retained.append([left, right, kept])
     if not discharged:
         raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state frame schedule discharges no implicit "
-            "push-memory edge"
+            "MSVC 4.20 compiler-state frame schedule discharges no implicit push-memory edge"
         )
     order = list(declaration["target_order"])
     try:
@@ -491,8 +479,7 @@ def _apply_frame_push_schedule(
     image = bytearray(state.body)
     image[start:end] = b"".join(pieces[index] for index in order)
     moved = {
-        int(source): int(target)
-        for source, target in declaration.get("relocation_reseat", [])
+        int(source): int(target) for source, target in declaration.get("relocation_reseat", [])
     }
     image_offsets = [moved.get(offset, offset) for offset in state.relocation_offsets]
     if len(set(image_offsets)) != len(image_offsets):
@@ -525,10 +512,7 @@ def _apply_synchronous_eh_schedule(
         raise ClassicSemanticError(
             "MSVC 4.20 compiler-state EH scheduling lacks paired EH-control evidence"
         )
-    if (
-        exception_mode is None
-        or exception_mode.get("model") != _SYNCHRONOUS_EXCEPTION_MODEL
-    ):
+    if exception_mode is None or exception_mode.get("model") != _SYNCHRONOUS_EXCEPTION_MODEL:
         raise ClassicSemanticError(
             "MSVC 4.20 compiler-state EH scheduling lacks exact synchronous /GX evidence"
         )
@@ -550,18 +534,14 @@ def _apply_synchronous_eh_schedule(
         or int(inside[0]["offset"]) != start
         or int(inside[-1]["offset"]) + int(inside[-1]["length"]) != end
         or any(
-            item["flow"] != "fall" or bool({"esp", "ebp"} & set(item["writes"]))
-            for item in inside
+            item["flow"] != "fall" or bool({"esp", "ebp"} & set(item["writes"])) for item in inside
         )
     ):
         raise ClassicSemanticError(
             "MSVC 4.20 compiler-state EH schedule is not one stack-stable "
             "call-free fallthrough window"
         )
-    if any(
-        "ebp" in instructions[position]["writes"]
-        for position in range(3, inside_positions[0])
-    ):
+    if any("ebp" in instructions[position]["writes"] for position in range(3, inside_positions[0])):
         raise ClassicSemanticError(
             "MSVC 4.20 compiler-state EH schedule does not retain the registered EBP frame"
         )
@@ -585,9 +565,7 @@ def _apply_synchronous_eh_schedule(
         or sorted(order) != list(range(len(inside)))
         or order == list(range(len(inside)))
     ):
-        raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state EH schedule declaration is malformed"
-        )
+        raise ClassicSemanticError("MSVC 4.20 compiler-state EH schedule declaration is malformed")
     _facts, edges = ia32_schedule_dependence_edges(
         cast(list[dict[Any, Any]], inside),
         "MSVC 4.20 compiler-state EH schedule",
@@ -635,8 +613,7 @@ def _apply_synchronous_eh_schedule(
         memory = item.get("memory")
         if int(item["opcode"]) == 0x8D:
             raise ClassicSemanticError(
-                "MSVC 4.20 compiler-state EH schedule exposes an untracked "
-                "address with LEA"
+                "MSVC 4.20 compiler-state EH schedule exposes an untracked address with LEA"
             )
         if not isinstance(memory, dict):
             continue
@@ -719,15 +696,12 @@ def _apply_synchronous_eh_schedule(
     image = bytearray(state.body)
     image[start:end] = b"".join(pieces[index] for index in order)
     moved = {
-        int(source): int(target)
-        for source, target in declaration.get("relocation_reseat", [])
+        int(source): int(target) for source, target in declaration.get("relocation_reseat", [])
     }
     image_offsets = [moved.get(offset, offset) for offset in state.relocation_offsets]
     image_records = {moved.get(offset, offset): record for offset, record in records.items()}
     if len(image_records) != len(records):
-        raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state EH schedule collides relocations"
-        )
+        raise ClassicSemanticError("MSVC 4.20 compiler-state EH schedule collides relocations")
     image_bytes = bytes(image)
     target_instructions = _instructions(
         image_bytes, image_records, "MSVC 4.20 compiler-state scheduled code"
@@ -741,8 +715,7 @@ def _apply_synchronous_eh_schedule(
     ]
     if source_values != target_values:
         raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state EH schedule changes its ordered "
-            "state-store sequence"
+            "MSVC 4.20 compiler-state EH schedule changes its ordered state-store sequence"
         )
     proof = {
         "kind": "msvc-synchronous-eh-state-schedule-v1",

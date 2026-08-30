@@ -18,16 +18,20 @@ from typing import cast
 import pytest
 
 import reprobit.classic_evidence as classic_evidence
+import reprobit.classic_execution_records as classic_execution_records
 import reprobit.classic_includes as classic_includes
 import reprobit.classic_orchestration as classic_orchestration
 import reprobit.classic_runtime as classic_runtime
-import reprobit.classic_runtime_developer as classic_runtime_developer
 import reprobit.classic_runtime_donor as classic_runtime_donor
 import reprobit.classic_runtime_environment as classic_runtime_environment
+import reprobit.classic_runtime_files as classic_runtime_files
 import reprobit.classic_runtime_graph as classic_runtime_graph
 import reprobit.classic_runtime_overlay as classic_runtime_overlay
 import reprobit.classic_runtime_preparation as classic_runtime_preparation
+import reprobit.classic_runtime_probe as classic_runtime_probe
 import reprobit.classic_runtime_producer as classic_runtime_producer
+import reprobit.classic_runtime_receipts as classic_runtime_receipts
+import reprobit.classic_runtime_warm as classic_runtime_warm
 from reprobit.backends import (
     BackendCapabilities,
     BackendError,
@@ -1341,10 +1345,10 @@ def test_prepare_failure_releases_logical_drive_and_uses_stable_temporary(
 def test_producer_write_closure_rejects_undeclared_file(tmp_path: Path) -> None:
     build_root = tmp_path / "build"
     build_root.mkdir()
-    before = classic_runtime_producer._tree_file_seal(build_root)
+    before = classic_runtime_files._tree_file_seal(build_root)
     declared = build_root / "unit.obj"
     declared.write_bytes(b"object")
-    classic_runtime_producer._require_declared_tree_writes(
+    classic_runtime_files._require_declared_tree_writes(
         before,
         root=build_root,
         allowed_outputs=(declared,),
@@ -1353,7 +1357,7 @@ def test_producer_write_closure_rejects_undeclared_file(tmp_path: Path) -> None:
     unexpected = build_root / "unit.idb"
     unexpected.write_bytes(b"undeclared")
     with pytest.raises(ClassicProjectError, match=r"unit\.idb"):
-        classic_runtime_producer._require_declared_tree_writes(
+        classic_runtime_files._require_declared_tree_writes(
             before,
             root=build_root,
             allowed_outputs=(declared,),
@@ -1482,9 +1486,9 @@ def test_published_target_reseal_detects_same_inode_mutation(tmp_path: Path) -> 
     executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
     executor.bundle = bundle
     executor.project_root = tmp_path
-    executor.record = classic_evidence.ClassicProducerGraphExecutionRecord(
+    executor.record = classic_execution_records.ClassicProducerGraphExecutionRecord(
         images=(
-            classic_evidence.ClassicProducedImage(
+            classic_execution_records.ClassicProducedImage(
                 "program",
                 tmp_path / "private/APP.EXE",
                 snapshot.path,
@@ -1705,7 +1709,7 @@ def test_generated_overlay_inputs_are_absent_until_the_sealed_epoch(
             (completed, total, phase, node_id)
         ),
     )
-    ordinary_seal = classic_runtime_producer._tree_file_seal(effective_root)
+    ordinary_seal = classic_runtime_files._tree_file_seal(effective_root)
     effective_receipt, effective_seal = executor.materialize_certified_project_overlay_epoch(
         ordinary_seal
     )
@@ -1720,7 +1724,7 @@ def test_generated_overlay_inputs_are_absent_until_the_sealed_epoch(
     assert receipt.step_id == "source.generated-input-epoch"
     assert (effective_root / "src/carrier.cpp").read_bytes() == carrier
     assert (effective_root / "src/carrier.h").read_bytes() == header
-    classic_runtime_producer._require_unchanged_tree(
+    classic_runtime_files._require_unchanged_tree(
         final_seal,
         root=effective_root,
         label="fixture final source epoch",
@@ -1876,7 +1880,7 @@ def test_compiler_namespace_payload_census_is_shared_across_nodes(
         for index in range(64)
     )
     executor._producer_reads.extend(
-        classic_evidence.ClassicProducerReadReceipt(
+        classic_execution_records.ClassicProducerReadReceipt(
             node.id,
             node.id,
             ProducerRole.COMPILER,
@@ -2009,7 +2013,7 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
         )
         step_id = f"{step_id_prefix}{node.id}"
         self._progress.emit(progress_phase or "compile", step_id)
-        return [classic_runtime_producer._internal_step(step_id, {"ran": node.id}, 0.0)]
+        return [classic_runtime_receipts._internal_step(step_id, {"ran": node.id}, 0.0)]
 
     monkeypatch.setattr(
         classic_runtime_producer.ClassicProducerExecution,
@@ -2038,7 +2042,7 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
         "compiler_epoch_invocation",
         lambda current, *, epoch: invocation,
     )
-    source_seal = classic_runtime_producer._tree_file_seal(source_root)
+    source_seal = classic_runtime_files._tree_file_seal(source_root)
     clean_receipt = executor.capture_clean_source_inputs(source_seal)
     with ProcessSupervisor() as supervisor:
         receipts = executor.run_counterfactual_compiler_audit(
@@ -2065,7 +2069,7 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
     )
     assert executor._clean_source_inputs == (CleanSourceInput("Unit.cpp", b"int unit();\n"),)
     assert producer._physical_outputs == {}
-    assert classic_runtime_producer._tree_file_seal(build_root) == {}
+    assert classic_runtime_files._tree_file_seal(build_root) == {}
     assert events == [
         (1, 3, "source-epoch", "source.clean-authority-capture"),
         (
@@ -2119,7 +2123,7 @@ def test_counterfactual_compiler_audit_rejects_a_plan_mismatch(tmp_path: Path) -
         executor.run_counterfactual_compiler_audit(
             supervisor,
             (),
-            source_seal=classic_runtime_producer._tree_file_seal(source_root),
+            source_seal=classic_runtime_files._tree_file_seal(source_root),
             cancellation=CancellationToken(),
             compiler_namespace_id="fixture-counterfactual",
         )
@@ -2145,7 +2149,7 @@ def test_certified_overlay_epoch_rejects_tampered_clean_source(tmp_path: Path) -
 
     with pytest.raises(ClassicProjectError, match="source preimage changed"):
         executor.materialize_certified_project_overlay_epoch(
-            classic_runtime_producer._tree_file_seal(source_root)
+            classic_runtime_files._tree_file_seal(source_root)
         )
 
 
@@ -2172,7 +2176,7 @@ def test_certified_overlay_epoch_rejects_preexisting_no_clean_input(
 
     with pytest.raises(ClassicProjectError, match="already exists"):
         executor.materialize_certified_project_overlay_epoch(
-            classic_runtime_producer._tree_file_seal(source_root)
+            classic_runtime_files._tree_file_seal(source_root)
         )
 
 
@@ -2300,7 +2304,7 @@ def test_effective_compiler_capture_freezes_raw_products_and_epoch_visibility(
             generated_invocation,
         ),
     )
-    captured: tuple[classic_evidence.ClassicCapturedProducerOutput, ...] = (
+    captured: tuple[classic_execution_records.ClassicCapturedProducerOutput, ...] = (
         executor._captured_compiler_outputs
     )
     assert [item.reference for item in captured] == [
@@ -3697,7 +3701,7 @@ def test_discarded_warm_dependency_replay_erases_arena_after_parse_failure(
             self.releases += 1
 
     pool = Pool()
-    executor = object.__new__(classic_runtime_developer.ClassicDeveloperExecution)
+    executor = object.__new__(classic_runtime_warm.ClassicWarmExecution)
     executor.build_root = build_root
     executor.session_root = session_root
     executor.overlay = SimpleNamespace(generated_node_inputs=MappingProxyType({}))
@@ -3726,7 +3730,7 @@ def test_discarded_warm_dependency_replay_erases_arena_after_parse_failure(
         (arenas[0] / "dependencies.sbr").write_bytes(b"not-an-sbr")
         return ProcessResult(("compiler",), 0, b"", 1, 0.01), object()
 
-    monkeypatch.setattr(classic_runtime_developer, "_run", run)
+    monkeypatch.setattr(classic_runtime_warm, "_run", run)
     replay = executor.replay_warm_compiler_dependencies(
         node.id,
         cancellation=CancellationToken(),
@@ -4335,10 +4339,10 @@ def test_donor_invocation_replays_only_dependency_tracked_donors(
             0,
             CancellationToken(),
             step_id="donor.fixture",
-            compiler_epoch=classic_runtime_overlay.ClassicActiveCompilerEpoch(
+            compiler_epoch=classic_execution_records.ClassicActiveCompilerEpoch(
                 "fixture",
                 include_authority,
-                classic_runtime_producer._tree_file_seal(effective_root),
+                classic_runtime_files._tree_file_seal(effective_root),
                 False,
             ),
             capture_dependencies=True,
@@ -4459,12 +4463,12 @@ def test_projected_donor_dependency_parse_failure_is_discarded(
                 "s.cpp",
             ),
             arena=arena,
-            arena_seal=classic_runtime_producer._tree_file_seal(arena),
+            arena_seal=classic_runtime_files._tree_file_seal(arena),
             lane=cast(classic_runtime_environment._ExecutionLane, lane),
             timeout=30.0,
             step_id="donor.fixture",
             cancellation=CancellationToken(),
-            compiler_epoch=classic_runtime_overlay.ClassicActiveCompilerEpoch(
+            compiler_epoch=classic_execution_records.ClassicActiveCompilerEpoch(
                 "fixture",
                 include_authority,
                 MappingProxyType({}),
@@ -4511,8 +4515,8 @@ def test_exact_compiler_probe_returns_raw_outputs_and_closes_runtime(
             self.closed = True
 
     pool = Pool()
-    executor = object.__new__(classic_runtime_developer.ClassicDeveloperExecution)
-    executor._warm_stack = None
+    executor = object.__new__(classic_runtime_probe.ClassicProbeExecution)
+    executor.warm = SimpleNamespace(close=lambda: None)
     executor.graph = graph
     executor.overlay = SimpleNamespace(
         generated_node_inputs=MappingProxyType({}),
@@ -4559,7 +4563,7 @@ def test_exact_compiler_probe_returns_raw_outputs_and_closes_runtime(
         producer._physical_outputs[object_path] = object_path
         producer._physical_outputs[pdb_path] = pdb_path
         cast(set[str], kwargs["completed"]).add(node.id)
-        return [classic_runtime_producer._internal_step(f"probe.{node.id}", {}, 0.0)]
+        return [classic_runtime_receipts._internal_step(f"probe.{node.id}", {}, 0.0)]
 
     producer.run_graph_nodes = run_nodes  # type: ignore[method-assign]
 
@@ -4590,7 +4594,7 @@ def _donor_probe_executor(
     donors: tuple[tuple[str, bytes], ...],
     jobs: int,
 ) -> tuple[
-    classic_runtime_developer.ClassicDeveloperExecution,
+    classic_runtime_probe.ClassicProbeExecution,
     _DonorProbePool,
     SimpleNamespace,
     SealedNamespaceSnapshot,
@@ -4618,8 +4622,8 @@ def _donor_probe_executor(
     )
 
     pool = _DonorProbePool()
-    executor = object.__new__(classic_runtime_developer.ClassicDeveloperExecution)
-    executor._warm_stack = None
+    executor = object.__new__(classic_runtime_probe.ClassicProbeExecution)
+    executor.warm = SimpleNamespace(close=lambda: None)
     executor.units = cast(tuple[classic_orchestration.ClassicPreparedUnit, ...], (unit,))
     executor.overlay = SimpleNamespace(
         overlay_witnesses=(),
@@ -4672,7 +4676,7 @@ def test_exact_donor_probe_runs_in_parallel_with_stable_output_and_progress(
         cancellation: CancellationToken,
         *,
         step_id: str,
-        compiler_epoch: classic_runtime_overlay.ClassicActiveCompilerEpoch,
+        compiler_epoch: classic_execution_records.ClassicActiveCompilerEpoch,
     ) -> classic_runtime_donor._DonorCompilerInvocation:
         del supervisor, cancellation, compiler_epoch
         donor = unit_arg.donors[donor_index]
@@ -4725,7 +4729,7 @@ def test_exact_donor_probe_runs_in_parallel_with_stable_output_and_progress(
     assert outputs[0].source_reference == "unit.cpp"
     assert outputs[0].producer_node_id == "compiler.program.0000"
     assert outputs[0].rendered_inputs == (
-        classic_runtime_developer.ClassicDonorProbeInput(
+        classic_runtime_probe.ClassicDonorProbeInput(
             "unit.cpp",
             Digest.from_bytes(b"rendered second\n"),
             len(b"rendered second\n"),
@@ -4764,7 +4768,7 @@ def test_donor_probe_failure_cancels_active_sibling_without_replenishing(
         cancellation: CancellationToken,
         *,
         step_id: str,
-        compiler_epoch: classic_runtime_overlay.ClassicActiveCompilerEpoch,
+        compiler_epoch: classic_execution_records.ClassicActiveCompilerEpoch,
     ) -> classic_runtime_donor._DonorCompilerInvocation:
         del supervisor, step_id, compiler_epoch
         donor_id = unit_arg.donors[donor_index].intervention.id
@@ -4804,8 +4808,8 @@ def test_donor_probe_rejects_unprepared_id_and_still_closes_runtime(tmp_path: Pa
             self.closed = True
 
     pool = Pool()
-    executor = object.__new__(classic_runtime_developer.ClassicDeveloperExecution)
-    executor._warm_stack = None
+    executor = object.__new__(classic_runtime_probe.ClassicProbeExecution)
+    executor.warm = SimpleNamespace(close=lambda: None)
     executor.units = ()
     executor.effective_root = source_root
     producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)

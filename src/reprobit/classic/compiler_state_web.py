@@ -192,9 +192,7 @@ def _derived_web_declarations(
     frame_pointer_free: bool = False,
 ) -> list[dict[str, Any]]:
     if len(source) != len(target):
-        raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state web proof changes instruction count"
-        )
+        raise ClassicSemanticError("MSVC 4.20 compiler-state web proof changes instruction count")
     changed: dict[tuple[str, str], list[tuple[int, int, int]]] = {}
     for index, (source_item, target_item) in enumerate(zip(source, target, strict=True)):
         if (
@@ -205,8 +203,7 @@ def _derived_web_declarations(
             or source_item["fields"] != target_item["fields"]
         ):
             raise ClassicSemanticError(
-                "MSVC 4.20 compiler-state web proof changes instruction or "
-                "control-flow structure"
+                "MSVC 4.20 compiler-state web proof changes instruction or control-flow structure"
             )
         source_fields = _field_registers(source_body, source_item)
         target_fields = _field_registers(target_body, target_item)
@@ -220,9 +217,7 @@ def _derived_web_declarations(
                 (index, ordinal, int(byte_index))
             )
     if not changed:
-        raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state web proof recolours no register web"
-        )
+        raise ClassicSemanticError("MSVC 4.20 compiler-state web proof recolours no register web")
     declarations: list[dict[str, Any]] = []
     structural_registers = {"esp"} if frame_pointer_free else {"esp", "ebp"}
     for (source_register, target_register), entries in sorted(changed.items()):
@@ -254,8 +249,7 @@ def _derived_web_declarations(
             if reads and writes:
                 if sorted(ordinals) != source_ordinals:
                     raise ClassicSemanticError(
-                        "MSVC 4.20 compiler-state web partially recolours a "
-                        "read-write definition"
+                        "MSVC 4.20 compiler-state web partially recolours a read-write definition"
                     )
                 member: object = offset
             elif len(ordinals) == 1:
@@ -344,8 +338,7 @@ def _prove_simultaneous_register_webs(
 ) -> tuple[_ImageState, dict[str, object]]:
     if not 2 <= len(declarations) <= 3:
         raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state simultaneous web cycle is outside its "
-            "closed size bound"
+            "MSVC 4.20 compiler-state simultaneous web cycle is outside its closed size bound"
         )
     mapping = {str(item["source_register"]): str(item["image_register"]) for item in declarations}
     if (
@@ -359,9 +352,7 @@ def _prove_simultaneous_register_webs(
             "MSVC 4.20 compiler-state simultaneous web fields are not one "
             "structural-register-free cycle"
         )
-    source = _instructions(
-        state.body, source_records, "MSVC 4.20 compiler-state source web cycle"
-    )
+    source = _instructions(state.body, source_records, "MSVC 4.20 compiler-state source web cycle")
     target = _instructions(
         pair.effective_body,
         target_records,
@@ -415,8 +406,7 @@ def _prove_simultaneous_register_webs(
             or source_item["fields"] != target_item["fields"]
         ):
             raise ClassicSemanticError(
-                "MSVC 4.20 compiler-state simultaneous web cycle changes "
-                "instruction structure"
+                "MSVC 4.20 compiler-state simultaneous web cycle changes instruction structure"
             )
         local: dict[str, str] = {}
         source_fields = _field_registers(state.body, source_item)
@@ -427,8 +417,7 @@ def _prove_simultaneous_register_webs(
             previous = local.setdefault(source_register, target_register)
             if previous != target_register:
                 raise ClassicSemanticError(
-                    "MSVC 4.20 compiler-state simultaneous web has a non-functional "
-                    "field image"
+                    "MSVC 4.20 compiler-state simultaneous web has a non-functional field image"
                 )
             byte_index, shift = source_item["fields"][ordinal]
             byte_index = int(byte_index)
@@ -439,8 +428,7 @@ def _prove_simultaneous_register_webs(
                 continue
             if source_register not in mapping or mapping[source_register] != target_register:
                 raise ClassicSemanticError(
-                    "MSVC 4.20 compiler-state simultaneous web changes a field "
-                    "outside its cycle"
+                    "MSVC 4.20 compiler-state simultaneous web changes a field outside its cycle"
                 )
             if byte_index in relocation_bytes:
                 raise ClassicSemanticError(
@@ -448,8 +436,7 @@ def _prove_simultaneous_register_webs(
                 )
             if {source_register, target_register} & set(source_item.get("frozen", frozenset())):
                 raise ClassicSemanticError(
-                    "MSVC 4.20 compiler-state simultaneous web touches a partial "
-                    "register field"
+                    "MSVC 4.20 compiler-state simultaneous web touches a partial register field"
                 )
             image[byte_index] = (
                 image[byte_index] & ~(7 << shift)
@@ -460,9 +447,7 @@ def _prove_simultaneous_register_webs(
             local.setdefault(register, register)
         mapped_reads = {local[register] for register in source_item["reads"]}
         mapped_writes = {local[register] for register in source_item["writes"]}
-        if mapped_reads != set(target_item["reads"]) or mapped_writes != set(
-            target_item["writes"]
-        ):
+        if mapped_reads != set(target_item["reads"]) or mapped_writes != set(target_item["writes"]):
             raise ClassicSemanticError(
                 "MSVC 4.20 compiler-state simultaneous web changes an operand observation"
             )
@@ -514,8 +499,7 @@ def _prove_simultaneous_register_webs(
         target_masked[offset] = 0
     if source_masked != target_masked or bytes(image) != pair.effective_body:
         raise ClassicSemanticError(
-            "MSVC 4.20 compiler-state simultaneous web does not reproduce only "
-            "register fields"
+            "MSVC 4.20 compiler-state simultaneous web does not reproduce only register fields"
         )
     if len(set(definition_map.values())) != len(definition_map):
         raise ClassicSemanticError(
@@ -529,8 +513,7 @@ def _prove_simultaneous_register_webs(
             mapped = frozenset(definition_map[value] for value in source_incoming[index][register])
             if mapped != target_incoming[index][target_register]:
                 raise ClassicSemanticError(
-                    "MSVC 4.20 compiler-state simultaneous web changes a "
-                    "reaching definition"
+                    "MSVC 4.20 compiler-state simultaneous web changes a reaching definition"
                 )
             observations.append(
                 {
@@ -562,9 +545,7 @@ def _prove_register_web_recolour(
     *,
     frame_pointer_free: bool = False,
 ) -> tuple[_ImageState, dict[str, object]]:
-    source = _instructions(
-        state.body, source_records, "MSVC 4.20 compiler-state source web"
-    )
+    source = _instructions(state.body, source_records, "MSVC 4.20 compiler-state source web")
     target = _instructions(
         pair.effective_body, target_records, "MSVC 4.20 compiler-state effective web"
     )

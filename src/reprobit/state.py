@@ -112,8 +112,7 @@ def _require_real_directory(path: Path, label: str) -> Path:
 
 def _atomic_json(path: Path, value: object) -> None:
     payload = (
-        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        + "\n"
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
     ).encode("utf-8")
     temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
     descriptor = os.open(
@@ -358,9 +357,7 @@ class StateStore:
         runs: list[RunState] = []
         if os.path.lexists(self.root):
             with _maintenance_gate(self.root, create=False):
-                run_activity = tuple(
-                    (path, self._active(path)) for path in self._run_paths()
-                )
+                run_activity = tuple((path, self._active(path)) for path in self._run_paths())
         else:
             run_activity = ()
         for path, active in run_activity:
@@ -406,12 +403,8 @@ class StateStore:
             cache_files,
             cache_records=cache_status.records if cache_status is not None else 0,
             cache_blobs=cache_status.blobs if cache_status is not None else 0,
-            cache_active_leases=(
-                cache_status.active_leases if cache_status is not None else 0
-            ),
-            cache_stale_leases=(
-                cache_status.stale_leases if cache_status is not None else 0
-            ),
+            cache_active_leases=(cache_status.active_leases if cache_status is not None else 0),
+            cache_stale_leases=(cache_status.stale_leases if cache_status is not None else 0),
         )
 
     def gc(
@@ -444,9 +437,7 @@ class StateStore:
                     lease: _AdvisoryFileLock | None = None
                     if os.path.lexists(lease_path):
                         if not lease_path.is_file():
-                            raise _StateError(
-                                f"run lease is not a real file: {lease_path}"
-                            )
+                            raise _StateError(f"run lease is not a real file: {lease_path}")
                         try:
                             lease = _AdvisoryFileLock(lease_path, create=False)
                         except FileNotFoundError:
@@ -471,10 +462,7 @@ class StateStore:
                         if modified_ns > cutoff_ns:
                             skipped_recent.append(path)
                             continue
-                        if (
-                            path.is_symlink()
-                            or path.parent.resolve(strict=True) != self.runs_root
-                        ):
+                        if path.is_symlink() or path.parent.resolve(strict=True) != self.runs_root:
                             raise _StateError(f"run escaped state root during GC: {path}")
                         # Windows cannot remove a held lease file. The state-wide
                         # gate keeps the close-to-remove window exclusive.

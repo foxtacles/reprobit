@@ -116,9 +116,7 @@ def test_heartbeat_retains_latest_count_and_named_subphase() -> None:
         assert received.wait(timeout=1)
 
     heartbeat = next(
-        event
-        for event in events
-        if event.kind is ProgressKind.HEARTBEAT and event.completed == 7
+        event for event in events if event.kind is ProgressKind.HEARTBEAT and event.completed == 7
     )
     assert (heartbeat.completed, heartbeat.total) == (7, 10)
     assert heartbeat.phase == "evidence"
@@ -198,7 +196,5 @@ def test_phase_elapsed_is_relative_for_each_phase() -> None:
     with emitter.phase("execute", "executing"):
         now[0] = 124.5
 
-    finished = [
-        event for event in events if event.kind is ProgressKind.PHASE_FINISHED
-    ]
+    finished = [event for event in events if event.kind is ProgressKind.PHASE_FINISHED]
     assert [event.elapsed_seconds for event in finished] == [3.0, 4.5]

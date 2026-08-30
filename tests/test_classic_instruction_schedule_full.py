@@ -469,9 +469,7 @@ class DisambiguationTests(unittest.TestCase):
         ]
         _, edges = schedule_algorithms.ia32_schedule_dependence_edges(decoded, "dag")
         self.assertEqual([edge[:2] for edge in edges], [[0, 1]])
-        self.assertEqual(
-            edges[0][2], ["memory", "register_raw", "register_war", "register_waw"]
-        )
+        self.assertEqual(edges[0][2], ["memory", "register_raw", "register_war", "register_waw"])
 
     def test_a_push_transposes_with_an_esp_free_instruction(self):
         # `lea ecx, [esi+0x4220]` accesses no memory and names no esp, so it

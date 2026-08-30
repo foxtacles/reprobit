@@ -394,9 +394,9 @@ def revalidate_classic_validator_implementation() -> None:
 
     if _classic_implementation_digest() != CLASSIC_VALIDATOR_IMPLEMENTATION_DIGEST:
         raise ClassicSemanticError(
-            "classic semantic validator implementation changed during execution; "
-            "rerun the build"
+            "classic semantic validator implementation changed during execution; rerun the build"
         )
+
 
 SOURCE_OVERLAY_VALIDATOR_ID = "classic.source-overlay-ancestry.v1"
 _SOURCE_OVERLAY_SPEC = {
@@ -411,6 +411,8 @@ _SOURCE_OVERLAY_SPEC = {
     ),
     "timestamp_policy": "COFF producer timestamps are parsed but excluded from semantics",
 }
+
+
 def _source_overlay_validator_digest(implementation_digest: Digest) -> Digest:
     return Digest.from_bytes(
         canonical_json(
@@ -874,9 +876,7 @@ def issue_classic_donor_semantics(
                 "digest": donor_digest.model_dump(mode="json"),
                 "size": len(donor.donor_object),
             },
-            "source_inputs": _payload_receipts(
-                donor.source_inputs, label="donor source input"
-            ),
+            "source_inputs": _payload_receipts(donor.source_inputs, label="donor source input"),
             "compiler_statement": compiler_trace,
         }
     )
@@ -939,6 +939,7 @@ def donor_lane_input_statement(lane: DonorSemanticLane) -> dict[str, object]:
     """Return the exact candidate input statement bound by a donor lane."""
 
     return dict(lane.consumer_input_statement)
+
 
 __all__ = [
     "BINARY_TRANSFORM_OBLIGATIONS",

@@ -486,6 +486,9 @@ def run_project_grind(
                     "grind-verify",
                     state_id,
                 )
+                # The next verifier may construct another very large report.
+                # Release rejected evidence before entering that call.
+                del evidence
                 continue
             _advance(progress, completed, total, "grind-verify", state_id)
             chosen_documents = final_documents

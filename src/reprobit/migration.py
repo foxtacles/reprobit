@@ -1172,7 +1172,7 @@ def _normalized_legacy_overlay(
         if has_member_probe and source_root is not None
         else {}
     )
-    from reprobit.classic_overlay import SourceEditError
+    from reprobit.classic_overlay_types import SourceEditError
     from reprobit.migration_overlay import normalize_legacy_member_probe_return_types
 
     try:

@@ -216,8 +216,7 @@ def build_declaration_shape_donor(
             role=ClassicRecipeRole.DONOR,
             build_target=build_target,
             parameters=tuple(
-                ClassicField(name=name, value=value)
-                for name, value in sorted(parameters.items())
+                ClassicField(name=name, value=value) for name, value in sorted(parameters.items())
             ),
         )
         receipt = _record_receipt(intervention, {})
@@ -360,14 +359,10 @@ def merge_authored_records(
         raise DiscoveryAuthoringError("discovery authoring requires a shard build target")
 
     interventions = list(intervention_document.interventions)
-    intervention_indexes = {
-        item.id: index for index, item in enumerate(interventions)
-    }
+    intervention_indexes = {item.id: index for index, item in enumerate(interventions)}
     receipts = list(proof_document.expected_observations)
     receipt_indexes = {item.id: index for index, item in enumerate(receipts)}
-    receipt_interventions = {
-        item.intervention_id: index for index, item in enumerate(receipts)
-    }
+    receipt_interventions = {item.intervention_id: index for index, item in enumerate(receipts)}
     for record in records:
         intervention = record.intervention
         receipt = record.receipt
@@ -407,18 +402,14 @@ def merge_authored_records(
             interventions[existing_index] = ClassicRecipeIntervention.model_validate(
                 {
                     **intervention.model_dump(mode="python"),
-                    "beneficiaries": tuple(
-                        beneficiaries[key] for key in sorted(beneficiaries)
-                    ),
+                    "beneficiaries": tuple(beneficiaries[key] for key in sorted(beneficiaries)),
                 }
             )
 
         existing_receipt_index = receipt_interventions.get(intervention.id)
         if existing_receipt_index is not None:
             if receipts[existing_receipt_index] != receipt:
-                raise DiscoveryAuthoringError(
-                    f"intervention proof collision: {intervention.id!r}"
-                )
+                raise DiscoveryAuthoringError(f"intervention proof collision: {intervention.id!r}")
             continue
         if receipt.id in receipt_indexes:
             raise DiscoveryAuthoringError(f"receipt identifier collision: {receipt.id!r}")

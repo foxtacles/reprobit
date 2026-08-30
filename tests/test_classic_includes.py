@@ -65,10 +65,7 @@ def test_vc4_sbr_parser_preserves_nested_source_ancestry() -> None:
 
 def _sbr_with_main(*records: bytes) -> bytes:
     return (
-        b"\x00\x02\x00\x07\x00R:\\build\0"
-        b"\x01R:\\source\\main.cpp\0"
-        + b"".join(records)
-        + b"\x0a"
+        b"\x00\x02\x00\x07\x00R:\\build\0\x01R:\\source\\main.cpp\0" + b"".join(records) + b"\x0a"
     )
 
 

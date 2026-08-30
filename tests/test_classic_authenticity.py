@@ -167,9 +167,10 @@ def test_mosaic_ranges_use_current_reprobit_donor_identifiers() -> None:
             "donor": "donor_2611b2229ba41e75",
         }
     ]
-    assert ia32_algorithms.validate_instruction_mosaic_ranges(
-        declaration, "mosaic", 1
-    )[0]["donor"] == "donor_2611b2229ba41e75"
+    assert (
+        ia32_algorithms.validate_instruction_mosaic_ranges(declaration, "mosaic", 1)[0]["donor"]
+        == "donor_2611b2229ba41e75"
+    )
     declaration[0]["donor"] = "Legacy Donor"
     with pytest.raises(ByteIdentityError, match="donor is invalid"):
         ia32_algorithms.validate_instruction_mosaic_ranges(declaration, "mosaic", 1)

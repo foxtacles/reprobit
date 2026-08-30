@@ -26,21 +26,14 @@ def test_version_is_exposed() -> None:
 
 def test_committed_json_schemas_are_current() -> None:
     expected = {
-        **{
-            name: canonical_json(schema)
-            for name, schema in project_document_schemas().items()
-        },
+        **{name: canonical_json(schema) for name, schema in project_document_schemas().items()},
         "msvc-discovery-request-v1.schema.json": canonical_json(
             msvc_discovery_request_json_schema()
         ),
-        "discovery-report-v1.schema.json": canonical_json(
-            discovery_report_json_schema()
-        ),
+        "discovery-report-v1.schema.json": canonical_json(discovery_report_json_schema()),
         "report-v2.schema.json": canonical_json(report_json_schema()),
     }
-    assert {path.name for path in (ROOT / "schemas").glob("*.schema.json")} == set(
-        expected
-    )
+    assert {path.name for path in (ROOT / "schemas").glob("*.schema.json")} == set(expected)
     for name, generated in expected.items():
         assert (ROOT / "schemas" / name).read_bytes() == generated
 

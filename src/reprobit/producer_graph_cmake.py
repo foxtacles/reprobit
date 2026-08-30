@@ -6,8 +6,8 @@ import os
 import re
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from typing import cast
 
 from reprobit.cmake_graph_paths import (
     attached_value as _attached_value,
@@ -57,29 +57,21 @@ from reprobit.producer_graph import (
 )
 
 
-def extract_cmake_makefiles_graph(
-    *,
-    configured_build_root: Path,
-    effective_source_root: Path,
-    toolchain_root: Path,
-    source_topology_digest_value: Digest,
-    toolchain_lock_digest: Digest,
-    path_profile_id: str,
+@dataclass(frozen=True, slots=True)
+class _RawNode:
+    role: ProducerRole
+    owner: str
+    arguments: tuple[str, ...]
+    outputs: tuple[str, ...]
+    working_directory: Path
+    inputs: tuple[str, ...] = ()
+
+
+def _normalize_directive_inputs(
     target_outputs: Mapping[str, str],
-    directive_inputs: Mapping[str, Sequence[str]] | None = None,
-) -> ProducerGraphDocument:
-    """Extract a reviewable graph from one migration-time CMake configuration.
-
-    This function is intentionally not called by certification.  Its output is
-    committed, reviewed, and reloaded as authority on later runs.
-    """
-
-    build_root = configured_build_root.resolve(strict=True)
-    source_root = effective_source_root.resolve(strict=True)
-    toolchain = toolchain_root.resolve(strict=True)
-    raw_database = read_compile_database(build_root)
-    metadata_reader = MetadataReader()
-    normalized_directive_inputs: dict[str, tuple[str, ...]] = {}
+    directive_inputs: Mapping[str, Sequence[str]] | None,
+) -> dict[str, tuple[str, ...]]:
+    normalized: dict[str, tuple[str, ...]] = {}
     for target_id, references in (directive_inputs or {}).items():
         if target_id not in target_outputs:
             raise ProducerGraphError(f"directive inputs name unknown target {target_id!r}")
@@ -92,22 +84,30 @@ def extract_cmake_makefiles_graph(
             raise ProducerGraphError(
                 f"directive inputs for {target_id!r} are not canonical and unique"
             )
-        normalized_directive_inputs[target_id] = canonical
+        normalized[target_id] = canonical
+    return normalized
 
-    compile_commands = _compile_commands(
+
+def _compiler_nodes(
+    raw_database: list[object],
+    *,
+    build_root: Path,
+    source_root: Path,
+    toolchain_root: Path,
+) -> tuple[_RawNode, ...]:
+    commands = _compile_commands(
         raw_database,
         build_root=build_root,
         source_root=source_root,
-        toolchain_root=toolchain,
+        toolchain_root=toolchain_root,
     )
     pdb_directory_owners = Counter(
         command.pdb_directory_ref.casefold()
-        for command in compile_commands
+        for command in commands
         if command.pdb_directory_ref is not None
     )
-    raw_nodes: list[dict[str, object]] = []
-    produced_paths: set[str] = set()
-    for command in compile_commands:
+    nodes: list[_RawNode] = []
+    for command in commands:
         arguments = command.arguments
         pdb_ref = command.pdb_ref
         if command.pdb_directory_ref is not None:
@@ -117,7 +117,7 @@ def extract_cmake_makefiles_graph(
                 pdb_ref = command.pdb_directory_ref.rstrip("/") + "/vc40.pdb"
             else:
                 # Shared ``vc40.pdb`` is incompatible with isolated compiler
-                # lanes.  Make the per-TU policy explicit as ``<object>.pdb``.
+                # lanes. Make the per-TU policy explicit as ``<object>.pdb``.
                 # This changes debug-path input and is not byte-neutral by itself.
                 pdb_ref = command.output_ref + ".pdb"
                 pdb_relative = PurePosixPath(pdb_ref.removeprefix("build/"))
@@ -128,56 +128,141 @@ def extract_cmake_makefiles_graph(
                     os.fspath(pdb_path),
                 )
         assert pdb_ref is not None
-        produced_paths.update(ref.removeprefix("build/") for ref in (command.output_ref, pdb_ref))
-        raw_nodes.append(
-            {
-                "role": ProducerRole.COMPILER,
-                "owner": command.owner,
-                "arguments": arguments[1:],
-                "inputs": (command.source_ref,),
-                "outputs": (command.output_ref, pdb_ref),
-                "working_directory": command.directory,
-            }
+        nodes.append(
+            _RawNode(
+                role=ProducerRole.COMPILER,
+                owner=command.owner,
+                arguments=arguments[1:],
+                inputs=(command.source_ref,),
+                outputs=(command.output_ref, pdb_ref),
+                working_directory=command.directory,
+            )
         )
+    return tuple(nodes)
 
+
+def _resource_nodes(
+    *,
+    build_root: Path,
+    source_root: Path,
+    toolchain_root: Path,
+    reader: MetadataReader,
+) -> tuple[_RawNode, ...]:
+    nodes: list[_RawNode] = []
     for owner, directory, arguments in _resource_commands(
         build_root,
-        toolchain_root=toolchain,
-        reader=metadata_reader,
+        toolchain_root=toolchain_root,
+        reader=reader,
     ):
         output = _attached_value(arguments, ("/fo", "-fo"))
         if output is None or not arguments:
             raise ProducerGraphError("resource command omits its output")
-        source = arguments[-1]
         output_ref = _path_reference(
             output,
             working_directory=directory,
             source_root=source_root,
             build_root=build_root,
-            toolchain_root=toolchain,
+            toolchain_root=toolchain_root,
         )
         source_ref = _path_reference(
-            source,
+            arguments[-1],
             working_directory=directory,
             source_root=source_root,
             build_root=build_root,
-            toolchain_root=toolchain,
+            toolchain_root=toolchain_root,
         )
         if not output_ref.startswith("build/"):
             raise ProducerGraphError("resource output is outside the configured build")
-        produced_paths.add(output_ref.removeprefix("build/"))
-        raw_nodes.append(
-            {
-                "role": ProducerRole.RESOURCE,
-                "owner": owner,
-                "arguments": arguments,
-                "inputs": (source_ref,),
-                "outputs": (output_ref,),
-                "working_directory": directory,
-            }
+        nodes.append(
+            _RawNode(
+                role=ProducerRole.RESOURCE,
+                owner=owner,
+                arguments=arguments,
+                inputs=(source_ref,),
+                outputs=(output_ref,),
+                working_directory=directory,
+            )
         )
+    return tuple(nodes)
 
-    link_records: list[dict[str, object]] = []
+
+def _link_outputs(
+    *,
+    owner: str,
+    role: ProducerRole,
+    arguments: tuple[str, ...],
+    directory: Path,
+    source_root: Path,
+    build_root: Path,
+    toolchain_root: Path,
+) -> tuple[str, ...]:
+    output = _attached_value(arguments, ("/out:", "-out:"))
+    if output is None:
+        raise ProducerGraphError(f"link command for {owner!r} omits /out")
+    outputs = [
+        _path_reference(
+            output,
+            working_directory=directory,
+            source_root=source_root,
+            build_root=build_root,
+            toolchain_root=toolchain_root,
+        )
+    ]
+    if role is ProducerRole.LINKER:
+        switches = {item.casefold() for item in arguments}
+        implementation_library = _attached_value(arguments, ("/implib:", "-implib:"))
+        if switches & {"/dll", "-dll"}:
+            if implementation_library is None:
+                raise ProducerGraphError(f"DLL link command for {owner!r} omits /implib")
+            outputs.append(
+                _path_reference(
+                    implementation_library,
+                    working_directory=directory,
+                    source_root=source_root,
+                    build_root=build_root,
+                    toolchain_root=toolchain_root,
+                )
+            )
+            outputs.append(
+                _path_reference(
+                    os.fspath(Path(implementation_library).with_suffix(".exp")),
+                    working_directory=directory,
+                    source_root=source_root,
+                    build_root=build_root,
+                    toolchain_root=toolchain_root,
+                )
+            )
+        has_debug = any(
+            item.casefold() in {"/debug", "-debug"}
+            or item.casefold().startswith(("/debug:", "-debug:"))
+            for item in arguments
+        )
+        if has_debug:
+            pdb = _attached_value(arguments, ("/pdb:", "-pdb:"))
+            if pdb is None:
+                raise ProducerGraphError(f"debug link command for {owner!r} omits /pdb")
+            outputs.append(
+                _path_reference(
+                    pdb,
+                    working_directory=directory,
+                    source_root=source_root,
+                    build_root=build_root,
+                    toolchain_root=toolchain_root,
+                )
+            )
+    if any(not reference.startswith("build/") for reference in outputs):
+        raise ProducerGraphError(f"link outputs for {owner!r} leave the build seat")
+    return tuple(outputs)
+
+
+def _link_nodes(
+    *,
+    build_root: Path,
+    source_root: Path,
+    toolchain_root: Path,
+    reader: MetadataReader,
+) -> tuple[_RawNode, ...]:
+    nodes: list[_RawNode] = []
     for link_file in _metadata_files(build_root, "link.txt"):
         owner = link_file.parent.name.removesuffix(".dir")
         directory = _build_working_directory(
@@ -185,200 +270,206 @@ def extract_cmake_makefiles_graph(
             build_root=build_root,
             label=f"link target {owner!r} working directory",
         )
-        link_command_text = metadata_reader.read_text(
+        command_text = reader.read_text(
             link_file,
             label=f"link target {owner!r} metadata",
         ).strip()
-        arguments = _split_command_line(link_command_text)
+        arguments = _split_command_line(command_text)
         if not arguments:
             raise ProducerGraphError(f"empty link command for {owner!r}")
         executable_path = _toolchain_executable(
             arguments[0],
             working_directory=directory,
-            toolchain_root=toolchain,
+            toolchain_root=toolchain_root,
             label=f"link command for {owner!r}",
         )
         expanded = _expand_response(
             arguments[1:],
             build_root=build_root,
             working_directory=directory,
-            reader=metadata_reader,
+            reader=reader,
         )
-        output = _attached_value(expanded, ("/out:", "-out:"))
-        if output is None:
-            raise ProducerGraphError(f"link command for {owner!r} omits /out")
         executable = executable_path.name.casefold()
         role = ProducerRole.LIBRARIAN if executable in {"lib", "lib.exe"} else ProducerRole.LINKER
-        output_refs = [
-            _path_reference(
-                output,
-                working_directory=directory,
-                source_root=source_root,
-                build_root=build_root,
-                toolchain_root=toolchain,
-            )
-        ]
-        if role is ProducerRole.LINKER:
-            switches = {item.casefold() for item in expanded}
-            is_dll = bool(switches & {"/dll", "-dll"})
-            implementation_library = _attached_value(expanded, ("/implib:", "-implib:"))
-            if is_dll:
-                if implementation_library is None:
-                    raise ProducerGraphError(f"DLL link command for {owner!r} omits /implib")
-                output_refs.append(
-                    _path_reference(
-                        implementation_library,
-                        working_directory=directory,
-                        source_root=source_root,
-                        build_root=build_root,
-                        toolchain_root=toolchain,
-                    )
-                )
-                export_file = os.fspath(Path(implementation_library).with_suffix(".exp"))
-                output_refs.append(
-                    _path_reference(
-                        export_file,
-                        working_directory=directory,
-                        source_root=source_root,
-                        build_root=build_root,
-                        toolchain_root=toolchain,
-                    )
-                )
-            has_debug = any(
-                item.casefold() in {"/debug", "-debug"}
-                or item.casefold().startswith(("/debug:", "-debug:"))
-                for item in expanded
-            )
-            if has_debug:
-                pdb = _attached_value(expanded, ("/pdb:", "-pdb:"))
-                if pdb is None:
-                    raise ProducerGraphError(f"debug link command for {owner!r} omits /pdb")
-                output_refs.append(
-                    _path_reference(
-                        pdb,
-                        working_directory=directory,
-                        source_root=source_root,
-                        build_root=build_root,
-                        toolchain_root=toolchain,
-                    )
-                )
-        produced_paths.update(ref.removeprefix("build/") for ref in output_refs)
-        if any(not ref.startswith("build/") for ref in output_refs):
-            raise ProducerGraphError(f"link outputs for {owner!r} leave the build seat")
-        link_records.append(
-            {
-                "role": role,
-                "owner": owner,
-                "arguments": expanded,
-                "outputs": tuple(output_refs),
-                "working_directory": directory,
-            }
-        )
-
-    produced_relatives = frozenset(path.casefold() for path in produced_paths)
-    raw_nodes.extend(link_records)
-    normalized_nodes: list[dict[str, object]] = []
-    for raw_node in raw_nodes:
-        arguments = _normalize_arguments(
-            cast(tuple[str, ...], raw_node["arguments"]),
-            working_directory=cast(Path, raw_node["working_directory"]),
-            source_root=source_root,
-            build_root=build_root,
-            toolchain_root=toolchain,
-            produced_relatives=produced_relatives,
-        )
-        explicit_inputs = set(cast(tuple[str, ...], raw_node.get("inputs", ())))
-        for argument in arguments:
-            plain = argument
-            for prefix in ("/DEF:", "-DEF:"):
-                if plain.casefold().startswith(prefix.casefold()):
-                    plain = plain[len(prefix) :]
-                    break
-            if plain.startswith("${SOURCE}/"):
-                relative = plain.removeprefix("${SOURCE}/")
-                path = source_root.joinpath(*PurePosixPath(relative).parts)
-                if path.is_file():
-                    kind = (
-                        "quarantine-archive"
-                        if (
-                            raw_node["role"] is ProducerRole.LINKER
-                            and path.suffix.casefold() == ".lib"
-                        )
-                        else "source"
-                    )
-                    explicit_inputs.add(graph_reference(kind, relative))
-            elif plain.startswith("${BUILD}/"):
-                explicit_inputs.add(graph_reference("build", plain.removeprefix("${BUILD}/")))
-            elif re.fullmatch(r"(?i)[a-z0-9_.+@-]+\.lib", plain):
-                explicit_inputs.add(graph_reference("system-library", plain))
-        explicit_inputs.difference_update(cast(tuple[str, ...], raw_node["outputs"]))
-        normalized_nodes.append(
-            {
-                **raw_node,
-                "arguments": arguments,
-                "inputs": tuple(sorted(explicit_inputs, key=str.casefold)),
-                "outputs": tuple(
-                    sorted(cast(tuple[str, ...], raw_node["outputs"]), key=str.casefold)
+        nodes.append(
+            _RawNode(
+                role=role,
+                owner=owner,
+                arguments=expanded,
+                outputs=_link_outputs(
+                    owner=owner,
+                    role=role,
+                    arguments=expanded,
+                    directory=directory,
+                    source_root=source_root,
+                    build_root=build_root,
+                    toolchain_root=toolchain_root,
                 ),
-            }
+                working_directory=directory,
+            )
         )
+    return tuple(nodes)
 
+
+def _normalize_node(
+    node: _RawNode,
+    *,
+    source_root: Path,
+    build_root: Path,
+    toolchain_root: Path,
+    produced_relatives: frozenset[str],
+) -> _RawNode:
+    arguments = _normalize_arguments(
+        node.arguments,
+        working_directory=node.working_directory,
+        source_root=source_root,
+        build_root=build_root,
+        toolchain_root=toolchain_root,
+        produced_relatives=produced_relatives,
+    )
+    inputs = set(node.inputs)
+    for argument in arguments:
+        plain = argument
+        for prefix in ("/DEF:", "-DEF:"):
+            if plain.casefold().startswith(prefix.casefold()):
+                plain = plain[len(prefix) :]
+                break
+        if plain.startswith("${SOURCE}/"):
+            relative = plain.removeprefix("${SOURCE}/")
+            path = source_root.joinpath(*PurePosixPath(relative).parts)
+            if path.is_file():
+                kind = (
+                    "quarantine-archive"
+                    if node.role is ProducerRole.LINKER and path.suffix.casefold() == ".lib"
+                    else "source"
+                )
+                inputs.add(graph_reference(kind, relative))
+        elif plain.startswith("${BUILD}/"):
+            inputs.add(graph_reference("build", plain.removeprefix("${BUILD}/")))
+        elif re.fullmatch(r"(?i)[a-z0-9_.+@-]+\.lib", plain):
+            inputs.add(graph_reference("system-library", plain))
+    inputs.difference_update(node.outputs)
+    return _RawNode(
+        role=node.role,
+        owner=node.owner,
+        arguments=arguments,
+        inputs=tuple(sorted(inputs, key=str.casefold)),
+        outputs=tuple(sorted(node.outputs, key=str.casefold)),
+        working_directory=node.working_directory,
+    )
+
+
+def _producer_nodes(
+    raw_nodes: Sequence[_RawNode],
+    *,
+    target_outputs: Mapping[str, str],
+    directive_inputs: Mapping[str, tuple[str, ...]],
+) -> tuple[ProducerNode, ...]:
     output_owner = {
-        output.casefold(): str(normalized["owner"]) + ":" + str(index)
-        for index, normalized in enumerate(normalized_nodes)
-        for output in cast(tuple[str, ...], normalized["outputs"])
+        output.casefold(): index for index, node in enumerate(raw_nodes) for output in node.outputs
     }
     node_ids = [
-        f"{cast(ProducerRole, normalized['role']).value}."
-        f"{cast(str, normalized['owner'])}.{index:04d}"
-        for index, normalized in enumerate(normalized_nodes)
+        f"{node.role.value}.{node.owner}.{index:04d}" for index, node in enumerate(raw_nodes)
     ]
-    temporary_to_final = {
-        f"{cast(str, normalized['owner'])}:{index}": node_ids[index]
-        for index, normalized in enumerate(normalized_nodes)
-    }
-    nodes: list[ProducerNode] = []
     final_by_output = {
         graph_reference("build", relative): target_id
         for target_id, relative in target_outputs.items()
     }
-    for index, normalized in enumerate(normalized_nodes):
-        role = cast(ProducerRole, normalized["role"])
-        owner = cast(str, normalized["owner"])
-        node_outputs = cast(tuple[str, ...], normalized["outputs"])
-        target_ids = {final_by_output[item] for item in node_outputs if item in final_by_output}
-        if len(target_ids) > 1 or (target_ids and role is not ProducerRole.LINKER):
+    nodes: list[ProducerNode] = []
+    for index, node in enumerate(raw_nodes):
+        target_ids = {final_by_output[item] for item in node.outputs if item in final_by_output}
+        if len(target_ids) > 1 or (target_ids and node.role is not ProducerRole.LINKER):
             raise ProducerGraphError("terminal target output has an invalid producer role")
-        node_id = node_ids[index]
+        target_id = next(iter(target_ids), None)
         dependencies = {
-            temporary_to_final[output_owner[input_ref.casefold()]]
-            for input_ref in cast(tuple[str, ...], normalized["inputs"])
+            node_ids[output_owner[input_ref.casefold()]]
+            for input_ref in node.inputs
             if input_ref.casefold() in output_owner
         }
         nodes.append(
             ProducerNode(
-                id=node_id,
-                role=role,
-                owner=owner,
-                target_id=next(iter(target_ids), None),
-                arguments=cast(tuple[str, ...], normalized["arguments"]),
-                inputs=cast(tuple[str, ...], normalized["inputs"]),
-                directive_inputs=(
-                    normalized_directive_inputs.get(next(iter(target_ids)), ())
-                    if target_ids
-                    else ()
-                ),
-                outputs=node_outputs,
+                id=node_ids[index],
+                role=node.role,
+                owner=node.owner,
+                target_id=target_id,
+                arguments=node.arguments,
+                inputs=node.inputs,
+                directive_inputs=directive_inputs.get(target_id, ()) if target_id else (),
+                outputs=node.outputs,
                 depends_on=tuple(sorted(dependencies, key=str.casefold)),
             )
         )
     terminal_targets = {node.target_id for node in nodes if node.target_id is not None}
-    unused_directive_targets = set(normalized_directive_inputs) - terminal_targets
+    unused_directive_targets = set(directive_inputs) - terminal_targets
     if unused_directive_targets:
         raise ProducerGraphError(
             "directive inputs lack a terminal linker: "
             + ", ".join(sorted(unused_directive_targets, key=str.casefold))
         )
+    return tuple(nodes)
+
+
+def extract_cmake_makefiles_graph(
+    *,
+    configured_build_root: Path,
+    effective_source_root: Path,
+    toolchain_root: Path,
+    source_topology_digest_value: Digest,
+    toolchain_lock_digest: Digest,
+    path_profile_id: str,
+    target_outputs: Mapping[str, str],
+    directive_inputs: Mapping[str, Sequence[str]] | None = None,
+) -> ProducerGraphDocument:
+    """Extract a reviewable graph from one-time CMake configuration metadata.
+
+    This function is intentionally not called by certification.  Its output is
+    committed, reviewed, and reloaded as authority on later runs.
+    """
+
+    build_root = configured_build_root.resolve(strict=True)
+    source_root = effective_source_root.resolve(strict=True)
+    toolchain = toolchain_root.resolve(strict=True)
+    raw_database = read_compile_database(build_root)
+    metadata_reader = MetadataReader()
+    normalized_directive_inputs = _normalize_directive_inputs(target_outputs, directive_inputs)
+    raw_nodes = (
+        *_compiler_nodes(
+            raw_database,
+            build_root=build_root,
+            source_root=source_root,
+            toolchain_root=toolchain,
+        ),
+        *_resource_nodes(
+            build_root=build_root,
+            source_root=source_root,
+            toolchain_root=toolchain,
+            reader=metadata_reader,
+        ),
+        *_link_nodes(
+            build_root=build_root,
+            source_root=source_root,
+            toolchain_root=toolchain,
+            reader=metadata_reader,
+        ),
+    )
+    produced_relatives = frozenset(
+        output.removeprefix("build/").casefold() for node in raw_nodes for output in node.outputs
+    )
+    normalized_nodes = tuple(
+        _normalize_node(
+            node,
+            source_root=source_root,
+            build_root=build_root,
+            toolchain_root=toolchain,
+            produced_relatives=produced_relatives,
+        )
+        for node in raw_nodes
+    )
+    nodes = _producer_nodes(
+        normalized_nodes,
+        target_outputs=target_outputs,
+        directive_inputs=normalized_directive_inputs,
+    )
     return ProducerGraphDocument(
         schema_version=2,
         source_topology_digest=source_topology_digest_value,

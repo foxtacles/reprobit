@@ -49,8 +49,7 @@ def test_reusable_repository_contains_no_downstream_project_identity() -> None:
                     folded = token.casefold()
                     if _digest(folded) in _FORBIDDEN_TOKEN_DIGESTS or (
                         len(folded) >= 4
-                        and _digest(folded[:4])
-                        in _FORBIDDEN_FOUR_CHARACTER_PREFIX_DIGESTS
+                        and _digest(folded[:4]) in _FORBIDDEN_FOUR_CHARACTER_PREFIX_DIGESTS
                     ):
                         leaks.append(f"{path.relative_to(root)}:{line_number}:{token}")
     assert not leaks, "downstream project identities leaked into reusable code:\n" + "\n".join(

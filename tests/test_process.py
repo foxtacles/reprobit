@@ -376,9 +376,12 @@ def test_windows_lineage_planner_is_never_ignored_off_windows(tmp_path: Path) ->
             called = True
             return b"{}"
 
-    with ProcessSupervisor() as supervisor, pytest.raises(
-        process_module.ProcessLaunchError,
-        match="requires native Windows",
+    with (
+        ProcessSupervisor() as supervisor,
+        pytest.raises(
+            process_module.ProcessLaunchError,
+            match="requires native Windows",
+        ),
     ):
         supervisor.run(
             command(tmp_path, "raise AssertionError('must not launch')"),

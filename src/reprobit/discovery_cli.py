@@ -495,7 +495,8 @@ def _load_campaign_inputs(paths: _DiscoveryPaths) -> _CampaignInputs:
     from reprobit.discovery_contracts import DiscoveryInputReceipt, DiscoveryInputRole
     from reprobit.msvc_discovery import MsvcDiscoveryRequest
     from reprobit.msvc_discovery_coff import MsvcFunctionReference
-    from reprobit.secure_paths import SecurePathError, read_relative_file
+    from reprobit.secure_path_contracts import SecurePathError
+    from reprobit.secure_paths import read_relative_file
     from reprobit.strict_json import strict_loads
 
     try:
@@ -698,7 +699,8 @@ def _validate_selected_artifacts(
     report: DiscoveryCampaignReport,
     inputs: _CampaignInputs,
 ) -> None:
-    from reprobit.secure_paths import SecurePathError, read_relative_file
+    from reprobit.secure_path_contracts import SecurePathError
+    from reprobit.secure_paths import read_relative_file
 
     for artifact in report.artifacts:
         try:

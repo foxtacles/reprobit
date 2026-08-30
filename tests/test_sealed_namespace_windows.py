@@ -77,9 +77,7 @@ def test_windows_namespace_lease_allows_unrelated_sibling_run_changes(
 ) -> None:
     source = _source_tree(tmp_path)
 
-    with SealedNamespaceLease(
-        trees=(NamespaceTree("source", source, tmp_path / "arena"),)
-    ):
+    with SealedNamespaceLease(trees=(NamespaceTree("source", source, tmp_path / "arena"),)):
         sibling = tmp_path / "unrelated-run"
         sibling.mkdir()
         (sibling / "state.json").write_text("temporary\n", encoding="utf-8")

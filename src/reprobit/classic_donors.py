@@ -30,7 +30,7 @@ from reprobit.schema import (
 from reprobit.strict_json import JsonValue, canonical_json
 
 if TYPE_CHECKING:
-    from reprobit.classic_overlay import ClassicOverlayOutputReceipt
+    from reprobit.classic_overlay_types import ClassicOverlayOutputReceipt
 
 
 class DonorSourceError(ValueError):
@@ -75,9 +75,7 @@ _ROLE_POLICIES = frozenset(
         "retail_exact_instruction_permutation_fpo_only_v1",
     }
 )
-_PROJECTIONS = frozenset(
-    {"source_root_mirror_v1", "source_root_mirror_only_v1"}
-)
+_PROJECTIONS = frozenset({"source_root_mirror_v1", "source_root_mirror_only_v1"})
 
 
 def _digest(data: bytes) -> str:
@@ -187,9 +185,7 @@ def _reject_payload_fields(value: object, label: str) -> None:
             if identity in seen:
                 continue
             seen.add(identity)
-            pending.extend(
-                (child, f"{path}[{index}]") for index, child in enumerate(current)
-            )
+            pending.extend((child, f"{path}[{index}]") for index, child in enumerate(current))
 
 
 def _json_equal(left: object, right: object) -> bool:
@@ -346,9 +342,9 @@ def generate_forward_run(prefix: str, count: int, width: int) -> bytes:
     _integer(count, "forward-run count", minimum=1, maximum=999)
     _integer(width, "forward-run width", minimum=1, maximum=3)
     _require(count <= 10**width, "forward-run width cannot represent its count")
-    return "".join(
-        f"class {prefix}{number:0{width}d};\n" for number in range(count)
-    ).encode("ascii")
+    return "".join(f"class {prefix}{number:0{width}d};\n" for number in range(count)).encode(
+        "ascii"
+    )
 
 
 def generate_extern_run(prefix: str, count: int, width: int) -> bytes:
@@ -356,9 +352,9 @@ def generate_extern_run(prefix: str, count: int, width: int) -> bytes:
     _integer(count, "extern-run count", minimum=1, maximum=999)
     _integer(width, "extern-run width", minimum=1, maximum=3)
     _require(count <= 10**width, "extern-run width cannot represent its count")
-    return "".join(
-        f"extern int {prefix}{number:0{width}d};\n" for number in range(count)
-    ).encode("ascii")
+    return "".join(f"extern int {prefix}{number:0{width}d};\n" for number in range(count)).encode(
+        "ascii"
+    )
 
 
 def generate_declaration_shape(classes: int, functions: int) -> bytes:
@@ -623,9 +619,7 @@ def _validate_overlay_carrier(
             names = ("classes", "functions_per_class")
             payload = generate_pad_shape(
                 _integer(carrier.get("classes"), "carrier.classes"),
-                _integer(
-                    carrier.get("functions_per_class"), "carrier.functions_per_class"
-                ),
+                _integer(carrier.get("functions_per_class"), "carrier.functions_per_class"),
             )
         _exact_keys(
             carrier,
@@ -821,9 +815,7 @@ def validate_donor_recipe(
         force_payload = shape
     elif family is ClassicRecipeFamily.DECLARATION_RUN_TRIPLE:
         seats = {
-            f"{seat}_{field}"
-            for seat in ("pre", "post", "eof")
-            for field in ("prefix", "count")
+            f"{seat}_{field}" for seat in ("pre", "post", "eof") for field in ("prefix", "count")
         }
         _exact_keys(
             parameters,
@@ -1015,8 +1007,7 @@ def _render_overlay_carrier(source: bytes, carrier: Mapping[str, object]) -> byt
 
 def _source_identifiers(source: bytes) -> frozenset[str]:
     return frozenset(
-        match.group().decode("ascii")
-        for match in re.finditer(rb"[A-Za-z_][A-Za-z0-9_]*", source)
+        match.group().decode("ascii") for match in re.finditer(rb"[A-Za-z_][A-Za-z0-9_]*", source)
     )
 
 
@@ -1137,9 +1128,7 @@ def _overlay_files(
         for path, data in non_primary:
             files[f"inc/source/{path}"] = data
         parent = PurePosixPath(primary).parent.as_posix()
-        include_directories.append(
-            "inc/source" if parent == "." else f"inc/source/{parent}"
-        )
+        include_directories.append("inc/source" if parent == "." else f"inc/source/{parent}")
     return files, tuple(include_directories)
 
 
@@ -1190,8 +1179,7 @@ def prepare_donor_compile_request(
             path = _logical_path(raw_path, "overlay input path")
             _require(isinstance(data, bytes), f"overlay input {path!r} is not immutable bytes")
             _require(
-                path.casefold()
-                not in {key.casefold() for key in normalized_inputs},
+                path.casefold() not in {key.casefold() for key in normalized_inputs},
                 "overlay input paths case-fold collide",
             )
             normalized_inputs[path] = data
@@ -1235,7 +1223,7 @@ def prepare_donor_compile_request(
                 }
             )
         try:
-            from reprobit.classic_overlay import render_classic_overlay_declarations
+            from reprobit.classic_overlay_document import render_classic_overlay_declarations
         except ImportError as exc:  # pragma: no cover - only during partial installations
             raise DonorSourceError("classic overlay renderer is unavailable") from exc
         result = render_classic_overlay_declarations(declarations, normalized_inputs)
@@ -1270,10 +1258,7 @@ def prepare_donor_compile_request(
             _require(_digest(effective_source) == expected_input, "donor effective source differs")
         generated = validation.generated_declarations
         assert generated is not None
-        if (
-            intervention.family
-            is ClassicRecipeFamily.PREFIX_FORWARD_AFTER_INCLUDES_EXTERN
-        ):
+        if intervention.family is ClassicRecipeFamily.PREFIX_FORWARD_AFTER_INCLUDES_EXTERN:
             overlap = _source_identifiers(effective_source).intersection(
                 _generated_identifiers(generated)
             )

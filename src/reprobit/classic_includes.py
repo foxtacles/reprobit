@@ -62,9 +62,7 @@ class SealedIncludeAuthority:
             or len({item.casefold() for item in roots}) != len(roots)
             or tuple(sorted(roots, key=str.casefold)) != roots
         ):
-            raise ClassicIncludeTraceError(
-                "include authority roots are not unique and canonical"
-            )
+            raise ClassicIncludeTraceError("include authority roots are not unique and canonical")
         for index, left in enumerate(roots):
             for right in roots[index + 1 :]:
                 if _within(left, right) or _within(right, left):
@@ -73,21 +71,15 @@ class SealedIncludeAuthority:
                     )
         folded = [item.logical_path.casefold() for item in self.files]
         if len(folded) != len(set(folded)):
-            raise ClassicIncludeTraceError(
-                "include authority contains DOS-case-colliding files"
-            )
-        if tuple(sorted(self.files, key=lambda item: item.logical_path.casefold())) != (
-            self.files
-        ):
+            raise ClassicIncludeTraceError("include authority contains DOS-case-colliding files")
+        if tuple(sorted(self.files, key=lambda item: item.logical_path.casefold())) != (self.files):
             raise ClassicIncludeTraceError("include authority files are not canonical")
         for item in self.files:
             if normalize_logical_path(item.logical_path) != item.logical_path:
                 raise ClassicIncludeTraceError(
                     f"include authority path is not canonical: {item.logical_path!r}"
                 )
-            containing_roots = tuple(
-                root for root in roots if _within(item.logical_path, root)
-            )
+            containing_roots = tuple(root for root in roots if _within(item.logical_path, root))
             if item.size < 0 or len(containing_roots) != 1:
                 raise ClassicIncludeTraceError(
                     f"include authority file escapes its roots: {item.logical_path!r}"
@@ -107,9 +99,7 @@ def index_sealed_include_authority(
 ) -> SealedIncludeIndex:
     return SealedIncludeIndex(
         authority,
-        MappingProxyType(
-            {item.logical_path.casefold(): item for item in authority.files}
-        ),
+        MappingProxyType({item.logical_path.casefold(): item for item in authority.files}),
     )
 
 
@@ -172,9 +162,7 @@ class _Reader:
     def exact(self, size: int) -> bytes:
         end = self.offset + size
         if size < 0 or end > len(self.payload):
-            raise ClassicIncludeTraceError(
-                f"SBR payload is truncated at offset 0x{self.offset:x}"
-            )
+            raise ClassicIncludeTraceError(f"SBR payload is truncated at offset 0x{self.offset:x}")
         result = self.payload[self.offset : end]
         self.offset = end
         return result
@@ -269,9 +257,7 @@ def parse_msvc_sbr(payload: bytes) -> MsvcSbrTrace:
         if opcode == 1:
             if len(sources) >= 100_000 or len(stack) >= 4096:
                 raise ClassicIncludeTraceError("SBR source nesting is excessive")
-            source = MsvcSbrSource(
-                reader.cstring(), stack[-1] if stack else None
-            )
+            source = MsvcSbrSource(reader.cstring(), stack[-1] if stack else None)
             sources.append(source)
             stack.append(len(sources) - 1)
         elif opcode == 2:
@@ -308,9 +294,7 @@ def parse_msvc_sbr(payload: bytes) -> MsvcSbrTrace:
                     f"SBR parent opcode 0x{parent_opcode:04x} is unknown"
                 )
         else:
-            raise ClassicIncludeTraceError(
-                f"SBR opcode 0x{raw_opcode:02x} is unknown"
-            )
+            raise ClassicIncludeTraceError(f"SBR opcode 0x{raw_opcode:02x} is unknown")
     if stack:
         raise ClassicIncludeTraceError("SBR source stack is unterminated")
     if not sources or sources[0].parent_index is not None:
@@ -391,9 +375,7 @@ def resolve_msvc_include_trace(
     if authority_index is None:
         authority_index = index_sealed_include_authority(authority)
     elif authority_index.authority is not authority:
-        raise ClassicIncludeTraceError(
-            "sealed include index is bound to a different authority"
-        )
+        raise ClassicIncludeTraceError("sealed include index is bound to a different authority")
     by_path = authority_index.by_path
     if expected_source.casefold() not in by_path:
         raise ClassicIncludeTraceError("compiler source is outside sealed include authority")
@@ -452,12 +434,9 @@ def resolve_msvc_include_trace(
             forced_candidates = {logical.casefold()} & set(by_path)
         else:
             forced_candidates = {
-                _absolute(raw, base=root).casefold()
-                for root in (working_directory, *search_roots)
+                _absolute(raw, base=root).casefold() for root in (working_directory, *search_roots)
             } & set(by_path)
-        if len(forced_candidates) != 1 or not forced_candidates.issubset(
-            resolved_paths
-        ):
+        if len(forced_candidates) != 1 or not forced_candidates.issubset(resolved_paths):
             raise ClassicIncludeTraceError(
                 f"forced include {force_include!r} is absent or ambiguous in the SBR trace"
             )

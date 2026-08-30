@@ -17,13 +17,13 @@ from reprobit.backends import NativeWindowsBackend
 from reprobit.cache import IncrementalCache, cache_key
 from reprobit.classic_project import ClassicProjectError
 from reprobit.cli import (
-    _human_intervention_detail,
-    _legacy_oracle_targets,
     _positive_seconds,
     main,
 )
+from reprobit.cli_build import _legacy_oracle_targets
 from reprobit.cli_output import CLIOutput, human_command
 from reprobit.cli_paths import CLIError
+from reprobit.cli_project import _human_intervention_detail
 from reprobit.cmake_source import effective_source_digest
 from reprobit.costs import (
     calculate_cost,
@@ -2426,7 +2426,7 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
         return FakeVerificationResult()
 
     monkeypatch.setattr("reprobit.cache.IncrementalCache", CacheBomb)
-    monkeypatch.setattr("reprobit.cli._prepare_producer_graph_run", prepare)
+    monkeypatch.setattr("reprobit.cli_build.prepare_producer_graph_run", prepare)
     monkeypatch.setattr("reprobit.engine.ReproductionEngine.run", verify_run)
     monkeypatch.setattr("reprobit.legacy.bind_pe32_oracle", lambda _oracle: object())
 
@@ -2510,10 +2510,10 @@ def test_plain_build_loads_worktree_authority_before_state_and_emits_warm_summar
             ),
         )
 
-    monkeypatch.setattr("reprobit.cli.load_project_tree", load)
+    monkeypatch.setattr("reprobit.cli_build.load_project_tree", load)
     monkeypatch.setattr("reprobit.incremental.current_worktree_authority", worktree)
     monkeypatch.setattr("reprobit.classic_incremental.execute_classic_incremental_build", execute)
-    monkeypatch.setattr("reprobit.cli._selected_backend", lambda _args: object())
+    monkeypatch.setattr("reprobit.cli_build.selected_backend", lambda _args: object())
 
     assert (
         main(

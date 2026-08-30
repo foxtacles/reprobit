@@ -61,7 +61,10 @@ _COMPILE_IMPLEMENTATION_PATHS = (
     "msvc_compile.py",
     "msvc_discovery.py",
     "process.py",
+    "secure_path_contracts.py",
     "secure_paths.py",
+    "secure_paths_posix.py",
+    "secure_paths_windows.py",
     "strict_json.py",
 )
 

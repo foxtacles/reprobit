@@ -39,8 +39,8 @@ from reprobit.schema import (
     ClassicRecipeRole,
     ProjectBundle,
 )
+from reprobit.secure_path_contracts import SecurePathError
 from reprobit.secure_paths import (
-    SecurePathError,
     atomic_publish_relative,
     read_relative_file,
 )
@@ -217,18 +217,14 @@ class ClassicFamilyDispatcher:
         )
         declared_splice = function.setdefault("splice_class", intervention.family.value)
         if declared_splice != intervention.family.value:
-            raise ClassicProjectError(
-                "candidate splice class differs from the typed recipe family"
-            )
+            raise ClassicProjectError("candidate splice class differs from the typed recipe family")
         declared_symbol = function.get("symbol")
         declared_mangled = function.get("mangled")
         if declared_symbol not in {None, intervention.symbol} or declared_mangled not in {
             None,
             intervention.symbol,
         }:
-            raise ClassicProjectError(
-                "candidate symbol differs from the typed recipe scope"
-            )
+            raise ClassicProjectError("candidate symbol differs from the typed recipe scope")
         function["kind"] = intervention.family.value
         function["symbol"] = intervention.symbol
         # The low-level, payload-free classic producers retain the v2 field
@@ -256,9 +252,7 @@ class ClassicFamilyDispatcher:
                     _required_bytes(materials.donor_source, "donor source"),
                 )
             else:
-                output, proof = composition.produce_reloc_divergent_candidate(
-                    seed, donor, function
-                )
+                output, proof = composition.produce_reloc_divergent_candidate(seed, donor, function)
         elif family is ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING:
             output, proof = rewriting.produce_donor_rewriting_candidate(
                 seed, donor, function, compiler_identity=materials.compiler_identity
@@ -283,9 +277,7 @@ class ClassicFamilyDispatcher:
                     primary_donor_id=intervention.dependencies[0],
                 )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION:
-            output, proof = registers.produce_register_bijection_candidate(
-                seed, donor, function
-            )
+            output, proof = registers.produce_register_bijection_candidate(seed, donor, function)
         elif family is ClassicRecipeFamily.RETAIL_EXACT_SOURCE_EQUAL_BODY:
             output, proof = composition.produce_source_equal_body_candidate(
                 seed,
@@ -321,9 +313,7 @@ class ClassicFamilyDispatcher:
                 function,
                 _required_bytes(materials.seed_source, "seed source"),
                 _required_bytes(materials.target_donor_source, "target donor source"),
-                _required_bytes(
-                    materials.instruction_donor_source, "instruction donor source"
-                ),
+                _required_bytes(materials.instruction_donor_source, "instruction donor source"),
             )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_SOURCE_TARGET_CLOSURE:
             output, proof = composition.produce_source_target_closure_candidate(
@@ -405,15 +395,15 @@ class ClassicFamilyDispatcher:
             output, proof = pe_metadata.apply_pe_metadata_candidate(candidate, values)
         elif intervention.family is ClassicRecipeFamily.IMAGE_LINK_ORDER:
             declaration: object = values.get("import_order")
-            if not isinstance(declaration, dict) or declaration.get("schema") != (
-                "pe32_import_order_v1"
-            ) or set(values) != {"import_order"}:
+            if (
+                not isinstance(declaration, dict)
+                or declaration.get("schema") != ("pe32_import_order_v1")
+                or set(values) != {"import_order"}
+            ):
                 raise ClassicProjectError(
                     "image link-order recipe requires a closed pe32_import_order_v1 declaration"
                 )
-            output, proof = pe_imports.apply_pe_import_order_candidate(
-                candidate, declaration
-            )
+            output, proof = pe_imports.apply_pe_import_order_candidate(candidate, declaration)
         elif (
             intervention.family is ClassicRecipeFamily.IMAGE_BINARY_REPACK
             and set(values) == {"text_repack"}
@@ -431,17 +421,16 @@ class ClassicFamilyDispatcher:
             declaration = values["rdata_pool_repack"]
             if declaration.get("schema") != "rdata_pool_repack_v1":
                 raise ClassicProjectError("unsupported rdata repack schema")
-            output, proof = pe_rdata.apply_rdata_pool_repack_candidate(
-                candidate, declaration
-            )
+            output, proof = pe_rdata.apply_rdata_pool_repack_candidate(candidate, declaration)
         else:
             raise ClassicProjectError("image repack declaration is not closed or unambiguous")
         if not isinstance(output, bytes) or not isinstance(proof, Mapping):
             raise ClassicProjectError("classic project producer returned malformed evidence")
         proof_value = dict(proof)
-        if proof_value.get("candidate_only") is not True or proof_value.get(
-            "oracle_payload_bytes_read"
-        ) != 0:
+        if (
+            proof_value.get("candidate_only") is not True
+            or proof_value.get("oracle_payload_bytes_read") != 0
+        ):
             raise ClassicProjectError("classic project producer violated candidate-only policy")
         try:
             semantics = issue_classic_candidate_semantics(
@@ -515,8 +504,7 @@ def _copy_effective_source(
     if manifest is None or not manifest.complete:
         raise ClassicProjectError("classic execution requires a complete source manifest")
     if destination.is_symlink() or (
-        destination.exists()
-        and (not destination.is_dir() or any(destination.iterdir()))
+        destination.exists() and (not destination.is_dir() or any(destination.iterdir()))
     ):
         raise ClassicProjectError(f"effective workspace is not empty: {destination}")
     destination.mkdir(parents=True, exist_ok=True)
@@ -533,17 +521,13 @@ def _copy_effective_source(
                 f"source input differs from portable manifest: {entry.path!r}"
             )
         try:
-            target_receipt = atomic_publish_relative(
-                destination, entry.path, payload
-            )
+            target_receipt = atomic_publish_relative(destination, entry.path, payload)
         except SecurePathError as exc:
             raise ClassicProjectError(
                 f"effective source copy cannot be published safely: {entry.path!r}"
             ) from exc
         if target_receipt.size != entry.size or target_receipt.digest != entry.digest:
-            raise ClassicProjectError(
-                f"effective source copy differs from receipt: {entry.path!r}"
-            )
+            raise ClassicProjectError(f"effective source copy differs from receipt: {entry.path!r}")
 
 
 def _effective_source_seal(root: Path) -> tuple[tuple[str, int, str], ...]:
@@ -574,8 +558,7 @@ def materialize_effective_workspace(
     if project_root != Path(bundle.root).resolve(strict=True):
         raise ClassicProjectError("adapter project root differs from loaded bundle")
     oracle_paths = tuple(
-        (project_root / target.oracle).resolve(strict=False)
-        for target in bundle.spec.targets
+        (project_root / target.oracle).resolve(strict=False) for target in bundle.spec.targets
     )
     _copy_effective_source(
         project_root,
@@ -585,8 +568,7 @@ def materialize_effective_workspace(
     overlay_witnesses: list[OverlayOutputWitness] = []
     intervention_witnesses: list[InterventionWitness] = []
     forbidden_outputs = {
-        path.relative_to(project_root).as_posix().casefold()
-        for path in oracle_paths
+        path.relative_to(project_root).as_posix().casefold() for path in oracle_paths
     }
     for intervention in bundle.interventions:
         if not isinstance(intervention, ClassicRecipeIntervention):
@@ -618,16 +600,14 @@ def materialize_effective_workspace(
                     raise ClassicProjectError(f"overlay clean input is absent: {relative}")
                 clean_inputs[relative] = path.read_bytes()
         try:
-            from reprobit.classic_overlay import render_classic_overlay
+            from reprobit.classic_overlay_document import render_classic_overlay
 
             rendered = render_classic_overlay(
                 {"schema": schema, "outputs": outputs, "graph": graph},
                 clean_inputs,
             )
         except ValueError as exc:
-            raise ClassicProjectError(
-                f"cannot render overlay {intervention.id!r}: {exc}"
-            ) from exc
+            raise ClassicProjectError(f"cannot render overlay {intervention.id!r}: {exc}") from exc
         current: list[OverlayOutputWitness] = []
         for receipt in rendered.receipts:
             relative = receipt.path
@@ -662,13 +642,8 @@ def materialize_effective_workspace(
     if bundle.build_plan is not None:
         for unit in bundle.build_plan.translation_units:
             unit_source = destination.joinpath(*PurePosixPath(unit.source).parts)
-            if (
-                not unit_source.is_file()
-                or _digest_path(unit_source) != unit.source_digest.value
-            ):
-                raise ClassicProjectError(
-                    f"effective source differs from TU pin: {unit.source!r}"
-                )
+            if not unit_source.is_file() or _digest_path(unit_source) != unit.source_digest.value:
+                raise ClassicProjectError(f"effective source differs from TU pin: {unit.source!r}")
     manifest = bundle.source_manifest
     assert manifest is not None
     admitted = {item.path.casefold() for item in manifest.entries}
@@ -767,9 +742,7 @@ def write_cmake_project_plan(
                 neighbor_path = effective_root.joinpath(*PurePosixPath(neighbor_relative).parts)
                 if not neighbor_path.is_file():
                     raise ClassicProjectError(f"generated TU neighbor is absent: {neighbor}")
-                arguments.extend(
-                    (label.upper(), _cmake_effective_path(neighbor_relative))
-                )
+                arguments.extend((label.upper(), _cmake_effective_path(neighbor_relative)))
             lines.extend(("reprobit_insert_generated_source(", " ".join(arguments), ")"))
     if bundle.build_plan is None:
         raise ClassicProjectError("CMake project plan requires build target gates")
@@ -790,10 +763,10 @@ def write_cmake_project_plan(
         )
     lines.extend(
         (
-            "if(NOT DEFINED REPROBIT_TARGET_PLAN OR REPROBIT_TARGET_PLAN STREQUAL \"\")",
+            'if(NOT DEFINED REPROBIT_TARGET_PLAN OR REPROBIT_TARGET_PLAN STREQUAL "")',
             '  message(FATAL_ERROR "REPROBIT_TARGET_PLAN is required")',
             "endif()",
-            "reprobit_write_plan(OUTPUT \"${REPROBIT_TARGET_PLAN}\")",
+            'reprobit_write_plan(OUTPUT "${REPROBIT_TARGET_PLAN}")',
         )
     )
     destination.parent.mkdir(parents=True, exist_ok=True)

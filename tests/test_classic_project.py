@@ -146,9 +146,7 @@ file(WRITE "${{CMAKE_BINARY_DIR}}/sources.txt" "${{final_sources}}\n")
             source_overlay_digest=_digest(canonical_json(graph)),
             source_overlay_interventions=(intervention.id,),
             archives=(),
-            target_gates=(
-                ClassicTargetGate(target_id="program", build_target="app"),
-            ),
+            target_gates=(ClassicTargetGate(target_id="program", build_target="app"),),
         ),
         intervention_documents=(
             InterventionDocument(

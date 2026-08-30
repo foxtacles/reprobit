@@ -3,15 +3,14 @@
 from __future__ import annotations
 
 import os
-import stat
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import Lock
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, cast
+from typing import Literal, cast
 
 from reprobit.classic.compiler_epoch import (
     classic_compiler_path_profile_digest,
@@ -23,9 +22,8 @@ from reprobit.classic.semantic_contracts import (
     CompilerInputEvidenceKind,
     CompilerNamespaceEvidence,
     CompilerSourceRead,
-    ProjectOverlaySourcePair,
 )
-from reprobit.classic_evidence import (
+from reprobit.classic_execution_records import (
     ClassicCompilerNamespaceReceipt,
     ClassicProducerRead,
     ClassicProducerReadReceipt,
@@ -43,7 +41,6 @@ from reprobit.classic_resources import (
     scan_msvc_resource_dependencies,
 )
 from reprobit.classic_runtime_environment import (
-    _digest_path,
     _ExecutionLane,
     _LazyExecutionLanePool,
     _logical_join,
@@ -51,13 +48,20 @@ from reprobit.classic_runtime_environment import (
     _run,
     _toolchain_tree_files,
 )
+from reprobit.classic_runtime_files import (
+    _digest_path,
+    _path_is_within,
+    _require_declared_tree_writes,
+    _tree_file_seal,
+)
 from reprobit.classic_runtime_graph import (
     ClassicProducerTarget,
 )
-from reprobit.execution import (
-    FileReceipt,
-    StepExecutionReceipt,
+from reprobit.classic_runtime_receipts import (
+    _internal_step,
+    _step_receipt,
 )
+from reprobit.execution import StepExecutionReceipt
 from reprobit.model import Digest
 from reprobit.paths import (
     normalize_logical_path,
@@ -85,20 +89,6 @@ from reprobit.sealed_namespace import (
     SealedNamespaceLease,
     SealedNamespaceSnapshot,
 )
-from reprobit.secure_paths import (
-    SecureFileIdentity,
-    SecureFileSnapshot,
-    SecurePathError,
-    atomic_copy_new_relative,
-    canonical_system_path,
-    remove_regular_relative,
-    stat_relative_file,
-)
-from reprobit.strict_json import canonical_json
-
-if TYPE_CHECKING:
-    from reprobit.incremental_executor import ReceiptBoundInput
-
 
 ClassicProgressEventKind = Literal[
     "unit_finished",
@@ -175,51 +165,6 @@ class _ResourceDependencyAudit:
     receipt: ResourceDependencyReceipt
 
 
-def _project_overlay_resource_reader_closure(
-    *,
-    source_root: str,
-    source_pairs: Sequence[ProjectOverlaySourcePair],
-    graph: ProducerGraphDocument,
-    receipts: Mapping[str, ResourceDependencyReceipt],
-) -> dict[str, object]:
-    """Prove that RC's exact recursive-read closure excludes overlay outputs."""
-
-    expected_nodes = {node.id for node in graph.nodes if node.role is ProducerRole.RESOURCE}
-    if set(receipts) != expected_nodes:
-        missing = sorted(expected_nodes - set(receipts), key=str.casefold)
-        extra = sorted(set(receipts) - expected_nodes, key=str.casefold)
-        raise ClassicProjectError(
-            "project-overlay resource reader closure differs from the producer graph; "
-            f"missing={missing}, extra={extra}"
-        )
-    overlay_logical_paths = {
-        _logical_join(source_root, pair.path).casefold(): pair.path for pair in source_pairs
-    }
-    overlay_reads = tuple(
-        sorted(
-            (
-                node_id,
-                overlay_logical_paths[read.logical_path.casefold()],
-                read.kind.value,
-            )
-            for node_id, receipt in receipts.items()
-            for read in receipt.reads
-            if read.logical_path.casefold() in overlay_logical_paths
-        )
-    )
-    if overlay_reads:
-        raise ClassicProjectError(
-            "project-overlay source is also a resource-compiler input; sparse compiler "
-            f"semantics do not admit this secondary reader: {overlay_reads}"
-        )
-    return {
-        "schema": 1,
-        "resource_nodes": sorted(receipts, key=str.casefold),
-        "resource_read_count": sum(len(receipt.reads) for receipt in receipts.values()),
-        "overlay_resource_reads": [],
-    }
-
-
 @dataclass(frozen=True, slots=True)
 class ClassicAnalysisLinkPlan:
     """One closed relink whose image remains private to the current run."""
@@ -245,271 +190,11 @@ class ClassicAnalysisLinkExecution:
     pdb: Path
 
 
-def _path_is_within(path: Path, root: Path) -> bool:
-    try:
-        path.resolve(strict=False).relative_to(root.resolve(strict=False))
-    except ValueError:
-        return False
-    return True
-
-
-def _secure_copy_new(
-    source: Path,
-    destination: Path,
-    *,
-    expected: ReceiptBoundInput | None = None,
-) -> SecureFileSnapshot:
-    """Copy one run-private file without following or replacing path entries."""
-
-    source = canonical_system_path(source)
-    destination = canonical_system_path(destination)
-    if not source.anchor or not destination.anchor:
-        raise ClassicProjectError("classic warm copy requires absolute paths")
-    source_root = Path(source.anchor)
-    destination_root = Path(destination.anchor)
-    source_relative = PurePosixPath(*source.parts[1:]).as_posix()
-    destination_relative = PurePosixPath(*destination.parts[1:]).as_posix()
-    try:
-        source_identity = stat_relative_file(source_root, source_relative)
-        expected_identity = source_identity
-        expected_digest: Digest | None = None
-        expected_size: int | None = None
-        executable = bool(source_identity.mode & stat.S_IXUSR)
-        if expected is not None:
-            if canonical_system_path(expected.snapshot.path) != source:
-                raise ClassicProjectError(
-                    "classic warm dependency path differs from its receipt-bound view"
-                )
-            expected_identity = SecureFileIdentity(
-                expected.snapshot.path,
-                expected.snapshot.size,
-                expected.snapshot.device,
-                expected.snapshot.inode,
-                expected.snapshot.mtime_ns,
-                expected.snapshot.mode,
-                expected.snapshot.ctime_ns,
-                expected.snapshot.windows_file_id,
-                expected.snapshot.windows_attributes,
-            )
-            expected_digest = Digest(value=expected.output.digest)
-            expected_size = expected.output.size
-            executable = expected.output.executable
-        received = atomic_copy_new_relative(
-            source_root,
-            source_relative,
-            destination_root,
-            destination_relative,
-            executable=executable,
-            expected_digest=expected_digest,
-            expected_size=expected_size,
-            expected_source=expected_identity,
-        )
-        if expected is not None and (
-            received.digest.value != expected.output.digest
-            or received.size != expected.output.size
-            or bool(received.mode & stat.S_IXUSR) != expected.output.executable
-        ):
-            raise ClassicProjectError("classic warm dependency copy differs from its cache receipt")
-        return received
-    except (OSError, SecurePathError) as exc:
-        raise ClassicProjectError(
-            f"classic warm copy could not safely publish {destination}: {exc}"
-        ) from exc
-
-
-def _secure_remove_regular(path: Path) -> None:
-    """Remove one exact run-private regular file without following parents."""
-
-    path = Path(os.path.abspath(path))
-    if not path.anchor:
-        raise ClassicProjectError("classic warm erasure requires an absolute path")
-    root = Path(path.anchor)
-    relative = PurePosixPath(*path.parts[1:]).as_posix()
-    try:
-        removed = remove_regular_relative(root, relative)
-    except (OSError, SecurePathError) as exc:
-        raise ClassicProjectError(
-            f"classic warm output could not be erased safely: {path}: {exc}"
-        ) from exc
-    if not removed:
-        raise ClassicProjectError(f"classic warm output disappeared before erasure: {path}")
-
-
 def _runtime_authority_label(path: Path) -> str:
     """Give one external authority a stable full-path namespace identity."""
 
     canonical = Path(os.path.abspath(path)).resolve(strict=True)
     return "runtime-authority:" + canonical.as_posix()
-
-
-def _erase_warm_replay_arena(arena: Path, *, replay_root: Path) -> None:
-    """Erase every regular discard output and its exact run-private arena."""
-
-    arena = Path(os.path.abspath(arena))
-    replay_root = Path(os.path.abspath(replay_root))
-    if arena.parent != replay_root or arena.is_symlink() or not arena.is_dir():
-        raise ClassicProjectError(f"classic warm replay arena is redirected: {arena}")
-    try:
-        entries = tuple(arena.iterdir())
-    except OSError as exc:
-        raise ClassicProjectError(
-            f"classic warm replay arena cannot be enumerated: {arena}"
-        ) from exc
-    for entry in entries:
-        if entry.is_symlink() or not entry.is_file():
-            raise ClassicProjectError(
-                f"classic warm replay produced a non-regular discard entry: {entry}"
-            )
-        _secure_remove_regular(entry)
-    try:
-        arena.rmdir()
-    except OSError as exc:
-        raise ClassicProjectError(
-            f"classic warm replay arena could not be erased: {arena}"
-        ) from exc
-
-
-def _erase_donor_dependency_outputs(paths: Sequence[Path]) -> None:
-    """Erase exact case-insensitive replay outputs without touching donor bytes."""
-
-    for path in paths:
-        parent = path.parent
-        if parent.is_symlink() or not parent.is_dir():
-            raise ClassicProjectError(
-                f"donor dependency output parent is absent or redirected: {parent}"
-            )
-        matches = tuple(
-            item for item in parent.iterdir() if item.name.casefold() == path.name.casefold()
-        )
-        if len(matches) > 1:
-            raise ClassicProjectError(
-                f"donor dependency output has {len(matches)} physical aliases: {path}"
-            )
-        if not matches:
-            continue
-        actual = matches[0]
-        if actual.is_symlink() or not actual.is_file():
-            raise ClassicProjectError(f"donor dependency output is not a regular file: {actual}")
-        _secure_remove_regular(actual)
-
-
-def _receipt(path: Path, *, fresh: bool, producer_step: str | None) -> FileReceipt:
-    if path.is_symlink() or not path.is_file():
-        raise ClassicProjectError(f"classic output is absent or redirected: {path}")
-    before = path.stat()
-    if not stat.S_ISREG(before.st_mode):
-        raise ClassicProjectError(f"classic output is not regular: {path}")
-    digest = _digest_path(path)
-    after = path.stat()
-    identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
-    if identity_before != identity_after:
-        raise ClassicProjectError(f"classic output changed while receipted: {path}")
-    return FileReceipt(
-        path.resolve(strict=True),
-        digest,
-        after.st_size,
-        fresh,
-        producer_step,
-        after.st_dev,
-        after.st_ino,
-    )
-
-
-def _tree_file_seal(root: Path) -> Mapping[Path, tuple[int, Digest]]:
-    """Snapshot regular files beneath a producer-writable seat."""
-
-    sealed: dict[Path, tuple[int, Digest]] = {}
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
-        if path.is_symlink():
-            raise ClassicProjectError(f"producer build tree contains a symlink: {path}")
-        if path.is_file():
-            resolved = path.resolve(strict=True)
-            sealed[resolved] = (path.stat().st_size, _digest_path(path))
-    return MappingProxyType(sealed)
-
-
-def _require_declared_tree_writes(
-    before: Mapping[Path, tuple[int, Digest]],
-    *,
-    root: Path,
-    allowed_outputs: Iterable[Path],
-    phase: str,
-) -> None:
-    """Reject residual producer writes outside the committed output set."""
-
-    after = _tree_file_seal(root)
-    changed = {path for path in set(before) | set(after) if before.get(path) != after.get(path)}
-    allowed = {path.resolve(strict=False) for path in allowed_outputs}
-    unexpected = sorted(changed - allowed, key=str)
-    if unexpected:
-        raise ClassicProjectError(
-            f"{phase} wrote undeclared build-tree files: "
-            + ", ".join(str(path) for path in unexpected[:12])
-        )
-
-
-def _require_unchanged_tree(
-    before: Mapping[Path, tuple[int, Digest]], *, root: Path, label: str
-) -> None:
-    """Require a complete read-only seat to retain exact membership and bytes."""
-
-    after = _tree_file_seal(root)
-    changed = sorted(
-        (path for path in set(before) | set(after) if before.get(path) != after.get(path)),
-        key=str,
-    )
-    if changed:
-        raise ClassicProjectError(
-            f"{label} changed during execution: " + ", ".join(str(path) for path in changed[:12])
-        )
-
-
-def _semantic_statement_digest(statement: Mapping[str, object], *components: str) -> Digest:
-    current: object = statement
-    for component in components:
-        if not isinstance(current, Mapping):
-            raise ClassicProjectError("classic semantic statement path is malformed")
-        current = current.get(component)
-    try:
-        return Digest.model_validate(current)
-    except ValueError as exc:
-        raise ClassicProjectError("classic semantic statement digest is malformed") from exc
-
-
-def _command_digest(argv: Sequence[str], cwd: Path, environment: Mapping[str, str]) -> Digest:
-    return Digest.from_bytes(
-        canonical_json(
-            {
-                "argv": list(argv),
-                "cwd": str(cwd),
-                "environment": dict(sorted(environment.items())),
-            }
-        )
-    )
-
-
-def _step_receipt(step_id: str, result: ProcessResult, spec: CommandSpec) -> StepExecutionReceipt:
-    return StepExecutionReceipt(
-        step_id,
-        result.returncode,
-        result.attempts,
-        result.duration_seconds,
-        Digest.from_bytes(result.output),
-        _command_digest(result.argv, spec.cwd, spec.environment_mapping),
-    )
-
-
-def _internal_step(step_id: str, material: object, duration: float) -> StepExecutionReceipt:
-    digest = Digest.from_bytes(canonical_json(material))
-    return StepExecutionReceipt(step_id, 0, 1, duration, digest, digest)
-
-
-def _safe_relative(value: str) -> str:
-    path = PurePosixPath(value.replace("\\", "/"))
-    if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
-        raise ClassicProjectError(f"unsafe discovered project path: {value!r}")
-    return path.as_posix()
 
 
 def _compiler_read_reference(

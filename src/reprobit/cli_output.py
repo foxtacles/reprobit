@@ -422,9 +422,7 @@ class CLIOutput:
                                     task,
                                     total=total,
                                     completed=completed,
-                                    description=(
-                                        f"{description} - {_friendly_phase(phase)}"
-                                    ),
+                                    description=(f"{description} - {_friendly_phase(phase)}"),
                                 )
 
                         yield update_tty

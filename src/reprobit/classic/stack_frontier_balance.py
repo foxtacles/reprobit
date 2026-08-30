@@ -224,9 +224,7 @@ def _one_word_vcall_shape(
     def normalized(candidate: dict[str, Any]) -> tuple[object, ...] | None:
         return address_form(body, candidate)
 
-    receiver_address = (
-        normalized(receiver) if int(receiver["opcode"]) == 0x8D else None
-    )
+    receiver_address = normalized(receiver) if int(receiver["opcode"]) == 0x8D else None
     if receiver_address is None and receiver.get("memory") is None:
         sources = set(receiver["reads"])
         if int(receiver["opcode"]) in (0x89, 0x8B) and len(sources) == 1:
@@ -271,9 +269,7 @@ def derive_stack_depths(
         for index in sorted(ancestor_set)
         if index >= first_call
         if (
-            shape := _one_word_vcall_shape(
-                body, instructions, predecessor_rows, relocations, index
-            )
+            shape := _one_word_vcall_shape(body, instructions, predecessor_rows, relocations, index)
         )
         is not None
     }

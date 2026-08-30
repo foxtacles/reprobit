@@ -74,18 +74,12 @@ class ToolchainSourcePin:
         if len(self.revision) != 40 or any(
             character not in "0123456789abcdef" for character in self.revision
         ):
-            raise ValueError(
-                "toolchain profile-source revision must be a full lower-case Git hash"
-            )
+            raise ValueError("toolchain profile-source revision must be a full lower-case Git hash")
         paths = tuple(sorted((_relative(path) for path in self.paths), key=str.casefold))
         if not paths:
-            raise ValueError(
-                "toolchain profile source must supply at least one installed path"
-            )
+            raise ValueError("toolchain profile source must supply at least one installed path")
         if len({path.casefold() for path in paths}) != len(paths):
-            raise ValueError(
-                "toolchain profile-source paths must be unique under DOS case folding"
-            )
+            raise ValueError("toolchain profile-source paths must be unique under DOS case folding")
         object.__setattr__(self, "paths", paths)
 
 
@@ -143,9 +137,7 @@ class ToolchainProfile:
             raise ValueError("toolchain repository revisions must be unique")
         supplied_paths = [path for source in self.sources for path in source.paths]
         if len({path.casefold() for path in supplied_paths}) != len(supplied_paths):
-            raise ValueError(
-                "toolchain profile sources assign an installed path more than once"
-            )
+            raise ValueError("toolchain profile sources assign an installed path more than once")
         declared_paths = {
             path.casefold()
             for path in (
@@ -357,8 +349,7 @@ class ToolchainFileReceipt:
             raise ValueError("toolchain file receipt size must be positive")
         _validate_sha256(self.sha256, "toolchain file")
         if not isinstance(self.roles, (list, tuple)) or any(
-            not isinstance(role, str)
-            or not re.fullmatch(r"[a-z][a-z0-9._-]{0,127}", role)
+            not isinstance(role, str) or not re.fullmatch(r"[a-z][a-z0-9._-]{0,127}", role)
             for role in self.roles
         ):
             raise ValueError("toolchain file roles must be canonical identifiers")
@@ -386,6 +377,7 @@ class ToolchainTreeReceipt:
         _validate_sha256(self.membership_sha256, "toolchain tree membership")
         _validate_sha256(self.content_sha256, "toolchain tree content")
 
+
 def _validate_sha256(value: str, label: str) -> None:
     if not re.fullmatch(r"[0-9a-f]{64}", value):
         raise ValueError(f"{label} digest must be lower-case SHA-256")
@@ -401,9 +393,7 @@ def profile_source_pins_for_paths(
     for source in selected.sources:
         source_paths = tuple(path for path in source.paths if path.casefold() in admitted)
         if source_paths:
-            projected.append(
-                ToolchainSourcePin(source.repository, source.revision, source_paths)
-            )
+            projected.append(ToolchainSourcePin(source.repository, source.revision, source_paths))
     return tuple(projected)
 
 
@@ -457,14 +447,11 @@ def _validate_toolchain_profile_sources(
             f"extra={sorted(set(assignments) - set(expected_assignments))}"
         )
     mismatched = {
-        path
-        for path, source in expected_assignments.items()
-        if assignments.get(path) != source
+        path for path, source in expected_assignments.items() if assignments.get(path) != source
     }
     if mismatched:
         raise ToolchainError(
-            "schema-v3 lock profile-source mapping differs for paths: "
-            f"{sorted(mismatched)}"
+            f"schema-v3 lock profile-source mapping differs for paths: {sorted(mismatched)}"
         )
     return runtime_sources
 
@@ -474,9 +461,7 @@ def validate_toolchain_lock(document: SchemaToolchainLock) -> None:
 
     selected = profile(document.profile)
     _validate_toolchain_profile_sources(document)
-    required_producers = {
-        path.casefold(): path for path in selected.required_producers
-    }
+    required_producers = {path.casefold(): path for path in selected.required_producers}
     received_producers = {item.path.casefold(): item.path for item in document.tools}
     misplaced_tools = {
         path for folded, path in received_producers.items() if folded not in required_producers
@@ -493,9 +478,7 @@ def validate_toolchain_lock(document: SchemaToolchainLock) -> None:
             f"{sorted(required_producers[path] for path in missing_producers)}"
         )
 
-    required_runtime = {
-        path.casefold(): path for path in selected.required_runtime_files
-    }
+    required_runtime = {path.casefold(): path for path in selected.required_runtime_files}
     received_runtime = {item.path.casefold(): item.path for item in document.runtime_files}
     misplaced_runtime = {
         path for folded, path in received_runtime.items() if folded in required_producers
@@ -627,9 +610,7 @@ class ToolchainDoctorReport:
             raise ToolchainError("; ".join(f"{item.path}: {item.detail}" for item in failed))
 
 
-def _hash_file(
-    path: Path, relative: str, roles: tuple[str, ...] = ()
-) -> ToolchainFileReceipt:
+def _hash_file(path: Path, relative: str, roles: tuple[str, ...] = ()) -> ToolchainFileReceipt:
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -682,24 +663,18 @@ def _tree_receipt(root: Path, relative_root: str) -> ToolchainTreeReceipt:
     def append(record: dict[str, object]) -> None:
         records.append(record)
         if len(records) > _TREE_MAX_ENTRIES:
-            raise ToolchainError(
-                f"toolchain tree exceeds {_TREE_MAX_ENTRIES} entries: {root}"
-            )
+            raise ToolchainError(f"toolchain tree exceeds {_TREE_MAX_ENTRIES} entries: {root}")
 
     def walk(directory: Path, relative: PurePosixPath, depth: int) -> None:
         nonlocal observed_max_depth
         if depth > _TREE_MAX_DEPTH:
-            raise ToolchainError(
-                f"toolchain tree exceeds depth {_TREE_MAX_DEPTH}: {root}"
-            )
+            raise ToolchainError(f"toolchain tree exceeds depth {_TREE_MAX_DEPTH}: {root}")
         observed_max_depth = max(observed_max_depth, depth)
         try:
             with os.scandir(directory) as iterator:
                 entries = list(iterator)
         except OSError as error:
-            raise ToolchainError(
-                f"cannot enumerate toolchain tree {directory}: {error}"
-            ) from error
+            raise ToolchainError(f"cannot enumerate toolchain tree {directory}: {error}") from error
         entries.sort(key=lambda entry: (entry.name.casefold(), entry.name))
         folded = [entry.name.casefold() for entry in entries]
         if len(folded) != len(set(folded)):
@@ -743,9 +718,7 @@ def _tree_receipt(root: Path, relative_root: str) -> ToolchainTreeReceipt:
                     raise ToolchainError(f"toolchain directory changed while hashed: {child}")
                 continue
             if not stat.S_ISREG(before.st_mode):
-                raise ToolchainError(
-                    f"toolchain tree contains an unsupported entry type: {child}"
-                )
+                raise ToolchainError(f"toolchain tree contains an unsupported entry type: {child}")
             digest = hashlib.sha256()
             try:
                 with child.open("rb") as stream:
@@ -754,9 +727,7 @@ def _tree_receipt(root: Path, relative_root: str) -> ToolchainTreeReceipt:
                         opened.st_dev,
                         opened.st_ino,
                     ) != (before.st_dev, before.st_ino):
-                        raise ToolchainError(
-                            f"toolchain file changed while opened: {child}"
-                        )
+                        raise ToolchainError(f"toolchain file changed while opened: {child}")
                     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                         digest.update(chunk)
                     after_read = os.fstat(stream.fileno())
@@ -790,13 +761,10 @@ def _tree_receipt(root: Path, relative_root: str) -> ToolchainTreeReceipt:
     ):
         raise ToolchainError(f"toolchain tree changed while hashed: {root}")
     membership_records = [
-        {key: value for key, value in record.items() if key != "sha256"}
-        for record in records
+        {key: value for key, value in record.items() if key != "sha256"} for record in records
     ]
     membership = hashlib.sha256(
-        json.dumps(membership_records, sort_keys=True, separators=(",", ":")).encode(
-            "utf-8"
-        )
+        json.dumps(membership_records, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
     content = hashlib.sha256(
         json.dumps(records, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -831,9 +799,7 @@ class ClassicMSVCToolchain:
             try:
                 selected_profile = TOOLCHAIN_PROFILES[profile]
             except KeyError as error:
-                raise ToolchainError(
-                    f"unsupported classic MSVC profile: {profile}"
-                ) from error
+                raise ToolchainError(f"unsupported classic MSVC profile: {profile}") from error
             self.profile = selected_profile
         else:
             self.profile = profile
@@ -868,13 +834,9 @@ class ClassicMSVCToolchain:
         return self.logical_path(self.profile.resource_compiler)
 
     def doctor(self, lock: SchemaToolchainLock | None = None) -> ToolchainDoctorReport:
-        expected = (
-            {item.path.casefold(): item for item in lock.tools} if lock is not None else {}
-        )
+        expected = {item.path.casefold(): item for item in lock.tools} if lock is not None else {}
         expected_runtime = (
-            {item.path.casefold(): item for item in lock.runtime_files}
-            if lock is not None
-            else {}
+            {item.path.casefold(): item for item in lock.runtime_files} if lock is not None else {}
         )
         checks: list[ToolchainCheck] = []
         if lock is not None:
@@ -919,9 +881,7 @@ class ClassicMSVCToolchain:
                 ToolchainCheck(relative, matches, "digest matches" if matches else "digest differs")
             )
         if lock is not None:
-            required_runtime = {
-                path.casefold() for path in self.profile.required_runtime_files
-            }
+            required_runtime = {path.casefold() for path in self.profile.required_runtime_files}
             missing_runtime = required_runtime - set(expected_runtime)
             if missing_runtime:
                 checks.append(
@@ -1000,8 +960,7 @@ class ClassicMSVCToolchain:
                     actual_receipt.path.casefold() == expected_receipt.path.casefold()
                     and actual_receipt.entry_count == expected_receipt.entry_count
                     and actual_receipt.max_depth == expected_receipt.max_depth
-                    and actual_receipt.membership_sha256
-                    == expected_receipt.membership_digest.value
+                    and actual_receipt.membership_sha256 == expected_receipt.membership_digest.value
                     and actual_receipt.content_sha256 == expected_receipt.content_digest.value
                     and actual_receipt.algorithm == expected_receipt.algorithm
                 )
@@ -1047,9 +1006,7 @@ class ClassicMSVCToolchain:
         for relative in declared_runtime:
             path = self.host_path(relative)
             if not path.is_file() or path.is_symlink():
-                raise ToolchainError(
-                    f"declared runtime file is absent or unsafe: {relative}"
-                )
+                raise ToolchainError(f"declared runtime file is absent or unsafe: {relative}")
             runtime_files.append(_hash_file(path, relative, ("runtime",)))
         trees: list[ToolchainTreeReceipt] = []
         if include_trees:

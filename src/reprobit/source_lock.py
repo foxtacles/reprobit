@@ -20,9 +20,7 @@ class SourceLockError(ValueError):
 def _relative(value: str | Path) -> str:
     rendered = value.as_posix() if isinstance(value, Path) else value.replace("\\", "/")
     path = PurePosixPath(rendered)
-    if path.is_absolute() or not path.parts or any(
-        part in {"", ".", ".."} for part in path.parts
-    ):
+    if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
         raise SourceLockError(f"source path is not canonical and relative: {value!r}")
     canonical = path.as_posix()
     if canonical != rendered:
@@ -103,9 +101,7 @@ def git_tracked_paths(root: Path) -> tuple[str, ...]:
         raise SourceLockError(f"cannot enumerate tracked project inputs: {exc}") from exc
     try:
         cached = tuple(
-            _relative(item.decode("utf-8"))
-            for item in completed.stdout.split(b"\0")
-            if item
+            _relative(item.decode("utf-8")) for item in completed.stdout.split(b"\0") if item
         )
     except UnicodeDecodeError as exc:
         raise SourceLockError("tracked source paths must be valid UTF-8") from exc
@@ -119,11 +115,7 @@ def git_tracked_paths(root: Path) -> tuple[str, ...]:
             if candidate.is_symlink():
                 redirected_or_unsupported = True
                 break
-            if (
-                index < len(parts) - 1
-                and os.path.lexists(candidate)
-                and not candidate.is_dir()
-            ):
+            if index < len(parts) - 1 and os.path.lexists(candidate) and not candidate.is_dir():
                 redirected_or_unsupported = True
                 break
         if redirected_or_unsupported or os.path.lexists(candidate):

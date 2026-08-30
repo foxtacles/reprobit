@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from reprobit.backends import ExecutionBackend, PosixWineBackend
+from reprobit.backends import (
+    POSIX_WINE_BACKEND,
+    ExecutionBackend,
+    NativeWindowsBackend,
+    PosixWineBackend,
+    backend_for_host,
+)
 from reprobit.cli_paths import CLIError
 from reprobit.user_config import resolve_toolchain_root
 
@@ -17,6 +24,16 @@ class ClassicExecutionInputs:
     backend: ExecutionBackend
     compiler_transport: Path | None
     resource_transport: Path | None
+
+
+def selected_backend(args: argparse.Namespace) -> ExecutionBackend:
+    """Resolve shared CLI backend options without duplicating host policy."""
+
+    if args.backend == "auto":
+        return backend_for_host()
+    if args.backend == POSIX_WINE_BACKEND:
+        return PosixWineBackend(wine=args.wine, wineserver=args.wineserver)
+    return NativeWindowsBackend()
 
 
 def resolve_classic_execution_inputs(
@@ -40,4 +57,8 @@ def resolve_classic_execution_inputs(
     return ClassicExecutionInputs(root, backend, compiler, resource)
 
 
-__all__ = ["ClassicExecutionInputs", "resolve_classic_execution_inputs"]
+__all__ = [
+    "ClassicExecutionInputs",
+    "resolve_classic_execution_inputs",
+    "selected_backend",
+]

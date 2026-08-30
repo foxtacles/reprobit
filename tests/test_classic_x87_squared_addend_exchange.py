@@ -245,9 +245,7 @@ class TestFourUnitTrees:
         )
         assert image[1:end] == swapped
         for bad in ([1, 0, 2, 3], [2, 3, 0, 1], [0, 2, 1, 3]):
-            with pytest.raises(
-                ByteIdentityError, match="commutativity-exact"
-            ):
+            with pytest.raises(ByteIdentityError, match="commutativity-exact"):
                 floating_algorithms.apply_x87_squared_addend_exchange(
                     build_body(self.UNITS, self.CONSUME),
                     [dict(good, order=bad, expected_rewritten_offsets=[1])],

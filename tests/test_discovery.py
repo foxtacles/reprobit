@@ -356,11 +356,7 @@ def test_cold_resume_and_one_cell_extension_are_incremental(tmp_path: Path) -> N
         event.phase == "discovery-compile" and event.kind is ProgressKind.UNIT_FINISHED
         for event in events
     )
-    forwarded_phases = {
-        event.phase
-        for event in events
-        if event.kind is ProgressKind.UNIT_FINISHED
-    }
+    forwarded_phases = {event.phase for event in events if event.kind is ProgressKind.UNIT_FINISHED}
     assert forwarded_phases >= {
         "discovery-enumerate",
         "discovery-analyze",
@@ -369,14 +365,11 @@ def test_cold_resume_and_one_cell_extension_are_incremental(tmp_path: Path) -> N
     final = [
         event
         for event in events
-        if event.phase == "discovery-finalize"
-        and event.kind is ProgressKind.UNIT_FINISHED
+        if event.phase == "discovery-finalize" and event.kind is ProgressKind.UNIT_FINISHED
     ][-1]
     assert final.completed == final.total
     assert all(
-        event.completed is not None
-        and event.total is not None
-        and event.completed < event.total
+        event.completed is not None and event.total is not None and event.completed < event.total
         for event in events
         if event.phase == "discovery-compile"
         and event.kind in {ProgressKind.CACHE_HIT, ProgressKind.CACHE_MISS}

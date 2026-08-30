@@ -28,11 +28,9 @@ def generate_forward_run(prefix: str, count: int, width: int) -> str:
         raise ValueError("forward run prefix must be an identifier stem")
     if not 1 <= count <= 999:
         raise ValueError("forward run count must be in [1, 999]")
-    if not 1 <= width <= 3 or count > 10 ** width:
+    if not 1 <= width <= 3 or count > 10**width:
         raise ValueError("forward run width cannot represent the count")
-    return "".join(
-        f"class {prefix}{number:0{width}d};\n" for number in range(count)
-    )
+    return "".join(f"class {prefix}{number:0{width}d};\n" for number in range(count))
 
 
 def generate_extern_run(prefix: str, count: int, width: int) -> str:
@@ -47,12 +45,9 @@ def generate_extern_run(prefix: str, count: int, width: int) -> str:
         raise ValueError("extern run prefix must be an identifier stem")
     if not 1 <= count <= 999:
         raise ValueError("extern run count must be in [1, 999]")
-    if not 1 <= width <= 3 or count > 10 ** width:
+    if not 1 <= width <= 3 or count > 10**width:
         raise ValueError("extern run width cannot represent the count")
-    return "".join(
-        f"extern int {prefix}{number:0{width}d};\n"
-        for number in range(count)
-    )
+    return "".join(f"extern int {prefix}{number:0{width}d};\n" for number in range(count))
 
 
 def generate_pad_shape(classes: int, functions_per_class: int) -> str:
@@ -72,8 +67,7 @@ def generate_pad_shape(classes: int, functions_per_class: int) -> str:
         lines = [f"class ClassPad{class_number:02d} {{"]
         for function_number in range(functions_per_class):
             lines.append(
-                f"\tinline void FunctionPad{class_number:02d}"
-                f"x{function_number:02d}() {{}}"
+                f"\tinline void FunctionPad{class_number:02d}x{function_number:02d}() {{}}"
             )
         lines.append("};")
         parts.append("\n".join(lines))

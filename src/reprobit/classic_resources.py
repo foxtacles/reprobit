@@ -58,9 +58,7 @@ _TOKEN = re.compile(r'"(?:[^"\\]|\\.)*"|[^\s,]+|,')
 _CONDITIONAL_OPEN = frozenset({"if", "ifdef", "ifndef"})
 _CONDITIONAL_MIDDLE = frozenset({"elif", "else"})
 _CONDITIONAL_CLOSE = frozenset({"endif"})
-_PASSIVE_DIRECTIVES = frozenset(
-    {"define", "undef", "pragma", "error", "line", "warning"}
-)
+_PASSIVE_DIRECTIVES = frozenset({"define", "undef", "pragma", "error", "line", "warning"})
 _RESOURCE_FILE_TYPES = frozenset(
     {
         "aniicon",
@@ -141,26 +139,20 @@ def _strip_comments(payload: bytes, *, label: str) -> str:
             string = True
         index += 1
     if block or string:
-        raise ClassicResourceDependencyError(
-            f"{label} has an unterminated comment or string"
-        )
+        raise ClassicResourceDependencyError(f"{label} has an unterminated comment or string")
     return "".join(output)
 
 
 def _quoted_path(token: str, *, label: str) -> str:
     if len(token) < 2 or token[0] != '"' or token[-1] != '"':
-        raise ClassicResourceDependencyError(
-            f"{label} requires one literal quoted path"
-        )
+        raise ClassicResourceDependencyError(f"{label} requires one literal quoted path")
     value = token[1:-1]
     if not value or '"' in value or "\0" in value:
         raise ClassicResourceDependencyError(f"{label} has an invalid path literal")
     try:
         value.encode("ascii")
     except UnicodeEncodeError as exc:
-        raise ClassicResourceDependencyError(
-            f"{label} path literals must be ASCII"
-        ) from exc
+        raise ClassicResourceDependencyError(f"{label} path literals must be ASCII") from exc
     return value
 
 
@@ -219,26 +211,19 @@ def scan_msvc_resource_dependencies(
     by_path = {item.logical_path.casefold(): item for item in authority.files}
     source = by_path.get(source_path.casefold())
     if source is None:
-        raise ClassicResourceDependencyError(
-            "resource root source is outside sealed authority"
-        )
+        raise ClassicResourceDependencyError("resource root source is outside sealed authority")
     for directory in (*include_directories, *environment_directories):
         canonical = search_directory(directory)
         if not any(
             ntpath.commonpath((canonical, root)).casefold() == root.casefold()
             for root in authority.logical_roots
-            if ntpath.splitdrive(canonical)[0].casefold()
-            == ntpath.splitdrive(root)[0].casefold()
+            if ntpath.splitdrive(canonical)[0].casefold() == ntpath.splitdrive(root)[0].casefold()
         ):
             raise ClassicResourceDependencyError(
                 f"resource include root leaves sealed authority: {directory!r}"
             )
-    include_directories = tuple(
-        search_directory(item) for item in include_directories
-    )
-    environment_directories = tuple(
-        search_directory(item) for item in environment_directories
-    )
+    include_directories = tuple(search_directory(item) for item in include_directories)
+    environment_directories = tuple(search_directory(item) for item in environment_directories)
 
     reads: list[ResourceRead] = [
         ResourceRead(
@@ -346,8 +331,7 @@ def scan_msvc_resource_dependencies(
             resource_type = significant[1].casefold()
             index = 2
             while (
-                index < len(significant)
-                and significant[index].casefold() in _LOAD_MEMORY_OPTIONS
+                index < len(significant) and significant[index].casefold() in _LOAD_MEMORY_OPTIONS
             ):
                 index += 1
             operand = significant[index] if index < len(significant) else ""
@@ -365,8 +349,7 @@ def scan_msvc_resource_dependencies(
                     and _PATHLIKE.search(operand[1:-1])
                 ):
                     raise ClassicResourceDependencyError(
-                        f"{current.logical_path}:{line_number}: unknown file-backed "
-                        "resource form"
+                        f"{current.logical_path}:{line_number}: unknown file-backed resource form"
                     )
                 continue
             raw_path = _quoted_path(

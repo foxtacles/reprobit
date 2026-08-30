@@ -110,7 +110,7 @@ def add_terminal_nodes(plan: ClassicIncrementalPlan) -> None:
             current_target: str = target_id,
             current_output: Path = terminal_path,
         ) -> None:
-            runtime.prepared.developer.execute_warm_terminal(
+            runtime.prepared.warm.execute_warm_terminal(
                 current_target,
                 inputs=prepared_inputs,
                 destination=current_output,
@@ -240,7 +240,7 @@ def add_analysis_nodes(plan: ClassicIncrementalPlan) -> None:
             current_target: str = target_id,
             current_outputs: Mapping[str, Path] = current_paths,
         ) -> None:
-            runtime.prepared.developer.execute_warm_analysis_link(
+            runtime.prepared.warm.execute_warm_analysis_link(
                 current_target,
                 inputs=prepared_inputs,
                 outputs=current_outputs,

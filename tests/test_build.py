@@ -79,7 +79,9 @@ def test_plan_rejects_cycles_duplicate_outputs_and_unknown_json_fields() -> None
 
 def test_plan_rejects_duplicate_json_keys() -> None:
     with pytest.raises(BuildPlanError, match="duplicate JSON key"):
-        BuildPlan.from_json('{"schema_version":1,"schema_version":1,"steps":[],"link_admissions":[]}')
+        BuildPlan.from_json(
+            '{"schema_version":1,"schema_version":1,"steps":[],"link_admissions":[]}'
+        )
 
 
 def test_build_step_rejects_shell_control_characters() -> None:

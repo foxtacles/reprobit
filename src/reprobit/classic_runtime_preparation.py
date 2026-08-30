@@ -30,7 +30,6 @@ from reprobit.classic_runtime import (
     ClassicProducerGraphBuildExecutor,
     ClassicProducerGraphRuntimeEvidenceProvider,
 )
-from reprobit.classic_runtime_developer import ClassicDeveloperExecution
 from reprobit.classic_runtime_donor import ClassicDonorComposition
 from reprobit.classic_runtime_environment import (
     _admitted_host_wrapper,
@@ -43,6 +42,7 @@ from reprobit.classic_runtime_environment import (
     _project_locked_toolchain,
     _toolchain_include_reader_payloads,
 )
+from reprobit.classic_runtime_files import _safe_relative
 from reprobit.classic_runtime_graph import (
     _graph_compile_records,
     _graph_role_bindings,
@@ -50,12 +50,13 @@ from reprobit.classic_runtime_graph import (
     _graph_targets,
 )
 from reprobit.classic_runtime_overlay import ClassicOverlayEpochs
+from reprobit.classic_runtime_probe import ClassicProbeExecution
 from reprobit.classic_runtime_producer import (
     ClassicProducerExecution,
     ClassicProgressCallback,
     ClassicProgressReporter,
-    _safe_relative,
 )
+from reprobit.classic_runtime_warm import ClassicWarmExecution
 from reprobit.model import Digest
 from reprobit.producer_graph import ProducerRole, read_producer_graph
 from reprobit.schema import (
@@ -81,7 +82,8 @@ class _OverlayEpochPlan:
 class ClassicProducerGraphPreparedRun:
     executor: ClassicProducerGraphBuildExecutor
     producer: ClassicProducerExecution
-    developer: ClassicDeveloperExecution
+    warm: ClassicWarmExecution
+    probes: ClassicProbeExecution
     donors: ClassicDonorComposition
     evidence_provider: ClassicProducerGraphRuntimeEvidenceProvider
     plan: BuildPlan
@@ -89,7 +91,7 @@ class ClassicProducerGraphPreparedRun:
 
     def close(self) -> None:
         try:
-            self.developer.close()
+            self.warm.close()
         finally:
             self.producer.close()
 
@@ -586,7 +588,7 @@ def prepare_classic_producer_graph_run(
             progress=reporter,
             compile_timeout=compile_timeout,
         )
-        developer = ClassicDeveloperExecution(
+        warm = ClassicWarmExecution(
             bundle=bundle,
             project_root=project_root,
             session_root=session_root,
@@ -599,6 +601,14 @@ def prepare_classic_producer_graph_run(
             producer=producer,
             overlay=overlay,
             donors=donors,
+        )
+        probes = ClassicProbeExecution(
+            graph=graph,
+            units=units,
+            producer=producer,
+            overlay=overlay,
+            donors=donors,
+            warm=warm,
         )
         evidence_provider = ClassicProducerGraphRuntimeEvidenceProvider(
             bundle,
@@ -631,7 +641,8 @@ def prepare_classic_producer_graph_run(
         return ClassicProducerGraphPreparedRun(
             executor=executor,
             producer=producer,
-            developer=developer,
+            warm=warm,
+            probes=probes,
             donors=donors,
             evidence_provider=evidence_provider,
             plan=BuildPlan(()),

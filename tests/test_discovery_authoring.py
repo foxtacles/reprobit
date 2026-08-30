@@ -272,8 +272,7 @@ def test_merge_authored_records_reuses_one_donor_for_a_second_symbol() -> None:
     donors = tuple(
         item
         for item in merged_interventions.interventions
-        if isinstance(item, ClassicRecipeIntervention)
-        and item.role is ClassicRecipeRole.DONOR
+        if isinstance(item, ClassicRecipeIntervention) and item.role is ClassicRecipeRole.DONOR
     )
     assert len(donors) == 1
     assert donors[0].id == first.donor.intervention.id == second_donor.intervention.id
@@ -292,8 +291,7 @@ def test_merge_authored_records_reuses_one_donor_for_a_second_symbol() -> None:
     assert len(merged_cost.by_function) == 2
     assert all(item.direct_cost == 25 for item in merged_cost.by_function)
     assert all(
-        (item.allocated_shared_cost.numerator, item.allocated_shared_cost.denominator)
-        == (1, 2)
+        (item.allocated_shared_cost.numerator, item.allocated_shared_cost.denominator) == (1, 2)
         for item in merged_cost.by_function
     )
     assert all(item.exposure_cost == 1 for item in merged_cost.by_function)

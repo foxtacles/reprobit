@@ -54,9 +54,11 @@ from reprobit.report import (
 from reprobit.report_io import render_report_html, report_json_href
 from reprobit.scheduler import TaskScheduler, TaskSpec
 from reprobit.schema import ProjectBundle
-from reprobit.secure_paths import (
+from reprobit.secure_path_contracts import (
     SecureFileSnapshot,
     SecurePathError,
+)
+from reprobit.secure_paths import (
     atomic_publish_relative,
     remove_published_relative,
     reseal_relative_file,

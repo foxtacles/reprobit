@@ -233,10 +233,7 @@ def test_all_declaration_carrier_families_produce_closed_requests() -> None:
     )
     assert all(isinstance(request.carrier_identifiers, frozenset) for request in requests)
     assert all(request.carrier_identifiers for request in requests)
-    assert all(
-        not hasattr(request.compiler_additions, "required_define")
-        for request in requests
-    )
+    assert all(not hasattr(request.compiler_additions, "required_define") for request in requests)
     force_include_families = {
         ClassicRecipeFamily.DECLARATION_SHAPE,
         ClassicRecipeFamily.PAD_SHAPE,

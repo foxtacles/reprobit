@@ -22,9 +22,7 @@ SOURCE_REPOSITORY = "https://github.com/archaic-msvc/msvc420.git"
 SOURCE_REVISION = "b42c244f0a83ba15ba2ffb62b0dc240d7b2dea50"
 LINKER_PATH = "bin/LINK.EXE"
 LINKER_SIZE = 514_048
-LINKER_DIGEST = (
-    "6ca5a19155e4170e8df08247769b4586fa951743f09f1d8fcec838fc4eb9750e"
-)
+LINKER_DIGEST = "6ca5a19155e4170e8df08247769b4586fa951743f09f1d8fcec838fc4eb9750e"
 
 
 def canonical_lock() -> ToolchainLock:

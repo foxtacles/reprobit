@@ -30,7 +30,8 @@ except ImportError:  # pragma: no cover - native Windows
     resource = None  # type: ignore[assignment]
 
 from reprobit.model import Digest
-from reprobit.secure_paths import SecurePathError, _WindowsHandles
+from reprobit.secure_path_contracts import SecurePathError
+from reprobit.secure_paths_windows import _WindowsHandles
 
 
 class SealedNamespaceError(SecurePathError):

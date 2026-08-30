@@ -17,10 +17,7 @@ def _module_name(path: Path) -> str:
 
 
 def _internal_modules() -> dict[str, Path]:
-    return {
-        _module_name(path): path
-        for path in PACKAGE_ROOT.rglob("*.py")
-    }
+    return {_module_name(path): path for path in PACKAGE_ROOT.rglob("*.py")}
 
 
 def _import_base(
@@ -100,11 +97,7 @@ def _assigned_names(target: ast.expr) -> set[str]:
     if isinstance(target, ast.Name):
         return {target.id}
     if isinstance(target, ast.Tuple | ast.List):
-        return {
-            name
-            for element in target.elts
-            for name in _assigned_names(element)
-        }
+        return {name for element in target.elts for name in _assigned_names(element)}
     if isinstance(target, ast.Starred):
         return _assigned_names(target.value)
     return set()
@@ -116,14 +109,11 @@ def _imported_only_bindings(tree: ast.Module) -> set[str]:
     for statement in _module_scope_statements(tree):
         if isinstance(statement, ast.Import):
             imported.update(
-                alias.asname or alias.name.partition(".")[0]
-                for alias in statement.names
+                alias.asname or alias.name.partition(".")[0] for alias in statement.names
             )
         elif isinstance(statement, ast.ImportFrom):
             imported.update(
-                alias.asname or alias.name
-                for alias in statement.names
-                if alias.name != "*"
+                alias.asname or alias.name for alias in statement.names if alias.name != "*"
             )
         elif isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
             owned.add(statement.name)
@@ -178,22 +168,15 @@ def _literal_all(tree: ast.Module, path: Path) -> tuple[str, ...] | None:
     try:
         value = ast.literal_eval(declarations[0])
     except (TypeError, ValueError) as exc:
-        raise AssertionError(
-            f"non-literal __all__ in {path.relative_to(ROOT)}"
-        ) from exc
-    if not isinstance(value, list | tuple) or any(
-        not isinstance(item, str) for item in value
-    ):
+        raise AssertionError(f"non-literal __all__ in {path.relative_to(ROOT)}") from exc
+    if not isinstance(value, list | tuple) or any(not isinstance(item, str) for item in value):
         raise AssertionError(f"invalid __all__ in {path.relative_to(ROOT)}")
     return tuple(value)
 
 
 def test_internal_module_import_graph_is_acyclic() -> None:
     modules = _internal_modules()
-    graph = {
-        module: _dependencies(module, path, modules)
-        for module, path in modules.items()
-    }
+    graph = {module: _dependencies(module, path, modules) for module, path in modules.items()}
     visited: set[str] = set()
     active: list[str] = []
     active_set: set[str] = set()
@@ -233,10 +216,7 @@ def test_production_imports_and_exports_internal_owners_directly() -> None:
         module: ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         for module, path in modules.items()
     }
-    borrowed = {
-        module: _imported_only_bindings(tree)
-        for module, tree in trees.items()
-    }
+    borrowed = {module: _imported_only_bindings(tree) for module, tree in trees.items()}
     allowed_borrowed_exports = {("reprobit", "Verdict")}
     violations: list[str] = []
     for module, path in modules.items():
@@ -263,20 +243,12 @@ def test_production_imports_and_exports_internal_owners_directly() -> None:
                     alias.name in borrowed[base]
                     and (base, alias.name) not in allowed_borrowed_exports
                 ):
-                    violations.append(
-                        f"{location}: {base}.{alias.name} is owned by another module"
-                    )
+                    violations.append(f"{location}: {base}.{alias.name} is owned by another module")
 
         declared_all = _literal_all(tree, path)
         for name in declared_all or ():
-            if (
-                name in borrowed[module]
-                and (module, name) not in allowed_borrowed_exports
-            ):
-                violations.append(
-                    f"{path.relative_to(ROOT)}: __all__ borrows {module}.{name}"
-                )
+            if name in borrowed[module] and (module, name) not in allowed_borrowed_exports:
+                violations.append(f"{path.relative_to(ROOT)}: __all__ borrows {module}.{name}")
     assert not violations, (
-        "import and export names from their defining internal modules: "
-        f"{violations}"
+        f"import and export names from their defining internal modules: {violations}"
     )

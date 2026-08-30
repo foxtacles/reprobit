@@ -8,10 +8,8 @@ from typing import Any
 
 import pytest
 
+from reprobit.secure_path_contracts import SecurePathError
 from reprobit.secure_paths import (
-    SecurePathError,
-    _HeldWindowsRoot,
-    _WindowsHandles,
     atomic_publish_new_relative_from_stream,
     atomic_publish_relative,
     atomic_publish_relative_if_current,
@@ -21,6 +19,7 @@ from reprobit.secure_paths import (
     remove_published_relative,
     reseal_relative_file,
 )
+from reprobit.secure_paths_windows import _HeldWindowsRoot, _WindowsHandles
 
 _FILE_ATTRIBUTE_HIDDEN = 0x0002
 _FILE_ATTRIBUTE_ARCHIVE = 0x0020

@@ -41,7 +41,7 @@ def test_logical_paths_reject_windows_superscript_device_names(
     index: str,
 ) -> None:
     with pytest.raises(PathContractError, match="unsafe DOS component"):
-        normalize_logical_path(fr"R:\src\{prefix}{index}.artifact.tar")
+        normalize_logical_path(rf"R:\src\{prefix}{index}.artifact.tar")
 
 
 def test_materialized_skeleton_requires_an_ascii_dos_drive(tmp_path: Path) -> None:
@@ -136,9 +136,7 @@ def test_windows_materialization_uses_non_admin_junctions(tmp_path: Path) -> Non
 
     source = tmp_path / "source"
     source.mkdir()
-    skeleton = LogicalPathSkeleton(
-        (LogicalSeat("source", source, r"R:\deep\pinned\source"),)
-    )
+    skeleton = LogicalPathSkeleton((LogicalSeat("source", source, r"R:\deep\pinned\source"),))
 
     with skeleton.temporary_materialization(tmp_path / "runs") as materialized:
         entry = materialized.created_entries[0]

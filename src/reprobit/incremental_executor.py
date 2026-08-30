@@ -17,7 +17,11 @@ from typing import Generic, Literal, TypeAlias, TypeVar
 from reprobit.cache import CacheLease, CacheOutput, CacheRecord, IncrementalCache
 from reprobit.incremental import IncrementalBuildSummary
 from reprobit.process import CancellationToken
-from reprobit.secure_paths import SecureFileSnapshot, SecurePathError, digest_relative_file
+from reprobit.secure_path_contracts import (
+    SecureFileSnapshot,
+    SecurePathError,
+)
+from reprobit.secure_paths import digest_relative_file
 from reprobit.strict_json import JsonValue
 
 
@@ -74,9 +78,7 @@ NodeKeyFactory = Callable[[Mapping[str, NodeOutcome]], str | NodeKeyDecision]
 NodeCacheProbe = Callable[[CacheLease, Mapping[str, NodeOutcome]], CacheProbeDecision]
 NodeAction = Callable[[RuntimeT, CancellationToken, PreparedNodeInputs], None]
 NodePreStore = Callable[[RuntimeT, Mapping[str, NodeOutcome]], None]
-NodeInputMaterializer = Callable[
-    [CacheLease, Mapping[str, NodeOutcome]], PreparedNodeInputs
-]
+NodeInputMaterializer = Callable[[CacheLease, Mapping[str, NodeOutcome]], PreparedNodeInputs]
 IncrementalProgressEventKind: TypeAlias = Literal[
     "cache_hit",
     "cache_miss",
@@ -143,9 +145,7 @@ class _LazyRuntime(Generic[RuntimeT]):
 
     @staticmethod
     def _construction_failure(error: Exception) -> IncrementalExecutionError:
-        return IncrementalExecutionError(
-            f"incremental runtime construction failed: {error}"
-        )
+        return IncrementalExecutionError(f"incremental runtime construction failed: {error}")
 
     def get(self) -> RuntimeT:
         with self._lock:
@@ -504,9 +504,7 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                                 f"node {node.id!r} outcome differs from its output set"
                             )
                         for name, output in canonical_outputs[node.id].items():
-                            output_relative = output.relative_to(
-                                self.workspace_root
-                            ).as_posix()
+                            output_relative = output.relative_to(self.workspace_root).as_posix()
                             try:
                                 received = digest_relative_file(
                                     self.workspace_root,

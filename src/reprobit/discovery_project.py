@@ -245,9 +245,7 @@ def resolve_project_grind_context(
     if build_plan is None or graph is None:
         raise ProjectDiscoveryError("project grind requires a complete producer graph")
     if config.target not in {target.id for target in bundle.spec.targets}:
-        raise ProjectDiscoveryError(
-            f"discovery target is not in the project: {config.target!r}"
-        )
+        raise ProjectDiscoveryError(f"discovery target is not in the project: {config.target!r}")
     unit_matches = tuple(
         index
         for index, unit in enumerate(build_plan.translation_units)

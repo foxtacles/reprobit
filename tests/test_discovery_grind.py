@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import gc
+import weakref
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -42,14 +44,16 @@ class _Trace:
     seed_calls: list[tuple[Path, str]] = field(default_factory=list)
     donor_calls: list[tuple[Path, tuple[str, ...]]] = field(default_factory=list)
     cold_calls: list[Path] = field(default_factory=list)
-    donor_authoring: list[tuple[str, str, str, int, int]] = field(
-        default_factory=list
-    )
-    equal_body_authoring: list[tuple[str, str, str, str, int, int]] = field(
-        default_factory=list
-    )
+    donor_authoring: list[tuple[str, str, str, int, int]] = field(default_factory=list)
+    equal_body_authoring: list[tuple[str, str, str, str, int, int]] = field(default_factory=list)
     reference_objects: list[bytes] = field(default_factory=list)
     publication_calls: int = 0
+
+
+@dataclass
+class _ColdReport:
+    run_id: Digest
+    rejection_reason: str | None
 
 
 def _context(
@@ -112,9 +116,7 @@ def _install_grind_fixture(
         reference=b"sealed reference",
     )
     for context in (live, staged):
-        existing = tuple(
-            SimpleNamespace(id=donor_id) for donor_id in existing_donor_ids
-        )
+        existing = tuple(SimpleNamespace(id=donor_id) for donor_id in existing_donor_ids)
         context.bundle.interventions = existing
         context.intervention_document.interventions = existing
     trace = _Trace()
@@ -157,9 +159,7 @@ def _install_grind_fixture(
                 functions,
             )
         )
-        return SimpleNamespace(
-            intervention=SimpleNamespace(id=_donor_id(classes, functions))
-        )
+        return SimpleNamespace(intervention=SimpleNamespace(id=_donor_id(classes, functions)))
 
     def equal_body_authoring(
         *,
@@ -184,9 +184,7 @@ def _install_grind_fixture(
                 functions,
             )
         )
-        donor = SimpleNamespace(
-            intervention=SimpleNamespace(id=_donor_id(classes, functions))
-        )
+        donor = SimpleNamespace(intervention=SimpleNamespace(id=_donor_id(classes, functions)))
         function = SimpleNamespace(
             intervention=SimpleNamespace(id=f"function.{classes}.{functions}")
         )
@@ -248,15 +246,14 @@ def _install_grind_fixture(
     monkeypatch.setattr(grind, "build_declaration_shape_donor", donor_authoring)
     monkeypatch.setattr(grind, "build_declaration_shape_equal_body", equal_body_authoring)
     monkeypatch.setattr(grind, "qualify_msvc_reference_object", qualify)
+
     def merge_records(
         interventions: object,
         proofs: object,
         records: tuple[object, ...],
     ) -> tuple[object, object]:
         merged = {item.id: item for item in interventions.interventions}
-        merged.update(
-            (record.intervention.id, record.intervention) for record in records
-        )
+        merged.update((record.intervention.id, record.intervention) for record in records)
         return SimpleNamespace(interventions=tuple(merged.values())), proofs
 
     monkeypatch.setattr(grind, "merge_authored_records", merge_records)
@@ -266,10 +263,7 @@ def _install_grind_fixture(
         grind,
         "calculate_cost",
         lambda interventions: SimpleNamespace(
-            project_total=sum(
-                1 if item.id.startswith("donor.") else 25
-                for item in interventions
-            )
+            project_total=sum(1 if item.id.startswith("donor.") else 25 for item in interventions)
         ),
     )
     monkeypatch.setattr(
@@ -400,6 +394,44 @@ def test_progress_is_monotonic_and_finishes_its_bounded_total(
         completed for completed, _total in progress
     )
     assert progress[-1] == (11, 11)
+
+
+def test_rejected_cold_report_is_released_before_the_next_verifier(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    live_root, staged_root, _trace, callbacks = _install_grind_fixture(
+        monkeypatch,
+        tmp_path,
+        live_states=(_state(1, 1), _state(2, 2)),
+    )
+    report_refs: list[weakref.ReferenceType[_ColdReport]] = []
+
+    def cold(root: Path) -> ColdTrialEvidence:
+        assert root == staged_root
+        if report_refs:
+            gc.collect()
+            assert report_refs[-1]() is None
+        reason = "cold mismatch" if not report_refs else None
+        report = _ColdReport(
+            Digest.from_bytes(f"cold {len(report_refs)}".encode()),
+            reason,
+        )
+        report_refs.append(weakref.ref(report))
+        return ColdTrialEvidence(accepted=reason is None, report=report)
+
+    result = run_project_grind(
+        live_root,
+        callbacks=ProjectGrindCallbacks(
+            callbacks.probe_seed,
+            callbacks.probe_donors,
+            cold,
+        ),
+    )
+
+    assert result.solution is not None
+    assert report_refs[0]() is None
+    assert report_refs[1]() is result.solution.report
 
 
 def test_no_solution_never_publishes_even_with_advance_acceptance(

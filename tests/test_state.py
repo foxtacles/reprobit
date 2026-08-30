@@ -173,18 +173,14 @@ def test_state_gc_does_not_create_or_refresh_a_missing_lease(
     old_seconds = time.time() - 3600
     os.utime(payload, (old_seconds, old_seconds), follow_symlinks=False)
     os.utime(abandoned, (old_seconds, old_seconds), follow_symlinks=False)
-    before = {
-        path: path.stat(follow_symlinks=False).st_mtime_ns
-        for path in (abandoned, payload)
-    }
+    before = {path: path.stat(follow_symlinks=False).st_mtime_ns for path in (abandoned, payload)}
 
     preview = StateStore(state).gc(older_than_seconds=1800, dry_run=True)
 
     assert preview.removed == (abandoned,)
     assert not (abandoned / ".lease").exists()
     assert {
-        path: path.stat(follow_symlinks=False).st_mtime_ns
-        for path in (abandoned, payload)
+        path: path.stat(follow_symlinks=False).st_mtime_ns for path in (abandoned, payload)
     } == before
     assert StateStore(state).gc(older_than_seconds=1800).removed == (abandoned,)
     assert not abandoned.exists()
@@ -221,10 +217,7 @@ def test_state_gc_collectors_share_one_close_to_remove_gate(
         *,
         nonblocking: bool,
     ) -> bool:
-        if (
-            lock.path.name == ".maintenance.lock"
-            and threading.current_thread().name == "gc-second"
-        ):
+        if lock.path.name == ".maintenance.lock" and threading.current_thread().name == "gc-second":
             second_attempted_gate.set()
         return real_acquire(lock, nonblocking=nonblocking)
 
@@ -345,9 +338,7 @@ def test_run_arena_creation_holds_the_state_maintenance_gate(
     assert len(result) == 1
     gc_result = result[0]
     assert isinstance(gc_result, state_module.GCResult)
-    assert gc_result.skipped_active == (
-        state / "runs" / "build-creation-race",
-    )
+    assert gc_result.skipped_active == (state / "runs" / "build-creation-race",)
 
 
 def test_state_gc_honors_age_and_never_follows_run_symlinks(tmp_path: Path) -> None:

@@ -41,10 +41,12 @@ from reprobit.producer_graph import (
     materialize_argument,
 )
 from reprobit.schema import InterventionDocument, ProjectBundle
-from reprobit.secure_paths import (
+from reprobit.secure_path_contracts import (
     SecureFileSnapshot,
     SecurePathError,
     canonical_system_path,
+)
+from reprobit.secure_paths import (
     digest_relative_file,
     read_relative_file,
 )
@@ -212,7 +214,7 @@ class WarmRuntime:
         self._oracle_lock = Lock()
         self._oracles_bound = False
         self._closed = False
-        prepared.developer.bind_warm_staging_root(staging_root)
+        prepared.warm.bind_warm_staging_root(staging_root)
 
     @property
     def initialized_lane_count(self) -> int:

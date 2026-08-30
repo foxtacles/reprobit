@@ -105,15 +105,11 @@ def _ia32_schedule_flag_table() -> dict:
 
 
 _IA32_SCHEDULE_REGISTER_PUSH_OPCODES = frozenset(range(0x50, 0x58))
-_IA32_SCHEDULE_STACK_PUSH_OPCODES = (
-    _IA32_SCHEDULE_REGISTER_PUSH_OPCODES | frozenset({0x6A})
-)
+_IA32_SCHEDULE_STACK_PUSH_OPCODES = _IA32_SCHEDULE_REGISTER_PUSH_OPCODES | frozenset({0x6A})
 IA32_SCHEDULE_FLAG_EFFECTS = _ia32_schedule_flag_table()
 IA32_STACK_SLOT_BYTES = 4
 IA32_SCHEDULE_STACK_FRONTIER_THEOREM = "msvc-4.20-win32-register-push-stack-frontier-v1"
-IA32_SCHEDULE_PRIVATE_STACK_OBJECT_THEOREM = (
-    "msvc-4.20-win32-private-stack-object-frontier-v1"
-)
+IA32_SCHEDULE_PRIVATE_STACK_OBJECT_THEOREM = "msvc-4.20-win32-private-stack-object-frontier-v1"
 _IA32_SCHEDULE_STACK_FRONTIER_THEOREMS = frozenset(
     {
         IA32_SCHEDULE_STACK_FRONTIER_THEOREM,
@@ -135,11 +131,7 @@ def ia32_schedule_stack_delta(body: bytes, item: dict, context: str) -> int | No
     start = int(item["offset"])
     raw = body[start : start + int(item["length"])]
     opcode = int(item["opcode"])
-    if (
-        opcode in _IA32_SCHEDULE_REGISTER_PUSH_OPCODES
-        and len(raw) == 1
-        and raw[0] == opcode
-    ):
+    if opcode in _IA32_SCHEDULE_REGISTER_PUSH_OPCODES and len(raw) == 1 and raw[0] == opcode:
         return -IA32_STACK_SLOT_BYTES
     if opcode == 0x6A and len(raw) == 2 and raw[0] == 0x6A:
         return -IA32_STACK_SLOT_BYTES
@@ -237,8 +229,7 @@ def ia32_schedule_stack_adjustments(
         (index, delta)
         for index, item in enumerate(inside)
         if (delta := ia32_schedule_stack_delta(body, item, context)) is not None
-        if private_stack_object
-        or int(item["opcode"]) in _IA32_SCHEDULE_REGISTER_PUSH_OPCODES
+        if private_stack_object or int(item["opcode"]) in _IA32_SCHEDULE_REGISTER_PUSH_OPCODES
     ]
     if not updates:
         return []
@@ -249,9 +240,7 @@ def ia32_schedule_stack_adjustments(
         if found is None:
             continue
         source_delta = sum(delta for update, delta in updates if update < index)
-        target_delta = sum(
-            delta for update, delta in updates if position[update] < position[index]
-        )
+        target_delta = sum(delta for update, delta in updates if position[update] < position[index])
         delta = source_delta - target_delta
         if not delta:
             continue
@@ -690,8 +679,7 @@ def ia32_schedule_dependence_edges(
         segment_overrides = sorted(
             int(item["offset"])
             for item in instructions
-            if item.get("memory") is not None
-            and _ia32_schedule_has_segment_override(body, item)
+            if item.get("memory") is not None and _ia32_schedule_has_segment_override(body, item)
         )
         require(
             not segment_overrides,
@@ -737,8 +725,7 @@ def ia32_schedule_dependence_edges(
             ia32_schedule_stack_delta(body, item, context)
             if body is not None
             and (
-                private_stack_object
-                or int(item["opcode"]) in _IA32_SCHEDULE_REGISTER_PUSH_OPCODES
+                private_stack_object or int(item["opcode"]) in _IA32_SCHEDULE_REGISTER_PUSH_OPCODES
             )
             else None
         )
@@ -1102,9 +1089,7 @@ def apply_instruction_schedule(
         declared_stack = window.get("stack_adjustments")
         stack_frontier_theorem = window.get("stack_frontier_theorem")
         order = list(window["target_order"])
-        private_stack_object = (
-            stack_frontier_theorem == IA32_SCHEDULE_PRIVATE_STACK_OBJECT_THEOREM
-        )
+        private_stack_object = stack_frontier_theorem == IA32_SCHEDULE_PRIVATE_STACK_OBJECT_THEOREM
         window_stack = ia32_schedule_stack_adjustments(
             body,
             inside,
@@ -1127,9 +1112,7 @@ def apply_instruction_schedule(
             # The newer private-object theorem keeps its narrower, concrete
             # adjustment set.
             adjusted_instructions=(
-                frozenset(row[0] for row in window_stack)
-                if private_stack_object
-                else None
+                frozenset(row[0] for row in window_stack) if private_stack_object else None
             ),
         )
         if declared_stack is None:

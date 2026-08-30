@@ -110,9 +110,7 @@ def test_refuses_a_debug_range_outside_its_extent():
 
 def test_refuses_a_procedure_name_change_as_extent():
     renamed = gproc(105, 95, name=b"g") + DONOR[len(gproc(105, 95)) :]
-    with pytest.raises(
-        ByteIdentityError, match="more than the procedure extent"
-    ):
+    with pytest.raises(ByteIdentityError, match="more than the procedure extent"):
         debug_algorithms.require_debug_symbol_representation_delta(
             SEED, renamed, DELTA, 100, 105, "test"
         )

@@ -34,6 +34,7 @@ class WindowsLineagePlanner(Protocol):
 
     def windows_lineage_plan(self, spec: CommandSpec) -> bytes: ...
 
+
 _CREATE_NEW_PROCESS_GROUP = 0x00000200
 _CREATE_SUSPENDED = 0x00000004
 _WINDOWS_LINEAGE_PLAN_LIMIT = 16 * 1024 * 1024
@@ -286,9 +287,7 @@ class CancellationToken:
             raise ProcessCancelled(self.reason)
 
 
-def _windows_lineage_plan(
-    planner: WindowsLineagePlanner | None, spec: CommandSpec
-) -> bytes | None:
+def _windows_lineage_plan(planner: WindowsLineagePlanner | None, spec: CommandSpec) -> bytes | None:
     """Return one validated broker plan when native lineage isolation is required."""
 
     if planner is None:
@@ -495,9 +494,7 @@ class _WindowsJob:
     def wait_empty(self, timeout_seconds: float | None) -> bool:
         """Poll documented accounting until no process remains in the Job."""
 
-        deadline = (
-            None if timeout_seconds is None else time.monotonic() + timeout_seconds
-        )
+        deadline = None if timeout_seconds is None else time.monotonic() + timeout_seconds
         while self.active_processes() != 0:
             if deadline is None:
                 time.sleep(0.01)
@@ -593,9 +590,7 @@ class _OwnedChild:
         if not self._wait_posix_group_empty(grace_seconds):
             self.signal(force=True)
             if not self._wait_posix_group_empty(grace_seconds):
-                raise ProcessError(
-                    f"owned process group {self.process.pid} could not be drained"
-                )
+                raise ProcessError(f"owned process group {self.process.pid} could not be drained")
         return True
 
     def read_output(self, limit: int) -> bytes:
@@ -708,9 +703,7 @@ class ProcessSupervisor:
             if self._closed:
                 raise ProcessError("process supervisor is closed")
         if windows_lineage_planner is not None and os.name != "nt":
-            raise ProcessLaunchError(
-                "Windows lineage planning requires native Windows"
-            )
+            raise ProcessLaunchError("Windows lineage planning requires native Windows")
         job: _WindowsJob | None = None
         process: subprocess.Popen[bytes] | None = None
         output_stream: BinaryIO | None = None
@@ -732,9 +725,7 @@ class ProcessSupervisor:
                 # Start suspended, transfer the process to its Job Object, and
                 # only then permit it to create descendants.
                 job = _WindowsJob()
-                lineage_plan = _windows_lineage_plan(
-                    windows_lineage_planner, spec
-                )
+                lineage_plan = _windows_lineage_plan(windows_lineage_planner, spec)
                 if lineage_plan is None:
                     process = subprocess.Popen(
                         spec.argv,
@@ -750,9 +741,7 @@ class ProcessSupervisor:
                     plan_stream.write(lineage_plan)
                     plan_stream.flush()
                     plan_stream.seek(0)
-                    broker_environment = _windows_lineage_broker_environment(
-                        os.environ
-                    )
+                    broker_environment = _windows_lineage_broker_environment(os.environ)
                     process = subprocess.Popen(
                         _windows_lineage_broker_command(),
                         cwd=Path(sys.executable).resolve(strict=True).parent,
@@ -865,24 +854,16 @@ class ProcessSupervisor:
         try:
             while True:
                 if cancellation.cancelled:
-                    output = child.terminate_and_drain(
-                        self.termination_grace, spec.output_limit
-                    )
+                    output = child.terminate_and_drain(self.termination_grace, spec.output_limit)
                     self._write_log(spec.log_path, output)
                     raise ProcessCancelled(cancellation.reason, output)
                 if child.output_size > spec.output_limit:
-                    output = child.terminate_and_drain(
-                        self.termination_grace, spec.output_limit
-                    )
+                    output = child.terminate_and_drain(self.termination_grace, spec.output_limit)
                     self._write_log(spec.log_path, output[: spec.output_limit])
-                    raise ProcessOutputLimitExceeded(
-                        spec, output[: spec.output_limit]
-                    )
+                    raise ProcessOutputLimitExceeded(spec, output[: spec.output_limit])
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    output = child.terminate_and_drain(
-                        self.termination_grace, spec.output_limit
-                    )
+                    output = child.terminate_and_drain(self.termination_grace, spec.output_limit)
                     self._write_log(spec.log_path, output)
                     raise ProcessTimedOut(spec, output)
                 if child.process.poll() is not None:

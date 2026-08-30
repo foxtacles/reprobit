@@ -26,7 +26,7 @@ from reprobit.schema import (
 from reprobit.strict_json import StrictJSONError, canonical_json, strict_load
 
 if TYPE_CHECKING:
-    from reprobit.classic_overlay import ClassicOverlayRenderSession
+    from reprobit.classic_overlay_tokens import ClassicOverlayRenderSession
 
 
 ModelT = TypeVar("ModelT", bound=StrictModel)

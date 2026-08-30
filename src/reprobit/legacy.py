@@ -407,9 +407,7 @@ def bind_pe32_oracle(oracle: SealedFileOracle) -> PE32VirtualAddressReader:
             continue
         if virtual_address < size_of_headers or virtual_address + mapped_size > size_of_image:
             raise LegacyInstallError(f"PE32 section {name!r} has an invalid virtual extent")
-        if raw_size and (
-            raw_offset < size_of_headers or raw_offset + raw_size > oracle.size
-        ):
+        if raw_size and (raw_offset < size_of_headers or raw_offset + raw_size > oracle.size):
             raise LegacyInstallError(f"PE32 section {name!r} has an invalid raw extent")
         sections.append(
             _PE32Section(
@@ -488,9 +486,7 @@ class LegacyOracleInstallGate:
         all_ranges.sort()
         for left, right in pairwise(all_ranges):
             if left[1] > right[0]:
-                raise LegacyInstallError(
-                    f"legacy actions {left[2]!r} and {right[2]!r} overlap"
-                )
+                raise LegacyInstallError(f"legacy actions {left[2]!r} and {right[2]!r} overlap")
 
         output = bytearray(candidate)
         disclosed: list[ByteRange] = []
@@ -502,9 +498,7 @@ class LegacyOracleInstallGate:
                     )
                 preimage = bytes(output[item.output_offset : item.output_end])
                 if digest_bytes(preimage) != item.preimage_digest:
-                    raise LegacyInstallError(
-                        f"legacy action {action.id!r} preimage does not match"
-                    )
+                    raise LegacyInstallError(f"legacy action {action.id!r} preimage does not match")
                 payload = oracle.read_range(item.oracle_offset, item.length)
                 if digest_bytes(payload) != item.oracle_digest:
                     raise LegacyInstallError(

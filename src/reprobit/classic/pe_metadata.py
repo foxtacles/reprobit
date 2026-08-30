@@ -70,13 +70,9 @@ class _PE32MetadataMap:
                 raw_size == 0 or raw_offset <= len(data) - raw_size,
                 f"section {name!r} raw data extends past EOF",
             )
-            sections.append(
-                _Section(name, virtual_address, virtual_size, raw_offset, raw_size)
-            )
+            sections.append(_Section(name, virtual_address, virtual_size, raw_offset, raw_size))
         occupied = sorted(
-            (section.raw_offset, section.raw_end)
-            for section in sections
-            if section.raw_size
+            (section.raw_offset, section.raw_end) for section in sections if section.raw_size
         )
         require(
             all(left[1] <= right[0] for left, right in pairwise(occupied)),
@@ -187,11 +183,7 @@ def apply_pe_metadata_candidate(
         for index, (before, after) in enumerate(zip(candidate, result, strict=True))
         if before != after
     }
-    allowed = {
-        byte
-        for offset in writes
-        for byte in range(offset, offset + 4)
-    }
+    allowed = {byte for offset in writes for byte in range(offset, offset + 4)}
     require(changed <= allowed, "PE metadata normalization changed an undeclared byte")
     return result, {
         "schema": "pe32_timestamp_normalization_v1",

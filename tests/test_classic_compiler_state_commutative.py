@@ -74,9 +74,7 @@ def test_real_vector4_pair_derives_all_four_exchanges() -> None:
 def test_real_vector4_pair_dispatches_before_the_web() -> None:
     proof = state_projection._prove_pair(_pair(_VECTOR4_CLEAN, _VECTOR4_EFFECTIVE), None)
 
-    assert [step["kind"] for step in proof["steps"]] == [
-        "derived-x87-commutative-operand-form-v1"
-    ]
+    assert [step["kind"] for step in proof["steps"]] == ["derived-x87-commutative-operand-form-v1"]
     step = proof["steps"][0]
     assert step["debug_authority"] == "effective-compiler-product"
     assert len(step["declaration"]) == 4

@@ -2365,17 +2365,13 @@ def _compiler_state_code_pairs(
             and {key: value for key, value in clean_fpo[0].items() if key != "body"}
             == {key: value for key, value in effective_fpo[0].items() if key != "body"}
         ):
-            fpo_topology = {
-                key: value for key, value in clean_fpo[0].items() if key != "body"
-            }
+            fpo_topology = {key: value for key, value in clean_fpo[0].items() if key != "body"}
             fpo_evidence = CompilerStateFpoEvidence(
                 receipt_digest=Digest.from_bytes(canonical_json(fpo_topology)).value,
                 clean_body=clean_fpo[1],
                 effective_body=effective_fpo[1],
             )
-        clean_debug = _associated_debug_evidence_statement(
-            clean, clean_section, clean_symbols
-        )
+        clean_debug = _associated_debug_evidence_statement(clean, clean_section, clean_symbols)
         effective_debug = _associated_debug_evidence_statement(
             effective, effective_section, effective_symbols
         )
@@ -2386,9 +2382,7 @@ def _compiler_state_code_pairs(
             and {key: value for key, value in clean_debug[0].items() if key != "body"}
             == {key: value for key, value in effective_debug[0].items() if key != "body"}
         ):
-            debug_topology = {
-                key: value for key, value in clean_debug[0].items() if key != "body"
-            }
+            debug_topology = {key: value for key, value in clean_debug[0].items() if key != "body"}
             debug_evidence = CompilerStateDebugEvidence(
                 receipt_digest=Digest.from_bytes(canonical_json(debug_topology)).value,
                 clean_body=clean_debug[1],

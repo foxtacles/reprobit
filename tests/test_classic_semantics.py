@@ -99,7 +99,7 @@ from reprobit.classic.source_overlay_claims import (
 )
 from reprobit.classic.source_proofs import source_overlay_tokens
 from reprobit.classic_includes import IncludeOrigin
-from reprobit.classic_overlay import (
+from reprobit.classic_overlay_types import (
     ClassicOverlayAnchorReceipt,
     ClassicOverlayOperationReceipt,
 )
@@ -109,7 +109,7 @@ from reprobit.classic_resources import (
     ResourceRead,
     ResourceReadKind,
 )
-from reprobit.classic_runtime_producer import _project_overlay_resource_reader_closure
+from reprobit.classic_runtime_overlay import _project_overlay_resource_reader_closure
 from reprobit.model import Digest, Scope
 from reprobit.producer_graph import (
     ProducerGraphDocument,

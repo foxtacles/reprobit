@@ -292,9 +292,7 @@ class CoffMetadataIndex:
 
     def __init__(self, coff: CoffObject) -> None:
         self.coff = coff
-        self.definitions: Mapping[int, CoffSection] = MappingProxyType(
-            section_definitions(coff)
-        )
+        self.definitions: Mapping[int, CoffSection] = MappingProxyType(section_definitions(coff))
         associated: dict[int, dict[str, CoffSection]] = {}
         for section in coff.sections:
             definition = self.definitions.get(section["number"])
@@ -330,8 +328,7 @@ class CoffMetadataIndex:
     def _require_section(self, section: CoffSection) -> int:
         number = int(section["number"])
         require(
-            0 < number <= len(self.coff.sections)
-            and self.coff.sections[number - 1] is section,
+            0 < number <= len(self.coff.sections) and self.coff.sections[number - 1] is section,
             "COFF metadata index received a section from another object",
         )
         return number
@@ -430,10 +427,7 @@ def require_mosaic_relocation_compatibility(
     require(len(left) == len(right), f"{context}: relocation counts differ")
     for index, (seed_row, donor_row) in enumerate(zip(left, right, strict=True)):
         require(
-            all(
-                seed_row[key] == donor_row[key]
-                for key in ("offset", "type", "width", "addend")
-            ),
+            all(seed_row[key] == donor_row[key] for key in ("offset", "type", "width", "addend")),
             f"{context}: relocation {index} geometry differs",
         )
         same_name = seed_row["target"] == donor_row["target"]
@@ -570,8 +564,7 @@ def require_associated_comdat_compatibility(
             f"{context}: associated COMDAT {name!r} content differs",
         )
         require(
-            coff_table(left, left_child, "lines")
-            == coff_table(right, right_child, "lines"),
+            coff_table(left, left_child, "lines") == coff_table(right, right_child, "lines"),
             f"{context}: associated COMDAT {name!r} line metadata differs",
         )
         require_mosaic_relocation_compatibility(
@@ -618,9 +611,7 @@ def coff_mosaic_metadata_digest(
         canonical_json(
             {
                 "target_lines": Digest.from_bytes(coff_table(coff, primary, "lines")),
-                "target_relocations": Digest.from_bytes(
-                    coff_table(coff, primary, "relocations")
-                ),
+                "target_relocations": Digest.from_bytes(coff_table(coff, primary, "relocations")),
                 "closure": children,
             }
         )

@@ -244,9 +244,7 @@ def test_real_testtimer_print_pair_proves_fpo_ebx_ebp_web_cycle() -> None:
     assert projection.proof["compiler_identity"] == identity.proof_receipt()
     proof = projection.proof["sections"][0]
 
-    assert [step["kind"] for step in proof["steps"]] == [
-        "simultaneous-register-web-cycle-v1"
-    ]
+    assert [step["kind"] for step in proof["steps"]] == ["simultaneous-register-web-cycle-v1"]
     web = proof["steps"][0]
     assert web["mapping"] == {"ebp": "ebx", "ebx": "ebp"}
     assert web["rewritten_offsets"] == [126, 142, 147, 157, 159, 161, 181]
@@ -346,9 +344,7 @@ def test_non_gx_register_projection_binds_the_locked_compiler_invocation() -> No
         "tool_id": evidence.tool_id,
         "tool_digest": evidence.tool_digest,
         "invocation_digest": evidence.invocation_digest,
-        "arguments_digest": Digest.from_bytes(
-            canonical_json(list(evidence.arguments))
-        ).value,
+        "arguments_digest": Digest.from_bytes(canonical_json(list(evidence.arguments))).value,
     }
     identity_receipt = projection.proof["compiler_identity"]
     assert identity_receipt["target"] == "msvc-4.20-win32-i386"
@@ -492,9 +488,7 @@ def test_frame_push_pair_proves_exact_stack_span_disjointness() -> None:
 
     proof = state_projection._prove_pair(pair, _gx_mode())
 
-    assert [step["kind"] for step in proof["steps"]] == [
-        "ebp-frame-push-schedule-v1"
-    ]
+    assert [step["kind"] for step in proof["steps"]] == ["ebp-frame-push-schedule-v1"]
     step = proof["steps"][0]
     assert step["esp_relative_to_ebp"] == -28
     assert step["push_span_relative_to_ebp"] == [-32, -28]
@@ -523,9 +517,7 @@ def test_frame_push_pair_proves_exact_stack_span_disjointness() -> None:
             _eh_pair(
                 bytes.fromhex("83ec108b45088b4dec53c3"),
                 bytes.fromhex("83ec10538b45088b4decc3"),
-                prologue=bytes.fromhex(
-                    "64a100000000558bec6afe68000000005064892500000000"
-                ),
+                prologue=bytes.fromhex("64a100000000558bec6afe68000000005064892500000000"),
             ),
             "closed MSVC 4.20 EH registration frame",
         ),
@@ -568,9 +560,7 @@ def test_synchronous_eh_pair_proves_state_schedule_across_fresh_object_memory() 
 
     proof = state_projection._prove_pair(pair, _gx_mode())
 
-    assert [step["kind"] for step in proof["steps"]] == [
-        "msvc-synchronous-eh-state-schedule-v1"
-    ]
+    assert [step["kind"] for step in proof["steps"]] == ["msvc-synchronous-eh-state-schedule-v1"]
     step = proof["steps"][0]
     assert step["state_values"] == [0x40, 0x41]
     assert step["exception_mode"]["model"] == "msvc-4.20-synchronous-gx"
@@ -591,17 +581,13 @@ def test_synchronous_eh_pair_still_requires_exact_gx_evidence() -> None:
     [
         (
             _eh_schedule_pair(
-                effective_window=(
-                    _STATE_41 + _STATE_40 + _OBJECT_AT_4 + _OBJECT_AT_0 + _STATE_42
-                )
+                effective_window=(_STATE_41 + _STATE_40 + _OBJECT_AT_4 + _OBJECT_AT_0 + _STATE_42)
             ),
             "dependence DAG forbids",
         ),
         (
             _eh_schedule_pair(
-                effective_window=(
-                    _STATE_40 + _STATE_41 + _OBJECT_AT_4 + _OBJECT_AT_0 + _STATE_42
-                ),
+                effective_window=(_STATE_40 + _STATE_41 + _OBJECT_AT_4 + _OBJECT_AT_0 + _STATE_42),
                 extra_entries=(36,),
             ),
             "control-flow or funclet entry",
@@ -1055,11 +1041,7 @@ def _fpo_paired_object(
     fpo_body: bytes | None = None,
     debug_body: bytes = b"symbols",
 ) -> _CoffObject:
-    body = (
-        struct.pack("<IIIHBB", 0, len(code_body), 0, 0, 1, 4)
-        if fpo_body is None
-        else fpo_body
-    )
+    body = struct.pack("<IIIHBB", 0, len(code_body), 0, 0, 1, 4) if fpo_body is None else fpo_body
     return _CoffObject(
         label,
         Digest.from_bytes(label.encode()),
@@ -1156,9 +1138,7 @@ def test_pair_builder_binds_topology_entries_and_exact_eh_control() -> None:
     clean = _paired_object("clean", code_body=b"\x90\xc3")
     effective = _paired_object("effective", code_body=b"\x91\xc3")
 
-    pairs = _compiler_state_code_pairs(
-        clean, effective, excluded_effective_sections=frozenset()
-    )
+    pairs = _compiler_state_code_pairs(clean, effective, excluded_effective_sections=frozenset())
 
     assert len(pairs) == 1
     assert pairs[0].owner == "_owner"
@@ -1219,13 +1199,16 @@ def test_pair_builder_canonicalizes_unique_msvc_static_serials(
         assert target["symbol"]["name"] == {"msvc_static_serial_stem": "_g_value"}
     assert pair.clean_relocations[0] == pair.effective_relocations[0]
     certificate = _CodeProjectionCertificate("closed-test-theorem", "4" * 64, True)
-    assert _coff_semantic_envelope(
-        clean,
-        certified_code_sections={1: certificate},
-    )["statement"] == _coff_semantic_envelope(
-        effective,
-        certified_code_sections={1: certificate},
-    )["statement"]
+    assert (
+        _coff_semantic_envelope(
+            clean,
+            certified_code_sections={1: certificate},
+        )["statement"]
+        == _coff_semantic_envelope(
+            effective,
+            certified_code_sections={1: certificate},
+        )["statement"]
+    )
     trace = _coff_compiler_congruence_trace(
         clean,
         effective,
@@ -1370,9 +1353,7 @@ def test_pair_builder_retains_exact_bodies_under_one_paired_child_topology() -> 
     clean = _fpo_paired_object("clean", code_body=b"\x90\xc3")
     effective = _fpo_paired_object("effective", code_body=b"\x91\xc3")
 
-    pair = _compiler_state_code_pairs(
-        clean, effective, excluded_effective_sections=frozenset()
-    )[0]
+    pair = _compiler_state_code_pairs(clean, effective, excluded_effective_sections=frozenset())[0]
 
     assert pair.fpo_evidence is not None
     assert pair.fpo_evidence.clean_body == struct.pack("<IIIHBB", 0, 2, 0, 0, 1, 4)
@@ -1384,9 +1365,7 @@ def test_pair_builder_retains_exact_bodies_under_one_paired_child_topology() -> 
     assert len(pair.debug_evidence.receipt_digest) == 64
 
     changed_fpo = struct.pack("<IIIHBB", 0, 2, 0, 0, 2, 4)
-    changed = _fpo_paired_object(
-        "changed", code_body=b"\x91\xc3", fpo_body=changed_fpo
-    )
+    changed = _fpo_paired_object("changed", code_body=b"\x91\xc3", fpo_body=changed_fpo)
     changed_pair = _compiler_state_code_pairs(
         clean, changed, excluded_effective_sections=frozenset()
     )[0]
@@ -1524,8 +1503,7 @@ def test_unowned_code_delta_is_not_absorbed_by_compiler_state_pairing() -> None:
     )
 
     assert (
-        _compiler_state_code_pairs(clean, effective, excluded_effective_sections=frozenset())
-        == ()
+        _compiler_state_code_pairs(clean, effective, excluded_effective_sections=frozenset()) == ()
     )
     assert (
         _coff_semantic_envelope(clean)["statement"]
@@ -1639,9 +1617,7 @@ def test_full_coff_trace_merges_seed_row_and_compiler_state_certificates() -> No
         "typed-msvc-4.20-compiler-state-code-image",
     ]
     projection = trace["compiler_state_projection_proof"]
-    assert projection["theorem"] == (
-        "msvc-4.20-compiler-state-code-image-v1"
-    )
+    assert projection["theorem"] == ("msvc-4.20-compiler-state-code-image-v1")
     assert projection["compiler_identity"] == _compiler_identity().proof_receipt()
 
 
@@ -1704,9 +1680,7 @@ def test_ordered_archive_seed_policy_validation_is_separate_from_code_projection
             clean,
             effective,
             excluded_effective_sections=frozenset({2}),
-            ordered_archive_seed_dependencies=(
-                replace(_seed_dependency(), policy="unsupported"),
-            ),
+            ordered_archive_seed_dependencies=(replace(_seed_dependency(), policy="unsupported"),),
         )
 
 

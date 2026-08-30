@@ -83,9 +83,7 @@ def _fpo_pair(pair: CompilerStateCodePair) -> tuple[dict[str, object], dict[str,
             "MSVC 4.20 saved-prologue FPO pair is not frame-pointer-free and non-EH",
         )
     clean_common = {
-        key: value
-        for key, value in clean.items()
-        if key not in {"cbProlog", "raw_sha256"}
+        key: value for key, value in clean.items() if key not in {"cbProlog", "raw_sha256"}
     }
     effective_common = {
         key: value for key, value in effective.items() if key not in {"cbProlog", "raw_sha256"}
@@ -130,10 +128,7 @@ def _debug_pair(
         raise ClassicSemanticError(str(error)) from error
 
     def identities(records: Sequence[Mapping[str, object]]) -> list[tuple[object, ...]]:
-        return [
-            (item["offset"], item["size"], item["type"], item["name"])
-            for item in records
-        ]
+        return [(item["offset"], item["size"], item["type"], item["name"]) for item in records]
 
     _require(
         identities(clean_records) == identities(effective_records)
@@ -141,9 +136,7 @@ def _debug_pair(
         and clean_records[-1]["type"] == CODEVIEW_END_RECORD_TYPE,
         "MSVC 4.20 saved-prologue CodeView record sequence changes",
     )
-    procedures = [
-        item for item in clean_records if item["type"] in CODEVIEW_PROCEDURE_RECORD_TYPES
-    ]
+    procedures = [item for item in clean_records if item["type"] in CODEVIEW_PROCEDURE_RECORD_TYPES]
     _require(
         len(procedures) == 1
         and sum(item["type"] == CODEVIEW_END_RECORD_TYPE for item in clean_records) == 1,
@@ -213,11 +206,7 @@ def _debug_pair(
 def _register_push(body: bytes, item: _Instruction) -> str | None:
     start = int(item["offset"])
     opcode = int(item["opcode"])
-    if (
-        int(item["length"]) == 1
-        and opcode in range(0x50, 0x58)
-        and body[start] == opcode
-    ):
+    if int(item["length"]) == 1 and opcode in range(0x50, 0x58) and body[start] == opcode:
         return IA32_GENERAL_REGISTER_NAMES[opcode - 0x50]
     return None
 
@@ -245,9 +234,7 @@ def _prologue_shape(
     first = prologue[0]
     first_raw = body[int(first["offset"]) : int(first["offset"]) + int(first["length"])]
     allocation = (
-        len(first_raw) == 3
-        and first_raw[:2] == b"\x83\xec"
-        and first_raw[2] == locals_bytes
+        len(first_raw) == 3 and first_raw[:2] == b"\x83\xec" and first_raw[2] == locals_bytes
     ) or (
         len(first_raw) == 6
         and first_raw[:2] == b"\x81\xec"
@@ -276,8 +263,7 @@ def _prologue_shape(
             _require(change == 0, f"{context} changes its fixed frame twice")
         depth += change
     _require(
-        len(saves) == cast(int, record["cbRegs"])
-        and depth == -(locals_bytes + 4 * len(saves)),
+        len(saves) == cast(int, record["cbRegs"]) and depth == -(locals_bytes + 4 * len(saves)),
         f"{context} saved-register count or frame floor differs from FPO",
     )
     return {
@@ -297,11 +283,7 @@ def _epilogues(
     parameter_bytes: int,
     context: str,
 ) -> list[dict[str, object]]:
-    targets = {
-        cast(int, item["target"])
-        for item in instructions
-        if item.get("target") is not None
-    }
+    targets = {cast(int, item["target"]) for item in instructions if item.get("target") is not None}
     receipts: list[dict[str, object]] = []
     for ret_index, ret in enumerate(instructions):
         if ret["flow"] != "ret":
@@ -321,9 +303,7 @@ def _epilogues(
             for item in pops
         ]
         _require(measured_pops == expected_pops, f"{context} return changes restore order")
-        release_raw = body[
-            int(release["offset"]) : int(release["offset"]) + int(release["length"])
-        ]
+        release_raw = body[int(release["offset"]) : int(release["offset"]) + int(release["length"])]
         expected_release = (
             b"\x83\xc4" + bytes([locals_bytes])
             if locals_bytes <= 0x7F
@@ -332,9 +312,7 @@ def _epilogues(
         _require(release_raw == expected_release, f"{context} return changes local release")
         ret_raw = body[int(ret["offset"]) : int(ret["offset"]) + int(ret["length"])]
         expected_ret = (
-            b"\xc3"
-            if parameter_bytes == 0
-            else b"\xc2" + parameter_bytes.to_bytes(2, "little")
+            b"\xc3" if parameter_bytes == 0 else b"\xc2" + parameter_bytes.to_bytes(2, "little")
         )
         _require(ret_raw == expected_ret, f"{context} return changes parameter cleanup")
         first = int(pops[0]["offset"])
