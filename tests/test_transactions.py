@@ -132,6 +132,25 @@ def test_directory_membership_assertion_only_transaction_is_checked(
     assert committed.changed_paths == ()
 
 
+def test_empty_directory_membership_allows_first_transaction_write(tmp_path: Path) -> None:
+    transaction = CASTransaction(tmp_path)
+    transaction.assert_json_members("authority", expected_members=())
+    transaction.write("authority/first.json", b"first", expected_sha256=None)
+
+    committed = transaction.commit()
+
+    assert committed.changed_paths == (Path("authority/first.json"),)
+    assert (tmp_path / "authority/first.json").read_bytes() == b"first"
+
+
+def test_missing_directory_conflicts_with_nonempty_membership(tmp_path: Path) -> None:
+    transaction = CASTransaction(tmp_path)
+    transaction.assert_json_members("authority", expected_members=("first.json",))
+
+    with pytest.raises(TransactionConflict, match="authority membership conflict"):
+        transaction.commit()
+
+
 def test_directory_membership_assertion_only_transaction_rejects_a_race(
     tmp_path: Path,
 ) -> None:

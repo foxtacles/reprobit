@@ -307,6 +307,8 @@ class CASTransaction:
 
     def _json_members(self, relative_path: Path) -> tuple[str, ...]:
         directory = self._target(relative_path)
+        if not directory.exists():
+            return ()
         if not directory.is_dir() or directory.is_symlink():
             raise TransactionConflict(
                 f"transaction authority directory changed: {relative_path.as_posix()}"

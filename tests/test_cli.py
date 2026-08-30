@@ -1042,8 +1042,10 @@ def test_graph_configure_exposes_closed_migration_receipt(
 def _fresh_cmake_import_project(root: Path) -> None:
     _complete_project(root)
     for directory in ("interventions", "proofs", "oracles"):
-        for document in (root / "reprobit" / directory).glob("*.json"):
+        authority = root / "reprobit" / directory
+        for document in authority.glob("*.json"):
             document.unlink()
+        authority.rmdir()
 
 
 @pytest.mark.parametrize(
