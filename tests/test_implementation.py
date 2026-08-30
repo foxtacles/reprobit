@@ -570,3 +570,15 @@ def test_resolved_import_closure_rehash_rejects_relevant_membership_expansion(
             paths,
             unresolved,
         )
+
+
+def test_implementation_scope_rosters_reference_existing_modules():
+    """A renamed module must not leave a dangling scope roster entry; the
+    digest machinery fails at runtime when a listed file is absent."""
+    import reprobit
+    from reprobit.msvc_discovery import _COMPILE_IMPLEMENTATION_PATHS
+    from reprobit.msvc_discovery_analysis import _ANALYSIS_IMPLEMENTATION_PATHS
+
+    package_root = Path(reprobit.__file__).resolve().parent
+    for relative in (*_COMPILE_IMPLEMENTATION_PATHS, *_ANALYSIS_IMPLEMENTATION_PATHS):
+        assert (package_root / relative).is_file(), relative

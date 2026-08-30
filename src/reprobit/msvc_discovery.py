@@ -53,9 +53,9 @@ _CANONICAL_RELATIVE_PATH_PATTERN = (
 )
 _COMPILE_IMPLEMENTATION_PATHS = (
     "cache.py",
+    "declaration_shapes.py",
     "discovery.py",
     "discovery_contracts.py",
-    "entropy.py",
     "implementation.py",
     "model.py",
     "msvc_compile.py",

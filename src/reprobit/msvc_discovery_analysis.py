@@ -23,10 +23,10 @@ from reprobit.strict_json import canonical_json
 _MAX_MOSAIC_BODY_BYTES = 64 * 1024
 _ANALYSIS_IMPLEMENTATION_PATHS = (
     "binary.py",
-    "coff.py",
+    "coff_format.py",
     "discovery.py",
     "discovery_contracts.py",
-    "ia32.py",
+    "ia32_decode.py",
     "implementation.py",
     "model.py",
     "msvc_discovery.py",
