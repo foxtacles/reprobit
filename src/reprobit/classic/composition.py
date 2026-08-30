@@ -1971,6 +1971,22 @@ def instruction_mosaic_metadata_sha256(coff: CoffObject, primary: dict) -> str:
     )
 
 
+def _require_instruction_mosaic_metadata_pin(
+    coff: CoffObject,
+    primary: dict,
+    expected_sha256: str,
+    context: str,
+) -> None:
+    """Refuse changed mosaic metadata while exposing both diagnostic hashes."""
+
+    actual_sha256 = instruction_mosaic_metadata_sha256(coff, primary)
+    require(
+        actual_sha256 == expected_sha256,
+        f"{context} metadata SHA-256 pin mismatch: "
+        f"expected {expected_sha256}, actual {actual_sha256}",
+    )
+
+
 def produce_cross_tu_complete_target_resize_candidate(
     seed_bytes: bytes, target_donor_bytes: bytes, complete_donor_bytes: bytes, function: dict
 ) -> tuple[bytes, dict]:
@@ -2409,9 +2425,11 @@ def _validate_instruction_mosaic_source_variant(
         sha256_bytes(body) == variant["expected_body_sha256"],
         f"{context} body differs from its pin",
     )
-    require(
-        instruction_mosaic_metadata_sha256(donor, primary) == variant["expected_metadata_sha256"],
-        f"{context} metadata differs from its pin",
+    _require_instruction_mosaic_metadata_pin(
+        donor,
+        primary,
+        variant["expected_metadata_sha256"],
+        context,
     )
     lines = _coff_table_bytes(donor, primary, "lines")
     require(
@@ -2759,15 +2777,17 @@ def _produce_instruction_mosaic_candidate_core(
             )
         closure_pairs.append((left, right))
     if source_permutation or ordinary_fpo or self_permutation:
-        require(
-            instruction_mosaic_metadata_sha256(seed, sp)
-            == function["expected_seed_metadata_sha256"],
-            "instruction-mosaic seed metadata differs from its pin",
+        _require_instruction_mosaic_metadata_pin(
+            seed,
+            sp,
+            function["expected_seed_metadata_sha256"],
+            "instruction-mosaic seed",
         )
-        require(
-            instruction_mosaic_metadata_sha256(donor, dp)
-            == function["expected_donor_metadata_sha256"],
-            "instruction-mosaic donor metadata differs from its pin",
+        _require_instruction_mosaic_metadata_pin(
+            donor,
+            dp,
+            function["expected_donor_metadata_sha256"],
+            "instruction-mosaic donor",
         )
     seed_body = coff_body(seed, sp)
     donor_body = coff_body(donor, dp)
@@ -3223,12 +3243,12 @@ def produce_instruction_mosaic_candidate(
     effective_donor = donor_bytes
     effective_function = function
     if function.get("donor_variants"):
-        require(
-            instruction_mosaic_metadata_sha256(
-                CoffObject(seed_bytes), CoffObject(seed_bytes).function_section(function["mangled"])
-            )
-            == function["expected_seed_metadata_sha256"],
-            "instruction-mosaic seed metadata differs from its pin",
+        seed = CoffObject(seed_bytes)
+        _require_instruction_mosaic_metadata_pin(
+            seed,
+            seed.function_section(function["mangled"]),
+            function["expected_seed_metadata_sha256"],
+            "instruction-mosaic seed",
         )
         effective_donor, variant_detail = _compose_instruction_mosaic_variant_object(
             seed_bytes,
