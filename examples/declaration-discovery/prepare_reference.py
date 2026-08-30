@@ -17,7 +17,11 @@ from reprobit.discovery_contracts import (
     enumerate_declaration_states,
 )
 from reprobit.model import Digest
-from reprobit.msvc_compile import DirectMsvcCompiler, render_msvc_declaration_state
+from reprobit.msvc_compile import (
+    DirectMsvcCompiler,
+    hold_wine_prefix,
+    render_msvc_declaration_state,
+)
 from reprobit.msvc_discovery import MsvcDiscoveryRequest
 from reprobit.toolchains import MSVC_42, ClassicMSVCToolchain
 from reprobit.user_config import resolve_toolchain_root
@@ -198,16 +202,18 @@ def _build_reference(args: argparse.Namespace) -> Path:
         temporary_root = Path(raw_temporary)
         for name in ("home", "tmp", "xdg-runtime", "wine-prefix", "compile"):
             (temporary_root / name).mkdir(mode=0o700)
+        environment = _compiler_environment(toolchain_root, temporary_root)
         compiler = DirectMsvcCompiler.create(
             wrapper=driver,
             arguments=request.compiler_arguments,
-            environment=_compiler_environment(toolchain_root, temporary_root),
+            environment=environment,
             toolchain_authority=Digest.from_path(toolchain_root / "bin" / "CL.EXE"),
         )
-        built = compiler.compile(
-            render_msvc_declaration_state(source, state),
-            temporary_root / "compile",
-        ).object_path.read_bytes()
+        with hold_wine_prefix(environment):
+            built = compiler.compile(
+                render_msvc_declaration_state(source, state),
+                temporary_root / "compile",
+            ).object_path.read_bytes()
 
     temporary_output = output.with_name(f".{output.name}.new")
     temporary_output.write_bytes(built)

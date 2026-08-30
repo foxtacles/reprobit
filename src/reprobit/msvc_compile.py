@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Callable, Mapping, Sequence
+import shutil
+import subprocess
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
@@ -527,3 +530,54 @@ __all__ = [
     "safe_msvc_compiler_arguments",
     "validate_msvc_compiler_arguments",
 ]
+
+
+@contextmanager
+def hold_wine_prefix(
+    environment: Mapping[str, str],
+    *,
+    wineserver: str | os.PathLike[str] | None = None,
+    timeout_seconds: float = 60.0,
+) -> Iterator[None]:
+    """Hold one foreground wineserver for the prefix in ``environment``.
+
+    A Wine-transported compile on a cold prefix otherwise spawns the server
+    and its services inside the compiler's own process group, and the drain
+    invariant correctly refuses the compile. No-op on native Windows."""
+
+    if os.name == "nt":
+        yield
+        return
+    executable = os.fspath(wineserver) if wineserver is not None else shutil.which("wineserver")
+    if executable is None:
+        raise DiscoveryError("wineserver is required to hold a Wine prefix")
+    held = subprocess.Popen(
+        (executable, "-f", "-p"),
+        env=dict(environment),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        held.wait(timeout=0.2)
+    except subprocess.TimeoutExpired:
+        pass
+    else:
+        raise DiscoveryError(f"wineserver exited during startup: {held.returncode}")
+    try:
+        yield
+    finally:
+        stop = subprocess.run(
+            (executable, "-k"),
+            env=dict(environment),
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+        )
+        del stop
+        try:
+            held.wait(timeout=timeout_seconds)
+        except subprocess.TimeoutExpired:
+            held.kill()
+            held.wait()

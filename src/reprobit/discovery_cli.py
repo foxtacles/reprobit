@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 from reprobit.cli_output import ACTIVITY_PHASE_KINDS, CLIOutput
 from reprobit.cli_paths import CLIError, relative_output
 from reprobit.model import Digest
+from reprobit.msvc_compile import hold_wine_prefix
 from reprobit.progress import ProgressEvent, ProgressKind, ProgressObserver
 from reprobit.strict_json import canonical_json
 from reprobit.transactions import CASTransaction
@@ -107,7 +108,12 @@ def _discovery_wineserver_lifecycle(
     environment: Mapping[str, str],
     timeout_seconds: float,
 ) -> Iterator[None]:
-    """Clear, then always stop and reap, one exclusively locked Wine prefix."""
+    """Clear, hold one pinned wineserver, then always stop and reap the prefix.
+
+    The held foreground server is what compiler children attach to.  Without
+    it, the first wine invocation on a cold prefix spawns the server and its
+    services inside the compiler's own process group, and the drain invariant
+    correctly refuses the compile."""
 
     primary_error: BaseException | None = None
     try:
@@ -120,7 +126,12 @@ def _discovery_wineserver_lifecycle(
                 argument=argument,
                 phase="preflight",
             )
-        yield
+        with hold_wine_prefix(
+            environment,
+            wineserver=executable,
+            timeout_seconds=timeout_seconds,
+        ):
+            yield
     except BaseException as exc:
         primary_error = exc
         raise

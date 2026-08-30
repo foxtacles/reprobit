@@ -54,8 +54,7 @@ def render_report(report: DiscoveryCampaignReport) -> str:
             lines.extend(f"  {line}" for line in declarations.splitlines())
         lines.append("Artifacts:")
         lines.extend(
-            f"  {artifacts[artifact_id].role.value}: "
-            f"{artifacts[artifact_id].logical_path}"
+            f"  {artifacts[artifact_id].role.value}: {artifacts[artifact_id].logical_path}"
             for artifact_id in proposal.artifact_ids
         )
     if not report.proposals:

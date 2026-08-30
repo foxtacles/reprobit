@@ -5,6 +5,8 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Iterator
+from contextlib import contextmanager
 from io import StringIO
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -321,6 +323,14 @@ def test_discovery_wineserver_lifecycle_clears_and_reaps_each_run(
         "reprobit.discovery_cli._run_discovery_wineserver_command",
         fake_control,
     )
+
+    @contextmanager
+    def fake_hold(*_args: object, **_kwargs: object) -> Iterator[None]:
+        calls.append(("hold", "enter"))
+        yield
+        calls.append(("hold", "exit"))
+
+    monkeypatch.setattr("reprobit.discovery_cli.hold_wine_prefix", fake_hold)
     arguments = {
         "executable": tmp_path / "wineserver",
         "runtime_root": tmp_path,
@@ -335,12 +345,16 @@ def test_discovery_wineserver_lifecycle_clears_and_reaps_each_run(
     assert calls == [
         ("preflight", "-k"),
         ("preflight", "-w"),
+        ("hold", "enter"),
         ("body", "0"),
+        ("hold", "exit"),
         ("cleanup", "-k"),
         ("cleanup", "-w"),
         ("preflight", "-k"),
         ("preflight", "-w"),
+        ("hold", "enter"),
         ("body", "1"),
+        ("hold", "exit"),
         ("cleanup", "-k"),
         ("cleanup", "-w"),
     ]
@@ -389,6 +403,12 @@ def test_discovery_wineserver_cleanup_preserves_primary_failure(
         fake_control,
     )
 
+    @contextmanager
+    def fake_hold(*_args: object, **_kwargs: object) -> Iterator[None]:
+        yield
+
+    monkeypatch.setattr("reprobit.discovery_cli.hold_wine_prefix", fake_hold)
+
     with (
         pytest.raises(RuntimeError, match="campaign failed") as caught,
         _discovery_wineserver_lifecycle(
@@ -416,6 +436,12 @@ def test_discovery_wineserver_cleanup_failure_is_not_silent(
         "reprobit.discovery_cli._run_discovery_wineserver_command",
         fake_control,
     )
+
+    @contextmanager
+    def fake_hold(*_args: object, **_kwargs: object) -> Iterator[None]:
+        yield
+
+    monkeypatch.setattr("reprobit.discovery_cli.hold_wine_prefix", fake_hold)
 
     with (
         pytest.raises(CLIError, match="fake -k cleanup failure; fake -w cleanup failure"),
