@@ -14,7 +14,7 @@ import os
 import re
 from collections.abc import Iterable
 from enum import StrEnum
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
@@ -764,6 +764,46 @@ def materialize_argument(
     return result
 
 
+def _without_windows_extended_prefix(value: str) -> PureWindowsPath:
+    """Return one DOS/UNC spelling for a Win32 extended path.
+
+    ``ntpath.realpath(strict=False)`` can retain ``\\\\?\\`` when a missing
+    path changes state between its Win32 probes.  Only the two documented
+    aliases for DOS drives and UNC shares are equivalent here; device-object
+    namespaces remain distinct and therefore fail containment below.
+    """
+
+    folded = value.casefold()
+    if folded.startswith("\\\\?\\unc\\"):
+        value = "\\\\" + value[8:]
+    elif (
+        folded.startswith("\\\\?\\")
+        and len(value) >= 7
+        and value[4].isalpha()
+        and value[5:7] == ":\\"
+    ):
+        value = value[4:]
+    return PureWindowsPath(value)
+
+
+def _resolved_reference_parts(path: Path, root: Path) -> tuple[str, ...]:
+    """Return a physically resolved path relative to its resolved seat."""
+
+    try:
+        return path.relative_to(root).parts
+    except ValueError:
+        path_text = os.fspath(path)
+        root_text = os.fspath(root)
+        if not any(
+            value.casefold().startswith(("\\\\?\\unc\\", "\\\\?\\"))
+            for value in (path_text, root_text)
+        ):
+            raise
+        windows_path = _without_windows_extended_prefix(path_text)
+        windows_root = _without_windows_extended_prefix(root_text)
+        return windows_path.relative_to(windows_root).parts
+
+
 def materialize_reference(
     value: str,
     *,
@@ -783,12 +823,17 @@ def materialize_reference(
         "toolchain": toolchain_root,
         "quarantine-archive": source_root,
     }[kind]
+    resolved_root = root.resolve(strict=False)
     path = root.joinpath(*PurePosixPath(relative).parts).resolve(strict=False)
     try:
-        path.relative_to(root.resolve(strict=False))
+        resolved_relative = _resolved_reference_parts(path, resolved_root)
     except ValueError as exc:  # Defensive; _reference already rejects traversal.
         raise ProducerGraphError(f"graph reference escapes {kind} seat: {value!r}") from exc
-    return path
+    # Anchor the physically resolved target to one stable root spelling.  On
+    # Windows, concurrent creation of a missing output parent can otherwise
+    # make ``resolve(strict=False)`` alternate between ``D:\\...`` and
+    # ``\\\\?\\D:\\...`` for the same path.
+    return resolved_root.joinpath(*resolved_relative)
 
 
 def read_producer_graph(path: Path) -> ProducerGraphDocument:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import cast
 
@@ -9,6 +10,7 @@ from pydantic import ValidationError
 
 import reprobit.cmake_graph_paths as cmake_graph_paths
 import reprobit.cmake_makefile_metadata as cmake_makefile_metadata
+import reprobit.producer_graph as producer_graph
 from reprobit.model import Digest
 from reprobit.producer_graph import (
     ProducerGraphDocument,
@@ -595,6 +597,75 @@ def test_source_archive_requires_an_explicit_quarantine_edge(tmp_path: Path) -> 
         )
         == source / "vendor/payload.lib"
     )
+
+
+def test_windows_extended_drive_spelling_keeps_reference_in_its_seat() -> None:
+    assert producer_graph._resolved_reference_parts(
+        Path(r"\\?\D:\run\build\obj\unit.pdb"),
+        Path(r"D:\run\build"),
+    ) == ("obj", "unit.pdb")
+    with pytest.raises(ValueError):
+        producer_graph._resolved_reference_parts(
+            Path(r"\\?\D:\run\outside\unit.pdb"),
+            Path(r"D:\run\build"),
+        )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows path resolution")
+def test_materialize_reference_stabilizes_transient_extended_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    build = tmp_path / "build"
+    toolchain = tmp_path / "toolchain"
+    for root in (source, build, toolchain):
+        root.mkdir()
+    candidate = build / "obj/unit.pdb"
+    path_type = type(tmp_path)
+    resolve = path_type.resolve
+
+    def raced_resolve(path: Path, *, strict: bool = False) -> Path:
+        resolved = resolve(path, strict=strict)
+        if path == candidate and not strict:
+            return path_type("\\\\?\\" + os.fspath(resolved))
+        return resolved
+
+    monkeypatch.setattr(path_type, "resolve", raced_resolve)
+
+    assert (
+        materialize_reference(
+            "build/obj/unit.pdb",
+            source_root=source,
+            build_root=build,
+            toolchain_root=toolchain,
+        )
+        == candidate
+    )
+
+
+def test_materialize_reference_still_rejects_a_redirect_outside_its_seat(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    build = tmp_path / "build"
+    toolchain = tmp_path / "toolchain"
+    outside = tmp_path / "outside"
+    for root in (source, build, toolchain, outside):
+        root.mkdir()
+    redirect = build / "redirect"
+    try:
+        redirect.symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks are unavailable: {exc}")
+
+    with pytest.raises(ProducerGraphError, match="escapes build seat"):
+        materialize_reference(
+            "build/redirect/unit.pdb",
+            source_root=source,
+            build_root=build,
+            toolchain_root=toolchain,
+        )
 
 
 def _configured_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
