@@ -40,9 +40,9 @@ Every command has a deadline and belongs to a runner-owned process tree. On
 POSIX, one run-private Wine prefix and wineserver serve every scheduling lane,
 while each producer remains in its own bounded host process group. Native
 Windows uses bounded Job Object primitives. A timeout kills the complete owned
-producer tree. Run `rbit doctor
---execute-probe` before a long campaign: it tests the bounded Wine path on
-POSIX. On Windows it validates the controller's sealed physical root, then
+producer tree. Run `rbit doctor --execute-probe` before a long campaign. On
+POSIX it tests the bounded Wine path. On Windows it validates the controller's
+sealed physical root, then
 launches the logical-drive producer path in a fresh, verified logon session whose local
 `DefineDosDeviceW` mapping remains owned until a nested Job Object reports zero
 active processes. A Windows failure means the controller architecture, native

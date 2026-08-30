@@ -57,7 +57,7 @@ rbit discover init . \
   --reference reference/widget.obj
 ```
 
-ReproBit finds the matching committed compiler lane and writes the compact
+ReproBit finds the matching saved compiler step and writes the compact
 `reprobit/discovery.json` plan. It does not compile anything or change
 project files. The default plan tries four declaration states and is
 easy to widen deliberately:
@@ -116,8 +116,8 @@ away, finds two low-cost records, and verifies the result again from scratch.
 of declared states, indexes every emitted function, and reports whole-function,
 private-donor, and bounded same-symbol mosaic proposals. These proposals are
 review evidence only: this advanced command never edits source or project
-authority. Use it when you need to study candidates beyond the automatic grind's
-small admitted recipe.
+records. Use it when you need to study candidates beyond the automatic grind's
+small supported recipe.
 
 ### Run a campaign
 
@@ -184,8 +184,7 @@ unchanged cells.
 
 The report defaults to `REQUEST_STEM.report.json`. It includes:
 
-- readable input and compiler receipts plus compile and analysis authority
-  digests;
+- readable input and compiler receipts plus compile and analysis hashes;
 - observations for every emitted function;
 - schema-validated intervention proposals;
 - the exact state and generated declarations behind each selected cell; and

@@ -124,7 +124,7 @@ def inspect_project_readiness(root: Path) -> ProjectReadiness:
             )
 
     items: list[ReadinessItem] = [
-        ReadinessItem("project", "Project", True, f"{spec.project_id} uses schema 3"),
+        ReadinessItem("project", "Project", True, f"project ID {spec.project_id}"),
         ReadinessItem(
             "toolchain_lock",
             "Compiler lock",
@@ -216,7 +216,7 @@ def inspect_project_readiness(root: Path) -> ProjectReadiness:
             )
         )
     prerequisites_ready = all(item.ready for item in items)
-    validation_detail = "complete the missing items above"
+    validation_detail = "finish the missing steps above"
     validated = False
     if prerequisites_ready:
         try:
@@ -225,11 +225,11 @@ def inspect_project_readiness(root: Path) -> ProjectReadiness:
             validation_detail = str(error)
         else:
             validated = True
-            validation_detail = "all committed authority agrees"
+            validation_detail = "all saved project files agree"
     items.append(
         ReadinessItem(
             "authority",
-            "Authority",
+            "Final project check",
             validated,
             validation_detail,
             None if validated else human_command(("rbit", "validate", candidate)),

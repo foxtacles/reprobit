@@ -9,7 +9,7 @@ used by this backend. The technical details are available below.
 The compiler is not stored in this repository, a GitHub cache, or workflow
 artifact. From an initialized ReproBit project, the normal PowerShell setup is:
 
-```console
+```powershell
 rbit setup .
 rbit status .
 ```
@@ -18,7 +18,7 @@ rbit status .
 path, writes or checks the project lock, and runs the native execution probe.
 To choose a specific installation directory instead:
 
-```console
+```powershell
 rbit toolchain provision --destination C:\toolchains\msvc42
 rbit setup . --toolchain-root C:\toolchains\msvc42
 ```
@@ -27,7 +27,7 @@ After reviewing and locking the source files, place the reference binary at
 the path shown by `rbit status`, then run the same guided import used on other
 hosts:
 
-```console
+```powershell
 rbit import cmake .
 ```
 
@@ -39,7 +39,7 @@ do not run NMake or CMake.
 <details>
 <summary>Advanced: run the native probe without project setup</summary>
 
-```console
+```powershell
 rbit doctor --backend windows_native_v1 `
   --toolchain-profile msvc_4_2 `
   --toolchain-root C:\toolchains\msvc42 `

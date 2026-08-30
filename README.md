@@ -72,7 +72,7 @@ downloads the compiler when needed, authenticates it, remembers its location, cr
 the project lock, and tests the host. The two source commands show and then lock the Git-tracked
 files the build may read. `import cmake` creates a small reviewable build plan, records reference
 metadata, configures the existing CMake project once, and saves the direct compiler and linker
-steps. It also creates an empty review shard for each unambiguous source file, so discovery can
+steps. It also creates an empty review file for each unambiguous source file, so discovery can
 start without hand-authored JSON. It does not edit `CMakeLists.txt`, and normal ReproBit builds
 never invoke CMake. If the CMake target is not `program`, the simplest setup is to pass its name
 to `rbit init --target`; the default rebuilt-output and reference filenames follow that target name.

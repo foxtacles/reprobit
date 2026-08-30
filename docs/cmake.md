@@ -36,7 +36,7 @@ rbit init . --target game --artifact build/GAME.EXE --oracle reference/GAME.EXE
 
 The generated files are ordinary JSON that can be reviewed and committed. A
 failed first import removes only its new scaffold and retains the temporary
-workspace for diagnosis. Only the committed graph becomes build authority.
+workspace for diagnosis. ReproBit builds use only the committed graph.
 
 <details>
 <summary>Advanced: how the CMake import works and how to split it for CI</summary>
@@ -135,7 +135,7 @@ configured build, and admitted toolchain roots. It publishes a canonical
 `reprobit/producer-graph.json` only after validating the complete candidate
 project tree and rechecking all authority files transactionally.
 
-Classic COFF objects and archive members can contribute `/DEFAULTLIB` controls
+Older MSVC COFF objects and archive members can contribute `/DEFAULTLIB` controls
 through their `.drectve` sections even though those libraries do not appear in
 the extracted linker command. Such edges are never inferred or authorized at
 certification time. Run a prelink audit, review its missing-edge diagnostic,

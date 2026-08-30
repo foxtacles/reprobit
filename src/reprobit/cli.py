@@ -247,7 +247,7 @@ def _parser() -> argparse.ArgumentParser:
     init.add_argument("--target", default="program", help="first target name")
     init.add_argument(
         "--artifact",
-        help="candidate output path (default: build/TARGET.exe)",
+        help="rebuilt output path (default: build/TARGET.exe)",
     )
     init.add_argument(
         "--oracle",
@@ -431,7 +431,7 @@ def _parser() -> argparse.ArgumentParser:
     source_lock.set_defaults(handler=command_source_lock)
 
     import_command = subcommands.add_parser(
-        "import", help="turn an existing project build into ReproBit build authority"
+        "import", help="prepare an existing project for direct ReproBit builds"
     )
     import_commands = import_command.add_subparsers(dest="import_command", required=True)
     cmake_import = import_commands.add_parser(
@@ -693,7 +693,7 @@ def _parser() -> argparse.ArgumentParser:
 
     discover = subcommands.add_parser(
         "discover",
-        help="find low-cost compiler adjustments and save only proven results",
+        help="find and review low-cost compiler adjustments",
     )
     discover_commands = discover.add_subparsers(
         dest="discovery_command",
@@ -793,7 +793,7 @@ def _parser() -> argparse.ArgumentParser:
 
     discover_grind = discover_commands.add_parser(
         "grind",
-        help="try low-cost adjustments and keep only a freshly verified exact match",
+        help="preview low-cost adjustments and optionally save a freshly verified exact match",
     )
     discover_grind.add_argument(
         "project",

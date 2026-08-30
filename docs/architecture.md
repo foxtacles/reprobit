@@ -7,10 +7,10 @@ librarian, and linker invocation, while execution backends provide bounded
 processes and stable compiler-visible paths. CMake can bootstrap that graph
 during project setup, but it is outside the certification runtime.
 
-The reusable core and discovery tools are lasting parts of ReproBit. The
-built-in classic-MSVC adapter is supported product code too, not a disposable
-compatibility layer. The ignored CMake import tree is temporary and can be
-discarded after the committed producer graph has been reviewed.
+The reusable core, discovery tools, and built-in MSVC adapter are lasting parts
+of ReproBit. The ignored CMake import tree is temporary and can be discarded
+after the committed producer graph has been reviewed. Source-code names use
+`classic` as a short label for that older MSVC family.
 
 The producer and verifier are separate trust domains. A normal producer receives project
 source and declared toolchain inputs, but no reference-image path or raw-byte service. It
@@ -46,7 +46,7 @@ boundary and cross-checked against the cold-build verdict, target digests, sizes
 comparison result. A consumer can therefore recompute the binding without access to process
 memory or an implementation-specific run identifier.
 
-Classic runtime evidence follows producer causality in the same direction as the build: sealed
+MSVC runtime evidence follows producer causality in the same direction as the build: sealed
 source and toolchain inputs feed compiler object/PDB pairs and resource outputs; those products
 feed librarian archives; archives, remaining objects, and resources feed the linker image; only
 declared terminal transforms may follow the image. Current-run producer outputs carry both a
@@ -54,7 +54,7 @@ content-addressed artifact and a producer receipt naming the locked tool and exe
 Reports reject missing references, digest or size disagreement, cycles, and stage-reversing edges
 such as an object derived from a linked image.
 
-Schema v3 currently recognizes only the reviewed built-in classic-MSVC adapter
+Schema v3 currently recognizes only the reviewed built-in MSVC adapter
 and closed recipe registry. Adding another certification adapter requires a
 ReproBit code and schema release; project files and arbitrary installed packages
 cannot inject executable providers, scripts, or Python callables.

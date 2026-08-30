@@ -46,14 +46,14 @@ edges then establish that object's ancestry into a terminal image. Project-overl
 their sparse per-object audit receipts without pretending to be a proof about the already-linked
 image.
 
-## Classic semantic obligations
+## Built-in MSVC semantic checks
 
 A fresh execution receipt proves only that a declared transformation ran and produced the
 recorded bytes. It does not prove that the transformation preserved program behavior. Every
-classic recipe therefore requires a family-specific runtime obligation named
+built-in MSVC recipe therefore requires a family-specific runtime obligation named
 `semantic_equivalence.<family>`, bound to the affected artifact and transform provenance. A
 generic `fresh_execution` obligation, or a committed expected-observation pin, cannot make a
-classic intervention `logic_certified`.
+built-in intervention `logic_certified`.
 
 The source-overlay renderer proves deterministic syntax rendering, clean-input pins, anchor
 resolution, removed-range pins, and effective-output identity. None of its operation families is
@@ -82,7 +82,7 @@ every effective invocation namespace, run and graph identities, and operation-sp
 may an effective overlay receipt carry the primary origin `certified-project-overlay`; only
 effective primary products occupy the committed terminal graph seats.
 
-This project-overlay path is categorically separate from the classic `donor_source_overlay`
+This project-overlay path is categorically separate from the `donor_source_overlay`
 family. A donor overlay remains `donor_private_rendering_only`: its rendered source can enter only
 a private donor compile, and the resulting object can reach a candidate only through a registered
 binary-family semantic proof. It can never claim `certified-project-overlay` or occupy a primary

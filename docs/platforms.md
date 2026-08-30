@@ -1,6 +1,6 @@
 # Platforms and logical paths
 
-Classic compilers can treat the exact spelling of source and include paths as build inputs.
+Older compilers can treat the exact spelling of source and include paths as build inputs.
 ReproBit therefore reproduces complete compiler-visible paths, not just paths of the same length.
 Each run creates a private work area and gives its source, output, and toolchain trees stable DOS
 drive letters. Production builds and intervention checks receive the same recorded command line,

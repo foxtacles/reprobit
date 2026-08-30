@@ -74,8 +74,8 @@ range without throwing away completed compiler work.
 
 - `campaign.json` fixes the symbols, declaration range, compiler switches, and
   search budget before work starts.
-- `campaign.report.json` records every observed function and the exact inputs
-  and implementation authority used for analysis.
+- `campaign.report.json` records every observed function and the exact inputs,
+  implementation versions, and hashes used for analysis.
 - `.sample-state/cache/artifacts/` contains only objects selected by proposals.
 - `review_report.py` shows each proposal's declarations, rationale, and artifact
   path without changing the project.

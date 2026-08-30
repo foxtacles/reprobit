@@ -71,6 +71,18 @@ def test_grind_help_does_not_promise_workspace_retention(
     assert "--max-symbols COUNT" in rendered
 
 
+def test_discover_help_describes_grind_as_a_preview_with_optional_save(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        main(["discover", "--help"])
+
+    assert raised.value.code == 0
+    rendered = capsys.readouterr().out
+    assert "preview low-cost adjustments and optionally save" in rendered
+    assert "keep only a freshly verified exact match" not in rendered
+
+
 def test_cli_grind_plan_scaffold_refuses_to_overwrite_an_existing_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

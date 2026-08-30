@@ -64,7 +64,7 @@ def test_fresh_init_reports_all_remaining_authority_at_once(
     event = json.loads(capsys.readouterr().out)
     assert event["event"] == "project_readiness"
     assert event["checks"][0] == {
-        "detail": "fresh-project uses schema 3",
+        "detail": "project ID fresh-project",
         "id": "project",
         "label": "Project",
         "next_command": None,
@@ -106,6 +106,8 @@ def test_valid_project_can_have_no_intervention_or_proof_documents(
         "0 documents (valid when no build adjustment is needed)"
     )
     assert checks["proofs"].detail == "0 documents (valid when there is nothing to prove)"
+    assert checks["authority"].label == "Final project check"
+    assert checks["authority"].detail == "all saved project files agree"
     assert render_project_readiness(readiness) == "Project files ready: 10/10 checks passed"
     assert main(["status", str(project)]) == 0
     assert "Project files ready: 10/10 checks passed" in capsys.readouterr().out

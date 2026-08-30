@@ -65,7 +65,7 @@ The reference body is also 137 bytes, but byte 65 differs and its SHA-256 is
 `0592ba1107856e319c261ed45129ab9b518486acbde960ada58b2ace9435ccfb`.
 After timestamp normalization, that becomes one differing byte in the PE file at
 offset 577. This equal-size, one-byte case intentionally exercises the smallest
-classic donor path rather than resize, mosaic, binary surgery, or reference-byte
+built-in donor path rather than resize, mosaic, binary surgery, or reference-byte
 copying.
 
 ### Reference provenance

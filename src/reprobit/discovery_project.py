@@ -274,7 +274,9 @@ def resolve_project_grind_context(
         if document.translation_unit_id == unit.id
     )
     if len(intervention_matches) != 1 or len(proof_matches) != 1:
-        raise ProjectDiscoveryError("translation unit lacks one intervention/proof shard")
+        raise ProjectDiscoveryError(
+            "translation unit does not have exactly one intervention file and one proof file"
+        )
     intervention_index = intervention_matches[0]
     proof_index = proof_matches[0]
     intervention_paths = _document_paths(root, bundle.spec.layout.interventions)
@@ -282,12 +284,14 @@ def resolve_project_grind_context(
     if len(intervention_paths) != len(bundle.intervention_documents) or len(proof_paths) != len(
         bundle.proof_documents
     ):
-        raise ProjectDiscoveryError("project shard paths changed after validation")
+        raise ProjectDiscoveryError(
+            "project intervention or proof file paths changed after validation"
+        )
 
     try:
         compiler_authority = classic_compiler_translation_unit_authority(bundle, graph)
     except ClassicProjectError as exc:
-        raise ProjectDiscoveryError(f"project compiler/TU authority is invalid: {exc}") from exc
+        raise ProjectDiscoveryError(f"saved compiler steps are invalid: {exc}") from exc
     compiler_matches = tuple(
         node_id
         for node_id, planned_unit in compiler_authority.items()
@@ -295,7 +299,7 @@ def resolve_project_grind_context(
     )
     if len(compiler_matches) != 1:
         raise ProjectDiscoveryError(
-            "translation unit lacks one authoritative committed compiler lane"
+            "translation unit does not have exactly one saved compiler step"
         )
     compiler_node_id = compiler_matches[0]
     compiler_node = next(
@@ -303,12 +307,12 @@ def resolve_project_grind_context(
         None,
     )
     if compiler_node is None or compiler_node.role is not ProducerRole.COMPILER:
-        raise ProjectDiscoveryError("translation-unit compiler authority is not a compiler")
+        raise ProjectDiscoveryError("saved translation-unit step is not a compiler step")
     current = bundle.intervention_documents[intervention_index]
     existing_authority = _function_authority_ids(current, config.symbol)
     if existing_authority:
         raise ProjectDiscoveryError(
-            f"symbol already has committed Classic or legacy authority: "
+            f"symbol already has saved adjustment records: "
             f"{config.symbol!r} ({', '.join(existing_authority)})"
         )
     reference_path = _safe_project_path(root, config.reference_object)

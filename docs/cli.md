@@ -102,12 +102,13 @@ For a fresh CMake project, `rbit import cmake .` creates the minimal initial
 records and graph. `rbit status .` keeps every missing item visible; successful
 compiler setup alone never counts as a build-ready project.
 
-`validate` then loads every shard, rejects duplicate keys and IDs, checks
-cross-document references and dependency cycles, receipts current manifest
-bytes, renders declarative overlays in memory, and checks effective TU digests.
+`validate` then loads every saved JSON file, rejects duplicate keys and IDs,
+checks cross-document references and dependency cycles, compares current files
+with their recorded hashes, renders declarative overlays in memory, and checks
+effective TU digests.
 It never runs a build. `explain` and `cost` inspect the committed metadata only,
 so they remain useful while source bytes are being edited; `validate` is the
-command that checks those bytes against committed authority. `explain` lists
+command that checks those bytes against saved project records. `explain` lists
 interventions and their fixed costs; pass `--intervention ID` to select one.
 
 </details>
@@ -317,35 +318,38 @@ because include exposure is not independently sealed. Each invocation is
 covered by the compile timeout, and effective overlay receipts can carry
 `certified-project-overlay` only after this sparse evidence passes.
 
-Each command owns a leased run arena. Successful arenas are removed after all
-children and backend resources drain; failed arenas are retained for diagnosis.
-Use `--keep-workspace never|on-failure|always` to change that policy. Local state
-is inspectable and reclaimable without racing active runs:
-
-```console
-rbit state status .
-rbit clean . --preview
-rbit clean .
-rbit clean . --cache --preview
-rbit clean . --reports --preview
-```
-
-`clean` removes inactive build workspaces while preserving the reusable
-incremental cache. Add `--cache` when you also want to remove eligible cache
-records and blobs. Generated reports are also kept unless you add `--reports`;
-that option removes only the canonical verification reports and the grind
-report tree. Add `--older-than-hours 24` when you want to keep recent workspaces
-and cache records. `--preview` performs the same safety checks, shows how much
-space can be freed, and prints the exact cleanup command without deleting
-anything. Verification from scratch never uses the incremental cache as trusted
-build input.
-
 The project authenticity policy is authoritative. A command-line policy
 override may only narrow acceptance; it cannot silently broaden a clean project
 to accept quarantine. Similarly, target and toolchain overrides are checked
 against committed project identities.
 
 </details>
+
+## Reclaim local build space
+
+Successful workspaces are removed automatically; failed ones are kept so you
+can diagnose them. Check the space ReproBit manages, then preview cleanup before
+removing anything:
+
+```console
+rbit state status .
+rbit clean . --preview
+rbit clean .
+```
+
+`clean` removes inactive workspaces but keeps the reusable incremental cache and
+saved reports. Add `--cache` or `--reports` only when you also want to remove
+cache data or managed verification and grind reports. Keep `--preview` while
+reviewing the larger selection:
+
+```console
+rbit clean . --cache --preview
+rbit clean . --reports --preview
+```
+
+Use `--older-than-hours 24` to keep recent workspaces and cache records. Active
+runs are never removed. For unusual debugging, the `--keep-workspace` option
+changes which run workspaces are retained.
 
 ## Find and save compiler adjustments
 
