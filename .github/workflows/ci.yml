@@ -105,6 +105,51 @@ jobs:
               raise SystemExit(f"wheel omitted {missing}")
           PY
 
+  wine-msvc42:
+    name: Wine / authenticated MSVC 4.2
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install 32-bit Wine
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends wine wine32:i386
+          wine --version
+          command -v wineserver
+      - run: python -m pip install -e ".[test]"
+      - name: Provision and authenticate the external compiler
+        run: >-
+          rbit toolchain provision
+          --destination "$RUNNER_TEMP/archaic-msvc42"
+          --no-save
+      - name: Probe the Wine transport and toolchain
+        run: >-
+          rbit doctor
+          --toolchain-profile msvc_4_2
+          --toolchain-root "$RUNNER_TEMP/archaic-msvc42"
+          --execute-probe
+      - name: Run the full suite with the authenticated compiler
+        env:
+          REPROBIT_MSVC_4_2_ROOT: ${{ runner.temp }}/archaic-msvc42
+        run: python -m pytest -q --junitxml="$RUNNER_TEMP/wine-tests.xml"
+      - name: Upload Wine diagnostics only
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: wine-msvc42-diagnostics
+          path: |
+            ${{ runner.temp }}/wine-tests.xml
+          if-no-files-found: warn
+          retention-days: 7
+
   native-msvc42:
     name: Native Windows / authenticated MSVC 4.2
     runs-on: windows-2022
