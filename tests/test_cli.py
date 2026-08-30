@@ -3215,7 +3215,7 @@ def test_primary_help_uses_human_terms_for_common_workflows(
     top_level = " ".join(capsys.readouterr().out.split())
     assert "review and lock the source files a build may read" in top_level
     assert "check exact bytes and trust evidence" in top_level
-    assert "save only proven results" in top_level
+    assert "find and review low-cost compiler adjustments" in top_level
     assert "portable project read set" not in top_level
     assert "cold exact solution" not in top_level
 
