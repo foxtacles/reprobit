@@ -10,6 +10,7 @@ import pytest
 
 import reprobit.classic.composition as classic_composition
 import reprobit.classic.scheduling as classic_scheduling
+import reprobit.source_export as source_export
 from reprobit.classic.compiler_identity import (
     Msvc420CompilerIdentity,
     issue_msvc420_compiler_identity,
@@ -51,6 +52,7 @@ from reprobit.schema import (
     source_manifest_digest,
 )
 from reprobit.source_authority import SourceAuthorityError, inspect_source_authority
+from reprobit.source_export import SourceExportError, refresh_effective_source_export
 from reprobit.source_lock import build_source_manifest
 from reprobit.strict_json import canonical_json
 
@@ -217,6 +219,81 @@ def test_effective_source_copy_rejects_symlinked_manifest_ancestor(
             tmp_path / "effective",
             bundle=redirected,
         )
+
+
+def test_source_export_refreshes_a_real_overlay_and_removes_stale_files(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    bundle, generated = _bundle(project)
+    destination = project / "build/comparison-source"
+    destination.mkdir(parents=True)
+    (destination / "stale.cpp").write_bytes(b"remove me")
+
+    witnesses = refresh_effective_source_export(bundle, project, destination)
+
+    assert tuple(item.intervention_id for item in witnesses) == ("overlay.graph",)
+    assert (destination / "generated.cpp").read_bytes() == generated
+    assert not (destination / "stale.cpp").exists()
+
+    (destination / "generated.cpp").write_bytes(b"stale generated source")
+    (destination / "removed-on-refresh.txt").write_bytes(b"stale")
+    refresh_effective_source_export(bundle, project, destination)
+
+    assert (destination / "generated.cpp").read_bytes() == generated
+    assert not (destination / "removed-on-refresh.txt").exists()
+    assert not tuple(destination.parent.glob(".rbit-source-*-*"))
+
+
+def test_source_export_failed_promotion_restores_the_previous_complete_export(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    bundle, _generated = _bundle(project)
+    destination = project / "build/comparison-source"
+    refresh_effective_source_export(bundle, project, destination)
+    before = {
+        path.relative_to(destination): path.read_bytes()
+        for path in destination.rglob("*")
+        if path.is_file()
+    }
+    real_replace = source_export._replace_directory
+    calls = 0
+
+    def fail_new_export(source: Path, target: Path) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("simulated promotion failure")
+        real_replace(source, target)
+
+    monkeypatch.setattr(source_export, "_replace_directory", fail_new_export)
+
+    with pytest.raises(SourceExportError, match="previous export was preserved"):
+        refresh_effective_source_export(bundle, project, destination)
+
+    after = {
+        path.relative_to(destination): path.read_bytes()
+        for path in destination.rglob("*")
+        if path.is_file()
+    }
+    assert after == before
+    assert not tuple(destination.parent.glob(".rbit-source-*-*"))
+
+
+def test_source_export_rejects_a_redirected_destination(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    bundle, _generated = _bundle(project)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    redirected = project / "redirected"
+    redirected.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(SourceExportError, match="destination is redirected"):
+        refresh_effective_source_export(bundle, project, redirected)
+
+    assert not tuple(outside.iterdir())
 
 
 @pytest.mark.skipif(shutil.which("cmake") is None, reason="CMake is not installed")

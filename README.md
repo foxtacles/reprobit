@@ -115,7 +115,9 @@ rbit source export build/reprobit-debug/source
 ```
 
 Point the tool's source root at that directory. This keeps its line and symbol
-information matched to the files the compiler actually read.
+information matched to the files the compiler actually read. Run the same
+command after later changes; ReproBit safely replaces the previous source view
+and removes files that are no longer part of it.
 
 Failed builds keep a private workspace so problems can be inspected. Reclaim
 those workspaces with `rbit clean .`; the reusable build cache is kept by

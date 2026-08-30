@@ -243,8 +243,7 @@ incremental builds cache and restore both comparison files together.
 
 Source-aware tools must also read the same reviewed source view as the
 compiler. This matters when an intervention adds declarations or otherwise
-moves source lines. Export that view into a new or empty directory, then use it
-as the tool's source root:
+moves source lines. Export that view, then use it as the tool's source root:
 
 ```console
 rbit source export build/reprobit-debug/source
@@ -252,7 +251,9 @@ rbit source export build/reprobit-debug/source
 
 The export contains only project inputs admitted by the source lock, with the
 reviewed source adjustments applied. It does not contain reference binaries,
-compiler files, build outputs, or private run state.
+compiler files, build outputs, or private run state. Running the command again
+safely replaces the prior export, including files that are no longer part of
+the reviewed source view.
 
 ### Reading the report
 

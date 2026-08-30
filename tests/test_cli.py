@@ -583,6 +583,10 @@ def test_source_export_materializes_the_reviewed_effective_view(
     assert event["event"] == "source_exported"
     assert Path(event["path"]) == destination
 
+    (destination / "stale.txt").write_bytes(b"not part of the source lock")
+    assert main(["source", "export", str(destination), "--project", str(project)]) == 0
+    assert not (destination / "stale.txt").exists()
+
 
 def test_validate_rejects_current_manifest_with_stale_effective_tu_pin(
     tmp_path: Path,

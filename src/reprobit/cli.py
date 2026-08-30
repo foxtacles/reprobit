@@ -377,7 +377,10 @@ def _parser() -> argparse.ArgumentParser:
         "destination",
         nargs="?",
         default="build/reprobit-source",
-        help="new or empty project-relative directory (default: build/reprobit-source)",
+        help=(
+            "project-relative directory to create or safely refresh "
+            "(default: build/reprobit-source)"
+        ),
     )
     source_export.add_argument("--project", default=".")
     source_export.set_defaults(handler=command_source_export)

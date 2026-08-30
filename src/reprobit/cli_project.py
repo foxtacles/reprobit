@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -398,13 +399,15 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
 def command_source_export(args: argparse.Namespace, output: CLIOutput) -> int:
     """Materialize the reviewed effective source view used by producers."""
 
-    from reprobit.classic_project import materialize_effective_workspace
+    from reprobit.source_export import refresh_effective_source_export
 
     root = project_root(args.project)
-    destination = safe_project_path(root, args.destination)
+    safe_project_path(root, args.destination)
+    candidate = Path(args.destination.replace("\\", "/"))
+    destination = Path(os.path.abspath(candidate if candidate.is_absolute() else root / candidate))
     with output.activity("preparing the effective source view", phase="source"):
         bundle = load_project_tree(root)
-        witnesses = materialize_effective_workspace(bundle, root, destination)
+        witnesses = refresh_effective_source_export(bundle, root, destination)
     output.emit(
         "source_exported",
         f"Effective source view ready: {destination}",
