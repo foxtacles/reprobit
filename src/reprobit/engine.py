@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import marshal
 import os
 import re
 import stat
@@ -32,6 +31,7 @@ from reprobit.execution import (
     TargetVerification,
 )
 from reprobit.implementation import (
+    loaded_code_digest,
     package_implementation_digest,
     revalidate_package_implementation,
 )
@@ -498,7 +498,12 @@ def _module_digest(component: type[object]) -> Digest:
                 methods.append(
                     {
                         "name": f"{name}.{index}",
-                        "digest": Digest.from_bytes(marshal.dumps(_normalized_code(code))).value,
+                        # Marshal v3+ records reference sharing and string-intern
+                        # flags. Both are mutable interpreter bookkeeping: Python
+                        # 3.11 pathlib, for example, interns path components in
+                        # place. Marshal the complete, explicitly typed code
+                        # material with v2 so those runtime-only flags are absent.
+                        "digest": loaded_code_digest(code).value,
                     }
                 )
     return Digest.from_bytes(
@@ -509,13 +514,6 @@ def _module_digest(component: type[object]) -> Digest:
             }
         )
     )
-
-
-def _normalized_code(code: CodeType) -> CodeType:
-    constants = tuple(
-        _normalized_code(item) if isinstance(item, CodeType) else item for item in code.co_consts
-    )
-    return code.replace(co_consts=constants, co_filename="", co_firstlineno=1)
 
 
 def _package_component_identity() -> ComponentIdentity:
@@ -638,6 +636,29 @@ def _resolve_unsafe_identity(request: EngineRequest) -> _ExecutionIdentity:
         package=_package_component_identity(),
         unsafe=True,
     )
+
+
+def _builtin_identity_drift_message(
+    expected: _ExecutionIdentity,
+    observed: _ExecutionIdentity,
+) -> str:
+    """Describe the exact built-in component whose content identity drifted."""
+
+    components = (
+        ("adapter", expected.adapter, observed.adapter),
+        ("evidence provider", expected.providers[0], observed.providers[0]),
+        ("package", expected.package, observed.package),
+    )
+    for label, expected_component, observed_component in components:
+        if expected_component != observed_component:
+            return (
+                "built-in component identity changed during execution: "
+                f"{label} expected {expected_component.implementation!r} at "
+                f"{expected_component.digest.algorithm}:{expected_component.digest.value}, "
+                f"observed {observed_component.implementation!r} at "
+                f"{observed_component.digest.algorithm}:{observed_component.digest.value}"
+            )
+    return "built-in component identity changed during execution without a field-level delta"
 
 
 class ReproductionEngine:
@@ -790,8 +811,10 @@ class ReproductionEngine:
                 tuple(sorted({*evidence.issues, unsafe_issue})),
                 evidence.quarantines,
             )
-        elif _resolve_builtin_identity(request) != identity:
-            raise EngineError("built-in component identity changed during execution")
+        else:
+            observed_identity = _resolve_builtin_identity(request)
+            if observed_identity != identity:
+                raise EngineError(_builtin_identity_drift_message(identity, observed_identity))
         evidence_seconds = time.monotonic() - evidence_started
         verdict = Verdict(
             cold=build.cold,

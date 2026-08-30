@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from types import SimpleNamespace
+from types import CodeType, ModuleType, SimpleNamespace
 from typing import cast
 
 import pytest
@@ -152,6 +152,57 @@ def test_builtin_identity_rejects_an_evidence_provider_from_another_executor() -
 
     with pytest.raises(EngineError, match="not paired with its executor"):
         engine_module._resolve_builtin_identity(request)
+
+
+def test_module_digest_ignores_runtime_string_interning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module_name = f"_reprobit_identity_{tmp_path.name.replace('-', '_')}"
+    token = "-".join(("runtime", "path", tmp_path.name, "segment"))
+    source = f"class IdentityFixture:\n    def value(self):\n        return {token!r}\n"
+    source_path = tmp_path / "identity_fixture.py"
+    source_path.write_text(source, encoding="utf-8")
+    module = ModuleType(module_name)
+    module.__file__ = str(source_path)
+    monkeypatch.setitem(sys.modules, module_name, module)
+    exec(compile(source, str(source_path), "exec"), module.__dict__)
+    component = cast(type[object], module.__dict__["IdentityFixture"])
+    method = vars(component)["value"]
+    code = getattr(method, "__code__", None)
+    assert isinstance(code, CodeType)
+    literal = next(item for item in code.co_consts if item == token)
+    assert isinstance(literal, str)
+
+    before = engine_module._module_digest(component)
+    # CPython 3.11 pathlib interns path components in place. Explicitly intern
+    # the fresh literal as well so the regression remains effective on newer
+    # interpreters whose pathlib implementation no longer does so.
+    _ = Path("root") / literal
+    assert sys.intern(literal) is literal
+    after = engine_module._module_digest(component)
+
+    assert after == before
+    method.__code__ = (lambda _self: "changed loaded code").__code__
+    assert engine_module._module_digest(component) != before
+
+
+def test_builtin_identity_drift_message_names_the_changed_component() -> None:
+    identity = engine_module._resolve_builtin_identity(_builtin_identity_request(paired=True))
+    observed_digest = Digest.from_bytes(b"changed adapter implementation")
+    observed = engine_module._ExecutionIdentity(
+        adapter=identity.adapter.model_copy(update={"digest": observed_digest}),
+        providers=identity.providers,
+        package=identity.package,
+    )
+
+    message = engine_module._builtin_identity_drift_message(identity, observed)
+
+    assert (
+        "adapter expected 'reprobit.classic_runtime.ClassicProducerGraphBuildExecutor'" in message
+    )
+    assert f"at sha256:{identity.adapter.digest.value}" in message
+    assert f"at sha256:{observed_digest.value}" in message
 
 
 def _bundle(

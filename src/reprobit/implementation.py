@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import ast
 import heapq
+import marshal
 from collections.abc import Sequence
 from functools import cache
 from pathlib import Path, PurePosixPath
+from types import CodeType
+from typing import Any, cast
 
 from reprobit.assets import runtime_asset_path
 from reprobit.model import Digest
@@ -19,6 +22,75 @@ from reprobit.secure_paths import (
     read_relative_file,
 )
 from reprobit.strict_json import canonical_json
+
+
+def loaded_code_digest(code: CodeType) -> Digest:
+    """Hash loaded code without mutable marshal reference/intern flags."""
+
+    return Digest.from_bytes(_stable_marshal(_normalized_code_material(code)))
+
+
+def _normalized_code_material(code: CodeType) -> tuple[object, ...]:
+    return (
+        "reprobit-code-identity-v1",
+        code.co_argcount,
+        code.co_posonlyargcount,
+        code.co_kwonlyargcount,
+        code.co_nlocals,
+        code.co_stacksize,
+        code.co_flags,
+        code.co_code,
+        tuple(_normalized_constant_material(item) for item in code.co_consts),
+        code.co_names,
+        code.co_varnames,
+        code.co_freevars,
+        code.co_cellvars,
+        code.co_name,
+        code.co_qualname,
+        code.co_linetable,
+        code.co_exceptiontable,
+    )
+
+
+def _stable_marshal(value: object) -> bytes:
+    # Typeshed's private recursive marshal union cannot be named here. The
+    # material builder admits only the exact supported scalar/tuple set.
+    return marshal.dumps(cast(Any, value), 2)
+
+
+def _normalized_constant_material(value: object) -> tuple[object, ...]:
+    if value is None:
+        return ("none",)
+    if value is Ellipsis:
+        return ("ellipsis",)
+    if value is StopIteration:
+        return ("stop-iteration",)
+    value_type = type(value)
+    if value_type in {bool, int, float, complex, str, bytes}:
+        return (value_type.__name__, value)
+    if value_type is tuple:
+        items = cast(tuple[object, ...], value)
+        return ("tuple", tuple(_normalized_constant_material(item) for item in items))
+    if value_type is frozenset:
+        values = cast(frozenset[object], value)
+        items = tuple(
+            sorted(
+                (_normalized_constant_material(item) for item in values),
+                key=_stable_marshal,
+            )
+        )
+        return ("frozenset", items)
+    if value_type is slice:
+        slice_value = cast(slice, value)
+        return (
+            "slice",
+            _normalized_constant_material(slice_value.start),
+            _normalized_constant_material(slice_value.stop),
+            _normalized_constant_material(slice_value.step),
+        )
+    if value_type is CodeType:
+        return ("code", _normalized_code_material(cast(CodeType, value)))
+    raise RuntimeError(f"unsupported loaded-code constant type: {value_type.__name__}")
 
 
 def _identity_bound_material(root: Path, path: Path, *, role: str) -> dict[str, object]:
@@ -412,6 +484,7 @@ def revalidate_package_implementation(expected: Digest) -> None:
 
 
 __all__ = [
+    "loaded_code_digest",
     "package_implementation_digest",
     "revalidate_package_implementation",
     "scoped_package_implementation_digest",
