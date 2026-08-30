@@ -72,6 +72,36 @@ class _RawNode:
     inputs: tuple[str, ...] = ()
 
 
+def _nmake_inline_response(
+    arguments: tuple[str, ...],
+    lines: list[str],
+    offset: int,
+    *,
+    owner: str,
+) -> tuple[tuple[str, ...], int]:
+    """Fold one bounded NMake ``@<<`` response block into its command."""
+
+    markers = tuple(index for index, argument in enumerate(arguments) if argument == "@<<")
+    if not markers:
+        return arguments, offset
+    if len(markers) != 1:
+        raise ProducerGraphError(f"CMake target {owner!r} has ambiguous inline link metadata")
+
+    body: list[str] = []
+    while offset < len(lines):
+        line = lines[offset].strip()
+        offset += 1
+        if line == "<<":
+            marker = markers[0]
+            expanded = _split_command_line(" ".join(body))
+            return arguments[:marker] + expanded + arguments[marker + 1 :], offset
+        tokens = _split_command_line(line)
+        if "@<<" in tokens or "<<" in tokens:
+            raise ProducerGraphError(f"CMake target {owner!r} has malformed inline link metadata")
+        body.append(line)
+    raise ProducerGraphError(f"CMake target {owner!r} has unterminated inline link metadata")
+
+
 def _normalize_directive_inputs(
     target_outputs: Mapping[str, str],
     directive_inputs: Mapping[str, Sequence[str]] | None,
@@ -330,10 +360,14 @@ def _link_nodes(
             label=f"link target {owner!r} working directory",
         )
         candidates: list[tuple[Path, tuple[str, ...]]] = []
-        for raw_line in reader.read_text(
+        lines = reader.read_text(
             makefile,
             label=f"link target {owner!r} build metadata",
-        ).splitlines():
+        ).splitlines()
+        offset = 0
+        while offset < len(lines):
+            raw_line = lines[offset]
+            offset += 1
             line = raw_line.strip()
             if not line or line.startswith("#"):
                 continue
@@ -351,6 +385,12 @@ def _link_nodes(
                 "lib.exe",
             }:
                 continue
+            arguments, offset = _nmake_inline_response(
+                arguments,
+                lines,
+                offset,
+                owner=owner,
+            )
             _toolchain_executable(
                 arguments[0],
                 working_directory=directory,

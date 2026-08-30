@@ -245,6 +245,19 @@ def configure_cmake_project(
         )
     source_digest = effective_source_digest(effective_root)
 
+    # NMake 4.2 cannot execute CMake's quoted progress-message recipe when
+    # CMake is installed beneath ``Program Files``.  Progress recipes carry no
+    # producer authority, so suppress them in the project and its try_compile
+    # probes while retaining the real ABI and working-compiler checks.
+    nmake_options = (
+        (
+            "-DCMAKE_RULE_MESSAGES=OFF",
+            "-DCMAKE_TRY_COMPILE_PLATFORM_VARIABLES=CMAKE_RULE_MESSAGES",
+        )
+        if generator == "NMake Makefiles"
+        else ()
+    )
+
     command = (
         str(cmake),
         "-S",
@@ -260,6 +273,7 @@ def configure_cmake_project(
         f"-DCMAKE_RC_COMPILER={_cmake_path(resource)}",
         f"-DCMAKE_LINKER={_cmake_path(linker)}",
         f"-DCMAKE_AR={_cmake_path(librarian)}",
+        *nmake_options,
         "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON",
         f"-DREPROBIT_CMAKE_MODULE={_cmake_path(module)}",
         f"-DREPROBIT_PROJECT_PLAN={_cmake_path(project_plan)}",

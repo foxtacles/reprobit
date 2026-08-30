@@ -761,8 +761,12 @@ def test_extracts_nmake_terminal_command_embedded_in_build_make(
     link_file.unlink()
     build_make = build / f"CMakeFiles/{owner}.dir/build.make"
     previous = build_make.read_text(encoding="utf-8") if build_make.is_file() else ""
+    recipe = link_command
+    if role is ProducerRole.LINKER:
+        command = cmake_makefile_metadata.split_command_line(link_command)
+        recipe = " ".join(command[:3]) + " @<<\n " + " ".join(command[3:]) + "\n<<"
     build_make.write_text(
-        previous + f"\n\tcd /D {build.as_posix()} && {link_command}\n",
+        previous + f"\n\t{recipe}\n",
         encoding="utf-8",
     )
 
@@ -784,6 +788,34 @@ def test_extracts_nmake_terminal_command_embedded_in_build_make(
     else:
         assert terminal.target_id is None
         assert terminal.outputs == ("build/core.lib",)
+
+
+def test_rejects_unterminated_nmake_inline_link_metadata(tmp_path: Path) -> None:
+    source, build, toolchain = _configured_fixture(tmp_path)
+    link_file = build / "CMakeFiles/app.dir/link.txt"
+    command = cmake_makefile_metadata.split_command_line(link_file.read_text(encoding="utf-8"))
+    link_file.unlink()
+    build_make = build / "CMakeFiles/app.dir/build.make"
+    build_make.write_text(
+        build_make.read_text(encoding="utf-8")
+        + "\n\t"
+        + " ".join(command[:3])
+        + " @<<\n "
+        + " ".join(command[3:])
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProducerGraphError, match="unterminated inline link metadata"):
+        extract_cmake_makefiles_graph(
+            configured_build_root=build,
+            effective_source_root=source,
+            toolchain_root=toolchain,
+            source_topology_digest_value=_digest("3"),
+            toolchain_lock_digest=_digest("4"),
+            path_profile_id="stable",
+            target_outputs={"app": "APP.EXE"},
+        )
 
 
 def test_directory_form_pdb_is_explicitly_isolated_per_translation_unit(

@@ -13,7 +13,7 @@ import pytest
 
 import reprobit.cmake_graph as cmake_graph
 import reprobit.cmake_import as cmake_import
-from reprobit.backends import NativeWindowsBackend
+from reprobit.backends import NativeWindowsBackend, PosixWineBackend
 from reprobit.cache import IncrementalCache, cache_key
 from reprobit.classic_project import ClassicProjectError
 from reprobit.cli import (
@@ -1096,11 +1096,19 @@ def _mock_cmake_graph_result(project: Path) -> SimpleNamespace:
     )
 
 
+def _select_non_native_cmake_import_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import.backend_for_host",
+        lambda: PosixWineBackend(wine=sys.executable, wineserver=sys.executable),
+    )
+
+
 def test_cmake_import_scaffolds_and_runs_the_guided_graph_path(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    _select_non_native_cmake_import_backend(monkeypatch)
     project = tmp_path / "project"
     _fresh_cmake_import_project(project)
     capsys.readouterr()
@@ -1334,6 +1342,7 @@ def test_cmake_import_atomically_creates_project_grind_tu_authority(
     capsys: pytest.CaptureFixture[str],
     race: str | None,
 ) -> None:
+    _select_non_native_cmake_import_backend(monkeypatch)
     project = tmp_path / "project"
     _complete_project(project)
     project_file = project / "reprobit.toml"
@@ -1539,6 +1548,7 @@ def test_failed_cmake_import_removes_only_its_fresh_scaffold(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    _select_non_native_cmake_import_backend(monkeypatch)
     project = tmp_path / "project"
     _fresh_cmake_import_project(project)
     capsys.readouterr()

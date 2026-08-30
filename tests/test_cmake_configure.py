@@ -328,6 +328,10 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
     assert arguments[arguments.index("-G") + 1] == generator
     if generator == "NMake Makefiles":
         assert f"-DCMAKE_MAKE_PROGRAM={make_program}" in arguments
+        assert "-DCMAKE_RULE_MESSAGES=OFF" in arguments
+        assert "-DCMAKE_TRY_COMPILE_PLATFORM_VARIABLES=CMAKE_RULE_MESSAGES" in arguments
+    else:
+        assert "-DCMAKE_RULE_MESSAGES=OFF" not in arguments
     assert "-DCMAKE_C_COMPILER_FORCED=ON" not in arguments
     assert "-DCMAKE_CXX_COMPILER_FORCED=ON" not in arguments
     assert "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" in arguments
