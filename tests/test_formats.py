@@ -131,3 +131,13 @@ def test_archive_rejects_bad_trailer() -> None:
     data[8 + 58 : 8 + 60] = b"xx"
     with pytest.raises(FormatError, match="trailer"):
         parse_coff_archive(bytes(data))
+
+
+def test_parse_pe32_rejects_pe_offset_inside_dos_header():
+    """A forged e_lfanew pointing back into the DOS header is refused even
+    when the signature bytes happen to appear there."""
+    image = bytearray(_pe32())
+    image[0x10:0x14] = b"PE\0\0"
+    image[0x3C:0x40] = (0x10).to_bytes(4, "little")
+    with pytest.raises(FormatError, match="DOS header"):
+        parse_pe32(bytes(image))

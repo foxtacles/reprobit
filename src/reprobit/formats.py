@@ -224,6 +224,8 @@ def parse_pe32(data: bytes, *, require_i386: bool = True) -> Pe32Image:
     if bytes(_require(data, 0, 2, "DOS signature")) != b"MZ":
         raise FormatError("missing DOS MZ signature")
     pe_offset = struct.unpack("<L", _require(data, 0x3C, 4, "PE offset"))[0]
+    if pe_offset < 64:
+        raise FormatError("PE offset points into the DOS header")
     if bytes(_require(data, pe_offset, 4, "PE signature")) != b"PE\0\0":
         raise FormatError("missing PE signature")
     header = _parse_header(data, pe_offset + 4, "PE COFF")
@@ -247,6 +249,11 @@ def parse_pe32(data: bytes, *, require_i386: bool = True) -> Pe32Image:
         table_offset=section_table,
         count=header.section_count,
     )
+    previous_end = 0
+    for section in sorted(sections, key=lambda item: item.virtual_address):
+        if section.virtual_address < previous_end:
+            raise FormatError(f"section {section.name!r} overlaps its neighbor")
+        previous_end = section.virtual_address + max(section.virtual_size, len(section.raw_data))
     return Pe32Image(
         header=header,
         image_base=image_base,

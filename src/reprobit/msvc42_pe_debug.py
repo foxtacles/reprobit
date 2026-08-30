@@ -147,7 +147,7 @@ class _Pe32DebugMap:
     def __init__(self, data: bytes, expected_pdb_path: str) -> None:
         require(len(data) >= 64 and data[:2] == b"MZ", "missing DOS MZ header")
         pe = struct.unpack_from("<I", data, 0x3C)[0]
-        require(pe <= len(data) - 24, "PE header extends past EOF")
+        require(64 <= pe <= len(data) - 24, "PE header extends past EOF")
         require(data[pe : pe + 4] == b"PE\0\0", "missing PE signature")
 
         machine, section_count = struct.unpack_from("<HH", data, pe + 4)

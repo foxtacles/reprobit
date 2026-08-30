@@ -44,7 +44,9 @@ class _PE32MetadataMap:
     def __init__(self, data: bytes) -> None:
         require(len(data) >= 64 and data[:2] == b"MZ", "missing DOS MZ header")
         pe = struct.unpack_from("<I", data, 0x3C)[0]
-        require(pe <= len(data) - 24 and data[pe : pe + 4] == b"PE\0\0", "missing PE signature")
+        require(
+            64 <= pe <= len(data) - 24 and data[pe : pe + 4] == b"PE\0\0", "missing PE signature"
+        )
         machine, section_count = struct.unpack_from("<HH", data, pe + 4)
         optional_size = struct.unpack_from("<H", data, pe + 20)[0]
         require(machine == 0x14C, "only i386 PE images are supported")
