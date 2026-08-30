@@ -158,6 +158,8 @@ class NormalizationCategoryAttestation:
             raise EngineError("normalization range counts cannot be negative")
         if self.changed_range_count != len(self.changed_ranges) + self.omitted_changed_ranges:
             raise EngineError("normalization range summary is incomplete")
+        if (self.changed_range_count == 0) != (self.changed_bytes == 0):
+            raise EngineError("normalization changed-byte and range counts disagree")
         if self.changed_ranges != tuple(
             sorted(self.changed_ranges, key=lambda item: (item.offset, item.length))
         ):
@@ -165,6 +167,11 @@ class NormalizationCategoryAttestation:
         for left, right in pairwise(self.changed_ranges):
             if left.overlaps(right):
                 raise EngineError("normalization ranges overlap")
+        preview_bytes = sum(item.length for item in self.changed_ranges)
+        if preview_bytes + self.omitted_changed_ranges > self.changed_bytes:
+            raise EngineError("normalization range summary exceeds changed bytes")
+        if self.omitted_changed_ranges == 0 and preview_bytes != self.changed_bytes:
+            raise EngineError("normalization ranges do not exhaust changed bytes")
 
 
 @dataclass(frozen=True, slots=True)

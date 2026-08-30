@@ -139,12 +139,19 @@ class NormalizationCategorySummary(StrictModel):
             raise ValueError("normalization changed bytes exceed eligible bytes")
         if self.changed_range_count != len(self.changed_ranges) + self.omitted_changed_ranges:
             raise ValueError("normalization range summary is incomplete")
+        if (self.changed_range_count == 0) != (self.changed_bytes == 0):
+            raise ValueError("normalization changed-byte and range counts disagree")
         ordered = tuple(sorted(self.changed_ranges, key=lambda item: (item.offset, item.length)))
         if self.changed_ranges != ordered:
             raise ValueError("normalization ranges must be in canonical order")
         for left, right in pairwise(self.changed_ranges):
             if left.overlaps(right):
                 raise ValueError("normalization ranges overlap")
+        preview_bytes = sum(item.length for item in self.changed_ranges)
+        if preview_bytes + self.omitted_changed_ranges > self.changed_bytes:
+            raise ValueError("normalization range summary exceeds changed bytes")
+        if self.omitted_changed_ranges == 0 and preview_bytes != self.changed_bytes:
+            raise ValueError("normalization ranges do not exhaust changed bytes")
         return self
 
 

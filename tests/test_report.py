@@ -372,12 +372,12 @@ def proof_report_with_debug_companion() -> ProofReport:
                 size=300,
                 raw_digest=digest(b"raw debug pdb"),
                 raw_size=300,
-                changed_bytes=2,
+                changed_bytes=10,
                 categories=(
                     NormalizationCategorySummary(
                         category="pdb.signature",
-                        normalized_bytes=4,
-                        changed_bytes=2,
+                        normalized_bytes=40,
+                        changed_bytes=10,
                         changed_range_count=9,
                         changed_ranges=(ByteRange(offset=20, length=2),),
                         omitted_changed_ranges=8,
