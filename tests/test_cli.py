@@ -21,6 +21,7 @@ from reprobit.cli import (
     main,
 )
 from reprobit.cli_build import _legacy_oracle_targets
+from reprobit.cli_cmake_import import _cmake_import_workspace
 from reprobit.cli_output import CLIOutput, human_command
 from reprobit.cli_paths import CLIError
 from reprobit.cli_project import _human_intervention_detail
@@ -1232,6 +1233,11 @@ def test_cmake_import_uses_authenticated_nmake_on_native_windows(
         captured.update(options)
         workspace = options["workspace_root"]
         assert isinstance(workspace, Path)
+        (workspace / "build").mkdir()
+        (workspace / "build/configure.log").write_text(
+            "native configure fixture\n",
+            encoding="utf-8",
+        )
         return SimpleNamespace(
             configured_build_root=workspace / "build",
             effective_source_root=workspace / "source",
@@ -1270,6 +1276,8 @@ def test_cmake_import_uses_authenticated_nmake_on_native_windows(
                 str(toolchain),
                 "--cmake",
                 sys.executable,
+                "--keep-workspace",
+                "always",
             ]
         )
         == 0
@@ -1279,6 +1287,34 @@ def test_cmake_import_uses_authenticated_nmake_on_native_windows(
     assert captured["make_program"] == toolchain / "bin/NMAKE.EXE"
     assert captured["compiler_transport"] == toolchain / "bin/CL.EXE"
     assert captured["resource_transport"] == toolchain / "bin/RC.EXE"
+    short_workspace = captured["workspace_root"]
+    assert isinstance(short_workspace, Path)
+    assert not short_workspace.exists()
+    retained = tuple((project / ".reprobit-state/runs").glob("import-*"))
+    assert len(retained) == 1
+    assert (retained[0] / "cmake/build/configure.log").read_text(encoding="utf-8") == (
+        "native configure fixture\n"
+    )
+
+
+def test_failed_short_cmake_workspace_is_retained_without_leaking_temp_state(
+    tmp_path: Path,
+) -> None:
+    arena = RunArena(
+        tmp_path / "state",
+        kind="import",
+        keep=KeepWorkspace.ON_FAILURE,
+    )
+    with (
+        pytest.raises(RuntimeError, match="configure failed"),
+        arena,
+        _cmake_import_workspace(arena, short=True) as workspace,
+    ):
+        (workspace / "configure.log").write_text("diagnostic\n", encoding="utf-8")
+        raise RuntimeError("configure failed")
+
+    assert not workspace.exists()
+    assert (arena.path / "cmake/configure.log").read_text(encoding="utf-8") == "diagnostic\n"
 
 
 @pytest.mark.parametrize(
@@ -1749,8 +1785,11 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     )
     link_directory = configured / "CMakeFiles/program.dir"
     link_directory.mkdir(parents=True)
-    link_file = link_directory / "link.txt"
-    link_file.write_text(f"{linker} {object_path} /out:APP.EXE\n", encoding="utf-8")
+    link_metadata = link_directory / "build.make"
+    link_metadata.write_text(
+        f"\tcd /D {configured} && {linker} {object_path} /out:APP.EXE\n",
+        encoding="utf-8",
+    )
     (configured / "reprobit-target-plan.json").write_text(
         json.dumps(
             {
@@ -1883,7 +1922,10 @@ def test_graph_extract_commits_closed_direct_producer_authority(
         assert (project / "reprobit/producer-graph.json").read_bytes() == committed_graph
         capsys.readouterr()
 
-    link_file.write_text(f"{linker} {object_path} /out:UNDECLARED.EXE\n", encoding="utf-8")
+    link_metadata.write_text(
+        f"\tcd /D {configured} && {linker} {object_path} /out:UNDECLARED.EXE\n",
+        encoding="utf-8",
+    )
     assert (
         main(
             [
@@ -1905,7 +1947,10 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     )
     assert (project / "reprobit/producer-graph.json").read_bytes() == committed_graph
     capsys.readouterr()
-    link_file.write_text(f"{linker} {object_path} /out:APP.EXE\n", encoding="utf-8")
+    link_metadata.write_text(
+        f"\tcd /D {configured} && {linker} {object_path} /out:APP.EXE\n",
+        encoding="utf-8",
+    )
 
     source.write_text("int main() { return 1; }\n", encoding="utf-8")
     lock_argv = [

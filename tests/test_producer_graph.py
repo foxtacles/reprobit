@@ -728,6 +728,64 @@ def test_extracts_closed_direct_graph_and_round_trips(tmp_path: Path) -> None:
     assert producer_graph_digest(received) == producer_graph_digest(graph)
 
 
+def test_missing_terminal_target_reports_expected_and_observed_outputs(tmp_path: Path) -> None:
+    source, build, toolchain = _configured_fixture(tmp_path)
+
+    with pytest.raises(
+        ProducerGraphError,
+        match=r"expected \[app=build/missing.exe\], observed \[build/APP.EXE",
+    ):
+        extract_cmake_makefiles_graph(
+            configured_build_root=build,
+            effective_source_root=source,
+            toolchain_root=toolchain,
+            source_topology_digest_value=_digest("3"),
+            toolchain_lock_digest=_digest("4"),
+            path_profile_id="stable",
+            target_outputs={"app": "missing.exe"},
+        )
+
+
+@pytest.mark.parametrize(
+    ("owner", "role"),
+    (("app", ProducerRole.LINKER), ("core", ProducerRole.LIBRARIAN)),
+)
+def test_extracts_nmake_terminal_command_embedded_in_build_make(
+    tmp_path: Path,
+    owner: str,
+    role: ProducerRole,
+) -> None:
+    source, build, toolchain = _configured_fixture(tmp_path)
+    link_file = build / f"CMakeFiles/{owner}.dir/link.txt"
+    link_command = link_file.read_text(encoding="utf-8").strip()
+    link_file.unlink()
+    build_make = build / f"CMakeFiles/{owner}.dir/build.make"
+    previous = build_make.read_text(encoding="utf-8") if build_make.is_file() else ""
+    build_make.write_text(
+        previous + f"\n\tcd /D {build.as_posix()} && {link_command}\n",
+        encoding="utf-8",
+    )
+
+    graph = extract_cmake_makefiles_graph(
+        configured_build_root=build,
+        effective_source_root=source,
+        toolchain_root=toolchain,
+        source_topology_digest_value=_digest("3"),
+        toolchain_lock_digest=_digest("4"),
+        path_profile_id="stable",
+        target_outputs={"app": "APP.EXE"},
+    )
+
+    terminal = next(node for node in graph.nodes if node.role is role)
+    assert terminal.owner == owner
+    if role is ProducerRole.LINKER:
+        assert terminal.target_id == "app"
+        assert terminal.outputs[0] == "build/APP.EXE"
+    else:
+        assert terminal.target_id is None
+        assert terminal.outputs == ("build/core.lib",)
+
+
 def test_directory_form_pdb_is_explicitly_isolated_per_translation_unit(
     tmp_path: Path,
 ) -> None:

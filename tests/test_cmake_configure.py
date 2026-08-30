@@ -326,15 +326,10 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
         json.loads((workspace / "build/argv.json").read_text(encoding="utf-8")),
     )
     assert arguments[arguments.index("-G") + 1] == generator
-    forced_options = {
-        "-DCMAKE_C_COMPILER_FORCED=ON",
-        "-DCMAKE_CXX_COMPILER_FORCED=ON",
-    }
     if generator == "NMake Makefiles":
-        assert forced_options <= set(arguments)
         assert f"-DCMAKE_MAKE_PROGRAM={make_program}" in arguments
-    else:
-        assert forced_options.isdisjoint(arguments)
+    assert "-DCMAKE_C_COMPILER_FORCED=ON" not in arguments
+    assert "-DCMAKE_CXX_COMPILER_FORCED=ON" not in arguments
     assert "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON" in arguments
     assert f"-DREPROBIT_EFFECTIVE_SOURCE_ROOT={workspace / 'source'}" in arguments
     assert "-DREPROBIT_TERMINAL=ON" in arguments

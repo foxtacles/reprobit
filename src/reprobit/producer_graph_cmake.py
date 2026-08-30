@@ -32,6 +32,9 @@ from reprobit.cmake_makefile_metadata import (
     read_compile_database,
 )
 from reprobit.cmake_makefile_metadata import (
+    command_recipe as _command_recipe,
+)
+from reprobit.cmake_makefile_metadata import (
     compile_commands as _compile_commands,
 )
 from reprobit.cmake_makefile_metadata import (
@@ -55,6 +58,8 @@ from reprobit.producer_graph import (
     graph_reference,
     validate_graph_reference,
 )
+
+_LINK_RECIPE = re.compile(r'(?i)(?:^|[/\\"])(?:link|link\.exe|lib|lib\.exe)(?=(?:"|\s|$))')
 
 
 @dataclass(frozen=True, slots=True)
@@ -263,18 +268,8 @@ def _link_nodes(
     reader: MetadataReader,
 ) -> tuple[_RawNode, ...]:
     nodes: list[_RawNode] = []
-    for link_file in _metadata_files(build_root, "link.txt"):
-        owner = link_file.parent.name.removesuffix(".dir")
-        directory = _build_working_directory(
-            link_file.parent.parent.parent,
-            build_root=build_root,
-            label=f"link target {owner!r} working directory",
-        )
-        command_text = reader.read_text(
-            link_file,
-            label=f"link target {owner!r} metadata",
-        ).strip()
-        arguments = _split_command_line(command_text)
+
+    def append(owner: str, directory: Path, arguments: tuple[str, ...]) -> None:
         if not arguments:
             raise ProducerGraphError(f"empty link command for {owner!r}")
         executable_path = _toolchain_executable(
@@ -308,6 +303,65 @@ def _link_nodes(
                 working_directory=directory,
             )
         )
+
+    for link_file in _metadata_files(build_root, "link.txt"):
+        owner = link_file.parent.name.removesuffix(".dir")
+        directory = _build_working_directory(
+            link_file.parent.parent.parent,
+            build_root=build_root,
+            label=f"link target {owner!r} working directory",
+        )
+        command_text = reader.read_text(
+            link_file,
+            label=f"link target {owner!r} metadata",
+        ).strip()
+        append(owner, directory, _split_command_line(command_text))
+
+    # CMake's NMake generator deliberately disables link scripts, so its
+    # authenticated LINK/LIB invocation lives directly in build.make.  Unix
+    # Makefiles retain link.txt and take the path above.
+    for makefile in _metadata_files(build_root, "build.make"):
+        if (makefile.parent / "link.txt").is_file():
+            continue
+        owner = makefile.parent.name.removesuffix(".dir")
+        declared_directory = _build_working_directory(
+            makefile.parent.parent.parent,
+            build_root=build_root,
+            label=f"link target {owner!r} working directory",
+        )
+        candidates: list[tuple[Path, tuple[str, ...]]] = []
+        for raw_line in reader.read_text(
+            makefile,
+            label=f"link target {owner!r} build metadata",
+        ).splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            if _LINK_RECIPE.search(line.removeprefix("@")) is None:
+                continue
+            directory, arguments = _command_recipe(
+                line,
+                declared_working_directory=declared_directory,
+                build_root=build_root,
+            )
+            if not arguments or Path(arguments[0]).name.casefold() not in {
+                "link",
+                "link.exe",
+                "lib",
+                "lib.exe",
+            }:
+                continue
+            _toolchain_executable(
+                arguments[0],
+                working_directory=directory,
+                toolchain_root=toolchain_root,
+                label=f"link command for {owner!r}",
+            )
+            candidates.append((directory, arguments))
+        if len(candidates) > 1:
+            raise ProducerGraphError(f"CMake target {owner!r} has ambiguous link metadata")
+        if candidates:
+            append(owner, *candidates[0])
     return tuple(nodes)
 
 
@@ -375,6 +429,28 @@ def _producer_nodes(
         graph_reference("build", relative): target_id
         for target_id, relative in target_outputs.items()
     }
+    matched_targets = {
+        final_by_output[output]
+        for node in raw_nodes
+        for output in node.outputs
+        if output in final_by_output
+    }
+    missing_targets = set(target_outputs) - matched_targets
+    if missing_targets:
+        expected = ", ".join(
+            f"{target_id}=build/{target_outputs[target_id]}"
+            for target_id in sorted(missing_targets, key=str.casefold)
+        )
+        observed = ", ".join(
+            output
+            for node in raw_nodes
+            if node.role is ProducerRole.LINKER
+            for output in node.outputs
+        )
+        raise ProducerGraphError(
+            "terminal target output was not found in CMake linker metadata; "
+            f"expected [{expected}], observed [{observed or 'none'}]"
+        )
     nodes: list[ProducerNode] = []
     for index, node in enumerate(raw_nodes):
         target_ids = {final_by_output[item] for item in node.outputs if item in final_by_output}

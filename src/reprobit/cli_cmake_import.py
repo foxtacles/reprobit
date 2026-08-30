@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
+import stat
+import sys
+import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 
 from reprobit.backends import NativeWindowsBackend, backend_for_host
@@ -25,6 +31,8 @@ from reprobit.project_loader import load_project, load_project_tree
 from reprobit.schema import ProducerGraphBuildAdapter
 from reprobit.state import KeepWorkspace, RunArena
 from reprobit.toolchains import MSVC_42, ClassicMSVCToolchain
+
+_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 
 
 def _real_directory(value: str | os.PathLike[str], *, label: str) -> Path:
@@ -51,6 +59,68 @@ def _import_state_root(root: Path, relative: str) -> Path:
     state = safe_project_path(root, relative)
     state.mkdir(parents=True, exist_ok=True)
     return state
+
+
+def _plain_directory(path: Path) -> bool:
+    """Return whether ``path`` is one ordinary directory, not a redirect."""
+
+    try:
+        metadata = path.stat(follow_symlinks=False)
+    except OSError:
+        return False
+    return bool(
+        stat.S_ISDIR(metadata.st_mode)
+        and not stat.S_ISLNK(metadata.st_mode)
+        and not int(getattr(metadata, "st_reparse_tag", 0))
+        and not (int(getattr(metadata, "st_file_attributes", 0)) & _FILE_ATTRIBUTE_REPARSE_POINT)
+    )
+
+
+@contextmanager
+def _cmake_import_workspace(arena: RunArena, *, short: bool) -> Iterator[Path]:
+    """Seat legacy NMake in a short real tree while state owns retention."""
+
+    if not short:
+        yield arena.path / "cmake"
+        return
+
+    workspace = Path(tempfile.mkdtemp(prefix="rbit-cmake-"))
+    if not workspace.is_absolute() or not _plain_directory(workspace):
+        raise CLIError(f"temporary CMake workspace is not a real directory: {workspace}")
+    succeeded = False
+    try:
+        yield workspace
+        succeeded = True
+    finally:
+        active_error = sys.exception()
+        cleanup_errors: list[BaseException] = []
+        retain = arena.keep is KeepWorkspace.ALWAYS or (
+            arena.keep is KeepWorkspace.ON_FAILURE and not succeeded
+        )
+        if retain:
+            try:
+                if not _plain_directory(workspace):
+                    raise CLIError("temporary CMake workspace changed type before retention")
+                shutil.copytree(workspace, arena.path / "cmake", symlinks=True)
+            except BaseException as error:
+                cleanup_errors.append(error)
+        try:
+            if not _plain_directory(workspace):
+                raise CLIError("temporary CMake workspace changed type before cleanup")
+            shutil.rmtree(workspace)
+        except BaseException as error:
+            cleanup_errors.append(error)
+        if cleanup_errors:
+            if active_error is not None:
+                for cleanup_error in cleanup_errors:
+                    active_error.add_note(
+                        f"temporary CMake workspace cleanup failed: {cleanup_error}"
+                    )
+            else:
+                failure = CLIError("temporary CMake workspace cleanup failed")
+                for cleanup_error in cleanup_errors:
+                    failure.add_note(str(cleanup_error))
+                raise failure
 
 
 def command_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:
@@ -120,35 +190,39 @@ def command_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:
             keep=KeepWorkspace(args.keep_workspace),
         )
         with arena:
-            with output.activity("configuring the CMake project", phase="configure"):
-                configured = configure_cmake_project(
-                    bundle,
-                    project_root=root,
-                    workspace_root=arena.path / "cmake",
-                    toolchain_root=toolchain_root,
-                    cmake=cmake,
-                    compiler_transport=_absolute_file(compiler_transport),
-                    resource_transport=_absolute_file(resource_transport),
-                    configuration=args.configuration,
-                    timeout_seconds=args.timeout,
-                    defer_project_plan=True,
-                    generator=generator,
-                    make_program=make_program,
-                )
-            with output.activity(
-                "recording the direct compiler and linker steps",
-                phase="graph-import",
-            ):
-                graph_result = record_cmake_graph(
-                    project_root=root,
-                    configured_build_root=configured.configured_build_root,
-                    effective_source_root=configured.effective_source_root,
-                    expected_effective_source_digest=configured.effective_source_digest,
-                    toolchain_root=toolchain_root,
-                    target_plan=configured.target_plan,
-                    directive_inputs=args.directive_input,
-                    derive_translation_units=not bundle.build_plan.translation_units,
-                )
+            with _cmake_import_workspace(
+                arena,
+                short=generator == "NMake Makefiles",
+            ) as workspace:
+                with output.activity("configuring the CMake project", phase="configure"):
+                    configured = configure_cmake_project(
+                        bundle,
+                        project_root=root,
+                        workspace_root=workspace,
+                        toolchain_root=toolchain_root,
+                        cmake=cmake,
+                        compiler_transport=_absolute_file(compiler_transport),
+                        resource_transport=_absolute_file(resource_transport),
+                        configuration=args.configuration,
+                        timeout_seconds=args.timeout,
+                        defer_project_plan=True,
+                        generator=generator,
+                        make_program=make_program,
+                    )
+                with output.activity(
+                    "recording the direct compiler and linker steps",
+                    phase="graph-import",
+                ):
+                    graph_result = record_cmake_graph(
+                        project_root=root,
+                        configured_build_root=configured.configured_build_root,
+                        effective_source_root=configured.effective_source_root,
+                        expected_effective_source_digest=configured.effective_source_digest,
+                        toolchain_root=toolchain_root,
+                        target_plan=configured.target_plan,
+                        directive_inputs=args.directive_input,
+                        derive_translation_units=not bundle.build_plan.translation_units,
+                    )
             output.emit(
                 "producer_graph_extracted",
                 f"committed {len(graph_result.graph.nodes)} direct producer(s) "

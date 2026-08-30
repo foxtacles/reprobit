@@ -221,7 +221,7 @@ def _read_flags(path: Path, prefix: str, *, reader: MetadataReader) -> tuple[str
     return tuple(values)
 
 
-def _resource_recipe(
+def command_recipe(
     line: str, *, declared_working_directory: Path, build_root: Path
 ) -> tuple[Path, tuple[str, ...]]:
     tokens = split_command_line(line.removeprefix("@"))
@@ -237,11 +237,11 @@ def _resource_recipe(
         if directory_tokens and directory_tokens[0].casefold() == "/d":
             directory_tokens = directory_tokens[1:]
         if len(directory_tokens) != 1:
-            raise ProducerGraphError("CMake resource recipe has an ambiguous working directory")
+            raise ProducerGraphError("CMake command recipe has an ambiguous working directory")
         working_directory = build_working_directory(
             directory_tokens[0],
             build_root=build_root,
-            label="resource recipe working directory",
+            label="command recipe working directory",
         )
         tokens = tokens[separator + 1 :]
     return working_directory, tokens
@@ -271,7 +271,7 @@ def resource_commands(
                 continue
             if _RESOURCE_RECIPE.search(line.removeprefix("@")) is None:
                 continue
-            working_directory, tokens = _resource_recipe(
+            working_directory, tokens = command_recipe(
                 line,
                 declared_working_directory=declared_working_directory,
                 build_root=build_root,
@@ -393,6 +393,7 @@ def compile_commands(
 __all__ = [
     "CompileCommand",
     "MetadataReader",
+    "command_recipe",
     "compile_commands",
     "expand_response",
     "metadata_files",
