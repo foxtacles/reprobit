@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import cast
 
+from reprobit.classic.overlay_types import _Layout
 from reprobit.classic_overlay_cpp import (
     _cpp_type,
     _identifier_run,
@@ -12,7 +13,6 @@ from reprobit.classic_overlay_cpp import (
     _render_parameter,
 )
 from reprobit.classic_overlay_generator_common import _generator_contract, _string_array
-from reprobit.classic.overlay_types import _Layout
 from reprobit.classic_overlay_validation import (
     _array,
     _boolean,

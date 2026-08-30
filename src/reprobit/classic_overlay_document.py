@@ -7,6 +7,16 @@ from collections.abc import Mapping, Sequence
 from pathlib import PurePosixPath
 
 from reprobit.artifacts import digest_bytes
+from reprobit.classic.overlay_types import (
+    ClassicOverlayAnchorReceipt,
+    ClassicOverlayOperationReceipt,
+    ClassicOverlayOutputReceipt,
+    ClassicOverlayRenderResult,
+    _Operation,
+    _Output,
+    _ResolvedOperation,
+    _ValidatedOverlay,
+)
 from reprobit.classic_overlay_generator import _render_generator
 from reprobit.classic_overlay_relocation import (
     _relocation_spec,
@@ -18,16 +28,6 @@ from reprobit.classic_overlay_tokens import (
     _anchor,
     _anchor_resolver,
     _resolve_anchor,
-)
-from reprobit.classic.overlay_types import (
-    ClassicOverlayAnchorReceipt,
-    ClassicOverlayOperationReceipt,
-    ClassicOverlayOutputReceipt,
-    ClassicOverlayRenderResult,
-    _Operation,
-    _Output,
-    _ResolvedOperation,
-    _ValidatedOverlay,
 )
 from reprobit.classic_overlay_validation import (
     _COMPILE_SUFFIXES,

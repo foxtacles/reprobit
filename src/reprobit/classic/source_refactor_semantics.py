@@ -26,15 +26,15 @@ from types import MappingProxyType
 from typing import cast
 
 from reprobit.classic.overlay_declarations import _declaration_owned_identifiers
+from reprobit.classic.overlay_types import (
+    ClassicOverlayOperationReceipt,
+    ClassicOverlayOutputReceipt,
+)
 from reprobit.classic.source_proofs import (
     require_source_overlay_range_pin,
     require_target_source_refactor_identity,
     select_source_permutation_window,
     source_overlay_tokens,
-)
-from reprobit.classic.overlay_types import (
-    ClassicOverlayOperationReceipt,
-    ClassicOverlayOutputReceipt,
 )
 from reprobit.model import Digest
 from reprobit.schema import (

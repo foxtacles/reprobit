@@ -6,13 +6,13 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 
 from reprobit.artifacts import digest_bytes
+from reprobit.classic.overlay_types import _Layout
 from reprobit.classic_overlay_tokens import (
     _ANNOTATION_COMMENT_RE,
     _TOKEN_RE,
     _token_sequence_digest,
     _tokens,
 )
-from reprobit.classic.overlay_types import _Layout
 from reprobit.classic_overlay_validation import (
     _RANGE_DEPENDENCY_RE,
     _digest,

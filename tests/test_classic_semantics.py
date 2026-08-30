@@ -45,6 +45,10 @@ from reprobit.classic.overlay_declarations import (
     _DeclarationFact,
     _validate_declaration_odr,
 )
+from reprobit.classic.overlay_types import (
+    ClassicOverlayAnchorReceipt,
+    ClassicOverlayOperationReceipt,
+)
 from reprobit.classic.project_overlay import (
     _archive_semantics,
     _carrier_isolation_trace,
@@ -99,10 +103,6 @@ from reprobit.classic.source_overlay_claims import (
 )
 from reprobit.classic.source_proofs import source_overlay_tokens
 from reprobit.classic_includes import IncludeOrigin
-from reprobit.classic.overlay_types import (
-    ClassicOverlayAnchorReceipt,
-    ClassicOverlayOperationReceipt,
-)
 from reprobit.classic_project import ClassicProjectError
 from reprobit.classic_resources import (
     ResourceDependencyReceipt,

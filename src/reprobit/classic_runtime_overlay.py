@@ -13,6 +13,10 @@ from typing import TYPE_CHECKING, Literal, cast
 from reprobit.classic.compiler_epoch import (
     validate_project_overlay_compiler_epoch,
 )
+from reprobit.classic.link_topology import (
+    ClassicLinkTopologyError,
+    terminal_link_input_topology,
+)
 from reprobit.classic.project_overlay import (
     overlay_semantic_run_binding,
     prove_source_overlay_semantics,
@@ -48,10 +52,6 @@ from reprobit.classic_link_closure import (
     link_directive_closure_material,
     module_definition_material,
     parse_classic_module_definition,
-)
-from reprobit.classic.link_topology import (
-    ClassicLinkTopologyError,
-    terminal_link_input_topology,
 )
 from reprobit.classic_project import (
     ClassicProjectError,

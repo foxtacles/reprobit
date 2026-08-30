@@ -21,6 +21,10 @@ from reprobit.classic.compiler_identity import (
     Msvc420CompilerIdentity,
     issue_msvc420_compiler_identity,
 )
+from reprobit.classic.link_topology import (
+    ClassicLinkTopologyError,
+    terminal_link_input_topology,
+)
 from reprobit.classic.semantic_contracts import (
     DonorSemanticUse,
     _ClassicDonorSemanticMaterial,
@@ -36,10 +40,6 @@ from reprobit.classic_donors import (
     DonorSourceError,
     matching_candidate_constraints,
     prepare_donor_compile_request,
-)
-from reprobit.classic.link_topology import (
-    ClassicLinkTopologyError,
-    terminal_link_input_topology,
 )
 from reprobit.classic_project import (
     ClassicCandidate,

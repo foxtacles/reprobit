@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from reprobit.classic.source_overlay import _ancestor_compilers, _graph_archives
 from reprobit.classic.link_topology import terminal_link_input_topology
+from reprobit.classic.source_overlay import _ancestor_compilers, _graph_archives
 from reprobit.classic_orchestration import compiler_terminal_consumer_targets
 from reprobit.model import Digest
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole

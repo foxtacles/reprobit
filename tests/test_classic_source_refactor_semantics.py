@@ -5,6 +5,11 @@ from typing import Any
 
 import pytest
 
+from reprobit.classic.overlay_types import (
+    ClassicOverlayAnchorReceipt,
+    ClassicOverlayOperationReceipt,
+    ClassicOverlayOutputReceipt,
+)
 from reprobit.classic.source_proofs import (
     select_source_permutation_window,
     source_overlay_significant_sha256,
@@ -17,11 +22,6 @@ from reprobit.classic.source_refactor_semantics import (
 )
 from reprobit.classic_overlay_document import render_classic_overlay_declarations
 from reprobit.classic_overlay_generator import render_classic_overlay_generator
-from reprobit.classic.overlay_types import (
-    ClassicOverlayAnchorReceipt,
-    ClassicOverlayOperationReceipt,
-    ClassicOverlayOutputReceipt,
-)
 from reprobit.model import Scope
 from reprobit.schema import (
     ClassicField,
