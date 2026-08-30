@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import tomllib
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
@@ -16,7 +17,7 @@ from reprobit.migration import (
     load_legacy_manifest,
     migration_output,
 )
-from reprobit.project_loader import load_project_tree
+from reprobit.project_loader import load_project_tree, validate_project_files
 from reprobit.schema import ClassicRecipeFamily
 from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES
 
@@ -225,6 +226,46 @@ def test_convert_v2_manifest_splits_intent_and_expected_pins() -> None:
         "bin/msvcrt20.dll",
     }
     assert "source_revision" not in toolchain_lock
+
+
+def test_migration_output_excludes_replaced_v3_control_paths(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    source = project / "src/sample.cpp"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"")
+
+    manifest = _manifest()
+    manifest["translation_units"][0]["source_sha256"] = sha256(b"").hexdigest()
+    legacy = project / "tools/legacy.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(json.dumps(manifest), encoding="utf-8")
+
+    excluded = {
+        ".reprobit-state/cache/receipt.json",
+        "reprobit.toml",
+        "reprobit/build-plan.json",
+        "reprobit/interventions/existing.json",
+        "reprobit/oracles/existing.json",
+        "reprobit/producer-graph.json",
+        "reprobit/proofs/existing.json",
+        "reprobit/source-manifest.json",
+        "reprobit/toolchain.lock.json",
+    }
+    for relative in excluded | {"reprobit/README.md"}:
+        destination = project.joinpath(*PurePosixPath(relative).parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(relative, encoding="utf-8")
+
+    subprocess.run(("git", "init", "-q"), cwd=project, check=True)
+    subprocess.run(("git", "add", "."), cwd=project, check=True)
+
+    result = migration_output(legacy)
+    source_manifest = json.loads(result.files[PurePosixPath("reprobit/source-manifest.json")])
+    migrated_paths = {entry["path"] for entry in source_manifest["entries"]}
+
+    assert migrated_paths.isdisjoint(excluded)
+    assert {"src/sample.cpp", "reprobit/README.md"} <= migrated_paths
+    validate_project_files(result.files)
 
 
 @pytest.mark.parametrize(

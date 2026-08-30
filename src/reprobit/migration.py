@@ -116,6 +116,30 @@ _HOST_ABSOLUTE_ROOTS = (
 _FUNCTION_CLAIM_GENERATORS = frozenset(
     {"assert_reseat", "empty_scopes", "literal_alias", "local_ids", "noop_assign"}
 )
+_MIGRATION_CONTROL_FILES = frozenset(
+    {
+        "reprobit.toml",
+        "reprobit/build-plan.json",
+        "reprobit/producer-graph.json",
+        "reprobit/source-manifest.json",
+        "reprobit/toolchain.lock.json",
+    }
+)
+_MIGRATION_CONTROL_ROOTS = (
+    ".reprobit-state",
+    "reprobit/interventions",
+    "reprobit/oracles",
+    "reprobit/proofs",
+)
+
+
+def _is_migration_control_path(relative: str) -> bool:
+    """Keep replaced schema-v3 authority out of migrated source authority."""
+
+    folded = relative.casefold()
+    return folded in _MIGRATION_CONTROL_FILES or any(
+        folded == root or folded.startswith(root + "/") for root in _MIGRATION_CONTROL_ROOTS
+    )
 
 
 def _reject_duplicate(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -316,7 +340,11 @@ def _source_manifest(
                     value = image.get(key)
                     if isinstance(value, str):
                         forbidden.add(_relative(value, f"image {key}").casefold())
-        tracked = {item for item in tracked if item.casefold() not in forbidden}
+        tracked = {
+            item
+            for item in tracked
+            if item.casefold() not in forbidden and not _is_migration_control_path(item)
+        }
         document = build_source_manifest(source_root, tracked, complete=True)
         actual = {item.path.casefold(): item for item in document.entries}
         for relative, (declared_digest, declared_size) in declared.items():
