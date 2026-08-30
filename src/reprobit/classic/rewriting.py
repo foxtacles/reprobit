@@ -28,19 +28,21 @@ from .foundation import (
     sha256_bytes,
 )
 from .ia32 import require_declared_relocation_semantics
-from .registers import (
+from .register_bijection import (
     CODEVIEW_REGISTER_RECORD_TYPE,
-    IA32_GENERAL_REGISTER_NAMES,
     REGISTER_BIJECTION_FPO_CLOSURE,
+    _codeview_register_field,
+    _codeview_register_name,
+    apply_codeview_register_bijection,
+    apply_register_bijection,
+)
+from .register_reencoding import apply_slot_bijection
+from .register_semantics import (
+    IA32_GENERAL_REGISTER_NAMES,
     _IA32_ATOMS_OF,
     _IA32_REGISTER_NUMBERS,
     _IA32_STRUCTURAL_REGISTERS,
-    _codeview_register_field,
-    _codeview_register_name,
     _register_bijection_live_sets,
-    apply_codeview_register_bijection,
-    apply_register_bijection,
-    apply_slot_bijection,
     decode_ia32_bijection_body,
     decode_ia32_bijection_instruction,
 )

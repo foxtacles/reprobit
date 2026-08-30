@@ -37,7 +37,8 @@ import test_classic_register_bijection_full as fixture
 import reprobit.classic.coff as coff_algorithms
 import reprobit.classic.composition as composition_algorithms
 import reprobit.classic.foundation as foundation_algorithms
-import reprobit.classic.registers as register_algorithms
+import reprobit.classic.register_bijection as register_algorithms
+import reprobit.classic.register_candidates as register_candidates
 import reprobit.classic.relational as relational_algorithms
 import reprobit.coff as coff_format
 from reprobit.binary import ByteIdentityError, require
@@ -714,7 +715,7 @@ class CertificateCompositionTests(unittest.TestCase):
         """A producer proves its own step without seeing final oracle bytes."""
         seed = fixture.make_coff(body=BODY)
         record = fixture.function_record(seed, seed, self.sigma_image())
-        composed, detail = register_algorithms.produce_register_bijection_candidate(
+        composed, detail = register_candidates.produce_register_bijection_candidate(
             seed, seed, record
         )
         coff = coff_format.CoffObject(composed)

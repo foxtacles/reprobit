@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 
-import reprobit.classic.registers as register_algorithms
+import reprobit.classic.register_semantics as register_algorithms
 import reprobit.classic.scheduling as schedule_algorithms
 from reprobit.binary import ByteIdentityError
 

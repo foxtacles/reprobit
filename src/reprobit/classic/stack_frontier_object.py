@@ -13,7 +13,7 @@ from .debug import (
     parse_codeview_symbol_stream,
     parse_fpo_data,
 )
-from .registers import (
+from .register_bijection import (
     CODEVIEW_REGISTER_RECORD_TYPE,
     _codeview_register_field,
     _codeview_register_name,

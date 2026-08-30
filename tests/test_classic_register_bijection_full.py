@@ -36,7 +36,9 @@ import reprobit.classic.coff as coff_algorithms
 import reprobit.classic.composition as composition_algorithms
 import reprobit.classic.debug as debug_algorithms
 import reprobit.classic.foundation as foundation_algorithms
-import reprobit.classic.registers as register_algorithms
+import reprobit.classic.register_bijection as register_algorithms
+import reprobit.classic.register_candidates as register_candidates
+import reprobit.classic.register_semantics as register_semantics
 import reprobit.coff as coff_format
 from reprobit.binary import ByteIdentityError
 
@@ -477,7 +479,7 @@ class RegisterBijectionImageTests(unittest.TestCase):
         Here it does not, so the instruction is admitted and its EAX read and
         EDX write are modelled exactly.
         """
-        instruction = register_algorithms.decode_ia32_bijection_instruction(b"\x99", 0, "cdq")
+        instruction = register_semantics.decode_ia32_bijection_instruction(b"\x99", 0, "cdq")
         self.assertEqual(instruction["reads"], frozenset({"eax"}))
         self.assertEqual(instruction["writes"], frozenset({"edx"}))
         self.assertEqual(instruction["frozen"], frozenset({"eax", "edx"}))
@@ -560,7 +562,7 @@ class RegisterBijectionImageTests(unittest.TestCase):
     def test_decodes_the_body_to_exhaustion(self):
         # cut inside the six-byte `mov ebx, [_Nil]` at 19
         with self.assertRaises(ByteIdentityError):
-            register_algorithms.decode_ia32_bijection_body(BODY[:22], "truncated")
+            register_semantics.decode_ia32_bijection_body(BODY[:22], "truncated")
 
 
 class CodeViewRegisterMapTests(unittest.TestCase):
@@ -608,7 +610,7 @@ class RegisterBijectionCompositionTests(unittest.TestCase):
         self.function = function_record(self.seed, self.donor, self.image)
 
     def test_positive_control_produces_the_declared_candidate(self):
-        composed, detail = register_algorithms.produce_register_bijection_candidate(
+        composed, detail = register_candidates.produce_register_bijection_candidate(
             self.seed, self.donor, self.function
         )
         coff = coff_format.CoffObject(composed)
@@ -632,7 +634,7 @@ class RegisterBijectionCompositionTests(unittest.TestCase):
         wrong = bytearray(self.retail)
         wrong[10] ^= 0x08
         with self.assertRaises(TypeError):
-            register_algorithms.produce_register_bijection_candidate(
+            register_candidates.produce_register_bijection_candidate(
                 self.seed, self.donor, self.function, bytes(wrong)
             )
 
@@ -642,7 +644,7 @@ class RegisterBijectionCompositionTests(unittest.TestCase):
         primary = coff.function_section(TARGET_SYMBOL)
         donor[primary["raw_offset"] + 9] = 0xDF  # already sigma'd
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.produce_register_bijection_candidate(
+            register_candidates.produce_register_bijection_candidate(
                 self.seed, bytes(donor), self.function
             )
         self.assertIn("differs from its pin", str(caught.exception))
@@ -651,7 +653,7 @@ class RegisterBijectionCompositionTests(unittest.TestCase):
         function = copy.deepcopy(self.function)
         function["register_bijection"]["expected_rewritten_offsets"] = [4]
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.produce_register_bijection_candidate(
+            register_candidates.produce_register_bijection_candidate(
                 self.seed, self.donor, function
             )
         self.assertIn("differs from its declaration", str(caught.exception))
@@ -660,7 +662,7 @@ class RegisterBijectionCompositionTests(unittest.TestCase):
         function = copy.deepcopy(self.function)
         function["register_bijection"]["region_start"] = 0
         with self.assertRaises(ByteIdentityError):
-            register_algorithms.produce_register_bijection_candidate(
+            register_candidates.produce_register_bijection_candidate(
                 self.seed, self.donor, function
             )
 
@@ -736,7 +738,7 @@ class CallArgumentModelTests(unittest.TestCase):
             ("??3@YAXPAX@Z", frozenset()),
         ):
             self.assertEqual(
-                register_algorithms.msvc_call_argument_registers(symbol), expected, symbol
+                register_semantics.msvc_call_argument_registers(symbol), expected, symbol
             )
 
     def test_decoration_table_fails_closed(self):
@@ -753,9 +755,7 @@ class CallArgumentModelTests(unittest.TestCase):
             None,
             17,
         ):
-            self.assertIsNone(
-                register_algorithms.msvc_call_argument_registers(symbol), repr(symbol)
-            )
+            self.assertIsNone(register_semantics.msvc_call_argument_registers(symbol), repr(symbol))
 
     def test_a_cdecl_callee_lets_the_region_prove(self):
         """The control: EAX/ECX are clobbered by the call and read by nobody."""
@@ -923,10 +923,10 @@ class CallArgumentModelTests(unittest.TestCase):
             frozenset({1, 14}),
         )
         self.assertEqual(proof["region_instruction_count"], 2)
-        jump = register_algorithms.decode_ia32_bijection_instruction(body, 1, "j")
+        jump = register_semantics.decode_ia32_bijection_instruction(body, 1, "j")
         self.assertEqual(jump["flow"], "exit")
         self.assertTrue(jump["indirect"])
-        self.assertEqual(jump["reads"], frozenset(register_algorithms.IA32_GENERAL_REGISTER_NAMES))
+        self.assertEqual(jump["reads"], frozenset(register_semantics.IA32_GENERAL_REGISTER_NAMES))
         self.assertEqual(jump["writes"], frozenset())
 
 
@@ -969,7 +969,7 @@ class WidenedSemanticTableTests(unittest.TestCase):
 
     def test_a_byte_write_does_not_kill_its_parent(self):
         """`mov al, [ecx]` writes part of EAX, so EAX stays live through it."""
-        decoded = register_algorithms.decode_ia32_bijection_instruction(
+        decoded = register_semantics.decode_ia32_bijection_instruction(
             bytes.fromhex("8a01"), 0, "byte-mov"
         )
         self.assertIn("eax", decoded["reads"])
@@ -996,7 +996,7 @@ class WidenedSemanticTableTests(unittest.TestCase):
                 call_relocations(CDECL_SYMBOL),
             )
         self.assertIn("outside the register-bijection table", str(caught.exception))
-        divide = register_algorithms.decode_ia32_bijection_instruction(b"\xf7\xf1", 0, "div")
+        divide = register_semantics.decode_ia32_bijection_instruction(b"\xf7\xf1", 0, "div")
         self.assertEqual(divide["reads"], frozenset({"eax", "ecx", "edx"}))
         self.assertEqual(divide["writes"], frozenset({"eax", "edx"}))
         self.assertEqual(divide["frozen"], frozenset({"eax", "edx"}))
@@ -1032,7 +1032,7 @@ class WidenedSemanticTableTests(unittest.TestCase):
 
     def test_a_sixteen_bit_test_is_rewritable_and_does_not_kill(self):
         """`66 85 /r` numbers the same eight registers, so sigma applies."""
-        decoded = register_algorithms.decode_ia32_bijection_instruction(
+        decoded = register_semantics.decode_ia32_bijection_instruction(
             bytes.fromhex("668591d0000000"), 0, "test16"
         )
         self.assertEqual(decoded["reads"], frozenset({"ecx", "edx"}))
@@ -1051,13 +1051,13 @@ class ExternalTailJumpTests(unittest.TestCase):
         relocations = call_relocations(
             CDECL_SYMBOL, extra={17: {"width": 4, "target": OTHER_SYMBOL}}
         )
-        decoded = register_algorithms.decode_ia32_bijection_body(
+        decoded = register_semantics.decode_ia32_bijection_body(
             self.FUNCLET_BODY, "funclet", relocations
         )
         tail = decoded[-1]
         self.assertEqual(tail["flow"], "exit")
         self.assertIsNone(tail["target"])
-        self.assertEqual(tail["reads"], frozenset(register_algorithms.IA32_GENERAL_REGISTER_NAMES))
+        self.assertEqual(tail["reads"], frozenset(register_semantics.IA32_GENERAL_REGISTER_NAMES))
         _image, proof = register_algorithms.apply_register_bijection(
             self.FUNCLET_BODY,
             CALL_SIGMA,
@@ -1070,7 +1070,7 @@ class ExternalTailJumpTests(unittest.TestCase):
 
     def test_an_unrelocated_branch_off_the_body_is_still_refused(self):
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.decode_ia32_bijection_body(
+            register_semantics.decode_ia32_bijection_body(
                 self.FUNCLET_BODY, "funclet", call_relocations(CDECL_SYMBOL)
             )
         self.assertIn("does not target an instruction boundary", str(caught.exception))
@@ -1133,7 +1133,7 @@ class DelegateSelectionTests(unittest.TestCase):
             expected_xdata_rename_offsets=[],
         )
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.produce_register_bijection_candidate(seed, donor, function)
+            register_candidates.produce_register_bijection_candidate(seed, donor, function)
         self.assertIn("target closure changed", str(caught.exception))
 
     def test_refuses_a_closure_pin_no_delegate_would_accept(self):
@@ -1148,7 +1148,7 @@ class DelegateSelectionTests(unittest.TestCase):
         image = sigma_image()
         function = function_record(seed, donor, image, expected_closure=[".debug$S"])
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.produce_register_bijection_candidate(seed, donor, function)
+            register_candidates.produce_register_bijection_candidate(seed, donor, function)
         self.assertIn("target closure changed", str(caught.exception))
 
 
@@ -1173,7 +1173,7 @@ class PinnedRenameTests(unittest.TestCase):
             expected_code_rename_symbols=self.symbols,
             expected_xdata_rename_offsets=[],
         )
-        composed, detail = register_algorithms.produce_register_bijection_candidate(
+        composed, detail = register_candidates.produce_register_bijection_candidate(
             self.seed, self.donor, function
         )
         coff = coff_format.CoffObject(composed)
@@ -1189,7 +1189,7 @@ class PinnedRenameTests(unittest.TestCase):
     def test_refuses_a_rename_the_pin_does_not_declare(self):
         function = self._record(expected_code_renames=[], expected_xdata_rename_offsets=[])
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.produce_register_bijection_candidate(
+            register_candidates.produce_register_bijection_candidate(
                 self.seed, self.donor, function
             )
         self.assertIn("code rename set changed", str(caught.exception))
@@ -1205,7 +1205,7 @@ class PinnedRenameTests(unittest.TestCase):
             expected_xdata_rename_offsets=[],
         )
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.produce_register_bijection_candidate(self.seed, self.seed, function)
+            register_candidates.produce_register_bijection_candidate(self.seed, self.seed, function)
         self.assertIn("code rename set changed", str(caught.exception))
 
     def test_refuses_a_rename_whose_symbol_pair_is_wrong(self):
@@ -1218,7 +1218,7 @@ class PinnedRenameTests(unittest.TestCase):
             expected_xdata_rename_offsets=[],
         )
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.produce_register_bijection_candidate(
+            register_candidates.produce_register_bijection_candidate(
                 self.seed, self.donor, function
             )
         self.assertIn("code rename symbol pair changed", str(caught.exception))
@@ -1249,7 +1249,7 @@ class DataTailTests(unittest.TestCase):
     """A COMDAT may end in data, and the class must not decode it as code."""
 
     def test_a_pinned_code_length_stops_the_decode_at_the_data_tail(self):
-        instructions = register_algorithms.decode_ia32_bijection_body(
+        instructions = register_semantics.decode_ia32_bijection_body(
             TAIL_BODY, "tail", TAIL_RELOCATIONS, 12
         )
         self.assertEqual([item["offset"] for item in instructions], [0, 1, 7, 9, 11])
@@ -1257,30 +1257,30 @@ class DataTailTests(unittest.TestCase):
 
     def test_without_the_pin_the_data_tail_is_decoded_and_refused(self):
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.decode_ia32_bijection_body(TAIL_BODY, "tail", TAIL_RELOCATIONS)
+            register_semantics.decode_ia32_bijection_body(TAIL_BODY, "tail", TAIL_RELOCATIONS)
         self.assertIn("outside the register-bijection table", str(caught.exception))
 
     def test_refuses_code_that_falls_through_into_the_data_tail(self):
         """The tail is proved unreachable, never assumed unreachable."""
         body = bytes.fromhex("538b0d000000008b0133c040") + b"\x00" * 4
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.decode_ia32_bijection_body(body, "tail", TAIL_RELOCATIONS, 12)
+            register_semantics.decode_ia32_bijection_body(body, "tail", TAIL_RELOCATIONS, 12)
         self.assertIn("falls through into the body's data tail", str(caught.exception))
 
     def test_refuses_a_code_length_out_of_range(self):
         for length in (0, len(TAIL_BODY) + 1, -1):
             with self.assertRaises(ByteIdentityError) as caught:
-                register_algorithms.decode_ia32_bijection_body(
+                register_semantics.decode_ia32_bijection_body(
                     TAIL_BODY, "tail", TAIL_RELOCATIONS, length
                 )
             self.assertIn("code length is out of range", str(caught.exception))
         # A code length that would cut an instruction in half is refused by
         # the decode itself: the boundary must be a real one.
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.decode_ia32_bijection_body(TAIL_BODY, "tail", TAIL_RELOCATIONS, 8)
+            register_semantics.decode_ia32_bijection_body(TAIL_BODY, "tail", TAIL_RELOCATIONS, 8)
         self.assertIn("lacks ModRM", str(caught.exception))
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.decode_ia32_bijection_body(TAIL_BODY, "tail", TAIL_RELOCATIONS, 4)
+            register_semantics.decode_ia32_bijection_body(TAIL_BODY, "tail", TAIL_RELOCATIONS, 4)
         self.assertIn("truncated", str(caught.exception))
 
     def test_refuses_a_region_that_reaches_past_the_code(self):
@@ -1323,7 +1323,7 @@ class SubRegisterLivenessTests(unittest.TestCase):
             body, CALL_SIGMA, (1, 9), frozenset(range(3, 7)), "fnstsw", relocations
         )
         self.assertEqual(proof["region_instruction_count"], 2)
-        status = register_algorithms.decode_ia32_bijection_instruction(b"\xdf\xe0", 0, "fnstsw")
+        status = register_semantics.decode_ia32_bijection_instruction(b"\xdf\xe0", 0, "fnstsw")
         # At REGISTER granularity it is still only a partial write, so it
         # neither reads nor kills EAX; the kill lives in the atom set.
         self.assertEqual(status["reads"], frozenset())
@@ -1360,16 +1360,16 @@ class SubRegisterLivenessTests(unittest.TestCase):
 
     def test_the_atom_lattice_splits_only_the_byte_addressable_four(self):
         self.assertEqual(
-            sorted(register_algorithms.ia32_register_atoms(["eax"])), ["eax.h", "eax.l", "eax.u"]
+            sorted(register_semantics.ia32_register_atoms(["eax"])), ["eax.h", "eax.l", "eax.u"]
         )
-        self.assertEqual(sorted(register_algorithms.ia32_register_atoms(["esi"])), ["esi.w"])
+        self.assertEqual(sorted(register_semantics.ia32_register_atoms(["esi"])), ["esi.w"])
 
 
 class WidenedMoveExtendTests(unittest.TestCase):
     """MOVZX/MOVSX r32, r/m16 rewrite BOTH fields; the r/m8 forms are absent."""
 
     def test_movsx_r32_r16_rewrites_both_register_fields(self):
-        instruction = register_algorithms.decode_ia32_bijection_instruction(
+        instruction = register_semantics.decode_ia32_bijection_instruction(
             b"\x0f\xbf\xc1", 0, "movsx"
         )
         self.assertEqual(instruction["reads"], frozenset({"ecx"}))
@@ -1378,24 +1378,20 @@ class WidenedMoveExtendTests(unittest.TestCase):
         self.assertEqual(len(instruction["fields"]), 2)
 
     def test_a_memory_movzx_reads_only_its_address_register(self):
-        instruction = register_algorithms.decode_ia32_bijection_instruction(
+        instruction = register_semantics.decode_ia32_bijection_instruction(
             b"\x0f\xb7\x41\x02", 0, "movzx"
         )
         self.assertEqual(instruction["reads"], frozenset({"ecx"}))
         self.assertEqual(instruction["writes"], frozenset({"eax"}))
 
     def test_dec_r_m8_freezes_its_field(self):
-        instruction = register_algorithms.decode_ia32_bijection_instruction(
-            b"\xfe\xc8", 0, "dec al"
-        )
+        instruction = register_semantics.decode_ia32_bijection_instruction(b"\xfe\xc8", 0, "dec al")
         self.assertEqual(instruction["frozen"], frozenset({"eax"}))
         self.assertEqual(instruction["writes"], frozenset())
         self.assertEqual(instruction["write_atoms"], frozenset({"eax.l"}))
 
     def test_cmp_al_imm8_freezes_eax(self):
-        instruction = register_algorithms.decode_ia32_bijection_instruction(
-            b"\x3c\x01", 0, "cmp al"
-        )
+        instruction = register_semantics.decode_ia32_bijection_instruction(b"\x3c\x01", 0, "cmp al")
         self.assertEqual(instruction["reads"], frozenset({"eax"}))
         self.assertEqual(instruction["writes"], frozenset())
         self.assertEqual(instruction["frozen"], frozenset({"eax"}))
@@ -1403,7 +1399,7 @@ class WidenedMoveExtendTests(unittest.TestCase):
     def test_the_accumulator_forms_are_frozen_too(self):
         """`add eax, imm32` names EAX through no field sigma could rewrite."""
         for encoding in (b"\x05\x01\x00\x00\x00", b"\xa1\x00\x00\x00\x00", b"\xa3\x00\x00\x00\x00"):
-            instruction = register_algorithms.decode_ia32_bijection_instruction(
+            instruction = register_semantics.decode_ia32_bijection_instruction(
                 encoding, 0, "accumulator"
             )
             self.assertEqual(instruction["frozen"], frozenset({"eax"}))

@@ -30,9 +30,9 @@ from reprobit.classic.compiler_state_projection import (
     derive_msvc420_compiler_state_projection,
 )
 from reprobit.classic.debug import local_symbol_kind
-from reprobit.classic.registers import (
+from reprobit.classic.register_bijection import apply_register_bijection
+from reprobit.classic.register_semantics import (
     IA32_GENERAL_REGISTER_NAMES,
-    apply_register_bijection,
     decode_ia32_bijection_body,
 )
 from reprobit.classic.relational_projection import (

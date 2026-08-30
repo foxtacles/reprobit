@@ -8,7 +8,7 @@ from types import MappingProxyType
 from reprobit.binary import ByteIdentityError
 from reprobit.classic.compiler_identity import Msvc420CompilerIdentity
 from reprobit.classic.debug import parse_fpo_data
-from reprobit.classic.registers import (
+from reprobit.classic.register_reencoding import (
     FPO_FRAME_KIND_FPO,
     require_no_ebp_frame_derivation,
 )

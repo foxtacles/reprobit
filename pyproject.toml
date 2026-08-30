@@ -62,9 +62,12 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 ]
 "src/reprobit/classic/foundation.py" = ["B905", "E501", "UP034"]
 "src/reprobit/classic/ia32.py" = ["B905", "E501", "I001", "UP034"]
-"src/reprobit/classic/registers.py" = [
-  "B905", "E501", "F841", "I001", "RUF007", "SIM102", "UP034", "UP037",
+"src/reprobit/classic/register_bijection.py" = ["B905", "E501", "UP034"]
+"src/reprobit/classic/register_candidates.py" = ["B905", "E501", "I001", "UP034"]
+"src/reprobit/classic/register_reencoding.py" = [
+  "B905", "E501", "F841", "I001", "RUF007", "UP034", "UP037",
 ]
+"src/reprobit/classic/register_semantics.py" = ["E501", "SIM102"]
 "src/reprobit/classic/relational.py" = ["B905", "E501", "I001", "UP034", "UP037"]
 "src/reprobit/classic/rewriting.py" = [
   "B007", "B023", "B905", "E501", "F841", "I001", "RUF005", "RUF007",
@@ -127,11 +130,27 @@ disable_error_code = [
 ]
 
 [[tool.mypy.overrides]]
-module = "reprobit.classic.registers"
+module = "reprobit.classic.register_bijection"
 disable_error_code = [
-  "arg-type", "assignment", "attr-defined", "call-overload", "dict-item", "index",
-  "no-any-return", "no-untyped-def", "operator", "return-value", "type-arg", "union-attr",
-  "var-annotated",
+  "arg-type", "assignment", "attr-defined", "call-overload", "index", "no-any-return",
+  "return-value", "type-arg", "union-attr", "var-annotated",
+]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.register_candidates"
+disable_error_code = ["arg-type", "assignment", "index", "return-value", "type-arg"]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.register_reencoding"
+disable_error_code = [
+  "arg-type", "assignment", "attr-defined", "dict-item", "index", "no-any-return",
+  "no-untyped-def", "operator", "type-arg", "union-attr", "var-annotated",
+]
+
+[[tool.mypy.overrides]]
+module = "reprobit.classic.register_semantics"
+disable_error_code = [
+  "arg-type", "index", "no-untyped-def", "return-value", "type-arg", "var-annotated",
 ]
 
 [[tool.mypy.overrides]]

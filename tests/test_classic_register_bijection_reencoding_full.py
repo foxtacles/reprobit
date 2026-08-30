@@ -39,7 +39,9 @@ import reprobit.classic.coff as coff_algorithms
 import reprobit.classic.composition as composition_algorithms
 import reprobit.classic.debug as debug_algorithms
 import reprobit.classic.foundation as foundation_algorithms
-import reprobit.classic.registers as register_algorithms
+import reprobit.classic.register_candidates as register_candidates
+import reprobit.classic.register_reencoding as register_algorithms
+import reprobit.classic.register_semantics as register_semantics
 import reprobit.coff as coff_format
 from reprobit.binary import ByteIdentityError
 
@@ -499,7 +501,7 @@ class FramePointerProofTest(unittest.TestCase):
         coff = coff_format.CoffObject(coff_bytes)
         primary = coff.function_section(TARGET_SYMBOL)
         body = bytes(coff_format.coff_body(coff, primary))
-        instructions = register_algorithms.decode_ia32_bijection_body(
+        instructions = register_semantics.decode_ia32_bijection_body(
             body, "fixture", relocation_map(), None
         )
         return register_algorithms.require_frame_pointer_free_frame(
@@ -543,7 +545,7 @@ def composed_fixture(seed_body=SEED_BODY, **coff_overrides):
     seed_bytes = make_coff(body=seed_body, **coff_overrides)
     donor_bytes = make_coff(**coff_overrides)
     image, proof = apply_fixture()
-    derived, derived_detail = register_algorithms._reencoded_donor_object(
+    derived, derived_detail = register_candidates._reencoded_donor_object(
         donor_bytes, TARGET_SYMBOL, image, proof, "derived"
     )
     return seed_bytes, donor_bytes, image, proof, derived, derived_detail
@@ -655,7 +657,7 @@ class ComposerTest(unittest.TestCase):
         self.record = function_record(self.seed, self.donor, self.image, self.proof, self.detail)
 
     def _compose(self, record=None):
-        return register_algorithms.produce_register_bijection_reencoding_candidate(
+        return register_candidates.produce_register_bijection_reencoding_candidate(
             self.seed, self.donor, record or self.record
         )
 
@@ -684,7 +686,7 @@ class ComposerTest(unittest.TestCase):
         wrong = bytearray(self.retail)
         wrong[22] ^= 0xFF
         with self.assertRaises(TypeError):
-            register_algorithms.produce_register_bijection_reencoding_candidate(
+            register_candidates.produce_register_bijection_reencoding_candidate(
                 self.seed, self.donor, self.record, bytes(wrong)
             )
 
@@ -707,7 +709,7 @@ class ComposerTest(unittest.TestCase):
         record = function_record(seed, donor, image, proof, detail)
         record["register_bijection_reencoding"]["expected_fpo_record"]["cbFrame"] = 1
         with self.assertRaises(ByteIdentityError) as caught:
-            register_algorithms.produce_register_bijection_reencoding_candidate(seed, donor, record)
+            register_candidates.produce_register_bijection_reencoding_candidate(seed, donor, record)
         self.assertIn("FRAME_FPO", str(caught.exception))
 
     def test_refuses_a_wrong_image_pin(self):
@@ -827,7 +829,7 @@ class FramePointerPrecisionTest(unittest.TestCase):
         coff = coff_format.CoffObject(make_coff(body=body))
         primary = coff.function_section(TARGET_SYMBOL)
         raw = bytes(coff_format.coff_body(coff, primary))
-        instructions = register_algorithms.decode_ia32_bijection_body(
+        instructions = register_semantics.decode_ia32_bijection_body(
             raw, "fixture", relocation_map(), None
         )
         return register_algorithms.require_frame_pointer_free_frame(

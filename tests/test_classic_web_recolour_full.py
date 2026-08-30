@@ -40,7 +40,8 @@ import reprobit.classic.coff as coff_algorithms
 import reprobit.classic.composition as composition_algorithms
 import reprobit.classic.debug as debug_algorithms
 import reprobit.classic.foundation as foundation_algorithms
-import reprobit.classic.registers as register_algorithms
+import reprobit.classic.register_bijection as register_algorithms
+import reprobit.classic.register_semantics as register_semantics
 import reprobit.classic.scheduling as schedule_algorithms
 import reprobit.coff as coff_format
 from reprobit.binary import ByteIdentityError
@@ -223,7 +224,7 @@ class CoalesceObligationTests(unittest.TestCase):
         # the reordering is a topological order of the window's own DAG: the
         # `lea` and the `push` share no register, no flag and no memory cell
         decoded = [
-            register_algorithms.decode_ia32_bijection_instruction(BODY, offset, "decode")
+            register_semantics.decode_ia32_bijection_instruction(BODY, offset, "decode")
             for offset in (12, 18)
         ]
         _, edges = schedule_algorithms.ia32_schedule_dependence_edges(decoded, "dag")

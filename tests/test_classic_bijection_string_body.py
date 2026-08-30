@@ -24,7 +24,8 @@ from __future__ import annotations
 
 import unittest
 
-import reprobit.classic.registers as register_algorithms
+import reprobit.classic.register_bijection as register_algorithms
+import reprobit.classic.register_semantics as register_semantics
 import reprobit.classic.scheduling as schedule_algorithms
 from reprobit.binary import ByteIdentityError
 
@@ -87,9 +88,9 @@ class RepeatedStringBodyTests(unittest.TestCase):
 
     def test_the_bare_string_opcode_is_still_outside_the_one_byte_table(self):
         """The fix must not have widened the table it looks into."""
-        self.assertIsNone(register_algorithms._bijection_form_for(0xA5))
-        self.assertIsNone(register_algorithms._bijection_form_for(0xA4))
-        self.assertIn((0xF3, 0xA5), register_algorithms.IA32_BIJECTION_REPEATED_STRING_FORMS)
+        self.assertIsNone(register_semantics._bijection_form_for(0xA5))
+        self.assertIsNone(register_semantics._bijection_form_for(0xA4))
+        self.assertIn((0xF3, 0xA5), register_semantics.IA32_BIJECTION_REPEATED_STRING_FORMS)
 
 
 if __name__ == "__main__":  # pragma: no cover

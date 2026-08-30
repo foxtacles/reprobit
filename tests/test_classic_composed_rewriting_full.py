@@ -51,7 +51,8 @@ import test_classic_instruction_schedule_full as fixture
 import reprobit.classic.coff as coff_algorithms
 import reprobit.classic.composition as composition_algorithms
 import reprobit.classic.foundation as foundation_algorithms
-import reprobit.classic.registers as register_algorithms
+import reprobit.classic.register_bijection as register_algorithms
+import reprobit.classic.register_semantics as register_semantics
 import reprobit.classic.relational as relational_algorithms
 import reprobit.classic.rewriting as rewriting_algorithms
 import reprobit.classic.scheduling as schedule_algorithms
@@ -148,7 +149,7 @@ def composed_spec(**overrides):
         "register_bijections": [bijection_declaration()],
         "relational_sites": [site_declaration()],
         "expected_instruction_count": len(
-            register_algorithms.decode_ia32_bijection_body(IMAGE, "fixture", {})
+            register_semantics.decode_ia32_bijection_body(IMAGE, "fixture", {})
         ),
         "expected_changed_offsets": sorted(
             index for index in range(SIZE) if BODY[index] != IMAGE[index]
@@ -457,7 +458,7 @@ class CompositionEndToEndTests(unittest.TestCase):
             "expected_changed_offsets"
         ]
         record["composed_rewriting"]["expected_instruction_count"] = len(
-            register_algorithms.decode_ia32_bijection_body(SECOND_IMAGE, "fixture", {})
+            register_semantics.decode_ia32_bijection_body(SECOND_IMAGE, "fixture", {})
         )
         with self.assertRaises(ByteIdentityError) as raised:
             rewriting_algorithms.produce_composed_rewriting_candidate(seed, donor, record)

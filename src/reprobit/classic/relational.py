@@ -32,7 +32,7 @@ from .foundation import (
     sha256_bytes,
 )
 from .ia32 import require_declared_relocation_semantics
-from .registers import _ia32_backward_liveness, decode_ia32_bijection_instruction
+from .register_semantics import _ia32_backward_liveness, decode_ia32_bijection_instruction
 
 """Classic compiler algorithms: relational."""
 RELATIONAL_FORM_CLASS = "retail_exact_relational_form"

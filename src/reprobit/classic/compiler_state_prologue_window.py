@@ -8,7 +8,7 @@ from itertools import combinations
 from typing import Any, TypedDict, cast
 
 from reprobit.binary import ByteIdentityError
-from reprobit.classic.registers import IA32_GENERAL_REGISTER_NAMES
+from reprobit.classic.register_semantics import IA32_GENERAL_REGISTER_NAMES
 from reprobit.classic.scheduling import (
     ia32_esp_relative_displacement,
     ia32_esp_used_only_as_a_base,

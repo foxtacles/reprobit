@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError
-from reprobit.classic.registers import IA32_GENERAL_REGISTER_NAMES
+from reprobit.classic.register_semantics import IA32_GENERAL_REGISTER_NAMES
 from reprobit.classic.scheduling import (
     ia32_schedule_body_walk,
     ia32_schedule_dependence_edges,

@@ -11,7 +11,7 @@ import pytest
 import reprobit.classic.composition as composition_algorithms
 import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.ia32 as ia32_algorithms
-import reprobit.classic.registers as register_algorithms
+import reprobit.classic.register_candidates as register_algorithms
 import reprobit.classic.relational as relational_algorithms
 import reprobit.classic.rewriting as rewriting_algorithms
 import reprobit.classic.scheduling as schedule_algorithms
@@ -35,6 +35,11 @@ CANDIDATE_MODULES = (
     rewriting_algorithms,
     schedule_algorithms,
 )
+
+
+def test_register_algorithms_have_no_compatibility_facade() -> None:
+    package = Path(inspect.getfile(foundation_algorithms)).parent
+    assert not (package / "registers.py").exists()
 
 
 def test_clean_candidate_entry_points_have_no_oracle_payload_parameter() -> None:

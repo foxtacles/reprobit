@@ -32,25 +32,26 @@ from .foundation import (
     sha256_bytes,
 )
 from .ia32 import require_declared_relocation_semantics
-from .registers import (
+from .register_bijection import (
     CODEVIEW_REGISTER_RECORD_TYPE,
     CODEVIEW_X86_REGISTER_NUMBERS,
-    FPO_FRAME_KIND_FPO,
+    _codeview_register_field,
+    _codeview_register_name,
+)
+from .register_reencoding import FPO_FRAME_KIND_FPO, require_frame_pointer_free_frame
+from .register_semantics import (
     IA32_GENERAL_REGISTER_NAMES,
     _IA32_INERT_SEGMENT_PREFIXES,
     _IA32_OPERAND_SIZE_PREFIX,
     _IA32_REGISTER_NUMBERS,
     _IA32_STRUCTURAL_REGISTERS,
     _bijection_form_for,
-    _codeview_register_field,
-    _codeview_register_name,
     _ia32_atom_registers,
     _ia32_backward_liveness,
     _ia32_live_out,
     decode_ia32_bijection_body,
     decode_ia32_bijection_instruction,
     ia32_register_atoms,
-    require_frame_pointer_free_frame,
 )
 from .relational import relational_form_external_entries
 from .stack_frontier_object import derive_private_stack_object_boundary

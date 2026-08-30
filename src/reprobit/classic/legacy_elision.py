@@ -27,13 +27,15 @@ from .coff import (
 )
 from .composition import compose_same_slot_resize, instruction_mosaic_metadata_sha256
 from .foundation import sha256_bytes
-from .registers import (
+from .register_candidates import _reencoded_donor_object
+from .register_reencoding import (
+    REGISTER_BIJECTION_REENCODING_FIXPOINT_ROUNDS,
+    _reencoding_branch_width,
+)
+from .register_semantics import (
     _IA32_ATOMS_OF,
     _IA32_REGISTER_NUMBERS,
     _IA32_STRUCTURAL_REGISTERS,
-    REGISTER_BIJECTION_REENCODING_FIXPOINT_ROUNDS,
-    _reencoded_donor_object,
-    _reencoding_branch_width,
     _register_bijection_live_sets,
     decode_ia32_bijection_body,
 )

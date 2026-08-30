@@ -10,7 +10,7 @@ from reprobit.classic.compiler_identity import (
     MSVC420_WIN32_I386_TARGET,
     Msvc420CompilerIdentity,
 )
-from reprobit.classic.registers import require_no_ebp_frame_derivation
+from reprobit.classic.register_reencoding import require_no_ebp_frame_derivation
 from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.model import Digest
 

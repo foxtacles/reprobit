@@ -41,7 +41,7 @@ import unittest
 import reprobit.classic.coff as coff_algorithms
 import reprobit.classic.composition as composition_algorithms
 import reprobit.classic.foundation as foundation_algorithms
-import reprobit.classic.registers as register_algorithms
+import reprobit.classic.register_semantics as register_algorithms
 import reprobit.classic.scheduling as schedule_algorithms
 import reprobit.coff as coff_format
 from reprobit.binary import ByteIdentityError

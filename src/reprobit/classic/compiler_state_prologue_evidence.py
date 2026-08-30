@@ -12,10 +12,8 @@ from reprobit.classic.debug import (
     parse_codeview_symbol_stream,
     parse_fpo_data,
 )
-from reprobit.classic.registers import (
-    FPO_FRAME_KIND_FPO,
-    IA32_GENERAL_REGISTER_NAMES,
-)
+from reprobit.classic.register_reencoding import FPO_FRAME_KIND_FPO
+from reprobit.classic.register_semantics import IA32_GENERAL_REGISTER_NAMES
 from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.model import Digest
 

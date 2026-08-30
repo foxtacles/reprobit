@@ -2,6 +2,9 @@
 
 Algorithms live in focused modules such as :mod:`reprobit.classic.coff`,
 :mod:`reprobit.classic.composition`, and :mod:`reprobit.classic.scheduling`.
-Import the module that owns the operation instead of importing symbols from
-this package.
+Register work is split between :mod:`reprobit.classic.register_semantics`,
+:mod:`reprobit.classic.register_bijection`,
+:mod:`reprobit.classic.register_reencoding`, and
+:mod:`reprobit.classic.register_candidates`. Import the module that owns the
+operation instead of importing symbols from this package.
 """

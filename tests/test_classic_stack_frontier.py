@@ -10,7 +10,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-import reprobit.classic.registers as register_algorithms
+import reprobit.classic.register_semantics as register_algorithms
 import reprobit.classic.scheduling as schedule_algorithms
 import reprobit.classic.stack_frontier_balance as frontier_balance
 from reprobit.binary import ByteIdentityError

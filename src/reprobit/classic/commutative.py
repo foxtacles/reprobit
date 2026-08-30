@@ -8,7 +8,7 @@ from typing import Any, cast
 from reprobit.binary import ByteIdentityError, require
 
 from .foundation import require_payload_free_declaration
-from .registers import decode_ia32_bijection_body
+from .register_semantics import decode_ia32_bijection_body
 from .relational import ia32_relational_flow_walk
 
 COMMUTATIVE_OPERAND_FORM_KIND = "commutative_operand_form_v1"

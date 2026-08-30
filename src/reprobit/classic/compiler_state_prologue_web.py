@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from typing import Any, TypedDict, cast
 
 from reprobit.binary import ByteIdentityError
-from reprobit.classic.registers import IA32_GENERAL_REGISTER_NAMES, ia32_register_atoms
+from reprobit.classic.register_semantics import IA32_GENERAL_REGISTER_NAMES, ia32_register_atoms
 from reprobit.classic.scheduling import ia32_esp_relative_displacement, ia32_web_control_flow
 from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.model import Digest

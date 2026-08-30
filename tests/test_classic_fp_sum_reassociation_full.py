@@ -37,7 +37,7 @@ import test_classic_instruction_schedule_full as fixture
 
 import reprobit.classic.floating as floating_algorithms
 import reprobit.classic.foundation as foundation_algorithms
-import reprobit.classic.registers as register_algorithms
+import reprobit.classic.register_semantics as register_algorithms
 import reprobit.classic.rewriting as rewriting_algorithms
 import reprobit.coff as coff_format
 from reprobit.binary import ByteIdentityError

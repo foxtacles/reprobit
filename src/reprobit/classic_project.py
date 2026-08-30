@@ -22,7 +22,7 @@ import reprobit.classic.pe_imports as pe_imports
 import reprobit.classic.pe_metadata as pe_metadata
 import reprobit.classic.pe_rdata as pe_rdata
 import reprobit.classic.pe_text as pe_text
-import reprobit.classic.registers as registers
+import reprobit.classic.register_candidates as register_candidates
 import reprobit.classic.rewriting as rewriting
 import reprobit.classic.scheduling as scheduling
 from reprobit.classic.compiler_identity import Msvc420CompilerIdentity
@@ -277,7 +277,9 @@ class ClassicFamilyDispatcher:
                     primary_donor_id=intervention.dependencies[0],
                 )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION:
-            output, proof = registers.produce_register_bijection_candidate(seed, donor, function)
+            output, proof = register_candidates.produce_register_bijection_candidate(
+                seed, donor, function
+            )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_SOURCE_EQUAL_BODY:
             output, proof = composition.produce_source_equal_body_candidate(
                 seed,
@@ -302,7 +304,7 @@ class ClassicFamilyDispatcher:
                 function,
             )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION_REENCODING:
-            output, proof = registers.produce_register_bijection_reencoding_candidate(
+            output, proof = register_candidates.produce_register_bijection_reencoding_candidate(
                 seed, donor, function
             )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_SAME_TU_INSTRUCTION_HYBRID_RESIZE:
