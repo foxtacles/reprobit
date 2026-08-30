@@ -609,6 +609,18 @@ def test_windows_extended_drive_spelling_keeps_reference_in_its_seat() -> None:
             Path(r"\\?\D:\run\outside\unit.pdb"),
             Path(r"D:\run\build"),
         )
+    assert producer_graph._resolved_reference_parts(
+        Path(r"\\?\UNC\server\share\build\obj\unit.pdb"),
+        Path(r"\\server\share\build"),
+    ) == ("obj", "unit.pdb")
+
+
+def test_windows_unknown_extended_namespace_is_not_a_graph_seat() -> None:
+    with pytest.raises(ValueError, match="unsupported Windows device namespace"):
+        producer_graph._resolved_reference_parts(
+            Path(r"\\?\GLOBALROOT\Device\HarddiskVolume1\build\unit.pdb"),
+            Path(r"\\?\GLOBALROOT\Device\HarddiskVolume1\build"),
+        )
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows path resolution")

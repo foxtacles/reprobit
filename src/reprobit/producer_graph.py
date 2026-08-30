@@ -783,25 +783,21 @@ def _without_windows_extended_prefix(value: str) -> PureWindowsPath:
         and value[5:7] == ":\\"
     ):
         value = value[4:]
+    elif folded.startswith("\\\\?\\"):
+        raise ValueError("unsupported Windows device namespace")
     return PureWindowsPath(value)
 
 
 def _resolved_reference_parts(path: Path, root: Path) -> tuple[str, ...]:
     """Return a physically resolved path relative to its resolved seat."""
 
-    try:
-        return path.relative_to(root).parts
-    except ValueError:
-        path_text = os.fspath(path)
-        root_text = os.fspath(root)
-        if not any(
-            value.casefold().startswith(("\\\\?\\unc\\", "\\\\?\\"))
-            for value in (path_text, root_text)
-        ):
-            raise
+    path_text = os.fspath(path)
+    root_text = os.fspath(root)
+    if any(value.casefold().startswith("\\\\?\\") for value in (path_text, root_text)):
         windows_path = _without_windows_extended_prefix(path_text)
         windows_root = _without_windows_extended_prefix(root_text)
         return windows_path.relative_to(windows_root).parts
+    return path.relative_to(root).parts
 
 
 def materialize_reference(
