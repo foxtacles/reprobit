@@ -21,6 +21,7 @@ import reprobit.classic_evidence as classic_evidence
 import reprobit.classic_execution_records as classic_execution_records
 import reprobit.classic_includes as classic_includes
 import reprobit.classic_orchestration as classic_orchestration
+import reprobit.classic_publication as classic_publication
 import reprobit.classic_runtime as classic_runtime
 import reprobit.classic_runtime_donor as classic_runtime_donor
 import reprobit.classic_runtime_environment as classic_runtime_environment
@@ -82,6 +83,7 @@ from reprobit.process import (
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole
 from reprobit.schema import (
     BuildPlanDocument,
+    ClassicDebugCompanionPaths,
     ClassicField,
     ClassicProofReceipt,
     ClassicRecipeFamily,
@@ -112,6 +114,7 @@ from reprobit.sealed_namespace import (
     SealedNamespaceLease,
     SealedNamespaceSnapshot,
 )
+from reprobit.secure_path_contracts import SecurePathError
 from reprobit.secure_paths import atomic_publish_relative
 from reprobit.toolchains import ClassicMSVCToolchain
 
@@ -2528,7 +2531,15 @@ def _analysis_link_executor(
     producer._progress = classic_runtime_producer.ClassicProgressReporter(2, None)
     executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
     executor.producer = producer
-    executor.analysis_pdb_paths = MappingProxyType({"program": "state/program.PDB"})
+    executor.debug_companion_paths = MappingProxyType(
+        {
+            "program": ClassicDebugCompanionPaths(
+                "program",
+                "state/reprobit-debug/program.exe",
+                "state/reprobit-debug/program.PDB",
+            )
+        }
+    )
     executor._progress = producer._progress
     return executor, producer, target, node, project_root, drive_root
 
@@ -2655,22 +2666,281 @@ def test_analysis_link_stages_private_pair_without_publishing(
         return ProcessResult(tuple(argv), 0, b"linked", 1, 0.01), spec
 
     monkeypatch.setattr(classic_runtime_producer, "_run", fake_run)
+    monkeypatch.setattr(
+        classic_runtime,
+        "stabilize_msvc42_debug_companion",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            image=b"stable analysis image",
+            pdb=b"stable analysis pdb",
+            audit=SimpleNamespace(),
+        ),
+    )
     pending = executor._run_analysis_link(
         cast(ProcessSupervisor, object()),
         target,
         node,
+        b"certified exact image",
         CancellationToken(),
     )
 
     assert captured and captured[0][-1] == "/DEBUG"
     assert exact_snapshot.path.read_bytes() == b"certified exact image"
     assert target.output.read_bytes() == b"exact raw image"
-    assert pending.logical_path == "state/program.PDB"
+    assert pending.logical_image_path == "state/reprobit-debug/program.exe"
+    assert pending.logical_pdb_path == "state/reprobit-debug/program.PDB"
     assert pending.execution.pdb.read_bytes() == b"analysis pdb"
     assert pending.execution.image != target.output
     assert pending.link_receipt.step_id == "analysis-link.program"
-    assert not (project_root / "state/program.PDB").exists()
+    assert not (project_root / "state/reprobit-debug/program.exe").exists()
+    assert not (project_root / "state/reprobit-debug/program.PDB").exists()
     assert executor._progress.completed == 1
+
+
+def _cold_debug_publication_fixture(
+    tmp_path: Path,
+) -> tuple[
+    classic_runtime.ClassicProducerGraphBuildExecutor,
+    classic_runtime._ClassicPendingPublication,
+    set[Path],
+    list[StepExecutionReceipt],
+    dict[str, bytes],
+]:
+    project_root = tmp_path / "publication-project"
+    project_root.mkdir()
+    (project_root / "state").mkdir()
+    target = classic_runtime_graph.ClassicProducerTarget(
+        target_id="program",
+        build_target="program",
+        output=tmp_path / "private" / "program.exe",
+        pdb=None,
+        link_node_id="linker.program.0000",
+    )
+    payloads = {
+        "build/program.exe": b"certified exact image",
+        "build/reprobit-debug/program.exe": b"stable debug image",
+        "build/reprobit-debug/program.PDB": b"stable debug pdb",
+    }
+    raw_image = b"raw debug image"
+    raw_pdb = b"raw debug pdb"
+    audit = SimpleNamespace(
+        policy_version="msvc42-debug-pair-v1",
+        certified_image_sha256=sha256(payloads["build/program.exe"]).hexdigest(),
+        image_metadata_output_sha256=sha256(
+            payloads["build/reprobit-debug/program.exe"]
+        ).hexdigest(),
+        image_debug=SimpleNamespace(
+            raw_sha256=sha256(raw_image).hexdigest(),
+            size=len(raw_image),
+            changed_bytes=3,
+        ),
+        pdb=SimpleNamespace(
+            raw_sha256=sha256(raw_pdb).hexdigest(),
+            size=len(raw_pdb),
+            changed_bytes=2,
+            output_sha256=sha256(
+                payloads["build/reprobit-debug/program.PDB"]
+            ).hexdigest(),
+        ),
+    )
+    stabilized = cast(
+        classic_runtime.StabilizedMsvc42DebugCompanion,
+        SimpleNamespace(
+            image=payloads["build/reprobit-debug/program.exe"],
+            pdb=payloads["build/reprobit-debug/program.PDB"],
+            audit=audit,
+        ),
+    )
+    link_receipt = classic_runtime_receipts._internal_step(
+        "analysis-link.program",
+        {"linked": "program"},
+        0.01,
+    )
+    pending_image = classic_runtime._ClassicPendingImage(
+        target=target,
+        logical_path="build/program.exe",
+        payload=payloads["build/program.exe"],
+        witnesses=(),
+        raw_digest=Digest.from_bytes(b"raw exact image"),
+        elapsed_seconds=0.02,
+    )
+    pending_companion = classic_runtime._ClassicPendingDebugCompanion(
+        target=target,
+        logical_image_path="build/reprobit-debug/program.exe",
+        logical_pdb_path="build/reprobit-debug/program.PDB",
+        execution=cast(classic_runtime_producer.ClassicAnalysisLinkExecution, object()),
+        link_receipt=link_receipt,
+        stabilized=stabilized,
+        stabilization_elapsed_seconds=0.03,
+    )
+    mode = 0o644 if os.name == "posix" else None
+    pending = classic_runtime._ClassicPendingPublication(
+        images=(pending_image,),
+        debug_companions=(pending_companion,),
+        physical_graph_outputs=frozenset(),
+        requests=(
+            classic_publication.ClassicPublicationRequest(
+                owner_id="program",
+                kind="target",
+                producer_step="publish.program",
+                relative="build/program.exe",
+                payload=payloads["build/program.exe"],
+                mode=mode,
+            ),
+            classic_publication.ClassicPublicationRequest(
+                owner_id="program",
+                kind="debug companion image",
+                producer_step="publish-analysis.program",
+                relative="build/reprobit-debug/program.exe",
+                payload=payloads["build/reprobit-debug/program.exe"],
+                mode=mode,
+            ),
+            classic_publication.ClassicPublicationRequest(
+                owner_id="program",
+                kind="debug companion PDB",
+                producer_step="publish-analysis.program",
+                relative="build/reprobit-debug/program.PDB",
+                payload=payloads["build/reprobit-debug/program.PDB"],
+                mode=mode,
+            ),
+        ),
+    )
+    executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor.project_root = project_root
+    executor.bundle = SimpleNamespace(
+        spec=SimpleNamespace(
+            state_dir="state",
+            targets=(
+                SimpleNamespace(id="program", artifact="build/program.exe"),
+            ),
+        )
+    )
+    executor.role_tool_ids = MappingProxyType({ProducerRole.LINKER: "linker"})
+    executor._progress = classic_runtime_producer.ClassicProgressReporter(3, None)
+    executor.producer = SimpleNamespace(
+        producer_reads=lambda: (),
+        compiler_namespaces=lambda: {},
+    )
+    executor.donors = SimpleNamespace(
+        producer_reads=lambda: (),
+        donor_outputs=lambda: (),
+        object_transforms=lambda: (),
+    )
+    executor.overlay = SimpleNamespace(captured_compiler_outputs=())
+    executor.record = None
+    expected = {(project_root / "build/program.exe").resolve(strict=False)}
+    return executor, pending, expected, [link_receipt], payloads
+
+
+def test_cold_debug_pair_publication_binds_both_members_without_certifying_them(
+    tmp_path: Path,
+) -> None:
+    executor, pending, expected, steps, payloads = _cold_debug_publication_fixture(tmp_path)
+
+    receipt = executor._publish_atomically(
+        pending,
+        expected=expected,
+        inputs=(),
+        steps=steps,
+        witnesses=[],
+        output_steps={},
+    )
+
+    project_root = executor.project_root
+    assert {
+        path: (project_root / path).read_bytes()
+        for path in payloads
+    } == payloads
+    assert receipt.cold
+    assert {item.step_id for item in receipt.steps} == {
+        "analysis-link.program",
+        "publish.program",
+        "publish-analysis.program",
+    }
+    pair_outputs = {
+        item.path.relative_to(project_root).as_posix(): item.producer_step
+        for item in receipt.outputs
+        if "reprobit-debug" in item.path.parts
+    }
+    assert pair_outputs == {
+        "build/reprobit-debug/program.exe": "publish-analysis.program",
+        "build/reprobit-debug/program.PDB": "publish-analysis.program",
+    }
+    assert executor.record is not None
+    assert tuple(item.target_id for item in executor.record.images) == ("program",)
+    assert tuple(item.target_id for item in executor.record.debug_companions) == (
+        "program",
+    )
+    companion = executor.record.debug_companions[0]
+    assert companion.image_logical_path == "build/reprobit-debug/program.exe"
+    assert companion.pdb_logical_path == "build/reprobit-debug/program.PDB"
+    assert companion.audit is pending.debug_companions[0].stabilized.audit
+    assert next(
+        item for item in receipt.steps if item.step_id == "publish-analysis.program"
+    ).duration_seconds == pytest.approx(0.03)
+    classic_runtime._reseal_published_targets(
+        executor.bundle,
+        project_root,
+        executor.record,
+    )
+
+
+def test_cold_debug_pair_second_member_failure_rolls_back_exact_and_companion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor, pending, expected, steps, payloads = _cold_debug_publication_fixture(tmp_path)
+    project_root = executor.project_root
+    originals = {
+        "build/program.exe": b"prior exact image",
+        "build/reprobit-debug/program.exe": b"prior debug image",
+        "build/reprobit-debug/program.PDB": b"prior debug pdb",
+    }
+    for relative, payload in originals.items():
+        destination = project_root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    original_publish = classic_publication.atomic_publish_relative_if_current
+
+    def fail_second_member(
+        project: Path,
+        relative: str,
+        payload: bytes,
+        *,
+        expected: object,
+        **publication_options: object,
+    ) -> object:
+        if relative == "build/reprobit-debug/program.PDB":
+            raise SecurePathError("injected cold debug PDB publication failure")
+        return original_publish(  # type: ignore[arg-type]
+            project,
+            relative,
+            payload,
+            expected=expected,
+            **publication_options,  # type: ignore[arg-type]
+        )
+
+    monkeypatch.setattr(
+        classic_publication,
+        "atomic_publish_relative_if_current",
+        fail_second_member,
+    )
+    with pytest.raises(ClassicProjectError, match="could not be published safely"):
+        executor._publish_atomically(
+            pending,
+            expected=expected,
+            inputs=(),
+            steps=steps,
+            witnesses=[],
+            output_steps={},
+        )
+
+    assert {
+        relative: (project_root / relative).read_bytes()
+        for relative in originals
+    } == originals
+    assert executor.record is None
+    assert [item.step_id for item in steps] == ["analysis-link.program"]
+    assert payloads != originals
 
 
 def test_analysis_link_rejects_mutation_of_exact_build_outputs(
@@ -2722,6 +2992,7 @@ def test_analysis_link_rejects_mutation_of_exact_build_outputs(
             cast(ProcessSupervisor, object()),
             target,
             node,
+            b"certified exact image",
             CancellationToken(),
         )
 

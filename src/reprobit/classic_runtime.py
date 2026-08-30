@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
+from reprobit.binary import ByteIdentityError
 from reprobit.build import BuildPlan
 from reprobit.classic.semantic_contracts import (
     revalidate_classic_validator_implementation,
@@ -23,8 +24,8 @@ from reprobit.classic_evidence import (
 )
 from reprobit.classic_execution_records import (
     ClassicActiveCompilerEpoch,
+    ClassicProducedDebugCompanion,
     ClassicProducedImage,
-    ClassicProducedPdb,
     ClassicProducerGraphExecutionRecord,
     ClassicRuntimeEvidenceInputs,
 )
@@ -65,6 +66,10 @@ from reprobit.execution import (
     StepExecutionReceipt,
 )
 from reprobit.model import Digest
+from reprobit.msvc42_debug_companion import (
+    StabilizedMsvc42DebugCompanion,
+    stabilize_msvc42_debug_companion,
+)
 from reprobit.process import (
     CancellationToken,
     ProcessSupervisor,
@@ -77,7 +82,7 @@ from reprobit.producer_graph import (
 from reprobit.schema import (
     ClassicRecipeIntervention,
     ProjectBundle,
-    classic_analysis_pdb_paths,
+    classic_debug_companion_paths,
 )
 from reprobit.secure_path_contracts import SecurePathError
 from reprobit.secure_paths import reseal_relative_file
@@ -113,13 +118,16 @@ class _ClassicPendingImage:
 
 
 @dataclass(frozen=True, slots=True)
-class _ClassicPendingPdb:
-    """Validated private diagnostic image/PDB pair awaiting PDB publication."""
+class _ClassicPendingDebugCompanion:
+    """Validated private diagnostic pair awaiting canonical publication."""
 
     target: ClassicProducerTarget
-    logical_path: str
+    logical_image_path: str
+    logical_pdb_path: str
     execution: ClassicAnalysisLinkExecution
     link_receipt: StepExecutionReceipt
+    stabilized: StabilizedMsvc42DebugCompanion
+    stabilization_elapsed_seconds: float
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +146,7 @@ class _ClassicPendingPublication:
     """Validated private outputs awaiting one atomic public commit."""
 
     images: tuple[_ClassicPendingImage, ...]
-    pdbs: tuple[_ClassicPendingPdb, ...]
+    debug_companions: tuple[_ClassicPendingDebugCompanion, ...]
     physical_graph_outputs: frozenset[Path]
     requests: tuple[ClassicPublicationRequest, ...]
 
@@ -166,22 +174,25 @@ def _reseal_published_targets(
                 f"published target {image.target_id!r} changed before report commit"
             ) from exc
     target_ids = {image.target_id for image in record.images}
-    pdb_ids = [pdb.target_id for pdb in record.analysis_pdbs]
-    if pdb_ids and (len(pdb_ids) != len(set(pdb_ids)) or set(pdb_ids) != target_ids):
+    companion_ids = [item.target_id for item in record.debug_companions]
+    if companion_ids and (
+        len(companion_ids) != len(set(companion_ids)) or set(companion_ids) != target_ids
+    ):
         raise ClassicProjectError(
-            "published analysis PDB set differs from the certified target set"
+            "published debug-companion set differs from the certified target set"
         )
-    for pdb in record.analysis_pdbs:
-        try:
-            reseal_relative_file(
-                project_root,
-                pdb.logical_path,
-                expected=pdb.final_snapshot,
-            )
-        except SecurePathError as exc:
-            raise ClassicProjectError(
-                f"published analysis PDB {pdb.target_id!r} changed before report commit"
-            ) from exc
+    for companion in record.debug_companions:
+        for kind, relative, snapshot in (
+            ("image", companion.image_logical_path, companion.image_snapshot),
+            ("PDB", companion.pdb_logical_path, companion.pdb_snapshot),
+        ):
+            try:
+                reseal_relative_file(project_root, relative, expected=snapshot)
+            except SecurePathError as exc:
+                raise ClassicProjectError(
+                    f"published debug-companion {kind} {companion.target_id!r} "
+                    "changed before report commit"
+                ) from exc
 
 
 class ClassicProducerGraphRuntimeEvidenceProvider:
@@ -273,14 +284,19 @@ class ClassicProducerGraphBuildExecutor:
         if self.analysis_link_options not in {(), ("/DEBUG",)}:
             raise ClassicProjectError("classic analysis-link options are not closed")
         try:
-            self.analysis_pdb_paths = MappingProxyType(dict(classic_analysis_pdb_paths(bundle)))
+            self.debug_companion_paths = MappingProxyType(
+                {
+                    item.target_id: item
+                    for item in classic_debug_companion_paths(bundle)
+                }
+            )
         except ValueError as exc:
             raise ClassicProjectError(
-                f"classic analysis PDB output policy is malformed: {exc}"
+                f"classic debug-companion output policy is malformed: {exc}"
             ) from exc
-        if bool(self.analysis_pdb_paths) != bool(self.analysis_link_options):
+        if bool(self.debug_companion_paths) != bool(self.analysis_link_options):
             raise ClassicProjectError(
-                "classic analysis PDB output set differs from its link policy"
+                "classic debug-companion output set differs from its link policy"
             )
         self.producer = producer
         self.overlay = overlay
@@ -371,8 +387,9 @@ class ClassicProducerGraphBuildExecutor:
         supervisor: ProcessSupervisor,
         target: ClassicProducerTarget,
         node: ProducerNode,
+        certified_image: bytes,
         cancellation: CancellationToken,
-    ) -> _ClassicPendingPdb:
+    ) -> _ClassicPendingDebugCompanion:
         """Validate one private diagnostic pair before any public output changes."""
 
         step_id = f"analysis-link.{target.target_id}"
@@ -384,17 +401,34 @@ class ClassicProducerGraphBuildExecutor:
             log_namespace="analysis-link",
         )
         link_receipt = _step_receipt(step_id, execution.result, execution.spec)
-        self._progress.emit("analysis-link", step_id)
-        logical_pdb = self.analysis_pdb_paths.get(target.target_id)
-        if logical_pdb is None:
+        companion_paths = self.debug_companion_paths.get(target.target_id)
+        if companion_paths is None:
             raise ClassicProjectError(
-                f"analysis relink lacks a PDB output seat for {target.target_id!r}"
+                f"analysis relink lacks a debug-companion output seat for {target.target_id!r}"
             )
-        return _ClassicPendingPdb(
-            target,
-            logical_pdb,
-            execution,
-            link_receipt,
+        stabilization_started = time.monotonic()
+        try:
+            stabilized = stabilize_msvc42_debug_companion(
+                certified_image,
+                execution.image.read_bytes(),
+                execution.pdb.read_bytes(),
+                expected_pdb_path=self.producer.logical_for_host_path(execution.plan.pdb),
+            )
+        except (ByteIdentityError, OSError) as exc:
+            raise ClassicProjectError(
+                f"analysis relink {target.target_id!r} is not a valid MSVC 4.2 "
+                f"debug companion: {exc}"
+            ) from exc
+        stabilization_elapsed_seconds = time.monotonic() - stabilization_started
+        self._progress.emit("analysis-link", step_id)
+        return _ClassicPendingDebugCompanion(
+            target=target,
+            logical_image_path=companion_paths.image,
+            logical_pdb_path=companion_paths.pdb,
+            execution=execution,
+            link_receipt=link_receipt,
+            stabilized=stabilized,
+            stabilization_elapsed_seconds=stabilization_elapsed_seconds,
         )
 
     def execute(
@@ -798,9 +832,12 @@ class ClassicProducerGraphBuildExecutor:
                 )
             )
 
-        pending_pdbs: list[_ClassicPendingPdb] = []
+        pending_debug_companions: list[_ClassicPendingDebugCompanion] = []
         if self.analysis_link_options:
             nodes_by_id = {node.id: node for node in self.graph.nodes}
+            certified_images = {
+                item.target.target_id: item.payload for item in pending_images
+            }
             with ProcessSupervisor() as analysis_supervisor:
                 for target in self.targets:
                     node = nodes_by_id.get(target.link_node_id)
@@ -808,19 +845,20 @@ class ClassicProducerGraphBuildExecutor:
                         raise ClassicProjectError(
                             f"analysis relink lacks exact target state for {target.target_id!r}"
                         )
-                    pending_pdb = self._run_analysis_link(
+                    pending_companion = self._run_analysis_link(
                         analysis_supervisor,
                         target,
                         node,
+                        certified_images[target.target_id],
                         cancellation,
                     )
-                    steps.append(pending_pdb.link_receipt)
-                    pending_pdbs.append(pending_pdb)
-            if {item.target.target_id for item in pending_pdbs} != {
+                    steps.append(pending_companion.link_receipt)
+                    pending_debug_companions.append(pending_companion)
+            if {item.target.target_id for item in pending_debug_companions} != {
                 target.target_id for target in self.targets
-            } or len(pending_pdbs) != len(self.targets):
+            } or len(pending_debug_companions) != len(self.targets):
                 raise ClassicProjectError(
-                    "analysis relink did not produce exactly one PDB per configured target"
+                    "analysis relink did not produce exactly one debug companion per target"
                 )
 
         physical_graph_outputs = {
@@ -870,7 +908,7 @@ class ClassicProducerGraphBuildExecutor:
             root=self.toolchain_root,
             label="locked toolchain projection",
         )
-        pending_publication_steps = len(pending_images) + len(pending_pdbs)
+        pending_publication_steps = len(pending_images) + len(pending_debug_companions)
         if self._progress.completed != self._progress.total - pending_publication_steps - 1:
             raise ClassicProjectError(
                 "classic progress did not cover every pre-finalization execution step"
@@ -922,17 +960,28 @@ class ClassicProducerGraphBuildExecutor:
         publication_requests.extend(
             ClassicPublicationRequest(
                 owner_id=item.target.target_id,
-                kind="analysis PDB",
-                producer_step=f"publish-pdb.{item.target.target_id}",
-                relative=item.logical_path,
-                payload=item.execution.pdb.read_bytes(),
+                kind="debug companion image",
+                producer_step=f"publish-analysis.{item.target.target_id}",
+                relative=item.logical_image_path,
+                payload=item.stabilized.image,
                 mode=0o644 if os.name == "posix" else None,
             )
-            for item in pending_pdbs
+            for item in pending_debug_companions
+        )
+        publication_requests.extend(
+            ClassicPublicationRequest(
+                owner_id=item.target.target_id,
+                kind="debug companion PDB",
+                producer_step=f"publish-analysis.{item.target.target_id}",
+                relative=item.logical_pdb_path,
+                payload=item.stabilized.pdb,
+                mode=0o644 if os.name == "posix" else None,
+            )
+            for item in pending_debug_companions
         )
         return _ClassicPendingPublication(
             tuple(pending_images),
-            tuple(pending_pdbs),
+            tuple(pending_debug_companions),
             frozenset(physical_graph_outputs),
             tuple(publication_requests),
         )
@@ -950,7 +999,7 @@ class ClassicProducerGraphBuildExecutor:
         """Commit the validated target set and issue its immutable execution record."""
 
         pending_images = pending.images
-        pending_pdbs = pending.pdbs
+        pending_debug_companions = pending.debug_companions
         physical_graph_outputs = pending.physical_graph_outputs
         publication_requests = pending.requests
         state_root = self.project_root.joinpath(
@@ -998,43 +1047,82 @@ class ClassicProducerGraphBuildExecutor:
                     self._progress.emit("terminal", step_id)
 
                 images_by_target = {item.target_id: item for item in images}
-                analysis_pdbs: list[ClassicProducedPdb] = []
-                for pending_pdb in pending_pdbs:
-                    target_id = pending_pdb.target.target_id
-                    final_snapshot = published_by_relative[pending_pdb.logical_path.casefold()]
+                debug_companions: list[ClassicProducedDebugCompanion] = []
+                for pending_companion in pending_debug_companions:
+                    target_id = pending_companion.target.target_id
+                    image_snapshot = published_by_relative[
+                        pending_companion.logical_image_path.casefold()
+                    ]
+                    pdb_snapshot = published_by_relative[
+                        pending_companion.logical_pdb_path.casefold()
+                    ]
                     certified_image = images_by_target[target_id]
-                    publish_step_id = f"publish-pdb.{target_id}"
+                    publish_step_id = f"publish-analysis.{target_id}"
+                    audit = pending_companion.stabilized.audit
+                    if (
+                        audit.certified_image_sha256
+                        != certified_image.final_snapshot.digest.value
+                        or audit.image_metadata_output_sha256
+                        != image_snapshot.digest.value
+                        or audit.pdb.output_sha256 != pdb_snapshot.digest.value
+                    ):
+                        raise ClassicProjectError(
+                            f"debug-companion audit for {target_id!r} differs from its "
+                            "atomic publication"
+                        )
                     steps.append(
                         _internal_step(
                             publish_step_id,
                             {
-                                "schema": 1,
-                                "analysis_link_step": pending_pdb.link_receipt.step_id,
-                                "analysis_image": _digest_path(
-                                    pending_pdb.execution.image
-                                ).model_dump(mode="json"),
+                                "schema": 2,
+                                "policy": audit.policy_version,
+                                "analysis_link_step": pending_companion.link_receipt.step_id,
+                                "raw_image": {
+                                    "sha256": audit.image_debug.raw_sha256,
+                                    "size": audit.image_debug.size,
+                                },
+                                "raw_pdb": {
+                                    "sha256": audit.pdb.raw_sha256,
+                                    "size": audit.pdb.size,
+                                },
                                 "certified_image": (
                                     certified_image.final_snapshot.digest.model_dump(mode="json")
                                 ),
-                                "pdb": final_snapshot.digest.model_dump(mode="json"),
-                                "pdb_size": final_snapshot.size,
+                                "companion_image": {
+                                    "digest": image_snapshot.digest.model_dump(mode="json"),
+                                    "size": image_snapshot.size,
+                                },
+                                "companion_pdb": {
+                                    "digest": pdb_snapshot.digest.model_dump(mode="json"),
+                                    "size": pdb_snapshot.size,
+                                },
+                                "changed_bytes": {
+                                    "image_identity": audit.image_debug.changed_bytes,
+                                    "pdb_bookkeeping": audit.pdb.changed_bytes,
+                                },
                             },
-                            0.0,
+                            pending_companion.stabilization_elapsed_seconds,
                         )
                     )
-                    analysis_pdbs.append(
-                        ClassicProducedPdb(
-                            target_id,
-                            pending_pdb.logical_path,
-                            pending_pdb.execution.image,
-                            pending_pdb.execution.pdb,
-                            final_snapshot.path,
-                            pending_pdb.link_receipt.step_id,
-                            publish_step_id,
-                            final_snapshot,
+                    debug_companions.append(
+                        ClassicProducedDebugCompanion(
+                            target_id=target_id,
+                            image_logical_path=pending_companion.logical_image_path,
+                            pdb_logical_path=pending_companion.logical_pdb_path,
+                            raw_image_digest=Digest(
+                                value=audit.image_debug.raw_sha256
+                            ),
+                            raw_image_size=audit.image_debug.size,
+                            raw_pdb_digest=Digest(value=audit.pdb.raw_sha256),
+                            raw_pdb_size=audit.pdb.size,
+                            link_step_id=pending_companion.link_receipt.step_id,
+                            publish_step_id=publish_step_id,
+                            image_snapshot=image_snapshot,
+                            pdb_snapshot=pdb_snapshot,
+                            audit=audit,
                         )
                     )
-                    self._progress.emit("analysis-pdb", publish_step_id)
+                    self._progress.emit("analysis-pair", publish_step_id)
 
                 if self._progress.completed != self._progress.total - 1:
                     raise ClassicProjectError(
@@ -1054,13 +1142,17 @@ class ClassicProducerGraphBuildExecutor:
                 )
                 output_receipts.extend(
                     _receipt(
-                        pdb.final_path,
+                        path,
                         fresh=True,
-                        producer_step=pdb.publish_step_id,
+                        producer_step=companion.publish_step_id,
                     )
-                    for pdb in sorted(
-                        analysis_pdbs,
+                    for companion in sorted(
+                        debug_companions,
                         key=lambda value: value.target_id.casefold(),
+                    )
+                    for path in (
+                        companion.image_snapshot.path,
+                        companion.pdb_snapshot.path,
                     )
                 )
                 output_receipts_by_path = {
@@ -1079,23 +1171,29 @@ class ClassicProducerGraphBuildExecutor:
                             f"published target {image.target_id!r} receipt differs "
                             "from its atomic publication"
                         )
-                for pdb in analysis_pdbs:
-                    receipt = output_receipts_by_path.get(pdb.final_path.resolve(strict=False))
-                    snapshot = pdb.final_snapshot
-                    if receipt is None or (
-                        receipt.digest != snapshot.digest
-                        or receipt.size != snapshot.size
-                        or receipt.device != snapshot.device
-                        or receipt.inode != snapshot.inode
+                for companion in debug_companions:
+                    for kind, snapshot in (
+                        ("image", companion.image_snapshot),
+                        ("PDB", companion.pdb_snapshot),
                     ):
-                        raise ClassicProjectError(
-                            f"published analysis PDB {pdb.target_id!r} receipt differs "
-                            "from its atomic publication"
+                        receipt = output_receipts_by_path.get(
+                            snapshot.path.resolve(strict=False)
                         )
+                        if receipt is None or (
+                            receipt.digest != snapshot.digest
+                            or receipt.size != snapshot.size
+                            or receipt.device != snapshot.device
+                            or receipt.inode != snapshot.inode
+                        ):
+                            raise ClassicProjectError(
+                                f"published debug-companion {kind} "
+                                f"{companion.target_id!r} receipt differs from its "
+                                "atomic publication"
+                            )
                 self.record = ClassicProducerGraphExecutionRecord(
-                    tuple(images),
-                    tuple(witnesses),
-                    tuple(
+                    images=tuple(images),
+                    witnesses=tuple(witnesses),
+                    producer_reads=tuple(
                         sorted(
                             (*self.producer.producer_reads(), *self.donors.producer_reads()),
                             key=lambda value: (
@@ -1106,7 +1204,7 @@ class ClassicProducerGraphBuildExecutor:
                             ),
                         )
                     ),
-                    tuple(
+                    compiler_outputs=tuple(
                         sorted(
                             self.overlay.captured_compiler_outputs,
                             key=lambda value: (
@@ -1115,23 +1213,23 @@ class ClassicProducerGraphBuildExecutor:
                             ),
                         )
                     ),
-                    tuple(
+                    donor_outputs=tuple(
                         sorted(
                             self.donors.donor_outputs(),
                             key=lambda value: value.intervention_id.casefold(),
                         )
                     ),
-                    tuple(
+                    compiler_namespaces=tuple(
                         self.producer.compiler_namespaces()[key]
                         for key in sorted(self.producer.compiler_namespaces(), key=str.casefold)
                     ),
-                    tuple(
+                    debug_companions=tuple(
                         sorted(
-                            analysis_pdbs,
+                            debug_companions,
                             key=lambda value: value.target_id.casefold(),
                         )
                     ),
-                    tuple(
+                    object_transforms=tuple(
                         sorted(
                             self.donors.object_transforms(),
                             key=lambda value: value.unit_id.casefold(),
