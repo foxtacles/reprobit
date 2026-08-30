@@ -940,7 +940,7 @@ def _main(argv: list[str]) -> int:
     try:
         return operation()
     except Exception as error:
-        print(f"reprobit Windows lineage broker failed: {error}", file=sys.stderr)
+        print(f"ReproBit Windows lineage broker failed: {error}", file=sys.stderr)
         for note in getattr(error, "__notes__", ()):
             print(f"cleanup note: {note}", file=sys.stderr)
         return 125
