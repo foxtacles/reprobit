@@ -171,8 +171,8 @@ def test_state_gc_does_not_create_or_refresh_a_missing_lease(
     payload = abandoned / "payload.bin"
     payload.write_bytes(b"abandoned")
     old_seconds = time.time() - 3600
-    os.utime(payload, (old_seconds, old_seconds), follow_symlinks=False)
-    os.utime(abandoned, (old_seconds, old_seconds), follow_symlinks=False)
+    os.utime(payload, (old_seconds, old_seconds))
+    os.utime(abandoned, (old_seconds, old_seconds))
     before = {path: path.stat(follow_symlinks=False).st_mtime_ns for path in (abandoned, payload)}
 
     preview = StateStore(state).gc(older_than_seconds=1800, dry_run=True)
