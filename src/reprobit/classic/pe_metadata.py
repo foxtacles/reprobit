@@ -30,6 +30,14 @@ class _Section:
         return self.raw_offset + self.raw_size
 
 
+@dataclass(frozen=True, slots=True)
+class PE32MetadataTimes:
+    """The two declared clock values carried by a stabilized PE32 image."""
+
+    link_time: int
+    resource_time: int
+
+
 class _PE32MetadataMap:
     """Validated PE surface needed to locate timestamp fields exactly."""
 
@@ -140,6 +148,37 @@ class _PE32MetadataMap:
         return tuple(sorted(offsets))
 
 
+def read_pe32_metadata_times(candidate: bytes) -> PE32MetadataTimes:
+    """Read one already-coherent PE32 image metadata policy.
+
+    The certified image is the authority for the companion image's clock
+    values.  Refuse an image whose link-generated fields disagree rather than
+    guessing which timestamp should win.  Images without resources have no
+    independent resource clock, so their link time is the harmless canonical
+    value for the unused policy seat.
+    """
+
+    require(isinstance(candidate, bytes), "PE candidate must be immutable bytes")
+    image = _PE32MetadataMap(candidate)
+    link_time = struct.unpack_from("<I", candidate, image.coff_timestamp_offset)[0]
+    export = image.export_timestamp_offset()
+    if export is not None:
+        require(
+            struct.unpack_from("<I", candidate, export)[0] == link_time,
+            "PE export timestamp differs from its COFF link time",
+        )
+    resource_values = {
+        struct.unpack_from("<I", candidate, offset)[0]
+        for offset in image.resource_timestamp_offsets()
+    }
+    require(
+        len(resource_values) <= 1,
+        "PE resource directories do not share one timestamp",
+    )
+    resource_time = next(iter(resource_values), link_time)
+    return PE32MetadataTimes(link_time, resource_time)
+
+
 def apply_pe_metadata_candidate(
     candidate: bytes,
     declaration: Mapping[str, object],
@@ -197,4 +236,8 @@ def apply_pe_metadata_candidate(
     }
 
 
-__all__ = ["apply_pe_metadata_candidate"]
+__all__ = [
+    "PE32MetadataTimes",
+    "apply_pe_metadata_candidate",
+    "read_pe32_metadata_times",
+]

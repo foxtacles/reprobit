@@ -94,6 +94,34 @@ def test_pe_metadata_normalizes_only_declared_timestamp_fields() -> None:
         index for index, pair in enumerate(zip(source, result, strict=True)) if pair[0] != pair[1]
     } <= allowed
 
+    assert pe_metadata_algorithms.read_pe32_metadata_times(result) == (
+        pe_metadata_algorithms.PE32MetadataTimes(123, 456)
+    )
+
+
+def test_pe_metadata_reader_rejects_incoherent_link_timestamp() -> None:
+    source, _proof = pe_metadata_algorithms.apply_pe_metadata_candidate(
+        _image(),
+        {"link_time": 123, "resource_time": 456},
+    )
+    changed = bytearray(source)
+    struct.pack_into("<I", changed, EDATA_RAW + 4, 999)
+
+    with pytest.raises(ByteIdentityError, match="export timestamp"):
+        pe_metadata_algorithms.read_pe32_metadata_times(bytes(changed))
+
+
+def test_pe_metadata_reader_rejects_incoherent_resource_timestamps() -> None:
+    source, _proof = pe_metadata_algorithms.apply_pe_metadata_candidate(
+        _image(),
+        {"link_time": 123, "resource_time": 456},
+    )
+    changed = bytearray(source)
+    struct.pack_into("<I", changed, RSRC_RAW + 0x24, 999)
+
+    with pytest.raises(ByteIdentityError, match="resource directories"):
+        pe_metadata_algorithms.read_pe32_metadata_times(bytes(changed))
+
 
 def test_pe_metadata_rejects_resource_cycles() -> None:
     with pytest.raises(ByteIdentityError, match="cycle"):
