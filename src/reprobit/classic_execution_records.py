@@ -12,6 +12,7 @@ from reprobit.classic_orchestration import ClassicPreparedUnit
 from reprobit.classic_project import InterventionWitness
 from reprobit.classic_runtime_graph import ClassicCompileRecord
 from reprobit.model import Digest
+from reprobit.msvc42_debug_companion import Msvc42DebugPairAudit
 from reprobit.producer_graph import ProducerGraphDocument, ProducerRole
 from reprobit.secure_path_contracts import SecureFileSnapshot
 
@@ -28,17 +29,21 @@ class ClassicProducedImage:
 
 
 @dataclass(frozen=True, slots=True)
-class ClassicProducedPdb:
-    """Analysis-only PDB published without admitting its image as a candidate."""
+class ClassicProducedDebugCompanion:
+    """Matched, noncertifying comparison image/PDB pair."""
 
     target_id: str
-    logical_path: str
-    analysis_image_path: Path
-    raw_path: Path
-    final_path: Path
+    image_logical_path: str
+    pdb_logical_path: str
+    raw_image_digest: Digest
+    raw_image_size: int
+    raw_pdb_digest: Digest
+    raw_pdb_size: int
     link_step_id: str
     publish_step_id: str
-    final_snapshot: SecureFileSnapshot
+    image_snapshot: SecureFileSnapshot
+    pdb_snapshot: SecureFileSnapshot
+    audit: Msvc42DebugPairAudit
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,7 +132,7 @@ class ClassicProducerGraphExecutionRecord:
     compiler_outputs: tuple[ClassicCapturedProducerOutput, ...] = ()
     donor_outputs: tuple[ClassicDonorOutputReceipt, ...] = ()
     compiler_namespaces: tuple[ClassicCompilerNamespaceReceipt, ...] = ()
-    analysis_pdbs: tuple[ClassicProducedPdb, ...] = ()
+    debug_companions: tuple[ClassicProducedDebugCompanion, ...] = ()
     object_transforms: tuple[ClassicObjectTransformReceipt, ...] = ()
 
 
@@ -162,8 +167,8 @@ __all__ = [
     "ClassicCompilerNamespaceReceipt",
     "ClassicDonorOutputReceipt",
     "ClassicObjectTransformReceipt",
+    "ClassicProducedDebugCompanion",
     "ClassicProducedImage",
-    "ClassicProducedPdb",
     "ClassicProducerGraphExecutionRecord",
     "ClassicProducerRead",
     "ClassicProducerReadReceipt",

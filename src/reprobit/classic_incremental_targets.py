@@ -188,6 +188,7 @@ def add_analysis_nodes(plan: ClassicIncrementalPlan) -> None:
                 "pdb": staging_root / "analysis" / target_id / "pdb",
             }
         )
+        certified_image = plan.terminal_paths[target_id]
         analysis_nodes[target_id] = analysis_id
         arguments = node_arguments(linker)[1:]
         exact_logical_image = logical_join(
@@ -239,11 +240,13 @@ def add_analysis_nodes(plan: ClassicIncrementalPlan) -> None:
             *,
             current_target: str = target_id,
             current_outputs: Mapping[str, Path] = current_paths,
+            current_certified_image: Path = certified_image,
         ) -> None:
             runtime.prepared.warm.execute_warm_analysis_link(
                 current_target,
                 inputs=prepared_inputs,
                 outputs=current_outputs,
+                certified_image=current_certified_image,
                 cancellation=cancellation,
             )
 
@@ -268,6 +271,7 @@ def add_analysis_nodes(plan: ClassicIncrementalPlan) -> None:
                     "target_id": current_target,
                     "certifying": False,
                     "analysis_only": True,
+                    "release": False,
                 }
             )
 

@@ -54,6 +54,15 @@ def test_incremental_summary_accepts_single_runtime_initialization() -> None:
         IncrementalBuildSummary(0, 0, 0, 0, 0, runtime_init_count=-1)
     with pytest.raises(ValueError, match="must be zero or one"):
         IncrementalBuildSummary(0, 0, 0, 0, 0, runtime_init_count=2)
+    with pytest.raises(ValueError, match="publication counts"):
+        IncrementalBuildSummary(
+            0,
+            0,
+            0,
+            0,
+            0,
+            published_comparison_pairs=-1,
+        )
 
 
 def test_package_implementation_digest_change_is_a_cache_miss(tmp_path: Path) -> None:

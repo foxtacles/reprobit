@@ -12,6 +12,7 @@ from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import TYPE_CHECKING
 
+from reprobit.binary import ByteIdentityError
 from reprobit.classic_execution_records import ClassicActiveCompilerEpoch
 from reprobit.classic_includes import (
     MsvcSbrTrace,
@@ -41,6 +42,7 @@ from reprobit.execution import (
     StepExecutionReceipt,
 )
 from reprobit.model import Digest
+from reprobit.msvc42_debug_companion import stabilize_msvc42_debug_companion
 from reprobit.process import (
     CancellationToken,
     CommandFailed,
@@ -66,8 +68,10 @@ from reprobit.secure_path_contracts import (
 )
 from reprobit.secure_paths import (
     atomic_copy_new_relative,
+    atomic_publish_new_relative,
     atomic_publish_relative,
     digest_relative_file,
+    read_relative_file,
     stat_relative_file,
 )
 
@@ -150,6 +154,37 @@ def _secure_copy_new(
     except (OSError, SecurePathError) as exc:
         raise ClassicProjectError(
             f"classic warm copy could not safely publish {destination}: {exc}"
+        ) from exc
+
+
+def _secure_read_bytes(path: Path) -> bytes:
+    """Read one absolute run-private file without following path redirects."""
+
+    absolute = canonical_system_path(path)
+    if not absolute.anchor:
+        raise ClassicProjectError("classic warm read requires an absolute path")
+    root = Path(absolute.anchor)
+    relative = PurePosixPath(*absolute.parts[1:]).as_posix()
+    try:
+        payload, _snapshot = read_relative_file(root, relative)
+        return payload
+    except (OSError, SecurePathError) as exc:
+        raise ClassicProjectError(f"classic warm read is unsafe for {absolute}: {exc}") from exc
+
+
+def _secure_publish_new_bytes(payload: bytes, destination: Path) -> SecureFileSnapshot:
+    """Create one canonical warm output without a mutable temporary file."""
+
+    absolute = canonical_system_path(destination)
+    if not absolute.anchor:
+        raise ClassicProjectError("classic warm publication requires an absolute path")
+    root = Path(absolute.anchor)
+    relative = PurePosixPath(*absolute.parts[1:]).as_posix()
+    try:
+        return atomic_publish_new_relative(root, relative, payload)
+    except (OSError, SecurePathError) as exc:
+        raise ClassicProjectError(
+            f"classic warm bytes could not safely publish {absolute}: {exc}"
         ) from exc
 
 
@@ -495,6 +530,7 @@ class ClassicWarmExecution:
         *,
         inputs: PreparedNodeInputs,
         outputs: Mapping[str, Path],
+        certified_image: Path,
         cancellation: CancellationToken,
     ) -> StepExecutionReceipt:
         """Run one cache-missing analysis relink into paired warm outputs."""
@@ -522,7 +558,19 @@ class ClassicWarmExecution:
             log_namespace="warm-analysis-link",
         )
         try:
-            for name, source in (("image", execution.image), ("pdb", execution.pdb)):
+            try:
+                stabilized = stabilize_msvc42_debug_companion(
+                    _secure_read_bytes(certified_image),
+                    _secure_read_bytes(execution.image),
+                    _secure_read_bytes(execution.pdb),
+                    expected_pdb_path=self.producer.logical_for_host_path(execution.plan.pdb),
+                )
+            except ByteIdentityError as exc:
+                raise ClassicProjectError(
+                    f"warm analysis relink {target_id!r} is not a valid MSVC 4.2 "
+                    f"debug companion: {exc}"
+                ) from exc
+            for name, payload in (("image", stabilized.image), ("pdb", stabilized.pdb)):
                 destination = outputs[name]
                 if self._warm_staging_root is None:
                     raise ClassicProjectError("classic warm staging root is not bound")
@@ -532,7 +580,7 @@ class ClassicWarmExecution:
                     raise ClassicProjectError(
                         f"classic warm analysis output escapes its run: {destination}"
                     ) from exc
-                _secure_copy_new(source, destination)
+                _secure_publish_new_bytes(payload, destination)
         finally:
             for path in execution.private_files:
                 if os.path.lexists(path):

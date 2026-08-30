@@ -247,9 +247,11 @@ class _FakeWarmExecutor:
         *,
         inputs: PreparedNodeInputs,
         outputs: MappingProxyType[str, Path] | dict[str, Path],
+        certified_image: Path,
         cancellation: object,
     ) -> None:
         del cancellation
+        assert certified_image.is_file()
         self.analysis_link_calls.append(target_id)
         generation = len(self.analysis_link_calls)
         input_payload = b"|".join(
@@ -1159,7 +1161,7 @@ def test_implementation_drift_after_all_hit_planning_blocks_target_publication(
     )
 
 
-def test_analysis_link_pair_is_cacheable_and_only_its_pdb_is_published(
+def test_analysis_link_pair_is_cacheable_and_both_members_are_published(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1184,19 +1186,26 @@ def test_analysis_link_pair_is_cacheable_and_only_its_pdb_is_published(
     first = _run(bundle, root=root, state=state, session=tmp_path / "run-1")
 
     exact = root / "artifacts" / "app.exe"
-    pdb = root / "artifacts" / "app.PDB"
+    companion_dir = root / "artifacts" / "reprobit-debug"
+    companion_image = companion_dir / "app.exe"
+    pdb = companion_dir / "app.PDB"
     assert first.summary.misses == 5
+    assert first.summary.published_comparison_pairs == 1
+    assert first.summary.unchanged_comparison_pairs == 0
     assert executor.analysis_link_calls == ["app"]
     assert exact.read_bytes() == b"raw:linker.app.0000:build/app.exe:terminal:app"
+    assert companion_image.read_bytes().startswith(b"analysis-image:1:")
     assert pdb.read_bytes().startswith(b"analysis-pdb:1:")
     assert {item.producer_step for item in first.receipt.outputs} == {
         "terminal.app",
         "analysis-link.app",
     }
     assert sorted(path.name for path in (root / "artifacts").iterdir()) == [
-        "app.PDB",
         "app.exe",
+        "reprobit-debug",
     ]
+    assert sorted(path.name for path in companion_dir.iterdir()) == ["app.PDB", "app.exe"]
+    image_before = companion_image.stat()
     pdb_before = pdb.stat()
 
     monkeypatch.setattr(
@@ -1210,8 +1219,16 @@ def test_analysis_link_pair_is_cacheable_and_only_its_pdb_is_published(
     assert second.summary.misses == 0
     assert second.summary.published_targets == 0
     assert second.summary.unchanged_targets == 1
+    assert second.summary.published_comparison_pairs == 0
+    assert second.summary.unchanged_comparison_pairs == 1
     assert executor.analysis_link_calls == ["app"]
+    image_after = companion_image.stat()
     pdb_after = pdb.stat()
+    assert (image_after.st_dev, image_after.st_ino, image_after.st_mtime_ns) == (
+        image_before.st_dev,
+        image_before.st_ino,
+        image_before.st_mtime_ns,
+    )
     assert (pdb_after.st_dev, pdb_after.st_ino, pdb_after.st_mtime_ns) == (
         pdb_before.st_dev,
         pdb_before.st_ino,
@@ -1219,7 +1236,7 @@ def test_analysis_link_pair_is_cacheable_and_only_its_pdb_is_published(
     )
 
 
-def test_analysis_pdb_relinks_when_link_authority_changes_even_if_exact_image_does_not(
+def test_analysis_pair_relinks_when_link_authority_changes_even_if_exact_image_does_not(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1243,8 +1260,10 @@ def test_analysis_pdb_relinks_when_link_authority_changes_even_if_exact_image_do
 
     _run(bundle, root=root, state=state, session=tmp_path / "run-1")
     exact = root / "artifacts" / "app.exe"
-    pdb = root / "artifacts" / "app.PDB"
+    companion = root / "artifacts" / "reprobit-debug" / "app.exe"
+    pdb = root / "artifacts" / "reprobit-debug" / "app.PDB"
     first_exact = exact.read_bytes()
+    first_companion = companion.read_bytes()
     first_pdb = pdb.read_bytes()
 
     bundle.producer_graph = bundle.producer_graph.model_copy(
@@ -1261,7 +1280,10 @@ def test_analysis_pdb_relinks_when_link_authority_changes_even_if_exact_image_do
 
     assert executor.analysis_link_calls == ["app", "app"]
     assert second.summary.misses >= 3
+    assert second.summary.published_comparison_pairs == 1
+    assert second.summary.unchanged_comparison_pairs == 0
     assert exact.read_bytes() == first_exact
+    assert companion.read_bytes() != first_companion
     assert pdb.read_bytes() != first_pdb
     assert pdb.read_bytes().startswith(b"analysis-pdb:2:")
 
@@ -1341,9 +1363,14 @@ def test_analysis_link_cache_is_local_to_its_target_inputs(
     patch()
     _run(bundle, root=root, state=state, session=tmp_path / "run-1", jobs=2)
     assert executor.analysis_link_calls == ["app", "tool"]
-    app_pdb = root / "artifacts" / "app.PDB"
-    tool_pdb = root / "artifacts" / "tool.PDB"
+    companion_dir = root / "artifacts" / "reprobit-debug"
+    app_image = companion_dir / "app.exe"
+    app_pdb = companion_dir / "app.PDB"
+    tool_image = companion_dir / "tool.exe"
+    tool_pdb = companion_dir / "tool.PDB"
+    app_image_before = app_image.stat()
     app_before = app_pdb.stat()
+    tool_image_before = tool_image.read_bytes()
     tool_before = tool_pdb.read_bytes()
 
     (root / "tool.cpp").write_bytes(b"int tool(void) { return 12; }\n")
@@ -1359,12 +1386,25 @@ def test_analysis_link_cache_is_local_to_its_target_inputs(
     assert executor.analysis_link_calls == ["app", "tool", "tool"]
     assert second.summary.hits == 5
     assert second.summary.misses == 5
+    assert second.summary.published_comparison_pairs == 1
+    assert second.summary.unchanged_comparison_pairs == 1
+    app_image_after = app_image.stat()
     app_after = app_pdb.stat()
+    assert (
+        app_image_after.st_dev,
+        app_image_after.st_ino,
+        app_image_after.st_mtime_ns,
+    ) == (
+        app_image_before.st_dev,
+        app_image_before.st_ino,
+        app_image_before.st_mtime_ns,
+    )
     assert (app_after.st_dev, app_after.st_ino, app_after.st_mtime_ns) == (
         app_before.st_dev,
         app_before.st_ino,
         app_before.st_mtime_ns,
     )
+    assert tool_image.read_bytes() != tool_image_before
     assert tool_pdb.read_bytes() != tool_before
 
 
@@ -1383,8 +1423,11 @@ def test_analysis_link_missing_pdb_fails_before_target_publication(
     root.mkdir()
     artifacts = root / "artifacts"
     artifacts.mkdir()
+    companion_dir = artifacts / "reprobit-debug"
+    companion_dir.mkdir()
     (artifacts / "app.exe").write_bytes(b"prior-exact")
-    (artifacts / "app.PDB").write_bytes(b"prior-pdb")
+    (companion_dir / "app.exe").write_bytes(b"prior-companion")
+    (companion_dir / "app.PDB").write_bytes(b"prior-pdb")
     state = tmp_path / "state"
     state.mkdir()
     bundle, units, sources = _fixture_bundle(root)
@@ -1404,10 +1447,11 @@ def test_analysis_link_missing_pdb_fails_before_target_publication(
         _run(bundle, root=root, state=state, session=tmp_path / "run")
 
     assert (artifacts / "app.exe").read_bytes() == b"prior-exact"
-    assert (artifacts / "app.PDB").read_bytes() == b"prior-pdb"
+    assert (companion_dir / "app.exe").read_bytes() == b"prior-companion"
+    assert (companion_dir / "app.PDB").read_bytes() == b"prior-pdb"
 
 
-def test_analysis_pdb_publication_failure_rolls_back_exact_image(
+def test_debug_companion_publication_failure_rolls_back_exact_image_and_pair(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1415,8 +1459,11 @@ def test_analysis_pdb_publication_failure_rolls_back_exact_image(
     root.mkdir()
     artifacts = root / "artifacts"
     artifacts.mkdir()
+    companion_dir = artifacts / "reprobit-debug"
+    companion_dir.mkdir()
     (artifacts / "app.exe").write_bytes(b"prior-exact")
-    (artifacts / "app.PDB").write_bytes(b"prior-pdb")
+    (companion_dir / "app.exe").write_bytes(b"prior-companion")
+    (companion_dir / "app.PDB").write_bytes(b"prior-pdb")
     state = tmp_path / "state"
     state.mkdir()
     bundle, units, sources = _fixture_bundle(root)
@@ -1440,8 +1487,8 @@ def test_analysis_pdb_publication_failure_rolls_back_exact_image(
         expected: object,
         **publication_options: object,
     ) -> object:
-        if relative == "artifacts/app.PDB":
-            raise SecurePathError("injected analysis PDB failure")
+        if relative == "artifacts/reprobit-debug/app.PDB":
+            raise SecurePathError("injected debug-companion PDB failure")
         return original_publish(  # type: ignore[arg-type]
             project,
             relative,
@@ -1462,10 +1509,11 @@ def test_analysis_pdb_publication_failure_rolls_back_exact_image(
         _run(bundle, root=root, state=state, session=tmp_path / "run")
 
     assert (artifacts / "app.exe").read_bytes() == b"prior-exact"
-    assert (artifacts / "app.PDB").read_bytes() == b"prior-pdb"
+    assert (companion_dir / "app.exe").read_bytes() == b"prior-companion"
+    assert (companion_dir / "app.PDB").read_bytes() == b"prior-pdb"
 
 
-def test_multi_target_analysis_pdb_failure_rolls_back_every_image_and_pdb(
+def test_multi_target_debug_pair_failure_rolls_back_every_publication(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1475,12 +1523,16 @@ def test_multi_target_analysis_pdb_failure_rolls_back_every_image_and_pdb(
     artifacts.mkdir()
     originals = {
         "app.exe": b"prior-app-exact",
-        "app.PDB": b"prior-app-pdb",
         "tool.exe": b"prior-tool-exact",
-        "tool.PDB": b"prior-tool-pdb",
+        "reprobit-debug/app.exe": b"prior-app-companion",
+        "reprobit-debug/app.PDB": b"prior-app-pdb",
+        "reprobit-debug/tool.exe": b"prior-tool-companion",
+        "reprobit-debug/tool.PDB": b"prior-tool-pdb",
     }
     for name, payload in originals.items():
-        (artifacts / name).write_bytes(payload)
+        destination = artifacts / name
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
     state = tmp_path / "state"
     state.mkdir()
     bundle, units, sources = _fixture_bundle(root, targets=("app", "tool"))
@@ -1504,8 +1556,8 @@ def test_multi_target_analysis_pdb_failure_rolls_back_every_image_and_pdb(
         expected: object,
         **publication_options: object,
     ) -> object:
-        if relative == "artifacts/tool.PDB":
-            raise SecurePathError("injected final analysis PDB failure")
+        if relative == "artifacts/reprobit-debug/tool.PDB":
+            raise SecurePathError("injected final debug-companion PDB failure")
         return original_publish(  # type: ignore[arg-type]
             project,
             relative,

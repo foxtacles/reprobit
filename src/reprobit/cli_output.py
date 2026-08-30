@@ -74,8 +74,8 @@ class _ASCIIBarColumn(ProgressColumn):
 
 
 _FRIENDLY_PHASES = {
-    "analysis-link": "Creating comparison symbols",
-    "analysis-pdb": "Publishing comparison symbols",
+    "analysis-link": "Creating comparison files",
+    "analysis-pair": "Publishing comparison files",
     "analyze": "Analyzing candidates",
     "compile": "Compiling source",
     "compose": "Applying reviewed interventions",
@@ -106,6 +106,14 @@ _FRIENDLY_PHASES = {
 
 def _friendly_phase(phase: str) -> str:
     return _FRIENDLY_PHASES.get(phase, phase.replace("-", " ").capitalize())
+
+
+def _friendly_incremental_phase(phase: str, node_id: str) -> str:
+    """Give analysis nodes their user-facing work name without changing the DAG."""
+
+    if node_id.startswith("analysis-link."):
+        return _friendly_phase("analysis-link")
+    return _friendly_phase(phase)
 
 
 def _compact_failure_detail(error: BaseException | str) -> str:
@@ -242,8 +250,13 @@ class CLIOutput:
         )
         if summary.published_targets or summary.unchanged_targets:
             message += (
-                f"; targets: {summary.unchanged_targets} unchanged, "
+                f"; exact targets: {summary.unchanged_targets} unchanged, "
                 f"{summary.published_targets} updated"
+            )
+        if summary.published_comparison_pairs or summary.unchanged_comparison_pairs:
+            message += (
+                f"; comparison pairs: {summary.unchanged_comparison_pairs} unchanged, "
+                f"{summary.published_comparison_pairs} updated"
             )
         if self.output_format == "text" and summary.invalidations:
             visible = summary.invalidations[:8]
@@ -267,6 +280,8 @@ class CLIOutput:
             runtime_init_count=summary.runtime_init_count,
             published_targets=summary.published_targets,
             unchanged_targets=summary.unchanged_targets,
+            published_comparison_pairs=summary.published_comparison_pairs,
+            unchanged_comparison_pairs=summary.unchanged_comparison_pairs,
             invalidations=[
                 {"node_id": node_id, "reason": reason} for node_id, reason in summary.invalidations
             ],
@@ -422,7 +437,10 @@ class CLIOutput:
                                     task,
                                     total=total,
                                     completed=completed,
-                                    description=(f"{description} - {_friendly_phase(phase)}"),
+                                    description=(
+                                        f"{description} - "
+                                        f"{_friendly_incremental_phase(phase, node_id)}"
+                                    ),
                                 )
 
                         yield update_tty

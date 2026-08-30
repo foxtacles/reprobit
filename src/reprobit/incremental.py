@@ -88,6 +88,8 @@ class IncrementalBuildSummary:
     invalidations: tuple[tuple[str, str], ...] = ()
     published_targets: int = 0
     unchanged_targets: int = 0
+    published_comparison_pairs: int = 0
+    unchanged_comparison_pairs: int = 0
 
     def __post_init__(self) -> None:
         counts = (
@@ -100,7 +102,15 @@ class IncrementalBuildSummary:
             raise ValueError("incremental summary counts and timing cannot be negative")
         if self.runtime_init_count not in {0, 1}:
             raise ValueError("incremental runtime initialization count must be zero or one")
-        if self.published_targets < 0 or self.unchanged_targets < 0:
+        if any(
+            item < 0
+            for item in (
+                self.published_targets,
+                self.unchanged_targets,
+                self.published_comparison_pairs,
+                self.unchanged_comparison_pairs,
+            )
+        ):
             raise ValueError("incremental publication counts cannot be negative")
         if self.invalidations != tuple(
             sorted(self.invalidations, key=lambda item: item[0].casefold())

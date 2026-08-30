@@ -6,6 +6,7 @@ import os
 import re
 from collections.abc import Iterable, Mapping
 from copy import deepcopy
+from dataclasses import dataclass
 from enum import StrEnum
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
@@ -1052,15 +1053,26 @@ class BuildPlanDocument(StrictModel):
         return self
 
 
-def classic_analysis_pdb_paths(bundle: ProjectBundle) -> tuple[tuple[str, str], ...]:
-    """Derive analysis PDB outputs without admitting protected project paths."""
+@dataclass(frozen=True, slots=True)
+class ClassicDebugCompanionPaths:
+    """Derived public seats for one noncertifying image/PDB analysis pair."""
+
+    target_id: str
+    image: str
+    pdb: str
+
+
+def classic_debug_companion_paths(
+    bundle: ProjectBundle,
+) -> tuple[ClassicDebugCompanionPaths, ...]:
+    """Derive isolated debug-companion pairs without new manifest authority."""
 
     if bundle.build_plan is None:
         return ()
     if not bundle.build_plan.analysis_link_options:
         return ()
     if bundle.source_manifest is None:
-        raise ValueError("analysis PDB outputs require a complete source manifest")
+        raise ValueError("debug-companion outputs require a complete source manifest")
 
     claims: dict[str, str] = {}
 
@@ -1068,7 +1080,17 @@ def classic_analysis_pdb_paths(bundle: ProjectBundle) -> tuple[tuple[str, str], 
         folded = relative.replace("\\", "/").casefold()
         previous = claims.get(folded)
         if previous is not None:
-            raise ValueError(f"analysis PDB path {relative!r} aliases protected {previous}")
+            raise ValueError(f"debug-companion path {relative!r} aliases protected {previous}")
+        overlap = next(
+            (
+                previous_owner
+                for previous_path, previous_owner in claims.items()
+                if folded.startswith(previous_path + "/") or previous_path.startswith(folded + "/")
+            ),
+            None,
+        )
+        if overlap is not None:
+            raise ValueError(f"debug-companion path {relative!r} overlaps protected {overlap}")
         claims[folded] = owner
 
     for target in bundle.spec.targets:
@@ -1093,20 +1115,29 @@ def classic_analysis_pdb_paths(bundle: ProjectBundle) -> tuple[tuple[str, str], 
             bundle.spec.layout.oracles,
         )
     )
-    derived: list[tuple[str, str]] = []
+    derived: list[ClassicDebugCompanionPaths] = []
     for target in bundle.spec.targets:
-        relative = PurePosixPath(target.artifact).with_suffix(".PDB").as_posix()
-        folded = relative.casefold()
-        protected_root = next(
-            (root for root in protected_roots if folded == root or folded.startswith(root + "/")),
-            None,
-        )
-        if protected_root is not None:
-            raise ValueError(
-                f"analysis PDB path {relative!r} enters protected project root {protected_root!r}"
+        artifact = PurePosixPath(target.artifact)
+        companion_root = artifact.parent / "reprobit-debug"
+        image = (companion_root / artifact.name).as_posix()
+        pdb = (companion_root / artifact.with_suffix(".PDB").name).as_posix()
+        for relative, kind in ((image, "image"), (pdb, "PDB")):
+            folded = relative.casefold()
+            protected_root = next(
+                (
+                    root
+                    for root in protected_roots
+                    if folded == root or folded.startswith(root + "/")
+                ),
+                None,
             )
-        claim(relative, f"analysis PDB for {target.id!r}")
-        derived.append((target.id, relative))
+            if protected_root is not None:
+                raise ValueError(
+                    f"debug-companion {kind} path {relative!r} enters protected "
+                    f"project root {protected_root!r}"
+                )
+            claim(relative, f"debug-companion {kind} for {target.id!r}")
+        derived.append(ClassicDebugCompanionPaths(target.id, image, pdb))
     return tuple(derived)
 
 
@@ -1253,7 +1284,7 @@ class ProjectBundle(StrictModel):
         if self.build_plan is not None:
             if self.source_manifest is None:
                 raise ValueError("build plan requires a portable source manifest")
-            classic_analysis_pdb_paths(self)
+            classic_debug_companion_paths(self)
             actual_source_manifest_digest = source_manifest_digest(self.source_manifest)
             if self.build_plan.source_manifest_digest != actual_source_manifest_digest:
                 raise ValueError("build-plan source manifest digest does not match its document")
@@ -1840,6 +1871,7 @@ __all__ = [
     "BinarySurgeryIntervention",
     "BinarySurgeryMethod",
     "BuildPlanDocument",
+    "ClassicDebugCompanionPaths",
     "ClassicField",
     "ClassicGroupOrderPlan",
     "ClassicProofReceipt",
@@ -1889,7 +1921,7 @@ __all__ = [
     "ToolchainRef",
     "VerifierSpec",
     "candidate_auxiliary_donor_ids",
-    "classic_analysis_pdb_paths",
+    "classic_debug_companion_paths",
     "intervention_authority_digest",
     "legacy_allowlist_digest",
     "project_document_schemas",

@@ -64,7 +64,7 @@ from reprobit.schema import (
     ClassicRecipeIntervention,
     ProducerGraphBuildAdapter,
     ProjectBundle,
-    classic_analysis_pdb_paths,
+    classic_debug_companion_paths,
 )
 from reprobit.secure_path_contracts import SecureFileSnapshot
 from reprobit.strict_json import JsonValue
@@ -616,13 +616,15 @@ def prepare_classic_incremental_plan(
     if analysis_link_options not in {(), ("/DEBUG",)}:
         raise ClassicIncrementalError("warm analysis-link options are not closed")
     try:
-        analysis_pdb_relatives = dict(classic_analysis_pdb_paths(bundle))
+        debug_companion_paths = {
+            item.target_id: item for item in classic_debug_companion_paths(bundle)
+        }
     except ValueError as exc:
         raise ClassicIncrementalError(
-            f"warm analysis PDB output policy is malformed: {exc}"
+            f"warm debug-companion output policy is malformed: {exc}"
         ) from exc
-    if bool(analysis_pdb_relatives) != bool(analysis_link_options):
-        raise ClassicIncrementalError("warm analysis PDB output set differs from policy")
+    if bool(debug_companion_paths) != bool(analysis_link_options):
+        raise ClassicIncrementalError("warm debug-companion output set differs from policy")
     try:
         rdata_graph_authority = classic_rdata_repack_graph_authority(bundle, graph)
     except ClassicProjectError as exc:
@@ -854,7 +856,7 @@ def prepare_classic_incremental_plan(
         ordinary_barrier=ordinary_barrier,
         rdata_material_by_object=MappingProxyType(rdata_material_by_object),
         analysis_link_options=analysis_link_options,
-        analysis_pdb_relatives=MappingProxyType(analysis_pdb_relatives),
+        debug_companion_paths=MappingProxyType(debug_companion_paths),
         runtime_holder={},
         runtime_lock=Lock(),
         compiler_states={},

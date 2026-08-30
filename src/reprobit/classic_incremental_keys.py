@@ -23,6 +23,7 @@ from reprobit.classic_link_closure import (
 )
 from reprobit.classic_orchestration import ClassicPreparedUnit
 from reprobit.incremental_executor import NodeOutcome
+from reprobit.msvc42_debug_companion import MSVC42_DEBUG_PAIR_POLICY
 from reprobit.paths import normalize_logical_path
 from reprobit.producer_graph import ProducerNode, ProducerRole
 from reprobit.schema import ProjectBundle
@@ -200,12 +201,13 @@ def _warm_analysis_link_material(
     return json_value(
         {
             "schema": 1,
-            "kind": "classic-analysis-link-v1",
+            "kind": "classic-analysis-link-v2",
             "target_id": linker.target_id,
             "linker_node": linker.id,
             "exact_image": expected_out,
             "added_options": list(added_options),
             "isolated_outputs": ["image", "pdb"],
+            "stabilization_policy": MSVC42_DEBUG_PAIR_POLICY,
         }
     )
 
@@ -425,7 +427,7 @@ def analysis_material(
         role="analysis-link",
         toolchain=plan.toolchain_material,
         runtime=plan.runtime_material,
-        argv=("internal:classic-analysis-link-v1", *plan.analysis_link_options),
+        argv=("internal:classic-analysis-link-v2", *plan.analysis_link_options),
         environment=plan.environment,
         direct_inputs=(),
         dependencies=dependencies,

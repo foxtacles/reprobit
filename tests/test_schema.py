@@ -22,6 +22,7 @@ from reprobit.project_loader import (
 from reprobit.schema import (
     BuildPlanDocument,
     ClassicArchiveAuthority,
+    ClassicDebugCompanionPaths,
     ClassicField,
     ClassicGroupOrderPlan,
     ClassicProofReceipt,
@@ -39,7 +40,7 @@ from reprobit.schema import (
     SchemaVersionError,
     SourceManifestDocument,
     SourceManifestEntry,
-    classic_analysis_pdb_paths,
+    classic_debug_companion_paths,
     project_document_schemas,
     schema_catalog,
     source_manifest_digest,
@@ -108,13 +109,33 @@ def test_analysis_link_options_reject_malformed_or_widened_values(options: objec
         _build_plan_with_link_options(options)
 
 
-def test_analysis_pdb_path_cannot_alias_a_verification_oracle(tmp_path: Path) -> None:
+def test_debug_companion_paths_are_grouped_beside_the_exact_artifact(tmp_path: Path) -> None:
+    create_tree(tmp_path)
+    baseline = load_project_tree(tmp_path)
+    assert baseline.source_manifest is not None
+    plan = _build_plan_with_link_options(("/DEBUG",)).model_copy(
+        update={"source_manifest_digest": source_manifest_digest(baseline.source_manifest)}
+    )
+    bundle = baseline.model_copy(update={"build_plan": plan})
+
+    assert classic_debug_companion_paths(bundle) == (
+        ClassicDebugCompanionPaths(
+            "program",
+            "build/reprobit-debug/program.exe",
+            "build/reprobit-debug/program.PDB",
+        ),
+    )
+
+
+def test_debug_companion_path_cannot_alias_a_verification_oracle(tmp_path: Path) -> None:
     create_tree(tmp_path)
     baseline = load_project_tree(tmp_path)
     assert baseline.source_manifest is not None
     target = baseline.spec.targets[0]
     spec = baseline.spec.model_copy(
-        update={"targets": (target.model_copy(update={"oracle": "build/program.PDB"}),)}
+        update={
+            "targets": (target.model_copy(update={"oracle": "build/reprobit-debug/program.PDB"}),)
+        }
     )
     plan = _build_plan_with_link_options(("/DEBUG",)).model_copy(
         update={"source_manifest_digest": source_manifest_digest(baseline.source_manifest)}
@@ -122,7 +143,7 @@ def test_analysis_pdb_path_cannot_alias_a_verification_oracle(tmp_path: Path) ->
     bundle = baseline.model_copy(update={"spec": spec, "build_plan": plan})
 
     with pytest.raises(ValueError, match="aliases protected verification oracle"):
-        classic_analysis_pdb_paths(bundle)
+        classic_debug_companion_paths(bundle)
 
 
 def test_build_target_can_lead_with_a_digit_without_widening_internal_ids() -> None:

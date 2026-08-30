@@ -22,7 +22,7 @@ from reprobit.cli import (
 )
 from reprobit.cli_build import _legacy_oracle_targets
 from reprobit.cli_cmake_import import _cmake_import_workspace
-from reprobit.cli_output import CLIOutput, human_command
+from reprobit.cli_output import CLIOutput, _friendly_incremental_phase, human_command
 from reprobit.cli_paths import CLIError
 from reprobit.cli_project import _human_intervention_detail
 from reprobit.cmake_source import effective_source_digest
@@ -2014,6 +2014,14 @@ class _CapturedTTY(StringIO):
         return True
 
 
+def test_incremental_analysis_node_has_a_plain_language_progress_label() -> None:
+    assert (
+        _friendly_incremental_phase("transform", "analysis-link.program")
+        == "Creating comparison files"
+    )
+    assert _friendly_incremental_phase("transform", "object.program") == "Transform"
+
+
 def test_producer_progress_is_structured_for_ndjson_and_restrained_for_text() -> None:
     machine = StringIO()
     with CLIOutput("ndjson", machine, StringIO()).producer_activity("build") as progress:
@@ -2153,6 +2161,8 @@ def test_incremental_summary_is_complete_in_text_and_ndjson() -> None:
         runtime_init_count=1,
         invalidations=(("compile.unit", "recursive header changed"),),
         unchanged_targets=1,
+        published_comparison_pairs=1,
+        unchanged_comparison_pairs=2,
     )
     human = StringIO()
     CLIOutput("text", human, StringIO()).incremental_summary(summary)
@@ -2160,7 +2170,8 @@ def test_incremental_summary_is_complete_in_text_and_ndjson() -> None:
     assert "99 reused, 1 rebuilt (99.0% reused)" in rendered
     assert "compiler environment started 1 time" in rendered
     assert "1.25s" in rendered
-    assert "targets: 1 unchanged, 0 updated" in rendered
+    assert "exact targets: 1 unchanged, 0 updated" in rendered
+    assert "comparison pairs: 2 unchanged, 1 updated" in rendered
     assert "Why steps were rebuilt:" in rendered
     assert "compile.unit: recursive header changed" in rendered
 
@@ -2175,6 +2186,8 @@ def test_incremental_summary_is_complete_in_text_and_ndjson() -> None:
     assert event["runtime_init_count"] == 1
     assert event["published_targets"] == 0
     assert event["unchanged_targets"] == 1
+    assert event["published_comparison_pairs"] == 1
+    assert event["unchanged_comparison_pairs"] == 2
     assert event["invalidations"] == [
         {"node_id": "compile.unit", "reason": "recursive header changed"}
     ]

@@ -40,7 +40,7 @@ from reprobit.producer_graph import (
     ProducerRole,
     materialize_argument,
 )
-from reprobit.schema import InterventionDocument, ProjectBundle
+from reprobit.schema import ClassicDebugCompanionPaths, InterventionDocument, ProjectBundle
 from reprobit.secure_path_contracts import (
     SecureFileSnapshot,
     SecurePathError,
@@ -317,7 +317,7 @@ class ClassicIncrementalPlan:
     ordinary_barrier: tuple[str, ...]
     rdata_material_by_object: Mapping[str, tuple[JsonValue, ...]]
     analysis_link_options: tuple[str, ...]
-    analysis_pdb_relatives: Mapping[str, str]
+    debug_companion_paths: Mapping[str, ClassicDebugCompanionPaths]
     runtime_holder: dict[str, WarmRuntime]
     runtime_lock: Lock
     compiler_states: dict[str, CompilerState]

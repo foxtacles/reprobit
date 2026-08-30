@@ -40,7 +40,7 @@ def execute_classic_incremental_plan(
     plan: ClassicIncrementalPlan,
 ) -> ClassicIncrementalResult:
     analysis_nodes = plan.analysis_nodes
-    analysis_pdb_relatives = plan.analysis_pdb_relatives
+    debug_companion_paths = plan.debug_companion_paths
     bundle = plan.bundle
     census = plan.census
     compiler_states = plan.compiler_states
@@ -264,13 +264,25 @@ def execute_classic_incremental_plan(
             )
         )
         if target.id in immutable_analysis:
+            companion_paths = debug_companion_paths[target.id]
+            analysis_image, expected_image = immutable_analysis[target.id]["image"]
+            publication_requests.append(
+                publication_request(
+                    target_id=target.id,
+                    kind="debug companion image",
+                    producer_node_id=analysis_nodes[target.id],
+                    relative=companion_paths.image,
+                    staged=analysis_image,
+                    expected=expected_image,
+                )
+            )
             analysis_pdb, expected_pdb = immutable_analysis[target.id]["pdb"]
             publication_requests.append(
                 publication_request(
                     target_id=target.id,
-                    kind="analysis PDB",
+                    kind="debug companion PDB",
                     producer_node_id=analysis_nodes[target.id],
-                    relative=analysis_pdb_relatives[target.id],
+                    relative=companion_paths.pdb,
                     staged=analysis_pdb,
                     expected=expected_pdb,
                 )
@@ -285,6 +297,8 @@ def execute_classic_incremental_plan(
             # once here without rehashing every restored workspace output.
             revalidate_producer_implementation(implementation_receipt)
 
+    published_comparison_pairs = 0
+    unchanged_comparison_pairs = 0
     try:
         with publish_classic_output_set(
             project_root,
@@ -295,6 +309,31 @@ def execute_classic_incremental_plan(
             unchanged_target_count = sum(
                 item.request.kind == "target" and not item.changed for item in published_outputs
             )
+            comparison_changes: dict[str, dict[str, bool]] = {}
+            for item in published_outputs:
+                if item.request.kind not in {
+                    "debug companion image",
+                    "debug companion PDB",
+                }:
+                    continue
+                target_changes = comparison_changes.setdefault(item.request.owner_id, {})
+                if item.request.kind in target_changes:
+                    raise ClassicIncrementalError(
+                        f"warm debug companion {item.request.owner_id!r} repeats "
+                        f"{item.request.kind!r}"
+                    )
+                target_changes[item.request.kind] = item.changed
+            if set(comparison_changes) != set(debug_companion_paths) or any(
+                set(changes) != {"debug companion image", "debug companion PDB"}
+                for changes in comparison_changes.values()
+            ):
+                raise ClassicIncrementalError(
+                    "warm comparison-pair publication differs from the configured target set"
+                )
+            published_comparison_pairs = sum(
+                any(changes.values()) for changes in comparison_changes.values()
+            )
+            unchanged_comparison_pairs = len(comparison_changes) - published_comparison_pairs
             outputs = tuple(
                 sorted(
                     (
@@ -331,6 +370,8 @@ def execute_classic_incremental_plan(
             - unchanged_target_count
         ),
         unchanged_targets=unchanged_target_count,
+        published_comparison_pairs=published_comparison_pairs,
+        unchanged_comparison_pairs=unchanged_comparison_pairs,
     )
     result = replace(result, summary=summary)
     if progress is not None:
