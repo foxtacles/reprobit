@@ -457,6 +457,11 @@ keeps the current cache:
 
 ```console
 rbit clean . --obsolete-cache --preview
+```
+
+The full-cache and saved-report selections are separate alternatives:
+
+```console
 rbit clean . --cache --preview
 rbit clean . --reports --preview
 ```
