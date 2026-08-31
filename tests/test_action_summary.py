@@ -292,6 +292,26 @@ def test_action_summary_writes_outputs(tmp_path: Path, monkeypatch: object) -> N
     assert "| `sample` | Yes |" in summary_text
 
 
+def test_quarantine_digest_tracks_the_stable_boundary_not_the_run_receipt() -> None:
+    report = _fixture_report()
+    quarantine = report.verdict.quarantines[0]
+    original_digest = action_summary_module._quarantine_metrics(report)[3]
+
+    receipt_changed = quarantine.model_copy(
+        update={"proof_binding": Digest.from_bytes(b"another run receipt")}
+    )
+    receipt_report = report.model_copy(
+        update={"verdict": report.verdict.model_copy(update={"quarantines": (receipt_changed,)})}
+    )
+    assert action_summary_module._quarantine_metrics(receipt_report)[3] == original_digest
+
+    boundary_changed = quarantine.model_copy(update={"ranges": (ByteRange(offset=2, length=2),)})
+    boundary_report = report.model_copy(
+        update={"verdict": report.verdict.model_copy(update={"quarantines": (boundary_changed,)})}
+    )
+    assert action_summary_module._quarantine_metrics(boundary_report)[3] != original_digest
+
+
 def test_action_summary_rejects_output_path_line_breaks(tmp_path: Path) -> None:
     assert main([str(tmp_path / "report\ninjected=value.json")]) == 2
 

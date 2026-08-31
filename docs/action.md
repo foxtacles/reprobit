@@ -135,7 +135,7 @@ The Action exports:
 | `quarantine-count` | Number of declared reference-byte exceptions used. |
 | `quarantine-bytes` | Total reference bytes covered by those exceptions. |
 | `quarantine-ranges` | Total artifact ranges covered by those exceptions. |
-| `quarantine-digest` | SHA-256 identity of the complete canonical exception set. |
+| `quarantine-digest` | SHA-256 identity of the stable declared exception boundary. |
 | `total-cost` | Total intervention cost in relative points for the project. |
 | `report-json` | Path to the canonical JSON report. |
 | `report-html` | Path to the self-contained HTML report. |
@@ -149,6 +149,10 @@ independent failed claim remains inspectable.
 Projects that intentionally permit quarantine should assert the expected count,
 byte total, range total, and digest. That turns a reviewed exception set into a
 non-growing CI boundary instead of checking only that some quarantine occurred.
+The digest covers each exception's identity, target, coordinates, size, reason,
+and scope. Per-run proof bindings remain fully audited and visible in the report,
+but are excluded from this boundary fingerprint so the same reviewed policy has
+the same identity on every machine and invocation.
 
 ## Protection against stale reports
 

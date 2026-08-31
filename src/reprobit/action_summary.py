@@ -43,11 +43,20 @@ def _accepted(report: Report) -> bool:
 
 def _quarantine_metrics(report: Report) -> tuple[int, int, int, str]:
     quarantines = report.verdict.quarantines
+    boundary = tuple(
+        quarantine.model_dump(
+            mode="json",
+            exclude={"proof_binding"},
+            exclude_none=True,
+            exclude_computed_fields=True,
+        )
+        for quarantine in quarantines
+    )
     return (
         len(quarantines),
         sum(item.byte_count for item in quarantines),
         sum(len(item.ranges) for item in quarantines),
-        Digest.from_bytes(canonical_json(quarantines)).value,
+        Digest.from_bytes(canonical_json(boundary)).value,
     )
 
 
