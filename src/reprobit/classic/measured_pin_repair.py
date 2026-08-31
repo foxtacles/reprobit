@@ -21,12 +21,13 @@ from reprobit.classic_project import (
     ClassicFamilyDispatcher,
     ClassicProjectError,
 )
-from reprobit.coff_format import CoffObject, coff_body
+from reprobit.coff_format import CoffObject, CoffSection, coff_body, detailed_relocations
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ClassicRecipeRole,
+    NativeJsonValue,
 )
 
 
@@ -73,9 +74,12 @@ _SAFE_SOURCE_EQUAL_BODY_PIN_KEYS = frozenset(
     }
 )
 
-# Donor rewriting keeps its transformation program, retail claim, and donor
-# body immutable. These are only the fresh compiler observations that may move
-# around that fixed candidate.
+# Donor rewriting keeps its transformation program, retail addresses, semantic
+# relocation fields, and donor body immutable. These are only the fresh
+# compiler observations that may move around that fixed candidate.  The
+# ``retail_relocations`` entry is admitted only through the closed helper below,
+# which can refresh object-local section seats for exact named externals and no
+# other field.
 _SAFE_DONOR_REWRITING_PIN_KEYS = frozenset(
     {
         "expected_donor_length",
@@ -85,7 +89,16 @@ _SAFE_DONOR_REWRITING_PIN_KEYS = frozenset(
         "expected_seed_length",
         "expected_seed_line_count",
         "expected_seed_metadata_sha256",
+        "retail_relocations",
     }
+)
+
+_FIXED_NAMED_RELOCATION_FIELDS = (
+    "type",
+    "addend",
+    "target_value",
+    "target_type",
+    "target_storage",
 )
 
 
@@ -225,6 +238,62 @@ def _source_equal_body_measurements(
     return measured, _SAFE_SOURCE_EQUAL_BODY_PIN_KEYS
 
 
+def _named_external_relocation_seats(
+    receipt: ClassicProofReceipt,
+    donor: CoffObject,
+    donor_primary: CoffSection,
+) -> list[NativeJsonValue] | None:
+    """Refresh only compiler-local section seats for exact named externals.
+
+    A declaration-only edit can reorder otherwise identical COMDAT sections.
+    The relocation's named target and retail address remain authoritative; its
+    positive COFF section number is an observation of that particular compiler
+    object.  Keep every semantic field fixed and refuse broader drift here so
+    the ordinary family producer can still validate the complete refreshed
+    oracle afterward.  Offsets are intentionally left to that post-rewrite
+    check because an existing recipe may declare relocation reseating.
+    """
+
+    declared = receipt.expected_values.get("retail_relocations")
+    if not isinstance(declared, list):
+        return None
+    observed = detailed_relocations(donor, donor_primary)
+    if len(observed) != len(declared):
+        return None
+
+    refreshed = deepcopy(declared)
+    moved = False
+    for index, (record, expected) in enumerate(zip(observed, declared, strict=True)):
+        if not isinstance(expected, dict):
+            return None
+        observed_section = record["target_section"]
+        expected_section = expected.get("target_section")
+        if observed_section == expected_section:
+            continue
+        fixed_fields_match = all(
+            record[field] == expected.get(field) for field in _FIXED_NAMED_RELOCATION_FIELDS
+        )
+        exact_named_external = (
+            isinstance(expected_section, int)
+            and not isinstance(expected_section, bool)
+            and expected_section > 0
+            and observed_section > 0
+            and record["target_storage"] == 2
+            and isinstance(expected.get("target"), str)
+            and record["target"] == expected["target"]
+        )
+        if not fixed_fields_match or not exact_named_external:
+            raise MeasuredPinRepairError(
+                "fresh donor relocation section drift is not an exact named-external seat move"
+            )
+        refreshed_row = refreshed[index]
+        if not isinstance(refreshed_row, dict):  # Defensive: ``declared`` was deep-copied.
+            raise MeasuredPinRepairError("retail relocation receipt changed during repair")
+        refreshed_row["target_section"] = observed_section
+        moved = True
+    return refreshed if moved else None
+
+
 def _donor_rewriting_measurements(
     intervention: ClassicRecipeIntervention,
     receipt: ClassicProofReceipt,
@@ -241,20 +310,24 @@ def _donor_rewriting_measurements(
         raise MeasuredPinRepairError(
             "fresh donor body no longer matches immutable expected_donor_body_sha256 goal"
         )
+    relocation_seats = _named_external_relocation_seats(receipt, donor, donor_primary)
+    measured: dict[str, object] = {
+        "expected_seed_body_sha256": sha256(bytes(coff_body(seed, seed_primary))).hexdigest(),
+        "expected_seed_metadata_sha256": composition.instruction_mosaic_metadata_sha256(
+            seed, seed_primary
+        ),
+        "expected_donor_metadata_sha256": composition.instruction_mosaic_metadata_sha256(
+            donor, donor_primary
+        ),
+        "expected_seed_length": seed_primary["raw_size"],
+        "expected_donor_length": donor_primary["raw_size"],
+        "expected_seed_line_count": seed_primary["line_count"],
+        "expected_donor_line_count": donor_primary["line_count"],
+    }
+    if relocation_seats is not None:
+        measured["retail_relocations"] = relocation_seats
     return (
-        {
-            "expected_seed_body_sha256": sha256(bytes(coff_body(seed, seed_primary))).hexdigest(),
-            "expected_seed_metadata_sha256": composition.instruction_mosaic_metadata_sha256(
-                seed, seed_primary
-            ),
-            "expected_donor_metadata_sha256": composition.instruction_mosaic_metadata_sha256(
-                donor, donor_primary
-            ),
-            "expected_seed_length": seed_primary["raw_size"],
-            "expected_donor_length": donor_primary["raw_size"],
-            "expected_seed_line_count": seed_primary["line_count"],
-            "expected_donor_line_count": donor_primary["line_count"],
-        },
+        measured,
         _SAFE_DONOR_REWRITING_PIN_KEYS,
     )
 

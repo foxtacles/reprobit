@@ -17,7 +17,7 @@ from reprobit.classic_project import (
     ClassicFamilyDispatcher,
     ClassicProjectError,
 )
-from reprobit.coff_format import CoffObject, coff_body
+from reprobit.coff_format import CoffObject, coff_body, detailed_relocations
 from reprobit.model import Scope
 from reprobit.schema import (
     ClassicProofReceipt,
@@ -38,6 +38,38 @@ def _objects() -> tuple[bytes, bytes]:
 def _body(payload: bytes) -> bytes:
     coff = CoffObject(payload)
     return bytes(coff_body(coff, coff.function_section(SYMBOL)))
+
+
+def _with_named_target_section(payload: bytes, section: int) -> bytes:
+    coff = CoffObject(payload)
+    symbol_index = next(
+        index for index, symbol in coff.symbols.items() if symbol["name"] == coff_fixture.NIL_SYMBOL
+    )
+    result = bytearray(payload)
+    offset = coff.symbol_offset + symbol_index * 18 + 12
+    result[offset : offset + 2] = section.to_bytes(2, "little", signed=True)
+    return bytes(result)
+
+
+def _relocation_oracle(payload: bytes, *, section: int) -> list[dict[str, object]]:
+    coff = CoffObject(payload)
+    primary = coff.function_section(SYMBOL)
+    result: list[dict[str, object]] = []
+    for row in detailed_relocations(coff, primary):
+        result.append(
+            {
+                "offset": row["offset"],
+                "type": row["type"],
+                "addend": row["addend"],
+                "target": row["target"],
+                "target_section": section,
+                "target_value": row["target_value"],
+                "target_type": row["target_type"],
+                "target_storage": row["target_storage"],
+                "retail_target": "0x10000000",
+            }
+        )
+    return result
 
 
 def _intervention(family: ClassicRecipeFamily) -> ClassicRecipeIntervention:
@@ -362,4 +394,99 @@ def test_donor_rewriting_never_moves_the_donor_body_pin() -> None:
             intervention,
             receipt,
             ClassicDispatchMaterials(seed_object=seed, donor_object=donor),
+        )
+
+
+def test_donor_rewriting_refreshes_only_named_external_section_seats() -> None:
+    seed, donor = _objects()
+    donor = _with_named_target_section(donor, 4)
+    intervention = _intervention(ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING)
+    declared = _relocation_oracle(donor, section=3)
+    receipt = _receipt(
+        intervention,
+        {
+            "expected_donor_body_sha256": sha256(_body(donor)).hexdigest(),
+            "retail_relocations": declared,
+        },
+    )
+    sentinel = cast(ClassicCandidate, object())
+    dispatcher = _RecordingDispatcher(sentinel)
+
+    result = repair_measured_pins(
+        intervention,
+        receipt,
+        ClassicDispatchMaterials(seed_object=seed, donor_object=donor),
+        dispatcher=cast(ClassicFamilyDispatcher, dispatcher),
+    )
+
+    assert result.changed_keys == ("retail_relocations",)
+    refreshed = result.receipt.expected_values["retail_relocations"]
+    assert isinstance(refreshed, list)
+    assert all(isinstance(row, dict) and row["target_section"] == 4 for row in refreshed)
+    assert all(row["target_section"] == 3 for row in declared)
+    assert dispatcher.constraints == result.receipt.expected_values
+    assert result.candidate is sentinel
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    (
+        ("type", 20),
+        ("addend", 1),
+        ("target", "?Different@@3HA"),
+        ("target_value", 1),
+        ("target_type", 32),
+        ("target_storage", 3),
+    ),
+)
+def test_donor_rewriting_refuses_broader_relocation_drift_during_seat_refresh(
+    field: str,
+    replacement: object,
+) -> None:
+    seed, donor = _objects()
+    donor = _with_named_target_section(donor, 4)
+    intervention = _intervention(ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING)
+    declared = _relocation_oracle(donor, section=3)
+    declared[0][field] = replacement
+    receipt = _receipt(
+        intervention,
+        {
+            "expected_donor_body_sha256": sha256(_body(donor)).hexdigest(),
+            "retail_relocations": declared,
+        },
+    )
+
+    with pytest.raises(MeasuredPinRepairError, match="not an exact named-external seat move"):
+        repair_measured_pins(
+            intervention,
+            receipt,
+            ClassicDispatchMaterials(seed_object=seed, donor_object=donor),
+            dispatcher=cast(
+                ClassicFamilyDispatcher,
+                _RecordingDispatcher(cast(ClassicCandidate, object())),
+            ),
+        )
+
+
+def test_donor_rewriting_does_not_repin_defined_or_undefined_symbol_status() -> None:
+    seed, donor = _objects()
+    donor = _with_named_target_section(donor, 4)
+    intervention = _intervention(ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING)
+    receipt = _receipt(
+        intervention,
+        {
+            "expected_donor_body_sha256": sha256(_body(donor)).hexdigest(),
+            "retail_relocations": _relocation_oracle(donor, section=0),
+        },
+    )
+
+    with pytest.raises(MeasuredPinRepairError, match="not an exact named-external seat move"):
+        repair_measured_pins(
+            intervention,
+            receipt,
+            ClassicDispatchMaterials(seed_object=seed, donor_object=donor),
+            dispatcher=cast(
+                ClassicFamilyDispatcher,
+                _RecordingDispatcher(cast(ClassicCandidate, object())),
+            ),
         )
