@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_cli import _complete_translation_unit_project
@@ -107,12 +108,23 @@ def test_source_regenerate_plainly_reports_when_no_update_is_needed(
 def test_project_commands_send_an_existing_source_edit_to_repair(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
     shutil.copytree(Path(__file__).parents[1] / "examples/grind", project)
     reference = project / "reference/grind.exe"
     reference.parent.mkdir()
     reference.write_bytes(b"reference")
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    monkeypatch.setattr(
+        "reprobit.project_readiness.resolve_toolchain_root",
+        lambda *_args, **_kwargs: toolchain,
+    )
+    monkeypatch.setattr(
+        "reprobit.project_readiness.ClassicMSVCToolchain.doctor",
+        lambda _self, _lock=None: SimpleNamespace(ok=True, checks=()),
+    )
     unit_path = project / "reprobit/interventions/tu.transform.json"
     unit = InterventionDocument.model_validate_json(unit_path.read_bytes())
     unit_path.write_bytes(
