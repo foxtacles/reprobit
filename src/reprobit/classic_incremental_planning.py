@@ -30,6 +30,7 @@ from reprobit.classic_incremental_context import (
     snapshot_file,
 )
 from reprobit.classic_orchestration import (
+    ClassicMeasuredReceiptRepair,
     ClassicPreparedUnit,
     classic_compiler_translation_unit_authority,
     classic_rdata_repack_graph_authority,
@@ -600,6 +601,7 @@ def prepare_classic_incremental_plan(
     link_timeout: float,
     cleanup_timeout: float,
     progress: IncrementalProgress | None,
+    measured_receipt_repair: ClassicMeasuredReceiptRepair | None,
 ) -> ClassicIncrementalPlan:
     implementation_receipt = PRODUCER_IMPLEMENTATION_DIGEST
     revalidate_producer_implementation(implementation_receipt)
@@ -814,6 +816,7 @@ def prepare_classic_incremental_plan(
         link_timeout=link_timeout,
         cleanup_timeout=cleanup_timeout,
         progress=progress,
+        measured_receipt_repair=measured_receipt_repair,
         census=census,
         staging_root=staging_root,
         graph_digest=graph_digest_value,

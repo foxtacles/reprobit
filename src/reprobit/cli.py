@@ -438,9 +438,11 @@ def _parser() -> argparse.ArgumentParser:
     source_lock.set_defaults(handler=command_source_lock)
     source_regenerate = source_commands.add_parser(
         "regenerate",
-        help=(
-            "re-derive stale mechanical source pins (overlay outputs, donor "
-            "renderings, TU digests) after admitted source edits"
+        help="advanced: preview or apply source-check updates without building",
+        description=(
+            "Advanced maintenance tool. After editing an existing project file, normally "
+            "run rbit repair . instead. This command only previews or applies the "
+            "mechanical source-check updates; it does not build or verify the project."
         ),
     )
     source_regenerate.add_argument(
@@ -449,7 +451,7 @@ def _parser() -> argparse.ArgumentParser:
     source_regenerate.add_argument(
         "--apply",
         action="store_true",
-        help="write the regenerated documents (default: dry run)",
+        help="save the changes shown by the preview (default: preview without writing)",
     )
     source_regenerate.set_defaults(handler=command_source_regenerate)
 
@@ -680,7 +682,14 @@ def _parser() -> argparse.ArgumentParser:
 
     repair = subcommands.add_parser(
         "repair",
-        help="repair routine source-edit fallout and prove exact output in one run",
+        help="repair edits to already-locked source files and prove exact output",
+        description=(
+            "Use this after editing a source file that is already part of the project, "
+            "including a shared header used by many source files. ReproBit repairs the "
+            "saved build guidance in private, rebuilds, and publishes only after every "
+            "target matches exactly. For added or removed files, use source preview and "
+            "source lock first."
+        ),
     )
     repair.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
     _add_execution_options(repair, cold_option=False)

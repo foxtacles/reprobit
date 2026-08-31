@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,7 @@ from reprobit.cli_output import CLIOutput
 from reprobit.cli_paths import CLIError
 from reprobit.project_loader import load_project_tree
 from reprobit.repair import RepairError, capture_repair_snapshot, collect_repair_candidate
+from reprobit.repair_workflow import RepairWorkflowResult
 from reprobit.schema import classic_debug_companion_paths
 
 
@@ -39,6 +41,80 @@ def _write_candidate_reports(args: argparse.Namespace) -> None:
     report_directory.mkdir(parents=True, exist_ok=True)
     (report_directory / "report.json").write_bytes(b"{}\n")
     (report_directory / "report.html").write_bytes(b"<!doctype html>\n")
+
+
+@pytest.fixture(autouse=True)
+def _stub_classic_repair_workflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "reprobit.cli_repair.repair_classic_records",
+        lambda *_args, **_kwargs: RepairWorkflowResult((), (), 0, 0, 0, 0, 0, 1),
+    )
+
+
+def _track_locked_test_sources(project: Path) -> None:
+    subprocess.run(("git", "init", "-q"), cwd=project, check=True)
+    subprocess.run(("git", "add", "notes.txt", "src/unit.cpp"), cwd=project, check=True)
+
+
+def test_repair_refuses_a_newly_tracked_source_before_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    _track_locked_test_sources(project)
+    added = project / "src/added.cpp"
+    added.write_bytes(b"int added;\n")
+    subprocess.run(("git", "add", "src/added.cpp"), cwd=project, check=True)
+    verified = False
+
+    def verify(*_args: object) -> int:
+        nonlocal verified
+        verified = True
+        return 0
+
+    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    capsys.readouterr()
+
+    assert main(["repair", str(project)]) == 2
+
+    message = capsys.readouterr().err
+    assert "reviewed source-file list changed (+1 -0)" in message
+    assert "Added: src/added.cpp" in message
+    assert "rbit source preview" in message and "rbit source lock" in message
+    assert "Only if you changed which files CMake builds" in message
+    assert "rbit clean" not in message
+    assert not verified
+
+
+def test_repair_explains_a_removed_locked_source_before_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    _track_locked_test_sources(project)
+    (project / "notes.txt").unlink()
+    verified = False
+
+    def verify(*_args: object) -> int:
+        nonlocal verified
+        verified = True
+        return 0
+
+    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    capsys.readouterr()
+
+    assert main(["repair", str(project)]) == 2
+
+    message = capsys.readouterr().err
+    assert "reviewed source-file list changed (+0 -1)" in message
+    assert "Removed: notes.txt" in message
+    assert "cannot seal repair input" not in message
+    assert "rbit source preview" in message and "rbit source lock" in message
+    assert not verified
 
 
 def test_repair_refreshes_source_records_and_verifies_once(
@@ -70,6 +146,26 @@ def test_repair_refreshes_source_records_and_verifies_once(
     load_project_tree(project)
     assert (project / ".reprobit-state/reports/report.html").is_file()
     assert (project / "out/program.bin").read_bytes() == b"verified:out/program.bin\n"
+
+
+def test_repair_noop_reports_that_exact_verification_passed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+
+    def verify(args: argparse.Namespace, _output: CLIOutput) -> int:
+        _write_candidate_reports(args)
+        return 0
+
+    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    capsys.readouterr()
+
+    assert main(["repair", str(project)]) == 0
+
+    assert "Nothing needed repair; every target still matches exactly" in capsys.readouterr().out
 
 
 def test_repair_publishes_reports_to_the_requested_project_directory(
@@ -116,8 +212,9 @@ def test_repair_restores_authority_when_exact_verification_fails(
     assert main(["repair", str(project)]) == 2
 
     message = capsys.readouterr().err
-    assert "source edits were kept" in message
-    assert "saved project records were not changed" in message
+    assert "source edits are untouched" in message
+    assert "did not publish its staged project records or outputs" in message
+    assert "Cleanup when finished:" in message
     assert _authority_bytes(project) == before
     assert (project / "src/unit.cpp").read_bytes() == edited
 
@@ -165,7 +262,7 @@ def test_repair_never_overwrites_concurrent_authority_edits(
     assert main(["repair", str(project)]) == 2
 
     message = capsys.readouterr().err
-    assert "saved project records were not changed" in message
+    assert "did not publish its staged project records or outputs" in message
     assert "preimage conflict" in message
     assert unit_authority.read_bytes() == concurrent_edit
 
@@ -303,6 +400,29 @@ def test_repair_refuses_staged_oracle_membership_change(tmp_path: Path) -> None:
         )
 
 
+def test_repair_refuses_authority_change_outside_its_mutation_ledger(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    snapshot = capture_repair_snapshot(project)
+    staged = tmp_path / "staged"
+    staged.mkdir()
+    for source in snapshot.files:
+        destination = staged / source.relative_path
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.payload)
+    intervention = staged / "reprobit/interventions/unit.json"
+    intervention.write_bytes(intervention.read_bytes() + b" \n")
+
+    with pytest.raises(RepairError, match="outside its mutation ledger"):
+        collect_repair_candidate(
+            snapshot,
+            staged,
+            report_directory=".candidate-reports",
+        )
+
+
 def test_repair_reports_cleanup_failure_after_success_truthfully(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -333,5 +453,5 @@ def test_repair_reports_cleanup_failure_after_success_truthfully(
     captured = capsys.readouterr()
     assert "Repair complete" in captured.out
     assert "published and verified" in captured.err
-    assert "saved project records were not changed" not in captured.err
+    assert "did not publish its staged project records or outputs" not in captured.err
     load_project_tree(project)

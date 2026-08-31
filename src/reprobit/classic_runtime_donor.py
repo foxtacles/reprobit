@@ -42,6 +42,7 @@ from reprobit.classic_includes import (
     resolve_msvc_include_trace,
 )
 from reprobit.classic_orchestration import (
+    ClassicMeasuredReceiptRepair,
     ClassicPreparedUnit,
     compose_classic_unit,
 )
@@ -200,6 +201,7 @@ class ClassicDonorComposition:
         producer: ClassicProducerExecution,
         progress: ClassicProgressReporter,
         compile_timeout: float,
+        measured_receipt_repair: ClassicMeasuredReceiptRepair | None = None,
     ) -> None:
         self.bundle = bundle
         self.session_root = session_root
@@ -212,6 +214,7 @@ class ClassicDonorComposition:
         self.producer = producer
         self._progress = progress
         self.compile_timeout = compile_timeout
+        self.measured_receipt_repair = measured_receipt_repair
         self._evidence_lock = Lock()
         self._semantic_lock = Lock()
         self._producer_reads: list[ClassicProducerReadReceipt] = []
@@ -858,7 +861,12 @@ class ClassicDonorComposition:
         *,
         compiler_epoch: ClassicActiveCompilerEpoch,
         dependency_replays: list[ClassicWarmDonorDependencyReplay] | None = None,
-    ) -> tuple[ClassicCompileRecord, list[StepExecutionReceipt], list[InterventionWitness]]:
+    ) -> tuple[
+        ClassicCompileRecord,
+        list[StepExecutionReceipt],
+        list[InterventionWitness],
+        bool,
+    ]:
         record = self.record_for_unit(unit)
         self.producer.require_regular(record.object_path, label=f"seed object for {unit.plan.id!r}")
         if record.pdb_path.is_symlink():
@@ -889,7 +897,28 @@ class ClassicDonorComposition:
             donor_materials=donor_materials,
             seed_source=record.source.read_bytes(),
             legacy_oracles=self._legacy_oracles,
+            measured_receipt_repair=self.measured_receipt_repair,
         )
+        if composition.incomplete:
+            temporary = record.object_path.with_name(
+                f".{record.object_path.name}.reprobit-{unit.plan.id}"
+            )
+            temporary.write_bytes(composition.output)
+            os.replace(temporary, record.object_path)
+            steps.append(
+                _internal_step(
+                    f"compose.{unit.plan.id}",
+                    {
+                        "producer_node": record.node_id,
+                        "unit": unit.plan.model_dump(mode="json"),
+                        "output": sha256(composition.output).hexdigest(),
+                        "provisional_repair": True,
+                    },
+                    time.monotonic() - started,
+                )
+            )
+            self._progress.emit("compose", f"compose.{unit.plan.id}")
+            return record, steps, [], True
         object_transform: ClassicObjectTransformReceipt | None = None
         if composition.group_order_evidence is not None:
             if (
@@ -1024,7 +1053,12 @@ class ClassicDonorComposition:
             with self._evidence_lock:
                 self._object_transforms.append(object_transform)
         self._progress.emit("compose", f"compose.{unit.plan.id}")
-        return record, steps, [*donor_witnesses, *composition.witnesses]
+        return (
+            record,
+            steps,
+            [*donor_witnesses, *composition.witnesses],
+            composition.provisional_repair,
+        )
 
 
 __all__ = [

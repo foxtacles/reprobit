@@ -18,6 +18,7 @@ from reprobit.build import BuildPlan
 from reprobit.classic.semantic_contracts import CleanSourceInput, ProjectOverlaySourcePair
 from reprobit.classic.source_overlay import plan_project_overlay_compiler_epochs
 from reprobit.classic_orchestration import (
+    ClassicMeasuredReceiptRepair,
     classic_rdata_repack_graph_authority,
     prepare_classic_units,
 )
@@ -88,6 +89,7 @@ class ClassicProducerGraphPreparedRun:
     evidence_provider: ClassicProducerGraphRuntimeEvidenceProvider
     plan: BuildPlan
     intervention_witnesses: tuple[InterventionWitness, ...]
+    provisional: bool = False
 
     def close(self) -> None:
         try:
@@ -266,6 +268,7 @@ def prepare_classic_producer_graph_run(
     link_timeout: float = 900.0,
     cleanup_timeout: float = 10.0,
     progress: ClassicProgressCallback | None = None,
+    measured_receipt_repair: ClassicMeasuredReceiptRepair | None = None,
 ) -> ClassicProducerGraphPreparedRun:
     """Prepare a cold, direct execution of the committed producer graph."""
 
@@ -587,6 +590,7 @@ def prepare_classic_producer_graph_run(
             producer=producer,
             progress=reporter,
             compile_timeout=compile_timeout,
+            measured_receipt_repair=measured_receipt_repair,
         )
         warm = ClassicWarmExecution(
             bundle=bundle,
@@ -614,6 +618,7 @@ def prepare_classic_producer_graph_run(
             bundle,
             project_root,
             reporter,
+            provisional=measured_receipt_repair is not None,
         )
         executor = ClassicProducerGraphBuildExecutor(
             bundle=bundle,
@@ -647,6 +652,7 @@ def prepare_classic_producer_graph_run(
             evidence_provider=evidence_provider,
             plan=BuildPlan(()),
             intervention_witnesses=tuple(overlay_interventions),
+            provisional=measured_receipt_repair is not None,
         )
     except BaseException as original:
         try:

@@ -206,10 +206,13 @@ class ClassicProducerGraphRuntimeEvidenceProvider:
         bundle: ProjectBundle,
         project_root: Path,
         progress: ClassicProgressReporter,
+        *,
+        provisional: bool = False,
     ) -> None:
         self._bundle = bundle
         self._project_root = project_root
         self._progress = progress
+        self._provisional = provisional
         self._inputs: ClassicRuntimeEvidenceInputs | None = None
 
     def bind(self, inputs: ClassicRuntimeEvidenceInputs) -> None:
@@ -218,6 +221,10 @@ class ClassicProducerGraphRuntimeEvidenceProvider:
         self._inputs = inputs
 
     def issue(self, context: RuntimeEvidenceContext) -> RuntimeEvidence:
+        if self._provisional:
+            raise ClassicProjectError(
+                "provisional measured receipt repair cannot issue authenticity evidence"
+            )
         inputs = self._inputs
         if inputs is None:
             raise ClassicProjectError("classic producer-graph evidence requested before execution")
@@ -687,7 +694,7 @@ class ClassicProducerGraphBuildExecutor:
                 for future in as_completed(futures):
                     unit = futures[future]
                     try:
-                        record, unit_steps, unit_witnesses = future.result()
+                        record, unit_steps, unit_witnesses, _provisional = future.result()
                     except Exception as exc:
                         raise ClassicProjectError(
                             f"classic TU {unit.plan.id!r} composition failed: {exc}"

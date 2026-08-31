@@ -5,10 +5,12 @@ from __future__ import annotations
 import os
 import stat
 import time
+import uuid
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from enum import StrEnum
+from hashlib import sha256
 from pathlib import Path
 from threading import Lock
 from types import MappingProxyType
@@ -40,6 +42,7 @@ class NodeOutcome:
     key: str
     record: CacheRecord
     cache_hit: bool
+    publishable: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -115,6 +118,7 @@ class IncrementalNode(Generic[RuntimeT]):
     probe: NodeCacheProbe | None = None
     phase: IncrementalPhase = IncrementalPhase.PRODUCER
     order_only: tuple[str, ...] = ()
+    publish_result: Callable[[], bool] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.phase, IncrementalPhase):
@@ -345,6 +349,9 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                                 if dependency not in node.order_only
                             }
                         )
+                        dependencies_publishable = all(
+                            outcome.publishable for outcome in dependencies.values()
+                        )
                         prepared_inputs: PreparedNodeInputs | None = None
                         if node.materialize_before_probe:
                             assert node.materialize_inputs is not None
@@ -364,6 +371,9 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                                     f"node {node.id!r} probe returned a record from "
                                     "a different cache identity"
                                 )
+                            if not dependencies_publishable:
+                                record = None
+                                reason = "provisional dependency requires fresh execution"
                         else:
                             decision = node.key(dependencies)
                             if isinstance(decision, NodeKeyDecision):
@@ -372,7 +382,13 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                             else:
                                 key = decision
                                 reason = None
-                            record = lease.lookup(node.domain, key) if key is not None else None
+                            record = (
+                                lease.lookup(node.domain, key)
+                                if key is not None and dependencies_publishable
+                                else None
+                            )
+                            if not dependencies_publishable:
+                                reason = "provisional dependency requires fresh execution"
                         if record is not None:
                             assert key is not None
                             lease.restore(
@@ -432,21 +448,41 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                         if node.pre_store is not None:
                             node.pre_store(runtime, dependencies)
                         metadata = dict(node.metadata(dependencies))
+                        publish_result = dependencies_publishable and (
+                            node.publish_result is None or node.publish_result()
+                        )
+                        staged_key = (
+                            final_key
+                            if publish_result
+                            else sha256(
+                                (
+                                    f"provisional\0{node.id}\0{final_key}\0"
+                                    f"{uuid.uuid4().hex}"
+                                ).encode()
+                            ).hexdigest()
+                        )
                         staged = lease.stage_record(
                             node.domain,
-                            final_key,
+                            staged_key,
                             canonical_outputs[node.id],
                             metadata=metadata,
                         )
-                        with staged_lock:
-                            staged_records.append((node, staged))
+                        if publish_result:
+                            with staged_lock:
+                                staged_records.append((node, staged))
                         announce(
                             "unit_finished",
                             node,
                             None,
                             complete=True,
                         )
-                        return NodeOutcome(node.id, final_key, staged, False)
+                        return NodeOutcome(
+                            node.id,
+                            staged_key,
+                            staged,
+                            False,
+                            publish_result,
+                        )
 
                     with ThreadPoolExecutor(max_workers=min(self.max_workers, len(ready))) as pool:
                         futures = {pool.submit(run, node): node for node in ready}
@@ -534,6 +570,7 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                             prior.key,
                             published,
                             False,
+                            prior.publishable,
                         )
             with progress_lock:
                 if progress_count != len(nodes):

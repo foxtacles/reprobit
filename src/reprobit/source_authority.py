@@ -302,8 +302,8 @@ def validate_source_authority(
         for item in stale
     )
     raise SourceAuthorityError(
-        "effective translation-unit source differs from its reviewed pin; "
-        f"regenerate intervention and proof authority instead of repinning: {details}"
+        "saved ReproBit guidance no longer matches the edited source; run rbit repair . "
+        f"Details: {details}"
     )
 
 

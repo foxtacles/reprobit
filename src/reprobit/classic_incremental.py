@@ -19,6 +19,7 @@ from reprobit.classic_incremental_nodes import (
 )
 from reprobit.classic_incremental_planning import prepare_classic_incremental_plan
 from reprobit.classic_incremental_targets import add_analysis_nodes, add_terminal_nodes
+from reprobit.classic_orchestration import ClassicMeasuredReceiptRepair
 from reprobit.incremental import DeveloperAuthority
 from reprobit.incremental_executor import IncrementalProgress
 
@@ -39,6 +40,8 @@ def execute_classic_incremental_build(
     link_timeout: float = 900.0,
     cleanup_timeout: float = 10.0,
     progress: IncrementalProgress | None = None,
+    measured_receipt_repair: ClassicMeasuredReceiptRepair | None = None,
+    repair_analysis: bool = False,
 ) -> ClassicIncrementalResult:
     """Execute one current-worktree producer graph with conservative reuse."""
 
@@ -58,12 +61,26 @@ def execute_classic_incremental_build(
         link_timeout=link_timeout,
         cleanup_timeout=cleanup_timeout,
         progress=progress,
+        measured_receipt_repair=measured_receipt_repair,
     )
     add_producer_nodes(plan)
     add_transform_nodes(plan)
-    add_terminal_nodes(plan)
-    add_analysis_nodes(plan)
-    return execute_classic_incremental_plan(plan)
+    if repair_analysis:
+        by_id = {node.id: node for node in plan.nodes}
+        required = set(plan.transform_ids.values())
+        pending = list(required)
+        while pending:
+            node_id = pending.pop()
+            node = by_id[node_id]
+            for dependency in node.depends_on:
+                if dependency not in required:
+                    required.add(dependency)
+                    pending.append(dependency)
+        plan.nodes[:] = [node for node in plan.nodes if node.id in required]
+    else:
+        add_terminal_nodes(plan)
+        add_analysis_nodes(plan)
+    return execute_classic_incremental_plan(plan, publish_targets=not repair_analysis)
 
 
 __all__ = ["execute_classic_incremental_build"]

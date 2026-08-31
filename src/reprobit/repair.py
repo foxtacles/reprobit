@@ -16,7 +16,12 @@ from reprobit.authority_snapshot import (
 from reprobit.model import Digest
 from reprobit.project_loader import load_project
 from reprobit.schema import BuildPlanDocument, ProjectSpec, SourceManifestDocument
-from reprobit.source_lock import SourceLockError, receipt_source_input
+from reprobit.source_lock import (
+    SourceLockError,
+    is_git_worktree,
+    receipt_source_input,
+    tracked_source_paths,
+)
 from reprobit.state import KeepWorkspace, RunArena, report_publication_lease
 from reprobit.transactions import CASTransaction, TransactionResult
 
@@ -37,6 +42,14 @@ class RepairFileSnapshot:
 @dataclass(frozen=True, slots=True)
 class RepairOutputSnapshot:
     """The start-of-run state of one public output repair may replace."""
+
+    relative_path: str
+    digest: Digest | None
+
+
+@dataclass(frozen=True, slots=True)
+class RepairRecordPostimage:
+    """One explicitly authorized staged record state sealed before verification."""
 
     relative_path: str
     digest: Digest | None
@@ -120,6 +133,72 @@ def _repair_output_paths(spec: ProjectSpec, plan: BuildPlanDocument) -> tuple[st
     return tuple(sorted(values, key=lambda item: (item.casefold(), item)))
 
 
+def _source_membership_drift(
+    root: Path,
+    spec: ProjectSpec,
+    manifest: SourceManifestDocument,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Compare a repair lock with the same default selector used by source lock."""
+
+    locked = {entry.path for entry in manifest.entries}
+    missing_or_unsafe = {
+        relative
+        for relative in locked
+        if not _safe_path(root, relative).is_file()
+    }
+    if not is_git_worktree(root):
+        return (), tuple(
+            sorted(
+                missing_or_unsafe,
+                key=lambda item: (item.casefold(), item),
+            )
+        )
+    try:
+        selected = tracked_source_paths(root, spec)
+    except SourceLockError as exc:
+        raise RepairError(f"cannot review the current Git-tracked source files: {exc}") from exc
+    current = set(selected)
+    added = tuple(
+        sorted(
+            current - locked,
+            key=lambda item: (item.casefold(), item),
+        )
+    )
+    removed = tuple(
+        sorted(
+            (locked - current) | missing_or_unsafe,
+            key=lambda item: (item.casefold(), item),
+        )
+    )
+    return added, removed
+
+
+def _require_stable_source_membership(
+    root: Path,
+    spec: ProjectSpec,
+    manifest: SourceManifestDocument,
+) -> None:
+    added, removed = _source_membership_drift(root, spec, manifest)
+    if not added and not removed:
+        return
+    details = []
+    if added:
+        details.append("Added: " + ", ".join(added))
+    if removed:
+        details.append("Removed: " + ", ".join(removed))
+    details.extend(
+        (
+            "From the project root, review this list with: rbit source preview --project .",
+            "Then accept it with: rbit source lock --project .",
+            "Only if you changed which files CMake builds, follow with: rbit import cmake .",
+        )
+    )
+    raise RepairError(
+        "repair cannot start because the reviewed source-file list changed "
+        f"(+{len(added)} -{len(removed)}).\n" + "\n".join(details)
+    )
+
+
 def capture_repair_snapshot(project_root: Path) -> RepairSnapshot:
     """Capture every project byte that private verification may consume."""
 
@@ -137,6 +216,7 @@ def capture_repair_snapshot(project_root: Path) -> RepairSnapshot:
         raise RepairError(f"repair source lock is invalid: {exc}") from exc
     if not manifest.complete:
         raise RepairError("repair needs a complete source lock; run rbit setup first")
+    _require_stable_source_membership(root, spec, manifest)
 
     try:
         directories = capture_json_authority_directories(
@@ -267,6 +347,7 @@ def collect_repair_candidate(
     staged_root: Path,
     *,
     report_directory: str,
+    record_postimages: tuple[RepairRecordPostimage, ...] = (),
 ) -> RepairCandidate:
     """Collect only verified records and reports, refusing other input mutation."""
 
@@ -279,6 +360,25 @@ def collect_repair_candidate(
         before = by_path.get(relative)
         if payload != (before.payload if before is not None else None):
             records[relative] = payload
+
+    postimages = {item.relative_path: item.digest for item in record_postimages}
+    if len(postimages) != len(record_postimages):
+        raise RepairError("repair record postimages repeat a path")
+    unknown_postimages = set(postimages) - publishable
+    if unknown_postimages:
+        raise RepairError(
+            f"repair authorized unknown staged records: {sorted(unknown_postimages)}"
+        )
+    unauthorized = set(records) - set(postimages)
+    if unauthorized:
+        raise RepairError(
+            f"repair modified records outside its mutation ledger: {sorted(unauthorized)}"
+        )
+    for relative, expected in postimages.items():
+        candidate_path = _safe_path(staged_root, relative)
+        actual = Digest.from_path(candidate_path) if candidate_path.is_file() else None
+        if actual != expected:
+            raise RepairError(f"repair record changed after it was authorized: {relative!r}")
 
     for snapshot_file in snapshot.files:
         if snapshot_file.relative_path in publishable:
@@ -304,6 +404,31 @@ def collect_repair_candidate(
         report_json.read_bytes(),
         report_html.read_bytes(),
     )
+
+
+def capture_repair_record_postimages(
+    snapshot: RepairSnapshot,
+    staged_root: Path,
+    relative_paths: set[str],
+) -> tuple[RepairRecordPostimage, ...]:
+    """Seal the exact postimages that typed staged repair steps may publish."""
+
+    publishable = set(_publishable_paths(snapshot, staged_root))
+    unknown = relative_paths - publishable
+    if unknown:
+        raise RepairError(f"repair mutation ledger names unknown records: {sorted(unknown)}")
+    postimages: list[RepairRecordPostimage] = []
+    for relative in sorted(relative_paths, key=lambda item: (item.casefold(), item)):
+        path = _safe_path(staged_root, relative)
+        if path.exists() and (path.is_symlink() or not path.is_file()):
+            raise RepairError(f"repair record postimage is not a regular file: {relative!r}")
+        postimages.append(
+            RepairRecordPostimage(
+                relative,
+                Digest.from_path(path) if path.is_file() else None,
+            )
+        )
+    return tuple(postimages)
 
 
 def publish_repair_candidate(
@@ -421,8 +546,10 @@ __all__ = [
     "RepairError",
     "RepairFileSnapshot",
     "RepairOutputSnapshot",
+    "RepairRecordPostimage",
     "RepairSnapshot",
     "StagedRepairProject",
+    "capture_repair_record_postimages",
     "capture_repair_report_preimages",
     "capture_repair_snapshot",
     "collect_repair_candidate",

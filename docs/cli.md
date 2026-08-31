@@ -20,6 +20,13 @@ longer commands below are for first-time project onboarding and unusual hosts.
 `status` checks the saved project files; run `setup` once on each machine to
 prepare and remember its local compiler.
 
+After editing a file that already belongs to the project—including a shared
+header used by many source files—use:
+
+```console
+rbit repair .
+```
+
 <details>
 <summary>Advanced: progress events</summary>
 
@@ -86,11 +93,10 @@ the generated graph is stale; rerun `rbit import cmake .` afterward. A graph-v3
 command DAG remains valid when bytes change at an already admitted path, but a
 direct graph input cannot be removed without invalidating the graph. Unrelated
 manifest additions and removals leave the command DAG valid. The command does
-not rewrite translation-unit, intervention, or proof pins. If effective TU bytes
-or a clean overlay input changed, it refuses the transaction; run
-`rbit source regenerate` (see
-[Regenerate stale source-derived records](#regenerate-stale-source-derived-records))
-to re-derive the mechanical pins before locking again.
+not rewrite translation-unit, intervention, or proof checks. If those checks
+became stale after a routine edit, use `rbit repair .`. The advanced
+[source regeneration primitive](#source-regeneration-primitive) lets you
+inspect only the mechanical changes when diagnosing a repair.
 
 ### What setup records
 
@@ -115,47 +121,96 @@ interventions and their fixed costs; pass `--intervention ID` to select one.
 
 </details>
 
-## Regenerate stale source-derived records
+## Repair after source edits
 
-Reviewed records pin the exact bytes they were derived from, so an ordinary
-source edit makes some of them stale, and `source lock` refuses to bless the
-old digests. `source regenerate` re-derives the mechanical ones:
+Reviewed records are tied to the source they describe. After editing a file
+that already belongs to the project, the normal workflow is one command:
 
 ```console
-# After editing admitted source files:
-rbit source regenerate --project .          # dry run: print every proposed pin
-rbit source regenerate --project . --apply  # write the reviewed plan
-rbit source lock --project .
-rbit verify . --report-dir build/reprobit-report
+rbit repair .
 ```
 
-The command re-renders each stale record against the current bytes and
-proposes replacement pins for four record families:
+Repair works in a private workspace. It updates the saved build guidance
+affected by your edit, records the current source, rebuilds every target from
+scratch, and checks that the result is still exact and trustworthy. If all
+checks pass, it publishes the changed project records, verified target
+binaries, any matching debug companions, and the JSON/HTML report together.
+The default report is `.reprobit-state/reports/report.html`; choose another
+project-relative location when useful:
 
-* **Source-overlay outputs** — the clean digest, clean size, and the effective
-  digest of the freshly re-rendered output, with every anchor resolved against
-  the current bytes.
-* **Donor-private overlay renderings** — the proof-carried clean and rendered
-  digests, renderings that replay the owning translation unit's canonical
-  overlay, and the rendering identity over the merged claim.
-* **Declaration-carrier donors** — the `rendered_source_*` pins, the seat
-  witnesses around the prefix and after-includes insertion points, and the
-  effective-source digest.
-* **Translation-unit source digests** — in both the per-unit intervention
-  documents and the build plan.
+```console
+rbit repair . --report-dir build/reprobit-report
+```
 
-The dry run prints every before/after digest and writes nothing. `--apply`
-writes all changed documents in one compare-and-swap transaction that also
-asserts the exact source bytes the plan read, so an edit racing the
-regeneration aborts it instead of committing mixed state.
+No partial repair is published. If any update, build, or verification step
+fails, your source files remain edited, but saved project records, existing
+binaries, debug companions, and reports remain unchanged. The error points to
+the retained private workspace or candidate report when one is available. Once
+you are finished diagnosing it, reclaim that space with `rbit clean .`.
 
-The command fails closed. An overlay anchor that no longer resolves, an empty
-rendering without a replay policy, and a stale digest surviving anywhere the
-planner does not understand each abort the whole plan; such records need their
-own adapter-level re-derivation, not a blessed digest. Regeneration only
-proposes pins: the rewritten tree still has to pass the verifying render at
-`source lock` and the literal byte gate of a from-scratch `verify` before
-anything is certified.
+For example, suppose a project already matches and you add a harmless forward
+declaration to a shared header. That one edit may affect several source files;
+the workflow is still just:
+
+```console
+rbit repair .
+```
+
+ReproBit follows the shared header to every affected build step, adjusts the
+saved guidance it can safely re-derive, and checks every final binary. You do
+not repair each source file separately.
+
+Adding or removing a file changes the reviewed source list, so `repair` stops
+before doing any work. Review and accept the new list instead:
+
+```console
+rbit source preview --project .
+rbit source lock --project .
+```
+
+Run the exact `source lock` command printed by the preview when it includes an
+extra option. Re-run `rbit import cmake .` only if the change also adds a
+compiled file to, or removes one from, a CMake target. Adding a document or an
+included header does not by itself require another CMake import.
+
+<details>
+<summary>Advanced: inspect or apply only mechanical source-check changes</summary>
+
+### Source regeneration primitive
+
+`source regenerate` is the deterministic preview/apply primitive used inside
+the maintenance flow. It is useful when you want to inspect mechanical record
+updates without building or verifying:
+
+```console
+rbit source regenerate --project .          # preview only
+rbit source regenerate --project . --apply  # apply only these mechanical changes
+```
+
+It re-renders stale records against the current bytes and can propose changes
+for four record families:
+
+* **Source-adjustment outputs** — the clean source and newly rendered output.
+* **Private donor renderings** — source prepared for one owning translation
+  unit, including its reviewed adjustments.
+* **Declaration donors** — their rendered source and the checked insertion
+  points around a declaration.
+* **Translation-unit source checks** — in both per-unit records and the build
+  plan.
+
+The human preview says what would change, prints a concise count and
+per-document summary, and writes nothing. With global `--format ndjson`, the
+event's `changes` field contains each field-level before/after value for
+tooling. `--apply` reports what it saved and writes all changed documents in
+one guarded transaction that also checks the exact source bytes read by the
+plan, so a concurrent edit aborts instead of committing mixed state.
+
+The command fails closed when it cannot re-derive a check. It only proposes or
+applies mechanical record changes: it does not lock, build, verify, or certify
+the project. Prefer `rbit repair .` unless you specifically need this
+intermediate view.
+
+</details>
 
 ## Prepare the local compiler
 

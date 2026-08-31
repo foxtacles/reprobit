@@ -9,7 +9,10 @@ A project has a small `reprobit.toml` entry point and strict JSON files under
 complete source read set and the hash of every file. Inspect a proposed refresh
 with `rbit source preview`, then publish it with `rbit source lock`. The update
 rechecks every listed file and refuses to overwrite records when a source change
-requires refreshed intervention or proof records. Committed files use
+requires other saved records to be repaired. For normal edits to already-listed
+files, use `rbit repair .`; reserve preview and lock for added or removed files.
+Re-import CMake only when that source-list change also changes which files a
+CMake target compiles. Committed files use
 project-relative source, output, and reference-binary paths plus stable DOS
 paths seen by the compiler. The CLI project root selects the physical checkout;
 `--toolchain-root` supplies the local compiler installation. There is no

@@ -67,29 +67,47 @@ cache detail.
 
 ## Source edits made many expectations stale
 
-Run `rbit source preview --project .` (with the same repeatable `--path` values
-used for an explicit lock) and keep candidate work under `.reprobit-state`. The
-preview is read-only. Its NDJSON event separates source-path changes,
-producer-graph invalidation, stale effective translation units, and overlay
-rendering errors.
+Start with the normal one-command repair:
 
-If only the manifest binding changed, run `rbit source lock --project .`; add
-`--invalidate-producer-graph` when preview requires it, then rerun the guided
+```console
+rbit repair .
+```
+
+ReproBit updates the saved build guidance affected by your edit, records the
+current source, rebuilds from scratch, and checks every target. It publishes
+updated records, binaries, any matching debug companions, and reports only
+after the result is still exact and trustworthy. On failure, your source edits
+remain, while the saved records and previously published results remain
+unchanged. Follow the printed candidate report or workspace path, then run
+`rbit clean .` when you no longer need that diagnostic state.
+
+The same `repair` command covers an edit to a shared header, even when many
+source files include it. ReproBit finds the affected work; do not run a command
+for each source file.
+
+For an added or removed file, run `rbit source preview --project .` (with the
+same repeatable `--path` values used for an explicit lock). The preview is
+read-only and prints the `source lock` command to run next. Re-run
+`rbit import cmake .` only if the change adds a compiled file to, or removes one
+from, a CMake target. A newly tracked document or included header does not by
+itself require a CMake import. The NDJSON event keeps the detailed source-list,
+build-graph, and saved-record findings for automation.
+
+Run `rbit source lock --project .`; add `--invalidate-producer-graph` when the
+preview includes it. When CMake target membership changed, rerun the guided
 `rbit import cmake .` command described in [Import a CMake project](cmake.md).
 The separate `rbit graph configure` and `rbit graph extract` commands are only
 for advanced imports that need manual control. With a graph-v3 document,
 ordinary byte edits and unrelated manifest additions or removals do not require
-invalidation; removing a graph input does. If preview says authority regeneration
-is required, do not edit the old digest or rerun lock to bless it. Run
-`rbit source regenerate --project .` to review the proposed replacement pins,
-then `--apply` to write them; it re-derives the mechanical record families
-(overlay outputs, donor renderings, declaration-carrier pins, and TU source
-digests) by re-rendering against the current bytes, and fails closed on
-anything it cannot re-prove — see
-[Regenerate stale source-derived records](cli.md#regenerate-stale-source-derived-records).
-A record the command refuses needs its own adapter-level re-derivation, and
-every regenerated document still has to pass `source lock` and a from-scratch
-`verify` before anything is certified.
+invalidation; removing a graph input does.
+
+For advanced diagnosis, `rbit source regenerate --project .` previews only the
+mechanical record changes that repair can derive. Human output is a concise
+per-document summary; global `--format ndjson` includes every field-level
+before/after value. Add `--apply` only when you intentionally want that
+intermediate update without a build. It is not certification and still needs a
+source lock and fresh verification. See the
+[source regeneration primitive](cli.md#source-regeneration-primitive).
 
 ## Bytes match but the command exits nonzero
 

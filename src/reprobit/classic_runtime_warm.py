@@ -235,6 +235,7 @@ class ClassicWarmCompilerTransformResult:
 
     steps: tuple[StepExecutionReceipt, ...]
     donor_dependencies: tuple[ClassicWarmDonorDependencyReplay, ...]
+    provisional_repair: bool = False
 
 
 class ClassicWarmExecution:
@@ -630,7 +631,7 @@ class ClassicWarmExecution:
         self._materialize_warm_inputs(inputs)
         unit = self._warm_unit(compiler_node_id)
         donor_dependencies: list[ClassicWarmDonorDependencyReplay] = []
-        record, steps, _witnesses = self.donors.compose_unit(
+        record, steps, _witnesses, provisional_repair = self.donors.compose_unit(
             supervisor,
             unit,
             cancellation,
@@ -682,6 +683,7 @@ class ClassicWarmExecution:
         return ClassicWarmCompilerTransformResult(
             tuple(steps),
             tuple(sorted(donor_dependencies, key=lambda item: item.donor_id.casefold())),
+            provisional_repair,
         )
 
     def replay_warm_compiler_dependencies(

@@ -18,7 +18,10 @@ from reprobit.classic_cache import (
     DonorTransformDependencyHint,
 )
 from reprobit.classic_includes import SealedIncludeAuthority, SealedIncludeFile
-from reprobit.classic_orchestration import ClassicPreparedUnit
+from reprobit.classic_orchestration import (
+    ClassicMeasuredReceiptRepair,
+    ClassicPreparedUnit,
+)
 from reprobit.classic_runtime_preparation import (
     ClassicProducerGraphPreparedRun,
     prepare_classic_producer_graph_run,
@@ -279,6 +282,7 @@ class ClassicIncrementalPlan:
     link_timeout: float
     cleanup_timeout: float
     progress: IncrementalProgress | None
+    measured_receipt_repair: ClassicMeasuredReceiptRepair | None
     census: PhysicalInputCensus
     staging_root: Path
     graph_digest: str
@@ -577,6 +581,7 @@ def runtime_factory(plan: ClassicIncrementalPlan) -> WarmRuntime:
             compile_timeout=plan.compile_timeout,
             link_timeout=plan.link_timeout,
             cleanup_timeout=plan.cleanup_timeout,
+            measured_receipt_repair=plan.measured_receipt_repair,
         )
         runtime: WarmRuntime | None = None
         try:

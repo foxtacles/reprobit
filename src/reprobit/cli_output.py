@@ -96,6 +96,8 @@ _FRIENDLY_PHASES = {
     "link": "Linking targets",
     "link-controls": "Checking linker inputs",
     "object-transform": "Stabilizing object layout",
+    "repair-probe": "Trying nearby donor settings",
+    "repair-probe-prepare": "Preparing a safe donor search",
     "resource": "Compiling resources",
     "source-epoch": "Preparing source inputs",
     "terminal": "Saving verified targets",

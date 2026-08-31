@@ -11,12 +11,13 @@ candidate-only terminal pipeline.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import PurePosixPath
 from types import MappingProxyType
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 import reprobit.classic.composition as composition
+from reprobit.binary import ByteIdentityError
 from reprobit.classic.compiler_identity import (
     Msvc420CompilerIdentity,
     issue_msvc420_compiler_identity,
@@ -96,6 +97,28 @@ class ClassicUnitComposition:
     donor_semantic_uses: Mapping[str, tuple[DonorSemanticUse, ...]] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    provisional_repair: bool = False
+    incomplete: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class ClassicMeasuredReceiptRepairRequest:
+    """One failed saved action plus the exact fresh materials that rejected it."""
+
+    intervention: ClassicRecipeIntervention
+    receipt: ClassicProofReceipt
+    materials: ClassicDispatchMaterials
+    failure: Exception
+    unit: ClassicPreparedUnit
+    action_index: int
+
+
+class ClassicMeasuredReceiptRepair(Protocol):
+    """Repair-only measured-pin callback; certification never supplies one."""
+
+    def __call__(
+        self, request: ClassicMeasuredReceiptRepairRequest
+    ) -> ClassicProofReceipt | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -541,7 +564,7 @@ def classic_rdata_repack_graph_authority(
     return MappingProxyType(result)
 
 
-def _canonical_overlay_operations(
+def canonical_overlay_operations(
     bundle: ProjectBundle,
 ) -> Mapping[str, tuple[Mapping[str, object], ...]]:
     result: dict[str, tuple[Mapping[str, object], ...]] = {}
@@ -606,7 +629,7 @@ def prepare_classic_units(
         for document in bundle.intervention_documents
         if document.translation_unit_id is not None
     }
-    canonical_operations = _canonical_overlay_operations(bundle)
+    canonical_operations = canonical_overlay_operations(bundle)
     compiler_identity = _classic_compiler_identity(bundle)
     prepared: list[ClassicPreparedUnit] = []
     for plan in bundle.build_plan.translation_units:
@@ -742,6 +765,7 @@ def compose_classic_unit(
     donor_materials: Mapping[str, _ClassicDonorSemanticMaterial],
     seed_source: bytes,
     legacy_oracles: Mapping[str, PE32VirtualAddressReader] | None = None,
+    measured_receipt_repair: ClassicMeasuredReceiptRepair | None = None,
 ) -> ClassicUnitComposition:
     """Compose one independently compiled TU without access to image-oracle bytes."""
 
@@ -780,7 +804,8 @@ def compose_classic_unit(
     donor_uses: dict[str, list[DonorSemanticUse]] = {donor_id: [] for donor_id in expected_donors}
     quarantined_uses: dict[str, dict[str, Digest]] = {donor_id: {} for donor_id in expected_donors}
     dispatcher = ClassicFamilyDispatcher()
-    for action in unit.actions:
+    provisional_repair = False
+    for action_index, action in enumerate(unit.actions):
         if isinstance(action, LegacyOracleInstallIntervention):
             if legacy_oracles is None or action.oracle_target not in legacy_oracles:
                 raise ClassicProjectError(
@@ -816,7 +841,11 @@ def compose_classic_unit(
             )
             continue
         function = action
-        values = matching_candidate_constraints(function, unit.receipts).materialize()
+        receipt_matches = [item for item in unit.receipts if item.intervention_id == function.id]
+        if len(receipt_matches) != 1:
+            raise ClassicProjectError(f"function {function.id!r} requires one proof receipt")
+        receipt = receipt_matches[0]
+        values = matching_candidate_constraints(function, (receipt,)).materialize()
         primary_id = function.dependencies[0]
         primary = donor_objects[primary_id]
         unknown_auxiliary_donors = set(candidate_auxiliary_donor_ids(values)) - donor_ids
@@ -851,44 +880,97 @@ def compose_classic_unit(
                     resolved_donor_id, f"additional_donor:{resolved_donor_id}"
                 )
         request = next(item.request for item in unit.donors if item.intervention.id == primary_id)
+        materials = ClassicDispatchMaterials(
+            seed_object=output,
+            donor_object=primary,
+            target_donor_object=(
+                donor_objects[target_donor_id] if target_donor_id is not None else primary
+            ),
+            complete_donor_object=(
+                donor_objects[complete_donor_id] if complete_donor_id is not None else None
+            ),
+            instruction_donor_object=(
+                donor_objects[instruction_donor_id] if instruction_donor_id is not None else None
+            ),
+            seed_source=seed_source,
+            donor_source=donor_sources.get(primary_id),
+            target_donor_source=donor_sources.get(
+                target_donor_id if target_donor_id is not None else primary_id
+            ),
+            instruction_donor_source=(
+                donor_sources.get(instruction_donor_id)
+                if instruction_donor_id is not None
+                else None
+            ),
+            additional_donor_objects=additional,
+            shape_identifiers=request.carrier_identifiers,
+            candidate_constraints=values,
+            compiler_identity=unit.compiler_identity,
+        )
         try:
-            candidate = dispatcher.dispatch(
-                function,
-                ClassicDispatchMaterials(
-                    seed_object=output,
-                    donor_object=primary,
-                    target_donor_object=(
-                        donor_objects[target_donor_id] if target_donor_id is not None else primary
-                    ),
-                    complete_donor_object=(
-                        donor_objects[complete_donor_id] if complete_donor_id is not None else None
-                    ),
-                    instruction_donor_object=(
-                        donor_objects[instruction_donor_id]
-                        if instruction_donor_id is not None
-                        else None
-                    ),
-                    seed_source=seed_source,
-                    donor_source=donor_sources.get(primary_id),
-                    target_donor_source=donor_sources.get(
-                        target_donor_id if target_donor_id is not None else primary_id
-                    ),
-                    instruction_donor_source=(
-                        donor_sources.get(instruction_donor_id)
-                        if instruction_donor_id is not None
-                        else None
-                    ),
-                    additional_donor_objects=additional,
-                    shape_identifiers=request.carrier_identifiers,
-                    candidate_constraints=values,
-                    compiler_identity=unit.compiler_identity,
-                ),
+            candidate = dispatcher.dispatch(function, materials)
+        except (
+            ByteIdentityError,
+            ClassicProjectError,
+            ClassicSemanticError,
+            DonorSourceError,
+        ) as exc:
+            repaired_receipt = (
+                measured_receipt_repair(
+                    ClassicMeasuredReceiptRepairRequest(
+                        function,
+                        receipt,
+                        materials,
+                        exc,
+                        unit,
+                        action_index,
+                    )
+                )
+                if measured_receipt_repair is not None
+                else None
             )
-        except Exception as exc:
-            raise ClassicProjectError(
-                f"classic action {function.id!r} "
-                f"({function.family.value}, {function.symbol!r}) failed: {exc}"
-            ) from exc
+            if repaired_receipt is None:
+                if measured_receipt_repair is not None:
+                    return ClassicUnitComposition(
+                        output,
+                        tuple(witnesses),
+                        provisional_repair=True,
+                        incomplete=True,
+                    )
+                raise ClassicProjectError(
+                    f"classic action {function.id!r} "
+                    f"({function.family.value}, {function.symbol!r}) failed: {exc}"
+                ) from exc
+            if (
+                repaired_receipt.id != receipt.id
+                or repaired_receipt.intervention_id != receipt.intervention_id
+                or repaired_receipt.family is not receipt.family
+                or repaired_receipt.expected_values.keys() != receipt.expected_values.keys()
+                or repaired_receipt.model_copy(update={"expected_values": receipt.expected_values})
+                != receipt
+            ):
+                raise ClassicProjectError(
+                    f"repair for classic action {function.id!r} changed more than expected values"
+                ) from exc
+            repaired_values = matching_candidate_constraints(
+                function, (repaired_receipt,)
+            ).materialize()
+            try:
+                candidate = dispatcher.dispatch(
+                    function,
+                    replace(materials, candidate_constraints=repaired_values),
+                )
+            except (
+                ByteIdentityError,
+                ClassicProjectError,
+                ClassicSemanticError,
+                DonorSourceError,
+            ) as repaired_exc:
+                raise ClassicProjectError(
+                    f"classic action {function.id!r} repair did not satisfy its ordinary "
+                    f"composer: {repaired_exc}"
+                ) from repaired_exc
+            provisional_repair = True
         output = candidate.output
         for donor_id, input_name in sorted(function_donor_inputs.items()):
             donor_uses[donor_id].append(
@@ -954,6 +1036,7 @@ def compose_classic_unit(
         group_input_size,
         MappingProxyType(donor_semantic_proofs),
         MappingProxyType({donor_id: tuple(uses) for donor_id, uses in sorted(donor_uses.items())}),
+        provisional_repair,
     )
 
 
@@ -1032,11 +1115,14 @@ def classic_rdata_repack(
 
 
 __all__ = [
+    "ClassicMeasuredReceiptRepair",
+    "ClassicMeasuredReceiptRepairRequest",
     "ClassicPreparedDonor",
     "ClassicPreparedUnit",
     "ClassicTerminalComposition",
     "ClassicUnitComposition",
     "apply_classic_terminal_pipeline",
+    "canonical_overlay_operations",
     "classic_compiler_translation_unit_authority",
     "classic_rdata_repack",
     "classic_rdata_repack_authority",

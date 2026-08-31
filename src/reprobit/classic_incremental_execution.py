@@ -39,6 +39,8 @@ from reprobit.incremental_executor import (
 
 def execute_classic_incremental_plan(
     plan: ClassicIncrementalPlan,
+    *,
+    publish_targets: bool = True,
 ) -> ClassicIncrementalResult:
     analysis_nodes = plan.analysis_nodes
     debug_companion_paths = plan.debug_companion_paths
@@ -85,7 +87,7 @@ def execute_classic_incremental_plan(
             node_id: str,
             reason: str | None,
         ) -> None:
-            progress(kind, completed, total + 1, phase, node_id, reason)
+            progress(kind, completed, total + int(publish_targets), phase, node_id, reason)
 
         executor_progress = report_executor_progress
     else:
@@ -111,6 +113,7 @@ def execute_classic_incremental_plan(
             # improving lookup quality.
             if (
                 outcome.cache_hit
+                or not outcome.publishable
                 or compiler_state.hint is None
                 or compiler_state.replay_failure is not None
             ):
@@ -125,6 +128,7 @@ def execute_classic_incremental_plan(
             outcome = execution.outcomes[node_id]
             if (
                 outcome.cache_hit
+                or not outcome.publishable
                 or transform_state_value.hint is None
                 or transform_state_value.replay_failure is not None
             ):
@@ -153,6 +157,11 @@ def execute_classic_incremental_plan(
         execution.summary,
         invalidations=tuple(sorted(invalidations.items(), key=lambda item: item[0].casefold())),
     )
+    if not publish_targets:
+        return ClassicIncrementalResult(
+            BuildExecutionReceipt(False, (), (), ()),
+            replace(summary, elapsed_seconds=monotonic() - started),
+        )
 
     # The mutable staging workspace is transport only.  Re-materialize each
     # terminal artifact from its immutable record into a fresh publication

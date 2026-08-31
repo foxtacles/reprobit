@@ -751,6 +751,7 @@ def _add_transform_node(
         )
 
     transform_state: TransformState | None = None
+    transform_publishable = [True]
     if transform_contexts:
         empty_material = transform_material(MappingProxyType({}))
         transform_state = TransformState(
@@ -818,6 +819,7 @@ def _add_transform_node(
         current_state: TransformState | None = transform_state,
         current_contexts: tuple[DonorDependencyResolutionContext, ...] = transform_contexts,
         current_unit: ClassicPreparedUnit = transform_unit,
+        current_publishable: list[bool] = transform_publishable,
     ) -> None:
         result = runtime.prepared.warm.execute_warm_compiler_transform(
             current_id,
@@ -825,6 +827,7 @@ def _add_transform_node(
             outputs=current_outputs,
             cancellation=cancellation,
         )
+        current_publishable[0] = not result.provisional_repair
         if current_state is None:
             return
         if not isinstance(result, ClassicWarmCompilerTransformResult):
@@ -988,6 +991,12 @@ def _add_transform_node(
             current_state.physical_inputs if current_state is not None else current_paths,
         )
 
+    def transform_result_publishable(
+        *,
+        current: list[bool] = transform_publishable,
+    ) -> bool:
+        return current[0]
+
     nodes.append(
         IncrementalNode(
             id=transform_id,
@@ -1002,6 +1011,7 @@ def _add_transform_node(
             phase=IncrementalPhase.TRANSFORM,
             final_key=(transform_final_key_factory if transform_state is not None else None),
             probe=transform_probe if transform_state is not None else None,
+            publish_result=transform_result_publishable,
         )
     )
 

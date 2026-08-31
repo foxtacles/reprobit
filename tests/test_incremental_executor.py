@@ -152,6 +152,143 @@ def test_all_hit_dag_never_constructs_runtime(tmp_path: Path) -> None:
     assert (second_root / "second.lib").read_bytes() == b"object library"
 
 
+def test_provisional_result_is_available_to_dependants_but_never_reused(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    cache = IncrementalCache(state, implementation="dag-test-v1")
+    executions = 0
+
+    def run(root: Path) -> NodeOutcome:
+        nonlocal executions
+        root.mkdir()
+        output = root / "unit.obj"
+
+        def execute(
+            _runtime: object,
+            _cancellation: object,
+            _inputs: PreparedNodeInputs,
+        ) -> None:
+            nonlocal executions
+            executions += 1
+            output.write_bytes(f"provisional-{executions}".encode())
+
+        result = IncrementalDAGExecutor(
+            cache=cache,
+            workspace_root=root,
+            runtime_factory=object,
+            runtime_close=lambda _runtime: None,
+            max_workers=1,
+        ).execute(
+            (
+                IncrementalNode(
+                    id="transform.unit",
+                    domain="producer",
+                    depends_on=(),
+                    outputs={"build/unit.obj": output},
+                    key=lambda _deps: _node_key("transform.unit"),
+                    execute=execute,
+                    metadata=lambda _deps: {"provisional": True},
+                    publish_result=lambda: False,
+                ),
+            )
+        )
+        return result.outcomes["transform.unit"]
+
+    first = run(tmp_path / "first")
+    second = run(tmp_path / "second")
+
+    assert first.cache_hit is False
+    assert second.cache_hit is False
+    assert first.key != second.key
+    assert executions == 2
+
+
+def test_provisional_taint_prevents_descendant_reuse_and_publication(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    cache = IncrementalCache(state, implementation="dag-test-v1")
+    executions = {"compile": 0, "link": 0}
+
+    def run(root: Path, *, provisional: bool) -> tuple[NodeOutcome, NodeOutcome]:
+        root.mkdir()
+        compiled = root / "unit.obj"
+        linked = root / "app.exe"
+
+        def compile_unit(
+            _runtime: object,
+            _cancellation: object,
+            _inputs: PreparedNodeInputs,
+        ) -> None:
+            executions["compile"] += 1
+            compiled.write_bytes(b"same object bytes")
+
+        def link_target(
+            _runtime: object,
+            _cancellation: object,
+            inputs: PreparedNodeInputs,
+        ) -> None:
+            executions["link"] += 1
+            linked.write_bytes(inputs.entries["build/unit.obj"].snapshot.path.read_bytes())
+
+        result = IncrementalDAGExecutor(
+            cache=cache,
+            workspace_root=root,
+            runtime_factory=object,
+            runtime_close=lambda _runtime: None,
+            max_workers=1,
+        ).execute(
+            (
+                IncrementalNode(
+                    id="compile.unit",
+                    domain="producer",
+                    depends_on=(),
+                    outputs={"build/unit.obj": compiled},
+                    key=lambda _deps: _node_key(
+                        "compile.unit", "provisional" if provisional else "ordinary"
+                    ),
+                    execute=compile_unit,
+                    metadata=lambda _deps: {},
+                    publish_result=(lambda: False) if provisional else None,
+                ),
+                IncrementalNode(
+                    id="link.app",
+                    domain="producer",
+                    depends_on=("compile.unit",),
+                    outputs={"build/app.exe": linked},
+                    key=lambda deps: _node_key(
+                        "link.app", deps["compile.unit"].record.outputs[0].digest
+                    ),
+                    execute=link_target,
+                    materialize_inputs=_materialize_inputs(
+                        root,
+                        "link.app",
+                        {"build/unit.obj": "compile.unit"},
+                    ),
+                    metadata=lambda _deps: {},
+                ),
+            )
+        )
+        return result.outcomes["compile.unit"], result.outcomes["link.app"]
+
+    ordinary_compile, ordinary_link = run(tmp_path / "ordinary", provisional=False)
+    provisional_compile, provisional_link = run(tmp_path / "provisional", provisional=True)
+    repeated_compile, repeated_link = run(tmp_path / "repeated", provisional=True)
+
+    assert ordinary_compile.publishable is True
+    assert ordinary_link.publishable is True
+    assert provisional_compile.publishable is False
+    assert provisional_link.publishable is False
+    assert repeated_compile.publishable is False
+    assert repeated_link.publishable is False
+    assert provisional_link.cache_hit is False
+    assert repeated_link.cache_hit is False
+    assert executions == {"compile": 3, "link": 3}
+
+
 def test_one_miss_initializes_one_lazy_runtime_not_the_worker_budget(
     tmp_path: Path,
 ) -> None:

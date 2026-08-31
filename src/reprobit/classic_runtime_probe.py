@@ -118,7 +118,9 @@ class ClassicProbeExecution:
         self.build_root = warm.build_root
         self.warm = warm
 
-    def _close_all(self) -> None:
+    def close(self) -> None:
+        """Idempotently release the prepared probe runtime."""
+
         try:
             self.warm.close()
         finally:
@@ -188,7 +190,7 @@ class ClassicProbeExecution:
             build_before = _tree_file_seal(self.build_root)
         except BaseException as original:
             try:
-                self._close_all()
+                self.close()
             except BaseException as cleanup_error:
                 original.add_note(f"classic compiler probe cleanup also failed: {cleanup_error}")
             raise
@@ -285,7 +287,7 @@ class ClassicProbeExecution:
                 )
             return tuple(outputs)
         finally:
-            self._close_all()
+            self.close()
 
     def probe_donor_compilers(
         self,
@@ -458,11 +460,11 @@ class ClassicProbeExecution:
             )
         except BaseException as original:
             try:
-                self._close_all()
+                self.close()
             except BaseException as cleanup_error:
                 original.add_note(f"classic donor probe cleanup also failed: {cleanup_error}")
             raise
-        self._close_all()
+        self.close()
         return outputs
 
 

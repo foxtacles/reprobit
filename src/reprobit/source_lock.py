@@ -125,6 +125,21 @@ def git_tracked_paths(root: Path) -> tuple[str, ...]:
     return tuple(values)
 
 
+def is_git_worktree(root: Path) -> bool:
+    """Return whether the default source selector can inspect ``root`` with Git."""
+
+    root = root.resolve(strict=True)
+    try:
+        completed = subprocess.run(
+            ("git", "-C", os.fspath(root), "rev-parse", "--is-inside-work-tree"),
+            check=False,
+            capture_output=True,
+        )
+    except OSError:
+        return False
+    return completed.returncode == 0 and completed.stdout.strip() == b"true"
+
+
 def _forbidden(spec: ProjectSpec) -> tuple[set[str], tuple[str, ...]]:
     exact = {
         "reprobit.toml",
@@ -153,16 +168,11 @@ def _forbidden(spec: ProjectSpec) -> tuple[set[str], tuple[str, ...]]:
     return exact, roots
 
 
-def build_source_manifest(
-    root: Path,
+def _selected_source_paths(
     paths: Iterable[str | Path],
     *,
-    spec: ProjectSpec | None = None,
-    complete: bool = True,
-) -> SourceManifestDocument:
-    """Hash an explicit source read set, rejecting redirects and DOS collisions."""
-
-    root = root.resolve(strict=True)
+    spec: ProjectSpec | None,
+) -> tuple[str, ...]:
     exact, roots = _forbidden(spec) if spec is not None else (set(), ())
     canonical: dict[str, str] = {}
     for raw in paths:
@@ -176,8 +186,27 @@ def build_source_manifest(
                 f"source paths collide under DOS case folding: {previous!r}, {relative!r}"
             )
         canonical[folded] = relative
+    return tuple(sorted(canonical.values(), key=lambda item: (item.casefold(), item)))
+
+
+def tracked_source_paths(root: Path, spec: ProjectSpec) -> tuple[str, ...]:
+    """Select the default source membership without hashing file contents."""
+
+    return _selected_source_paths(git_tracked_paths(root), spec=spec)
+
+
+def build_source_manifest(
+    root: Path,
+    paths: Iterable[str | Path],
+    *,
+    spec: ProjectSpec | None = None,
+    complete: bool = True,
+) -> SourceManifestDocument:
+    """Hash an explicit source read set, rejecting redirects and DOS collisions."""
+
+    root = root.resolve(strict=True)
     entries = []
-    for relative in sorted(canonical.values(), key=lambda item: (item.casefold(), item)):
+    for relative in _selected_source_paths(paths, spec=spec):
         size, digest, _ = receipt_source_input(root, relative)
         entries.append(SourceManifestEntry(path=relative, size=size, digest=digest))
     if not entries:
@@ -199,6 +228,8 @@ __all__ = [
     "SourceLockError",
     "build_source_manifest",
     "git_tracked_paths",
+    "is_git_worktree",
     "lock_tracked_sources",
     "receipt_source_input",
+    "tracked_source_paths",
 ]

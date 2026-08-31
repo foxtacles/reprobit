@@ -537,6 +537,7 @@ def test_fresh_source_preview_does_not_report_the_unreviewed_project_file_as_rem
     assert event["added"] == ["src/unit.cpp"]
     assert event["removed"] == []
     assert event["next_command"] == f"rbit source lock --project {tmp_path}"
+    assert event["cmake_import_command"] is None
 
 
 def test_source_preview_checks_authority_before_reporting_up_to_date(
@@ -622,9 +623,9 @@ def test_source_preview_does_not_hide_stale_authority_when_source_is_unchanged(
     )
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert event["up_to_date"] is False
-    assert event["authority_regeneration_required"] is True
+    assert event["repair_required"] is True
     assert "donor.overlay" in event["authority_error"]
-    assert "source regenerate" in event["next_command"]
+    assert "rbit repair" in event["next_command"]
 
 
 def test_source_preview_reports_stale_tu_and_lock_preserves_reviewed_authority(
@@ -667,13 +668,13 @@ def test_source_preview_reports_stale_tu_and_lock_preserves_reviewed_authority(
     assert events[0]["event"] == "workflow_progress"
     event = events[-1]
     assert event["event"] == "source_preview"
-    assert event["authority_regeneration_required"] is True
+    assert event["repair_required"] is True
     assert event["changed"][0]["path"] == "src/unit.cpp"
     assert event["stale_translation_units"][0]["translation_unit_id"] == unit_id
     assert all(path.read_bytes() == data for path, data in before.items())
 
     assert main(["source", "lock", "--project", str(project), *paths]) == 2
-    assert "regenerate" in capsys.readouterr().err
+    assert "rbit repair" in capsys.readouterr().err
     assert all(path.read_bytes() == data for path, data in before.items())
 
 
@@ -733,12 +734,15 @@ def test_source_preview_reports_stale_donor_overlay_input_and_lock_refuses_it(
     )
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert event["event"] == "source_preview"
-    assert event["authority_regeneration_required"] is True
+    assert event["repair_required"] is True
     assert event["stale_translation_units"] == []
     assert event["authority_error"] is not None
     if with_build_plan:
         assert "donor.overlay" in event["authority_error"]
     assert expected_detail in event["authority_error"]
+    if candidate_input == "absent":
+        assert "source lock" in event["next_command"]
+        assert "rbit repair" not in event["next_command"]
     assert all(path.read_bytes() == data for path, data in before.items())
 
     assert main(["source", "lock", "--project", str(project), *paths]) == 2
@@ -747,6 +751,9 @@ def test_source_preview_reports_stale_donor_overlay_input_and_lock_refuses_it(
     if with_build_plan:
         assert "donor.overlay" in message
     assert expected_detail in message
+    if candidate_input == "absent":
+        assert "rbit repair" not in message
+        assert "source preview" in message
     assert all(path.read_bytes() == data for path, data in before.items())
     assert plan_path.exists() is with_build_plan
 
@@ -1308,8 +1315,8 @@ def test_validate_rejects_current_manifest_with_stale_effective_tu_pin(
 
     assert main(["validate", str(project)]) == 2
     message = capsys.readouterr().err
-    assert "effective translation-unit source differs" in message
-    assert "regenerate intervention and proof authority" in message
+    assert "saved ReproBit guidance no longer matches the edited source" in message
+    assert "rbit repair ." in message
 
 
 def test_source_lock_refreshes_unrelated_input_without_repinning_tu_or_proof(
@@ -3133,9 +3140,12 @@ def test_graph_extract_commits_closed_direct_producer_authority(
         "src/added.h",
     ]
     assert main(missing_graph_input) == 2
-    assert "--invalidate-producer-graph" in capsys.readouterr().err
+    graph_error = capsys.readouterr().err
+    assert "--invalidate-producer-graph" in graph_error
+    assert "rbit import cmake" in graph_error
     assert (project / "reprobit/producer-graph.json").is_file()
     assert main([*missing_graph_input, "--invalidate-producer-graph"]) == 0
+    assert "rbit import cmake" in capsys.readouterr().out
     assert not (project / "reprobit/producer-graph.json").exists()
 
 

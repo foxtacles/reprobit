@@ -310,17 +310,57 @@ def _source_preview_message(
     if graph_invalidation_required:
         lines.append("  build graph: update required after locking these source changes")
     if authority_error is not None:
-        lines.append("  project records need regeneration: " + authority_error)
+        label = (
+            "  saved records still name the previous source-file list: "
+            if added or removed
+            else "  project records need repair: "
+        )
+        lines.append(label + authority_error)
     elif stale_units:
         rendered = ", ".join(
             f"{item['translation_unit_id']} ({item['source']})" for item in stale_units
         )
-        lines.append("  project records need regeneration for: " + rendered)
+        label = (
+            "  saved records still name the previous source-file list for: "
+            if added or removed
+            else "  project records need repair for: "
+        )
+        lines.append(label + rendered)
     elif not authority_checked:
         lines.append("  no build plan or saved source-derived records to check")
     else:
         lines.append("  reviewed source-derived records remain valid")
     return "\n".join(lines)
+
+
+def _source_selection_command(
+    action: str,
+    root: Path,
+    paths: Sequence[str],
+    *,
+    invalidate_graph: bool = False,
+) -> str:
+    arguments: list[str | Path] = ["rbit", "source", action, "--project", root]
+    for path in paths:
+        arguments.extend(("--path", path))
+    if invalidate_graph:
+        arguments.append("--invalidate-producer-graph")
+    return human_command(arguments)
+
+
+def _source_membership_guidance(
+    root: Path,
+    paths: Sequence[str],
+    *,
+    graph_changed: bool,
+) -> str:
+    guidance = f"\nReview: {_source_selection_command('preview', root, paths)}"
+    if graph_changed:
+        guidance += (
+            "\nThen refresh the CMake build records: "
+            f"{human_command(('rbit', 'import', 'cmake', root))}"
+        )
+    return guidance
 
 
 def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
@@ -360,22 +400,17 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
     stale_units = _stale_tu_fields(report)
     source_changed = document_digest != current_digest
     next_command: str | None = None
-    if authority_error is None and not stale_units:
+    membership_changed = bool(added or removed)
+    if membership_changed or (authority_error is None and not stale_units):
         if source_changed or graph_invalidation_required:
-            lock_arguments: list[str | Path] = [
-                "rbit",
-                "source",
+            next_command = _source_selection_command(
                 "lock",
-                "--project",
                 root,
-            ]
-            for path in args.path:
-                lock_arguments.extend(("--path", path))
-            if graph_invalidation_required:
-                lock_arguments.append("--invalidate-producer-graph")
-            next_command = human_command(lock_arguments)
+                args.path,
+                invalidate_graph=graph_invalidation_required,
+            )
     else:
-        next_command = human_command(("rbit", "source", "regenerate", "--project", root))
+        next_command = human_command(("rbit", "repair", root))
     message = _source_preview_message(
         added=added,
         removed=removed,
@@ -388,6 +423,16 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
     )
     if next_command is not None:
         message += f"\nNext: {next_command}"
+    cmake_import_command = (
+        human_command(("rbit", "import", "cmake", root))
+        if graph_invalidation_required
+        else None
+    )
+    if cmake_import_command is not None:
+        message += (
+            "\nThen refresh the recorded CMake build because one of its inputs changed: "
+            f"{cmake_import_command}"
+        )
     output.emit(
         "source_preview",
         message,
@@ -403,8 +448,9 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
         authority_checked=report is not None,
         classic_preflight_checked=plan is not None and report is not None,
         stale_translation_units=stale_units,
-        authority_regeneration_required=bool(authority_error or stale_units),
+        repair_required=bool(authority_error or stale_units),
         authority_error=authority_error,
+        cmake_import_command=cmake_import_command,
         up_to_date=(
             not source_changed
             and not graph_invalidation_required
@@ -444,6 +490,23 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         raise CLIError(f"cannot seal source-lock inputs: {exc}") from exc
     document = _build_source_document(root, spec, args.path, output)
     document_digest = source_manifest_digest(document)
+    current = _load_source_manifest(safe_project_path(root, spec.layout.source_manifest))
+    added, removed, _changed = _source_changes(current, document)
+    membership_changed = bool(added or removed)
+
+    producer_graph_path = safe_project_path(root, spec.layout.producer_graph)
+    graph_invalidated = False
+    graph_present = producer_graph_path.is_file()
+    graph = None
+    if graph_present:
+        from reprobit.producer_graph import read_producer_graph
+
+        graph = read_producer_graph(producer_graph_path)
+        graph_invalidated = not producer_graph_accepts_source(
+            graph,
+            paths=(item.path for item in document.entries),
+            overlay_outputs=_declared_overlay_outputs(root, spec),
+        )
 
     plan: BuildPlanDocument | None = None
     report: Any | None = None
@@ -454,40 +517,62 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
 
         if not isinstance(exc, SourceAuthorityError):
             raise
-        regenerate_hint = human_command(("rbit", "source", "regenerate", "--project", root))
+        if membership_changed:
+            raise CLIError(
+                "source lock refused because saved records still name the previous "
+                f"source-file list: {exc}"
+                + _source_membership_guidance(
+                    root,
+                    args.path,
+                    graph_changed=graph_invalidated,
+                )
+            ) from exc
+        repair_hint = human_command(("rbit", "repair", root))
         raise CLIError(
             "source lock refused because reviewed source-derived authority must be "
-            f"regenerated: {exc}\nTry: {regenerate_hint}"
+            f"repaired: {exc}\nTry: {repair_hint}"
         ) from exc
     stale_units = _stale_tu_fields(report)
     if stale_units:
         rendered = ", ".join(
             f"{item['translation_unit_id']} ({item['source']})" for item in stale_units
         )
-        regenerate_hint = human_command(("rbit", "source", "regenerate", "--project", root))
+        if membership_changed:
+            raise CLIError(
+                "source lock refused because saved translation-unit records still name "
+                f"the previous source-file list: {rendered}"
+                + _source_membership_guidance(
+                    root,
+                    args.path,
+                    graph_changed=graph_invalidated,
+                )
+            )
+        repair_hint = human_command(("rbit", "repair", root))
         raise CLIError(
             "source lock refused because effective translation-unit bytes changed; "
-            "regenerate the affected intervention and proof authority instead of "
-            f"repinning it: {rendered}\nTry: {regenerate_hint}"
+            "repair the affected intervention and proof records instead of repinning "
+            f"them: {rendered}\nTry: {repair_hint}"
         )
 
-    producer_graph_path = safe_project_path(root, spec.layout.producer_graph)
-    graph_invalidated = False
-    graph_present = producer_graph_path.is_file()
-    if producer_graph_path.is_file():
-        from reprobit.producer_graph import read_producer_graph
-
-        graph = read_producer_graph(producer_graph_path)
-        if not producer_graph_accepts_source(
+    if graph is not None:
+        graph_invalidated = not producer_graph_accepts_source(
             graph,
             paths=(item.path for item in document.entries),
             overlay_outputs=(report.overlay_outputs if report is not None else ()),
-        ):
+        )
+        if graph_invalidated:
             if not args.invalidate_producer_graph:
+                retry_hint = _source_selection_command(
+                    "lock",
+                    root,
+                    args.path,
+                    invalidate_graph=True,
+                )
                 raise CLIError(
-                    "source authority removed an input used by the committed producer graph; "
-                    "rerun with --invalidate-producer-graph, reconfigure the project, "
-                    "then run rbit graph extract"
+                    "the selected source files removed an input used by the recorded build; "
+                    f"first run: {retry_hint}\n"
+                    "Then refresh the CMake build records: "
+                    f"{human_command(('rbit', 'import', 'cmake', root))}"
                 )
             graph_invalidated = True
 
@@ -542,13 +627,20 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         if entry.path not in claimed_paths:
             transaction.assert_unchanged(entry.path, expected_sha256=entry.digest.value)
     result = transaction.commit()
+    cmake_import_command = (
+        human_command(("rbit", "import", "cmake", root)) if graph_invalidated else None
+    )
+    message = f"locked {len(document.entries)} project source input(s)"
+    if cmake_import_command is not None:
+        message += f"\nNext: {cmake_import_command}"
     output.emit(
         "source_locked",
-        f"locked {len(document.entries)} project source input(s)",
+        message,
         output=spec.layout.source_manifest,
         entries=len(document.entries),
         source_manifest_digest=document_digest.value,
         producer_graph_invalidated=graph_invalidated,
+        next_command=cmake_import_command,
         transaction_id=result.transaction_id,
     )
     return 0
@@ -580,7 +672,7 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
     if not plan.changes:
         output.emit(
             "source_regenerated",
-            "reviewed source-derived authority already matches current bytes",
+            "No source-check updates are needed; saved records already match current files.",
             applied=False,
             changes=rendered_changes,
             documents=[],
@@ -589,10 +681,17 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
     counts_by_document: dict[str, int] = {}
     for change in plan.changes:
         counts_by_document[change.document] = counts_by_document.get(change.document, 0) + 1
-    lines = [
-        f"Source regeneration: {len(plan.changes)} saved source check(s) refreshed "
-        f"across {len(plan.changed_documents)} project file(s)"
-    ]
+    if args.apply:
+        summary = (
+            f"Source checks refreshed: {len(plan.changes)} update(s) saved "
+            f"across {len(plan.changed_documents)} project file(s)"
+        )
+    else:
+        summary = (
+            f"Source-check preview: {len(plan.changes)} update(s) would be saved "
+            f"across {len(plan.changed_documents)} project file(s)"
+        )
+    lines = [summary]
     visible_documents = sorted(counts_by_document)[:8]
     for document in visible_documents:
         lines.append(f"  {document}: {counts_by_document[document]} check(s)")
@@ -618,7 +717,7 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
             next_command=next_command,
         )
         return 0
-    lines.append("Preview only: no project files were changed; rerun with --apply to save")
+    lines.append("Preview only: no project files changed. Add --apply to save these updates.")
     output.emit(
         "source_regenerated",
         "\n".join(lines),

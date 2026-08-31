@@ -108,6 +108,7 @@ def prepare_producer_graph_run(
         link_timeout=args.link_timeout,
         cleanup_timeout=args.cleanup_timeout,
         progress=relay_progress,
+        measured_receipt_repair=getattr(args, "_classic_measured_receipt_repair", None),
     )
 
 
@@ -160,6 +161,14 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
             resource_transport=args.resource_transport,
         )
     state = state_root(root, bundle.spec)
+    cache_override = getattr(args, "_incremental_cache_root", None)
+    cache_state = (
+        Path(cache_override).resolve(strict=True)
+        if cache_override is not None
+        else state
+    )
+    if not cache_state.is_dir():
+        raise CLIError("incremental cache root is not a directory")
     required = tuple(safe_project_path(root, item.artifact) for item in bundle.spec.targets)
     arena = RunArena(
         state,
@@ -210,9 +219,12 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                         execute_classic_incremental_build,
                     )
 
-                    with output.producer_activity(
-                        "rebuilding changed steps and reusing unchanged work"
-                    ) as progress:
+                    progress_description = getattr(
+                        args,
+                        "_incremental_progress_description",
+                        "rebuilding changed steps and reusing unchanged work",
+                    )
+                    with output.producer_activity(progress_description) as progress:
 
                         def incremental_progress(
                             kind: str,
@@ -235,7 +247,7 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                             developer_authority,
                             project_root=root,
                             session_root=run_root / "incremental",
-                            state_root=state,
+                            state_root=cache_state,
                             toolchain_root=execution.toolchain_root,
                             backend=execution.backend,
                             jobs=args.jobs,
@@ -246,6 +258,14 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                             link_timeout=args.link_timeout,
                             cleanup_timeout=args.cleanup_timeout,
                             progress=incremental_progress,
+                            measured_receipt_repair=getattr(
+                                args,
+                                "_classic_measured_receipt_repair",
+                                None,
+                            ),
+                            repair_analysis=bool(
+                                getattr(args, "_classic_repair_analysis_only", False)
+                            ),
                         )
                     receipt = incremental.receipt
                     incremental_summary = incremental.summary
@@ -322,6 +342,8 @@ def command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
     from reprobit.execution import TargetOracle
     from reprobit.verify import seal_file_oracle
 
+    if getattr(args, "_classic_measured_receipt_repair", None) is not None:
+        raise CLIError("exact verification refuses provisional measured receipt repairs")
     root = project_root(args.project)
     with output.activity("checking the project files", phase="validate"):
         bundle = load_project_tree(root)

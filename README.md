@@ -119,18 +119,27 @@ information matched to the files the compiler actually read. Run the same
 command after later changes; ReproBit safely replaces the previous source view
 and removes files that are no longer part of it.
 
-When a source edit makes reviewed records stale — `source lock` refuses to
-bless old digests — regenerate the mechanical pins and relock:
+After editing a file that is already part of the project—even a shared header
+used by many source files—let ReproBit repair and verify the project in one
+step:
 
 ```console
-rbit source regenerate --project .          # dry run: print every proposed pin
-rbit source regenerate --project . --apply
-rbit source lock --project .
+rbit repair .
 ```
 
-See [Regenerate stale source-derived
-records](docs/cli.md#regenerate-stale-source-derived-records) for what the
-command covers and where it deliberately fails closed.
+`repair` works on a private copy first. It updates the saved build guidance
+affected by your edit, rebuilds every target from scratch, and checks that the
+result is still exact and trustworthy. Only then does it publish the updated
+project records, verified binaries, matching debug companions, and JSON/HTML
+report together. If repair cannot prove the result, your source edit is kept
+while the saved records and previously published results stay unchanged. See
+[Repair after source edits](docs/cli.md#repair-after-source-edits) for report
+paths, cleanup, and the advanced preview tool.
+
+Adding or removing a file is a different operation because it changes the
+reviewed source list. Run `rbit source preview --project .`, then follow the
+`source lock` command it prints. Re-run `rbit import cmake .` only when the
+change also adds a compiled file to, or removes one from, a CMake target.
 
 Failed builds keep a private workspace so problems can be inspected. Reclaim
 those workspaces with `rbit clean .`; the reusable build cache is kept by

@@ -953,6 +953,7 @@ def _run(
     session: Path,
     jobs: int = 1,
     progress: IncrementalProgress | None = None,
+    repair_analysis: bool = False,
 ) -> incremental_context.ClassicIncrementalResult:
     toolchain = root / "toolchain"
     toolchain.mkdir(exist_ok=True)
@@ -965,7 +966,91 @@ def _run(
         backend=cast(object, SimpleNamespace(identifier="fake")),  # type: ignore[arg-type]
         jobs=jobs,
         progress=progress,
+        repair_analysis=repair_analysis,
     )
+
+
+def test_repair_analysis_runs_only_transform_closure_and_never_caches_provisional_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    state = tmp_path / "state"
+    state.mkdir()
+    bundle, units, sources = _fixture_bundle(root)
+
+    class ProvisionalExecutor(_FakeWarmExecutor):
+        provisional = True
+
+        def execute_warm_compiler_transform(
+            self,
+            compiler_node_id: str,
+            *,
+            inputs: object,
+            outputs: MappingProxyType[str, Path] | dict[str, Path],
+            cancellation: object,
+        ) -> ClassicWarmCompilerTransformResult:
+            result = super().execute_warm_compiler_transform(
+                compiler_node_id,
+                inputs=inputs,
+                outputs=outputs,
+                cancellation=cancellation,
+            )
+            return ClassicWarmCompilerTransformResult(
+                result.steps,
+                result.donor_dependencies,
+                self.provisional,
+            )
+
+        def execute_warm_terminal(self, *_args: object, **_kwargs: object) -> None:
+            if self.provisional:
+                pytest.fail("repair analysis reached the terminal pipeline")
+            super().execute_warm_terminal(*_args, **_kwargs)  # type: ignore[arg-type]
+
+    executor = ProvisionalExecutor(sources)
+    runtime_calls: list[_FakePrepared] = []
+    _patch_planner(
+        monkeypatch,
+        bundle=bundle,
+        units=units,
+        sources=sources,
+        project_root=root,
+        runtime_calls=runtime_calls,
+        warm_executor=executor,
+    )
+
+    first = _run(
+        bundle,
+        root=root,
+        state=state,
+        session=tmp_path / "analysis-1",
+        repair_analysis=True,
+    )
+    second = _run(
+        bundle,
+        root=root,
+        state=state,
+        session=tmp_path / "analysis-2",
+        repair_analysis=True,
+    )
+
+    assert first.receipt.outputs == ()
+    assert first.summary.misses == 2
+    assert second.summary.hits == 1
+    assert second.summary.misses == 1
+    assert not (root / "artifacts/app.exe").exists()
+
+    executor.provisional = False
+    ordinary = _run(
+        bundle,
+        root=root,
+        state=state,
+        session=tmp_path / "ordinary",
+    )
+    assert ordinary.summary.hits == 1
+    assert ordinary.summary.misses == 3
+    assert (root / "artifacts/app.exe").is_file()
 
 
 def test_implementation_drift_is_rejected_before_planning_mutates_session(
@@ -2831,6 +2916,7 @@ def test_runtime_factory_binds_all_legacy_oracles_before_donor_use(
         compile_timeout=1.0,
         link_timeout=1.0,
         cleanup_timeout=1.0,
+        measured_receipt_repair=None,
         staging_root=tmp_path / "staging",
         oracle_paths=MappingProxyType(oracle_paths),
         oracle_snapshots=MappingProxyType(oracle_snapshots),

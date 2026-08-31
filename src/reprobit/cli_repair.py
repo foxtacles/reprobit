@@ -7,17 +7,20 @@ from io import StringIO
 from pathlib import Path
 
 from reprobit.cli_build import command_verify
-from reprobit.cli_output import CLIOutput
+from reprobit.cli_output import CLIOutput, human_command
 from reprobit.cli_paths import CLIError, project_root, safe_project_path
 from reprobit.cli_project import command_source_lock
+from reprobit.cli_state import state_root
 from reprobit.repair import (
     RepairError,
     StagedRepairProject,
+    capture_repair_record_postimages,
     capture_repair_report_preimages,
     capture_repair_snapshot,
     collect_repair_candidate,
     publish_repair_candidate,
 )
+from reprobit.repair_workflow import repair_classic_records
 from reprobit.source_regeneration import (
     SourceRegenerationError,
     apply_source_regeneration,
@@ -58,6 +61,7 @@ def _candidate_args(args: argparse.Namespace, staged_root: Path) -> argparse.Nam
         report_dir=_CANDIDATE_REPORT_DIRECTORY,
         action_receipt=None,
         action_nonce=None,
+        keep_workspace=KeepWorkspace.NEVER.value,
     )
     return argparse.Namespace(**values)
 
@@ -81,6 +85,7 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
     except RepairError as exc:
         raise CLIError(str(exc)) from exc
     candidate_output = _candidate_output(output)
+    cache_root = state_root(root, snapshot.spec)
     staged = StagedRepairProject(snapshot, keep=KeepWorkspace(args.keep_workspace))
     published = False
     cleanup_warning: str | None = None
@@ -100,8 +105,30 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
             )
             command_source_lock(lock_args, candidate_output)
 
+            candidate_args = _candidate_args(args, staged_root)
+            repair_result = repair_classic_records(
+                candidate_args,
+                candidate_output,
+                staged_root=staged_root,
+                spec=snapshot.spec,
+                cache_root=cache_root,
+            )
+
+            authorized_records = {
+                snapshot.spec.layout.source_manifest,
+                snapshot.spec.layout.build_plan,
+                snapshot.spec.layout.producer_graph,
+                *regeneration_plan.changed_documents,
+                *repair_result.changed_records,
+            }
+            record_postimages = capture_repair_record_postimages(
+                snapshot,
+                staged_root,
+                authorized_records,
+            )
+
             verification_status = command_verify(
-                _candidate_args(args, staged_root),
+                candidate_args,
                 candidate_output,
             )
             if verification_status != 0:
@@ -114,6 +141,7 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
                 snapshot,
                 staged_root,
                 report_directory=_CANDIDATE_REPORT_DIRECTORY,
+                record_postimages=record_postimages,
             )
             transaction = publish_repair_candidate(
                 snapshot,
@@ -131,26 +159,46 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
             retained = staged.retained_path
             retained_report = retained / "project" / _CANDIDATE_REPORT_DIRECTORY / "report.html"
             if retained_report.is_file():
-                retained_line = f" Review: {retained_report}."
+                retained_line = f"\nReview: {retained_report}"
             elif retained.is_dir():
-                retained_line = f" Diagnostics: {retained}."
+                retained_line = f"\nDiagnostics: {retained}"
             else:
                 retained_line = ""
+            cause = " ".join(str(exc).split())
+            if staged.root is not None:
+                cause = cause.replace(str(staged.root), "the private repair workspace")
+            cleanup = human_command(("rbit", "clean", root))
             raise CLIError(
-                "repair stopped; your source edits were kept and saved project records "
-                f"were not changed.{retained_line} Cause: {exc}\nTry: rbit clean {root}"
+                "Repair could not restore exact output. Your source edits are untouched; "
+                "ReproBit did not publish its staged project records or outputs."
+                f"\nDetails: {cause}{retained_line}"
+                f"\nCleanup when finished: {cleanup}"
             ) from exc
 
     changed_records = len(candidate.records)
     report_html = root / final_report_directory / "report.html"
-    output.emit(
-        "repair_complete",
-        (
+    if changed_records:
+        completion_message = (
             f"Repair complete: updated {changed_records} saved project file(s) and "
             f"verified every target exactly\nReport: {report_html}"
-        ),
+        )
+    else:
+        completion_message = (
+            "Nothing needed repair; every target still matches exactly"
+            f"\nReport: {report_html}"
+        )
+    output.emit(
+        "repair_complete",
+        completion_message,
         project=root,
         refreshed_checks=len(regeneration_plan.changes),
+        repaired_translation_units=len(repair_result.affected_units),
+        measured_checks=repair_result.measured_checks,
+        retired_actions=repair_result.retired_actions,
+        removed_donors=repair_result.removed_donors,
+        donor_retunes=repair_result.donor_retunes,
+        donor_candidates=repair_result.compiled_candidates,
+        repair_passes=repair_result.passes,
         changed_records=sorted(candidate.records),
         source_inputs=len(admitted_paths),
         exact=True,

@@ -17,6 +17,7 @@ from typing import cast
 
 import pytest
 
+import reprobit.classic.repair_probe_execution as classic_repair_probe_execution
 import reprobit.classic_evidence as classic_evidence
 import reprobit.classic_execution_records as classic_execution_records
 import reprobit.classic_includes as classic_includes
@@ -5096,13 +5097,18 @@ def _donor_probe_executor(
             request=SimpleNamespace(
                 build_target="program",
                 logical_source="unit.cpp",
+                compiler_seat=f"seat_{donor_id.replace('.', '_')}",
                 logical_outputs=MappingProxyType({"unit.cpp": payload}),
             ),
         )
 
     prepared_donors = tuple(prepared_donor(donor_id, payload) for donor_id, payload in donors)
     unit = SimpleNamespace(
-        plan=SimpleNamespace(id="tu.program.unit"),
+        plan=SimpleNamespace(
+            id="tu.program.unit",
+            build_target="program",
+            source="unit.cpp",
+        ),
         donors=prepared_donors,
     )
 
@@ -5277,6 +5283,98 @@ def test_donor_probe_failure_cancels_active_sibling_without_replenishing(
 
     assert cancellation_observed.is_set()
     assert set(invoked) == {"donor.waiting", "donor.failure"}
+    assert pool.closed is True
+    assert executor.producer._runtime_open is False
+
+
+def test_repair_donor_probe_isolates_candidate_failure_and_stops_before_later_window(
+    tmp_path: Path,
+) -> None:
+    executor, pool, _unit, empty_snapshot, source = _donor_probe_executor(
+        tmp_path,
+        donors=(
+            ("donor.failure", b"failure\n"),
+            ("donor.match", b"match\n"),
+            ("donor.unstarted", b"unstarted\n"),
+        ),
+        jobs=1,
+    )
+    invoked: list[str] = []
+
+    def invoke(
+        supervisor: ProcessSupervisor,
+        unit_arg: SimpleNamespace,
+        donor_index: int,
+        cancellation: CancellationToken,
+        *,
+        step_id: str,
+        compiler_epoch: classic_execution_records.ClassicActiveCompilerEpoch,
+    ) -> classic_runtime_donor._DonorCompilerInvocation:
+        del supervisor, cancellation, compiler_epoch
+        donor_id = unit_arg.donors[donor_index].intervention.id
+        invoked.append(donor_id)
+        if donor_id == "donor.failure":
+            raise ClassicProjectError("candidate compiler rejected input")
+        object_payload = f"object:{donor_id}".encode()
+        pdb_payload = f"pdb:{donor_id}".encode()
+        record = classic_runtime_graph.ClassicCompileRecord(
+            "compiler.program.0000",
+            tmp_path,
+            source,
+            tmp_path / "unit.obj",
+            tmp_path / "unit.pdb",
+            ("cl",),
+            "program",
+        )
+        spec = CommandSpec.create(("cl",), cwd=tmp_path, timeout_seconds=1)
+        return classic_runtime_donor._DonorCompilerInvocation(
+            record,
+            tmp_path / "donor.obj",
+            tmp_path / "donor.pdb",
+            object_payload,
+            pdb_payload,
+            ProcessResult(("cl",), 0, b"ok", 1, 0.01),
+            spec,
+            empty_snapshot,
+            step_id,
+        )
+
+    executor.donors = SimpleNamespace(invoke_donor_compiler=invoke)
+    evaluated: list[tuple[classic_repair_probe_execution.ClassicDonorCompileOutcome, ...]] = []
+    progress: list[tuple[int, int, str]] = []
+
+    def evaluate(
+        outcomes: tuple[classic_repair_probe_execution.ClassicDonorCompileOutcome, ...],
+    ) -> bool:
+        evaluated.append(outcomes)
+        return any(
+            isinstance(item, classic_runtime_probe.ClassicDonorProbeOutput)
+            for item in outcomes
+        )
+
+    outcomes = classic_repair_probe_execution.probe_donor_compile_windows(
+        executor,
+        executor.units,
+        (
+            ("donor.failure",),
+            ("donor.match",),
+            ("donor.unstarted",),
+        ),
+        evaluate=evaluate,
+        progress=lambda completed, total, donor_id: progress.append(
+            (completed, total, donor_id)
+        ),
+        planned_candidates=3,
+    )
+
+    assert invoked == ["donor.failure", "donor.match"]
+    assert isinstance(outcomes[0], classic_repair_probe_execution.ClassicDonorCompileRefusal)
+    assert isinstance(outcomes[1], classic_runtime_probe.ClassicDonorProbeOutput)
+    assert len(evaluated) == 2
+    assert progress == [
+        (1, 3, "donor.failure"),
+        (2, 3, "donor.match"),
+    ]
     assert pool.closed is True
     assert executor.producer._runtime_open is False
 
