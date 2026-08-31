@@ -13,7 +13,13 @@ from reprobit.coff_format import (
 )
 
 from .coff import function_multiset
-from .foundation import exact_audit_keys, require_exact_int, require_sha, sha256_bytes
+from .foundation import (
+    exact_audit_keys,
+    local_symbol_kind,
+    require_exact_int,
+    require_sha,
+    sha256_bytes,
+)
 from .ia32 import ORDINARY_FPO_MOSAIC_IDENTITY_KIND, SOURCE_FPO_MOSAIC_IDENTITY_KIND
 
 """Classic compiler algorithms: debug."""
@@ -451,14 +457,6 @@ def require_removed_caller_locals_delta(
         },
         reduced,
     )
-
-
-def local_symbol_kind(name: str) -> str | None:
-    if len(name) > 2 and name[0] == "$" and (name[1] in "LT") and name[2:].isdigit():
-        return name[1]
-    if name.startswith("$done$") and name[6:].isdigit():
-        return "done"
-    return None
 
 
 def relocation_compatibility(

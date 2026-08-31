@@ -26,13 +26,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from reprobit.project_loader import load_project
-from reprobit.strict_json import canonical_json, strict_load
-from reprobit.transactions import CASTransaction
+from reprobit.strict_json import canonical_json, strict_loads
+from reprobit.transactions import CASTransaction, TransactionResult
 
 _SOURCE_OVERLAY_FAMILY = "source_overlay_graph"
 _DONOR_OVERLAY_FAMILY = "donor_source_overlay"
@@ -57,8 +60,11 @@ class RegenerationPlan:
     """A reviewed set of document rewrites plus the exact bytes they assume."""
 
     changes: tuple[RegenerationChange, ...]
-    documents: dict[str, Any]
-    read_sources: dict[str, str]
+    documents: Mapping[str, bytes]
+    document_preimages: Mapping[str, str]
+    control_preimages: Mapping[str, str | None]
+    authority_directories: Mapping[str, tuple[str, ...]]
+    read_sources: Mapping[str, str]
 
     @property
     def changed_documents(self) -> tuple[str, ...]:
@@ -81,29 +87,26 @@ class _SourceReader:
     def __init__(self, root: Path) -> None:
         self._root = root
         self._cache: dict[str, bytes] = {}
+        self._digests: dict[str, str] = {}
 
     def read(self, relative: str, *, wanted_by: str) -> bytes:
         cached = self._cache.get(relative)
         if cached is not None:
             return cached
-        candidate = (self._root / relative).resolve()
         try:
-            candidate.relative_to(self._root)
-        except ValueError:
-            raise SourceRegenerationError(
-                f"{wanted_by} pins a path outside the project root: {relative!r}"
-            ) from None
-        if not candidate.is_file():
-            raise SourceRegenerationError(
-                f"{wanted_by} pins a source file that does not exist: {relative!r}"
-            )
-        data = candidate.read_bytes()
+            from reprobit.source_lock import SourceLockError, receipt_source_input
+
+            _size, digest, data = receipt_source_input(self._root, relative, capture=True)
+        except SourceLockError as exc:
+            raise SourceRegenerationError(f"{wanted_by} cannot read {relative!r}: {exc}") from exc
+        assert data is not None
         self._cache[relative] = data
+        self._digests[relative] = digest.value
         return data
 
     @property
     def digests(self) -> dict[str, str]:
-        return {path: _digest(data) for path, data in self._cache.items()}
+        return dict(self._digests)
 
 
 def _parameter_map(intervention: dict[str, Any]) -> dict[str, Any]:
@@ -148,35 +151,205 @@ def _render_single(
     return receipt.output_digest, receipt.output_size, result.outputs[receipt.path]
 
 
+_RENDERING_PIN = re.compile(r"^renderings\[(\d+)]\.(?:clean|rendered)_sha256$")
+
+
+def _surviving_digest_binding(
+    document: Any,
+    ancestors: tuple[dict[str, Any], ...],
+    key: str | int,
+    trail: tuple[str | int, ...],
+    *,
+    donor_paths: Mapping[str, tuple[str, ...]],
+    intervention_sources: Mapping[str, str],
+) -> str | None:
+    """Return the source path that owns one surviving source-derived digest."""
+
+    if isinstance(key, str) and key in {"clean", "effective"}:
+        for ancestor in reversed(ancestors):
+            path = ancestor.get("path")
+            if isinstance(path, str) and isinstance(ancestor.get("ops"), list):
+                return path
+
+    if isinstance(key, str):
+        match = _RENDERING_PIN.fullmatch(key)
+        if match is not None:
+            for ancestor in reversed(ancestors):
+                intervention_id = ancestor.get("intervention_id")
+                if not isinstance(intervention_id, str):
+                    continue
+                paths = donor_paths.get(intervention_id)
+                index = int(match.group(1))
+                if paths is not None and index < len(paths):
+                    return paths[index]
+
+    if len(trail) >= 2 and trail[-2:] == ("source_digest", "value"):
+        for ancestor in reversed(ancestors):
+            source = ancestor.get("source")
+            if isinstance(source, str):
+                return source
+
+    if key == "source_sha256" and ancestors:
+        path = ancestors[-1].get("path")
+        if isinstance(path, str):
+            return path
+
+    if key == "value" and ancestors:
+        parameter_name = ancestors[-1].get("name")
+        if parameter_name in {"donor_effective_source_sha256", "rendered_source_sha256"}:
+            for ancestor in reversed(ancestors):
+                candidate_id = ancestor.get("id")
+                if not isinstance(candidate_id, str):
+                    continue
+                donor_source = intervention_sources.get(candidate_id)
+                if donor_source is not None:
+                    return donor_source
+    return None
+
+
+def _digest_occurrence_index(
+    documents: Mapping[str, Any],
+    digests: frozenset[str],
+    *,
+    donor_paths: Mapping[str, tuple[str, ...]],
+    intervention_sources: Mapping[str, str],
+) -> dict[str, tuple[tuple[str, str | None], ...]]:
+    """Index selected exact digest values in one walk over each document."""
+
+    found: dict[str, list[tuple[str, str | None]]] = {digest: [] for digest in digests}
+
+    def index_document(name: str, document: Any) -> None:
+        def visit(
+            value: Any,
+            ancestors: tuple[dict[str, Any], ...],
+            key: str | int,
+            trail: tuple[str | int, ...],
+        ) -> None:
+            if isinstance(value, str) and value in digests:
+                found[value].append(
+                    (
+                        name,
+                        _surviving_digest_binding(
+                            document,
+                            ancestors,
+                            key,
+                            trail,
+                            donor_paths=donor_paths,
+                            intervention_sources=intervention_sources,
+                        ),
+                    )
+                )
+                return
+            if isinstance(value, dict):
+                nested = (*ancestors, value)
+                for child_key, child in value.items():
+                    visit(child, nested, child_key, (*trail, child_key))
+            elif isinstance(value, list):
+                for index, child in enumerate(value):
+                    visit(child, ancestors, index, (*trail, index))
+
+        visit(document, (), "", ())
+
+    for name, document in documents.items():
+        index_document(name, document)
+    return {digest: tuple(occurrences) for digest, occurrences in found.items()}
+
+
 def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
     """Propose pin regenerations for every stale mechanical derivation."""
 
     root = Path(project_root).resolve(strict=True)
+    config_relative = "reprobit.toml"
+    config_path = root / config_relative
+    config_data = config_path.read_bytes()
     spec = load_project(root)
+    if config_path.read_bytes() != config_data:
+        raise SourceRegenerationError("reprobit.toml changed while regeneration was planned")
     reader = _SourceReader(root)
     changes: list[RegenerationChange] = []
     updated: dict[str, Any] = {}
 
     intervention_paths = _document_paths(root, spec.layout.interventions)
     proof_paths = _document_paths(root, spec.layout.proofs)
+    authority_directories = {
+        spec.layout.interventions: tuple(
+            sorted(
+                (
+                    path.relative_to(root / spec.layout.interventions).as_posix()
+                    for path in intervention_paths
+                ),
+                key=lambda item: (item.casefold(), item),
+            )
+        ),
+        spec.layout.proofs: tuple(
+            sorted(
+                (path.relative_to(root / spec.layout.proofs).as_posix() for path in proof_paths),
+                key=lambda item: (item.casefold(), item),
+            )
+        ),
+    }
     documents: dict[str, Any] = {}
+    document_preimages: dict[str, str] = {}
+    control_preimages: dict[str, str | None] = {config_relative: _digest(config_data)}
     for document_path in (*intervention_paths, *proof_paths):
-        documents[document_path.relative_to(root).as_posix()] = strict_load(document_path)
+        name = document_path.relative_to(root).as_posix()
+        data = document_path.read_bytes()
+        documents[name] = strict_loads(data)
+        document_preimages[name] = _digest(data)
     plan_relative = spec.layout.build_plan
     plan_path = root / plan_relative
     if plan_path.is_file():
-        documents[plan_relative] = strict_load(plan_path)
+        data = plan_path.read_bytes()
+        documents[plan_relative] = strict_loads(data)
+        document_preimages[plan_relative] = _digest(data)
+    else:
+        control_preimages[plan_relative] = None
+
+    donor_paths: dict[str, tuple[str, ...]] = {}
+    intervention_sources: dict[str, str] = {}
+    for document in documents.values():
+        if not isinstance(document, dict):
+            continue
+        owning_source = document.get("source")
+        for intervention in document.get("interventions", []) or []:
+            if not isinstance(intervention, dict):
+                continue
+            identifier = intervention.get("id")
+            values = _parameter_map(intervention)
+            donor_source = values.get("donor_source", owning_source)
+            if isinstance(identifier, str) and isinstance(donor_source, str):
+                intervention_sources[identifier] = donor_source
+            if intervention.get("family") != _DONOR_OVERLAY_FAMILY:
+                continue
+            renderings = values.get("renderings")
+            if not isinstance(identifier, str) or not isinstance(renderings, list):
+                continue
+            paths = tuple(
+                str(rendering.get("path"))
+                for rendering in renderings
+                if isinstance(rendering, dict) and isinstance(rendering.get("path"), str)
+            )
+            if len(paths) == len(renderings):
+                donor_paths[identifier] = paths
 
     def record(document: str, location: str, before: str, after: str) -> None:
+        if before == after:
+            return
         changes.append(RegenerationChange(document, location, before, after))
         updated[document] = documents[document]
 
     stale_paths: dict[str, str] = {}
+    stale_digest_paths: dict[str, set[str]] = {}
+
+    def bind_stale(digest: object, path: str) -> None:
+        if isinstance(digest, str) and len(digest) == 64:
+            stale_digest_paths.setdefault(digest, set()).add(path)
 
     # Pass A: project-level source overlays own the effective text of their
     # outputs.  Re-render each stale output and propose clean/size/effective.
     effective_by_path: dict[str, str] = {}
     effective_bytes_by_path: dict[str, bytes] = {}
+    canonical_operations_by_path: dict[str, tuple[dict[str, Any], ...]] = {}
     for name, document in documents.items():
         if not isinstance(document, dict):
             continue
@@ -194,6 +367,12 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
                     continue
                 path = str(output.get("path"))
                 context = f"overlay output {path!r}"
+                operations = output.get("ops")
+                if not isinstance(operations, list) or any(
+                    not isinstance(operation, dict) for operation in operations
+                ):
+                    raise SourceRegenerationError(f"{context} has malformed operations")
+                canonical_operations_by_path[path] = tuple(operations)
                 if "clean" not in output:
                     # Generated-only outputs have no clean input on disk; their
                     # effective bytes derive from generators alone and cannot
@@ -213,6 +392,9 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
                 )
                 effective_bytes_by_path[path] = rendered_bytes
                 stale_paths[path] = str(output["clean"])
+                bind_stale(output.get("clean"), path)
+                if output.get("effective") != new_effective:
+                    bind_stale(output.get("effective"), path)
                 record(name, f"{context} clean", str(output["clean"]), current_digest)
                 record(name, f"{context} effective", str(output["effective"]), new_effective)
                 if output.get("size") != new_size:
@@ -284,33 +466,38 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
                 pinned_rendered = str(expected_values[rendered_key])
                 if current_digest != pinned_clean:
                     operations = rendering.get("operations")
-                    if isinstance(operations, list) and not operations:
-                        # An empty operation list under owning-TU replay means
-                        # the donor renders the canonical overlay's effective
-                        # text for this path verbatim.
-                        if values.get("canonical_overlay_replay") != "owning_translation_unit_v1":
+                    if not isinstance(operations, list) or any(
+                        not isinstance(operation, dict) for operation in operations
+                    ):
+                        raise SourceRegenerationError(f"{context} has malformed operations")
+                    rendered_operations = list(operations)
+                    replay = values.get("canonical_overlay_replay")
+                    if replay is not None:
+                        if replay != "owning_translation_unit_v1":
                             raise SourceRegenerationError(
-                                f"{context} has no operations and no replay policy; "
-                                "its rendered bytes cannot be re-derived here"
+                                f"{context} has an unsupported canonical replay policy"
                             )
-                        replayed = effective_by_path.get(path)
-                        if replayed is None:
-                            raise SourceRegenerationError(
-                                f"{context} replays a canonical overlay output that "
-                                "no source overlay declares"
-                            )
-                        new_rendered = replayed
-                    else:
-                        declaration = {
-                            "path": path,
-                            "clean": current_digest,
-                            "effective": pinned_rendered,
-                            "ops": operations,
-                        }
-                        new_rendered, _size, _bytes = _render_single(
-                            declaration, current, context=context
-                        )
+                        if index == 0:
+                            canonical = canonical_operations_by_path.get(path)
+                            if canonical is None:
+                                raise SourceRegenerationError(
+                                    f"{context} replays a canonical overlay output that "
+                                    "no source overlay declares"
+                                )
+                            rendered_operations = [*canonical, *rendered_operations]
+                    declaration = {
+                        "path": path,
+                        "clean": current_digest,
+                        "effective": pinned_rendered,
+                        "ops": rendered_operations,
+                    }
+                    new_rendered, _size, _bytes = _render_single(
+                        declaration, current, context=context
+                    )
                     stale_paths[path] = pinned_clean
+                    bind_stale(pinned_clean, path)
+                    if pinned_rendered != new_rendered:
+                        bind_stale(pinned_rendered, path)
                     record(
                         proof_name,
                         f"{identifier} {clean_key}",
@@ -349,6 +536,10 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
             identity = _legacy_identity(claim)
             pinned_identity = str(values.get("rendering_identity_sha256"))
             if identity != pinned_identity:
+                for rendering in merged:
+                    rendering_path = rendering.get("path")
+                    if isinstance(rendering_path, str):
+                        bind_stale(pinned_identity, rendering_path)
                 record(
                     name,
                     f"{identifier} rendering_identity_sha256",
@@ -377,6 +568,7 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
         before = str(digest_field.get("value"))
         if before != expected:
             stale_paths.setdefault(source, before)
+            bind_stale(before, source)
             record(name, f"source_digest ({source})", before, expected)
             digest_field["value"] = expected
 
@@ -394,6 +586,7 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
             before = str(digest_field.get("value"))
             if before != expected:
                 stale_paths.setdefault(source, before)
+                bind_stale(before, source)
                 record(plan_relative, f"{context} source_digest ({source})", before, expected)
                 digest_field["value"] = expected
 
@@ -405,7 +598,11 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
         derive_special_seat_proof,
         render_declaration_carrier_source,
     )
-    from reprobit.schema import ClassicProofReceipt, ClassicRecipeIntervention
+    from reprobit.schema import (
+        ClassicProofReceipt,
+        ClassicRecipeIntervention,
+        ClassicRecipeRole,
+    )
 
     _DONOR_SOURCE_PIN_NAMES = frozenset(
         {"rendered_source_sha256", "donor_effective_source_sha256", "seat_proof"}
@@ -425,8 +622,8 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
     for name, document in documents.items():
         if not isinstance(document, dict) or name == plan_relative:
             continue
-        source = document.get("source")
-        if not isinstance(source, str) or source not in stale_paths:
+        owning_source = document.get("source")
+        if not isinstance(owning_source, str):
             continue
         for intervention in document.get("interventions", []) or []:
             if not isinstance(intervention, dict):
@@ -434,6 +631,13 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
             values = _parameter_map(intervention)
             pinned_names = _DONOR_SOURCE_PIN_NAMES & values.keys()
             if not pinned_names:
+                continue
+            source = values.get("donor_source", owning_source)
+            if not isinstance(source, str):
+                raise SourceRegenerationError(
+                    f"{name} donor {intervention.get('id')} has an invalid donor_source"
+                )
+            if source not in stale_paths:
                 continue
             identifier = str(intervention.get("id"))
             context = f"{name} donor {identifier}"
@@ -468,6 +672,7 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
                 before_value = values.get(parameter_name)
                 if before_value == after_value:
                     continue
+                bind_stale(before_value, source)
                 record(
                     name,
                     f"{identifier} {parameter_name}",
@@ -480,40 +685,178 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
                 )
                 _set_parameter(intervention, parameter_name, after_value)
 
-    # Completeness sweep: a digest this plan replaced must not survive anywhere
-    # in the committed authority, or an unhandled pin family is riding along.
-    replaced = {change.before for change in changes if len(change.before) == 64}
-    replaced.update(stale_paths.values())
-    if replaced:
-        for name, document in documents.items():
-            serialized = canonical_json(document).decode("utf-8")
-            for old in sorted(replaced):
-                if old in serialized:
-                    raise SourceRegenerationError(
-                        f"stale digest {old} survives in {name} at a location this "
-                        "regeneration does not understand; regenerate that record "
-                        "with its own adapter first"
-                    )
+    # Pass E: typed source-refactor proofs may pin supporting headers in
+    # nested ``{path, source_sha256, ...}`` witnesses.  The whole-file digest
+    # is only the mechanical identity of bytes inspected by independent range
+    # pins and the closed semantic validator.  Enumerate those witness seats
+    # explicitly; never infer a source pin from an arbitrary nested object.
+    refactor_witness_paths: dict[str, tuple[tuple[str, ...], ...]] = {
+        "fixed_array_fill_loop_v1": (("array_declaration",),),
+        "fixed_array_shuffle_pointer_countdown_v1": (
+            ("semantic_witness", "owner_header"),
+            ("semantic_witness", "base_header"),
+            ("semantic_witness", "types_header"),
+        ),
+        "inclusive_extent_assignment_v1": (
+            ("semantic_witness", "source_owner_header"),
+            ("semantic_witness", "source_accessor_header"),
+            ("semantic_witness", "extent_header"),
+        ),
+        "constructor_allocation_lift_v1": (("semantic_witness", "owner_header"),),
+    }
+
+    def source_refactor_witness(
+        proof: dict[str, Any],
+        trail: tuple[str, ...],
+        *,
+        context: str,
+    ) -> dict[str, Any]:
+        current: Any = proof
+        for key in trail:
+            if not isinstance(current, dict) or key not in current:
+                raise SourceRegenerationError(
+                    f"{context} lacks its declared {'.'.join(trail)} witness"
+                )
+            current = current[key]
+        if not isinstance(current, dict):
+            raise SourceRegenerationError(f"{context} has a malformed {'.'.join(trail)} witness")
+        return current
+
+    def refresh_source_refactor_witness(
+        witness: dict[str, Any],
+        *,
+        document_name: str,
+        intervention_id: str,
+        proof_kind: str,
+        trail: tuple[str, ...],
+    ) -> None:
+        path = witness.get("path")
+        pinned = witness.get("source_sha256")
+        context = f"{document_name} {intervention_id} target_source_refactor {'.'.join(trail)}"
+        if not isinstance(path, str) or not isinstance(pinned, str):
+            raise SourceRegenerationError(f"{context} has malformed source identity")
+        current = reader.read(path, wanted_by=context)
+        current_digest = _digest(current)
+        if current_digest == pinned:
+            return
+        stale_paths.setdefault(path, pinned)
+        bind_stale(pinned, path)
+        location = f"{intervention_id} {proof_kind} {'.'.join(trail)}"
+        record(
+            document_name,
+            f"{location} source_sha256 ({path})",
+            pinned,
+            current_digest,
+        )
+        witness["source_sha256"] = current_digest
+        if "source_size" in witness and witness.get("source_size") != len(current):
+            record(
+                document_name,
+                f"{location} source_size ({path})",
+                str(witness.get("source_size")),
+                str(len(current)),
+            )
+            witness["source_size"] = len(current)
+
+    for name, document in documents.items():
+        if not isinstance(document, dict) or name == plan_relative:
+            continue
+        for intervention in document.get("interventions", []) or []:
+            if not isinstance(intervention, dict):
+                continue
+            values = _parameter_map(intervention)
+            raw_proof = values.get("target_source_refactor")
+            if raw_proof is None:
+                continue
+            identifier = str(intervention.get("id"))
+            try:
+                typed = ClassicRecipeIntervention.model_validate_json(canonical_json(intervention))
+            except ValueError as exc:
+                raise SourceRegenerationError(
+                    f"{name} source-refactor intervention {identifier!r} is invalid: {exc}"
+                ) from exc
+            if typed.role is not ClassicRecipeRole.FUNCTION or not isinstance(raw_proof, dict):
+                raise SourceRegenerationError(
+                    f"{name} source-refactor intervention {identifier!r} has an "
+                    "invalid role or proof"
+                )
+            proof_kind = raw_proof.get("kind")
+            if not isinstance(proof_kind, str):
+                raise SourceRegenerationError(
+                    f"{name} source-refactor intervention {identifier!r} has no typed proof kind"
+                )
+            for trail in refactor_witness_paths.get(proof_kind, ()):
+                refresh_source_refactor_witness(
+                    source_refactor_witness(
+                        raw_proof,
+                        trail,
+                        context=f"{name} source-refactor intervention {identifier!r}",
+                    ),
+                    document_name=name,
+                    intervention_id=identifier,
+                    proof_kind=proof_kind,
+                    trail=trail,
+                )
+
+    # Completeness sweep: a changed path's old digest may legitimately be the
+    # current digest of a different, byte-identical source. Bind every exact
+    # surviving value to its declared path so that duplicate source bytes do
+    # not look stale, while an unknown or still-changed binding remains fatal.
+    surviving = _digest_occurrence_index(
+        documents,
+        frozenset(stale_digest_paths),
+        donor_paths=donor_paths,
+        intervention_sources=intervention_sources,
+    )
+    for old, changed_paths in sorted(stale_digest_paths.items()):
+        for name, binding in surviving[old]:
+            if binding is not None and binding not in changed_paths:
+                continue
+            detail = "an unknown source" if binding is None else repr(binding)
+            raise SourceRegenerationError(
+                f"stale digest {old} survives in {name} bound to {detail} at a "
+                "location this regeneration does not understand; regenerate "
+                "that record with its own adapter first"
+            )
 
     return RegenerationPlan(
         changes=tuple(changes),
-        documents=updated,
-        read_sources=reader.digests,
+        documents=MappingProxyType(
+            {name: canonical_json(document) for name, document in updated.items()}
+        ),
+        document_preimages=MappingProxyType(dict(document_preimages)),
+        control_preimages=MappingProxyType(control_preimages),
+        authority_directories=MappingProxyType(authority_directories),
+        read_sources=MappingProxyType(reader.digests),
     )
 
 
-def apply_source_regeneration(project_root: Path | str, plan: RegenerationPlan) -> None:
+def apply_source_regeneration(
+    project_root: Path | str,
+    plan: RegenerationPlan,
+) -> TransactionResult | None:
     """Write a regeneration plan transactionally against the bytes it read."""
 
     if not plan.changes:
-        return
+        return None
     root = Path(project_root).resolve(strict=True)
     transaction = CASTransaction(root)
     for name in plan.changed_documents:
-        transaction.write(name, canonical_json(plan.documents[name]))
-    for path, digest in sorted(plan.read_sources.items()):
-        transaction.assert_unchanged(path, expected_sha256=digest)
-    transaction.commit()
+        transaction.write(
+            name,
+            plan.documents[name],
+            expected_sha256=plan.document_preimages[name],
+        )
+    for name, digest in sorted(plan.document_preimages.items()):
+        if name not in plan.documents:
+            transaction.assert_unchanged(name, expected_sha256=digest)
+    for name, control_digest in sorted(plan.control_preimages.items()):
+        transaction.assert_unchanged(name, expected_sha256=control_digest)
+    for relative, members in sorted(plan.authority_directories.items()):
+        transaction.assert_json_members(relative, expected_members=members)
+    for path, source_digest in sorted(plan.read_sources.items()):
+        transaction.assert_unchanged(path, expected_sha256=source_digest)
+    return transaction.commit()
 
 
 __all__ = [

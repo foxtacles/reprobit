@@ -35,6 +35,16 @@ FORBIDDEN_DECLARATION_PAYLOAD_KEYS = frozenset(
 )
 
 
+def local_symbol_kind(name: str) -> str | None:
+    """Classify compiler-local COFF symbols while ignoring their serial number."""
+
+    if len(name) > 2 and name[0] == "$" and (name[1] in "LT") and name[2:].isdigit():
+        return name[1]
+    if name.startswith("$done$") and name[6:].isdigit():
+        return "done"
+    return None
+
+
 def require_payload_free_declaration(value: object, context: str) -> None:
     """Refuse embedded byte payloads anywhere in clean recipe metadata.
 

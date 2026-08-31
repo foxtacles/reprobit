@@ -28,8 +28,8 @@ from .composition import (
     instruction_mosaic_metadata_sha256,
     require_instruction_mosaic_semantic_relocations,
 )
-from .debug import _apply_replacements, local_symbol_kind, parse_fpo_data, shifted_pointer
-from .foundation import require_payload_free_declaration, sha256_bytes
+from .debug import _apply_replacements, parse_fpo_data, shifted_pointer
+from .foundation import local_symbol_kind, require_payload_free_declaration, sha256_bytes
 from .ia32 import require_declared_relocation_semantics
 from .register_bijection import (
     REGISTER_BIJECTION_CLASS,

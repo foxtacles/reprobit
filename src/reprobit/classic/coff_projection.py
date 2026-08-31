@@ -29,7 +29,7 @@ from reprobit.classic.compiler_state_foundation import (
 from reprobit.classic.compiler_state_projection import (
     derive_msvc420_compiler_state_projection,
 )
-from reprobit.classic.debug import local_symbol_kind
+from reprobit.classic.foundation import local_symbol_kind
 from reprobit.classic.register_bijection import apply_register_bijection
 from reprobit.classic.register_semantics import (
     IA32_GENERAL_REGISTER_NAMES,

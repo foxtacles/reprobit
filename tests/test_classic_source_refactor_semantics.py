@@ -1677,12 +1677,39 @@ def test_entropy_only_donor_may_relocate_member_definition() -> None:
                 {
                     "id": "op_move",
                     "op": "replace",
-                    "gen": {"k": "member_sig", "kind": "destructor"},
-                    "removed": {"sha256": _digest(b"~Entry() { Flush(); }"), "size": 21},
-                }
+                    "gen": {
+                        "k": "member_sig",
+                        "kind": "destructor",
+                        "class_identifier": "Entry",
+                        "member_identifier": "Entry",
+                        "form": "in_class_declaration",
+                    },
+                    "removed": {"sha256": _digest(b"~Entry()"), "size": 8},
+                },
+                {
+                    "id": "op_body_source",
+                    "op": "delete",
+                    "gen": {"k": "reloc", "range_identity": "Entry::~Entry"},
+                    "removed": {"sha256": _digest(b" { Flush(); }"), "size": 13},
+                },
             ],
             "src/entry.cpp": [
-                {"id": "op_dest", "op": "insert", "gen": {"k": "reloc"}},
+                {
+                    "id": "op_definition",
+                    "op": "insert",
+                    "gen": {
+                        "k": "member_sig",
+                        "kind": "destructor",
+                        "class_identifier": "Entry",
+                        "member_identifier": "Entry",
+                        "form": "qualified_definition_header",
+                    },
+                },
+                {
+                    "id": "op_dest",
+                    "op": "insert",
+                    "gen": {"k": "reloc", "range_identity": "Entry::~Entry"},
+                },
             ],
         }
     )
@@ -1708,10 +1735,218 @@ def test_entropy_only_donor_relocation_must_reappear() -> None:
                 {
                     "id": "op_move",
                     "op": "replace",
-                    "gen": {"k": "member_sig", "kind": "destructor"},
+                    "gen": {
+                        "k": "member_sig",
+                        "kind": "destructor",
+                        "class_identifier": "Entry",
+                        "member_identifier": "Entry",
+                        "form": "in_class_declaration",
+                    },
                     "removed": {"sha256": _digest(b"~Entry() { Flush(); }"), "size": 21},
                 }
-            ]
+            ],
+            "src/entry.cpp": [
+                {
+                    "id": "op_definition",
+                    "op": "insert",
+                    "gen": {
+                        "k": "member_sig",
+                        "kind": "destructor",
+                        "class_identifier": "Entry",
+                        "member_identifier": "Entry",
+                        "form": "qualified_definition_header",
+                    },
+                },
+                {
+                    "id": "op_dest",
+                    "op": "insert",
+                    "gen": {"k": "reloc", "range_identity": "Entry::~Entry"},
+                },
+            ],
+        }
+    )
+
+    with pytest.raises(SourceRefactorSemanticError, match="does not reappear"):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/entry.cpp",
+            clean_sources={"include/entry.h": clean_header, "src/entry.cpp": b""},
+            rendered_sources={"include/entry.h": rendered_header, "src/entry.cpp": b""},
+        )
+
+
+def test_entropy_only_member_signature_requires_matching_relocation() -> None:
+    """A typed signature alone cannot authenticate deletion as a move."""
+    removed = b"~Entry() { Flush(); }"
+    clean_header = b"class Entry { public: " + removed + b" };\n"
+    rendered_header = b"class Entry { public: ~Entry(); };\n"
+    rendered_cpp = b"Entry::~Entry() { Flush(); }\n"
+    donor = _entropy_only_donor(
+        {
+            "include/entry.h": [
+                {
+                    "id": "op_move",
+                    "op": "replace",
+                    "gen": {
+                        "k": "member_sig",
+                        "kind": "destructor",
+                        "class_identifier": "Entry",
+                        "member_identifier": "Entry",
+                        "form": "in_class_declaration",
+                    },
+                    "removed": {"sha256": _digest(removed), "size": len(removed)},
+                }
+            ],
+            "src/entry.cpp": [
+                {
+                    "id": "op_wrong_dest",
+                    "op": "insert",
+                    "gen": {"k": "reloc", "range_identity": "Other::~Other"},
+                },
+            ],
+        }
+    )
+
+    with pytest.raises(SourceRefactorSemanticError, match="matching authenticated relocation"):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/entry.cpp",
+            clean_sources={"include/entry.h": clean_header, "src/entry.cpp": b""},
+            rendered_sources={
+                "include/entry.h": rendered_header,
+                "src/entry.cpp": rendered_cpp,
+            },
+        )
+
+
+@pytest.mark.parametrize(
+    ("definition_path", "definition_class"),
+    [
+        pytest.param(None, None, id="missing"),
+        pytest.param("src/entry.cpp", "Other", id="wrong-member"),
+        pytest.param("include/other.h", "Entry", id="wrong-destination"),
+    ],
+)
+def test_entropy_only_member_relocation_requires_qualified_definition_at_destination(
+    definition_path: str | None,
+    definition_class: str | None,
+) -> None:
+    """A copied body is not a destructor definition without its matching header."""
+
+    relocation = {
+        "k": "reloc",
+        "range_identity": "Entry::~Entry",
+        "byte_destination": "src/entry.cpp",
+    }
+    operations: dict[str, list[dict[str, object]]] = {
+        "include/entry.h": [
+            {
+                "id": "op_declaration",
+                "op": "replace",
+                "gen": {
+                    "k": "member_sig",
+                    "kind": "destructor",
+                    "class_identifier": "Entry",
+                    "member_identifier": "Entry",
+                    "form": "in_class_declaration",
+                },
+                "removed": {"sha256": _digest(b"~Entry()"), "size": 8},
+            },
+            {
+                "id": "op_body_source",
+                "op": "delete",
+                "gen": relocation,
+                "removed": {"sha256": _digest(b" { Flush(); }"), "size": 13},
+            },
+        ],
+        "src/entry.cpp": [
+            {"id": "op_body_destination", "op": "insert", "gen": relocation},
+        ],
+    }
+    rendered_sources = {
+        "include/entry.h": b"class Entry { public: ~Entry(); };\n",
+        "src/entry.cpp": b"void Other() { Flush(); }\n",
+    }
+    clean_sources = {
+        "include/entry.h": b"class Entry { public: ~Entry() { Flush(); } };\n",
+        "src/entry.cpp": b"",
+    }
+    if definition_path is not None:
+        assert definition_class is not None
+        operations.setdefault(definition_path, []).insert(
+            0,
+            {
+                "id": "op_definition",
+                "op": "insert",
+                "gen": {
+                    "k": "member_sig",
+                    "kind": "destructor",
+                    "class_identifier": definition_class,
+                    "member_identifier": definition_class,
+                    "form": "qualified_definition_header",
+                },
+            },
+        )
+        if definition_path not in rendered_sources:
+            rendered_sources[definition_path] = b"Entry::~Entry()\n"
+            clean_sources[definition_path] = b""
+
+    donor = _entropy_only_donor(operations)
+
+    with pytest.raises(
+        SourceRefactorSemanticError,
+        match="qualified definition header at its relocation destination",
+    ):
+        validate_donor_source_semantics(
+            donor,
+            [],
+            owning_source="src/entry.cpp",
+            clean_sources=clean_sources,
+            rendered_sources=rendered_sources,
+        )
+
+
+def test_entropy_only_relocation_must_reappear_as_contiguous_tokens() -> None:
+    """Unrelated code cannot supply scattered tokens for a claimed move."""
+    removed = b"~Entry() { Flush(); }"
+    clean_header = b"class Entry { public: " + removed + b" void Other(); };\n"
+    rendered_header = b"class Entry { public: ~Entry(); void Other() { Flush(); } };\n"
+    donor = _entropy_only_donor(
+        {
+            "include/entry.h": [
+                {
+                    "id": "op_move",
+                    "op": "replace",
+                    "gen": {
+                        "k": "member_sig",
+                        "kind": "destructor",
+                        "class_identifier": "Entry",
+                        "member_identifier": "Entry",
+                        "form": "in_class_declaration",
+                    },
+                    "removed": {"sha256": _digest(removed), "size": len(removed)},
+                }
+            ],
+            "src/entry.cpp": [
+                {
+                    "id": "op_definition",
+                    "op": "insert",
+                    "gen": {
+                        "k": "member_sig",
+                        "kind": "destructor",
+                        "class_identifier": "Entry",
+                        "member_identifier": "Entry",
+                        "form": "qualified_definition_header",
+                    },
+                },
+                {
+                    "id": "op_dest",
+                    "op": "insert",
+                    "gen": {"k": "reloc", "range_identity": "Entry::~Entry"},
+                },
+            ],
         }
     )
 

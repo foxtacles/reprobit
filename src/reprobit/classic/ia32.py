@@ -8,7 +8,14 @@ from reprobit.ia32_decode import (
 from reprobit.model import is_identifier
 
 from .coff import _coff_table_bytes, function_symbol
-from .foundation import ADDRESS_RE, exact_audit_keys, require_exact_int, require_sha, sha256_bytes
+from .foundation import (
+    ADDRESS_RE,
+    exact_audit_keys,
+    local_symbol_kind,
+    require_exact_int,
+    require_sha,
+    sha256_bytes,
+)
 
 """Classic compiler algorithms: ia32."""
 RETAIL_RELOCATION_ORACLE_KEYS = {
@@ -720,15 +727,25 @@ def require_declared_relocation_semantics(
         "offset",
         "type",
         "addend",
-        "target",
         "target_section",
         "target_value",
         "target_type",
         "target_storage",
     )
     for index, (record, expected) in enumerate(zip(donor_rows, oracle)):
+        # `$L`/`$T`/`$done$` suffixes are compiler-local counters, not symbol
+        # semantics.  The COFF composer already pairs these names by their
+        # local kind; apply the same rule at this declarative boundary while
+        # retaining every offset, section, value, type, and storage pin.
+        record_target = record["target"]
+        expected_target = expected["target"]
+        record_local_kind = local_symbol_kind(record_target)
+        target_matches = record_target == expected_target or (
+            record_local_kind is not None
+            and record_local_kind == local_symbol_kind(expected_target)
+        )
         require(
-            all(record[field] == expected[field] for field in fields),
+            target_matches and all(record[field] == expected[field] for field in fields),
             f"{context} relocation {index} differs from its declared COFF semantics",
         )
     return {

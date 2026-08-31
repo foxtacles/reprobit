@@ -374,9 +374,10 @@ def _prove_entropy_only_rendering(
     - ``#include`` directives (the include-seat entropy lever relocates and
       exchanges implementation includes; their effect on the program is
       carried by the byte-exact compile itself);
-    - member relocations (``member_sig``/``reloc`` generators), whose removed
-      tokens must all survive, in order, inside one of the donor's rendered
-      outputs — the moved definition reappears at its destination;
+    - member relocations (``member_sig``/``reloc`` generators), whose member
+      identity must agree, whose qualified definition header must be generated
+      on the authenticated byte destination, and whose removed tokens must
+      survive there contiguously — the moved definition reappears;
     - non-virtual function prototype declarations whose name no longer
       appears anywhere in the donor's rendered text, so nothing the
       compiler sees in these files can have resolved against them.
@@ -397,6 +398,8 @@ def _prove_entropy_only_rendering(
             )
         touched.add(operation.path)
 
+    relocation_destinations = _relocation_destinations(operations)
+    qualified_destructors = _qualified_destructor_definitions(operations)
     survivors: set[str] = set()
     rendered_tokens: dict[str, list[str]] = {}
     for rendered_path, rendered in rendered_sources.items():
@@ -428,10 +431,33 @@ def _prove_entropy_only_rendering(
             continue
         kinds = {cast(str, leaf.get("k")) for leaf in operation.leaves}
         if kinds & _RELOCATION_LEAVES:
+            for leaf in operation.leaves:
+                if leaf.get("k") != "member_sig":
+                    continue
+                identity = _destructor_relocation_identity(leaf)
+                _need(
+                    leaf.get("form") == "in_class_declaration",
+                    "entropy-only donor destructive member signature is not an"
+                    " in-class declaration",
+                )
+                destinations = relocation_destinations.get(identity, frozenset())
+                _need(
+                    bool(destinations),
+                    f"entropy-only donor member signature {identity!r} lacks a"
+                    " matching authenticated relocation",
+                )
+                _need(
+                    bool(destinations.intersection(qualified_destructors.get(identity, ()))),
+                    f"entropy-only donor member signature {identity!r} lacks a"
+                    " matching qualified definition header at its relocation destination",
+                )
             # A declared member relocation: the removed definition must
-            # reappear, token for token and in order, at its destination.
+            # reappear as one token-for-token range at its destination.
             _need(
-                any(_is_token_subsequence(deleted, tokens) for tokens in rendered_tokens.values()),
+                any(
+                    _contains_contiguous_tokens(deleted, tokens)
+                    for tokens in rendered_tokens.values()
+                ),
                 f"entropy-only donor relocation from {operation.path!r} does not"
                 " reappear in a rendered output",
             )
@@ -443,12 +469,80 @@ _RELOCATION_LEAVES = frozenset({"member_sig", "reloc"})
 _ENTROPY_ONLY_LEAVES = _SAFE_ENTROPY_LEAVES | _RELOCATION_LEAVES
 
 
-def _is_token_subsequence(needle: Sequence[str], haystack: Sequence[str]) -> bool:
-    position = 0
-    for token in haystack:
-        if position < len(needle) and token == needle[position]:
-            position += 1
-    return position == len(needle)
+def _relocation_destinations(
+    operations: Sequence[_Operation],
+) -> Mapping[str, frozenset[str]]:
+    destinations: dict[str, set[str]] = {}
+    for operation in operations:
+        for leaf in operation.leaves:
+            if leaf.get("k") != "reloc":
+                continue
+            identity = leaf.get("range_identity")
+            _need(
+                isinstance(identity, str) and bool(identity),
+                "entropy-only donor relocation lacks an authenticated range identity",
+            )
+            if operation.action != "insert":
+                continue
+            destination = leaf.get("byte_destination")
+            if destination is not None:
+                _need(
+                    isinstance(destination, str) and destination == operation.path,
+                    "entropy-only donor relocation byte destination differs",
+                )
+                destinations.setdefault(cast(str, identity), set()).add(cast(str, destination))
+            else:
+                # Renderer-validated manifests carry ``byte_destination`` on
+                # both relocation halves.  The insert path keeps focused
+                # validator fixtures useful without recreating that payload.
+                destinations.setdefault(cast(str, identity), set()).add(operation.path)
+    return MappingProxyType(
+        {identity: frozenset(paths) for identity, paths in destinations.items()}
+    )
+
+
+def _qualified_destructor_definitions(
+    operations: Sequence[_Operation],
+) -> Mapping[str, frozenset[str]]:
+    definitions: dict[str, set[str]] = {}
+    for operation in operations:
+        for leaf in operation.leaves:
+            if (
+                leaf.get("k") != "member_sig"
+                or leaf.get("kind") != "destructor"
+                or leaf.get("form") != "qualified_definition_header"
+            ):
+                continue
+            identity = _destructor_relocation_identity(leaf)
+            definitions.setdefault(identity, set()).add(operation.path)
+    return MappingProxyType({identity: frozenset(paths) for identity, paths in definitions.items()})
+
+
+def _destructor_relocation_identity(member_signature: Mapping[str, object]) -> str:
+    _need(
+        member_signature.get("kind") == "destructor",
+        "entropy-only donor member signature is not a destructor relocation",
+    )
+    class_identifier = _identifier(
+        member_signature.get("class_identifier"),
+        "entropy-only donor member signature class",
+    )
+    member_identifier = _identifier(
+        member_signature.get("member_identifier"),
+        "entropy-only donor member signature member",
+    )
+    _need(
+        class_identifier == member_identifier,
+        "entropy-only donor destructor identity differs from its class",
+    )
+    return f"{class_identifier}::~{member_identifier}"
+
+
+def _contains_contiguous_tokens(needle: list[str], haystack: list[str]) -> bool:
+    width = len(needle)
+    return any(
+        haystack[start : start + width] == needle for start in range(len(haystack) - width + 1)
+    )
 
 
 def _pinned_removed_text(operation: _Operation, clean: bytes) -> bytes:

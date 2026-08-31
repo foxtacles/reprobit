@@ -242,6 +242,41 @@ def _stale_tu_fields(report: Any | None) -> tuple[dict[str, Any], ...]:
     )
 
 
+def _declared_overlay_outputs(root: Path, spec: ProjectSpec) -> tuple[str, ...]:
+    """Read source-overlay output paths without requiring their stale pins to verify."""
+
+    outputs: set[str] = set()
+    directory = safe_project_path(root, spec.layout.interventions)
+    if not directory.is_dir():
+        return ()
+    for path in sorted(directory.rglob("*.json"), key=lambda item: item.as_posix()):
+        document = strict_load(path)
+        if not isinstance(document, dict):
+            continue
+        raw_interventions: Any = document.get("interventions")
+        if not isinstance(raw_interventions, list):
+            continue
+        for intervention in raw_interventions:
+            if not isinstance(intervention, dict) or intervention.get("family") != (
+                "source_overlay_graph"
+            ):
+                continue
+            raw_parameters: Any = intervention.get("parameters")
+            if not isinstance(raw_parameters, list):
+                continue
+            parameters: dict[str, Any] = {}
+            for field in raw_parameters:
+                if isinstance(field, dict) and isinstance(field.get("name"), str):
+                    parameters[field["name"]] = field.get("value")
+            declarations = parameters.get("outputs")
+            if not isinstance(declarations, list):
+                continue
+            for declaration in declarations:
+                if isinstance(declaration, dict) and isinstance(declaration.get("path"), str):
+                    outputs.add(declaration["path"])
+    return tuple(sorted(outputs, key=lambda item: (item.casefold(), item)))
+
+
 def _source_preview_message(
     *,
     added: Sequence[str],
@@ -253,10 +288,13 @@ def _source_preview_message(
     authority_error: str | None,
     stale_units: Sequence[Mapping[str, Any]],
 ) -> str:
-    lines = [
-        f"Source preview: +{len(added)} -{len(removed)} ~{len(changed)}; "
-        f"{entries} selected input(s)"
-    ]
+    if not added and not removed and not changed:
+        lines = [f"Source files are up to date; {entries} selected input(s)."]
+    else:
+        lines = [
+            f"Source preview: +{len(added)} -{len(removed)} ~{len(changed)}; "
+            f"{entries} selected input(s)"
+        ]
     if added:
         lines.append("  add: " + ", ".join(added))
     if removed:
@@ -301,29 +339,35 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
             raise
         authority_error = str(exc)
     graph_invalidation_required = False
+    checked_overlay_outputs: tuple[str, ...] = ()
     if producer_graph_path.is_file():
         from reprobit.producer_graph import read_producer_graph
 
+        checked_overlay_outputs = (
+            report.overlay_outputs if report is not None else _declared_overlay_outputs(root, spec)
+        )
         graph_invalidation_required = not producer_graph_accepts_source(
             read_producer_graph(producer_graph_path),
             paths=(item.path for item in document.entries),
-            overlay_outputs=(report.overlay_outputs if report is not None else ()),
+            overlay_outputs=checked_overlay_outputs,
         )
     stale_units = _stale_tu_fields(report)
+    source_changed = document_digest != current_digest
     next_command: str | None = None
     if authority_error is None and not stale_units:
-        lock_arguments: list[str | Path] = [
-            "rbit",
-            "source",
-            "lock",
-            "--project",
-            root,
-        ]
-        for path in args.path:
-            lock_arguments.extend(("--path", path))
-        if graph_invalidation_required:
-            lock_arguments.append("--invalidate-producer-graph")
-        next_command = human_command(lock_arguments)
+        if source_changed or graph_invalidation_required:
+            lock_arguments: list[str | Path] = [
+                "rbit",
+                "source",
+                "lock",
+                "--project",
+                root,
+            ]
+            for path in args.path:
+                lock_arguments.extend(("--path", path))
+            if graph_invalidation_required:
+                lock_arguments.append("--invalidate-producer-graph")
+            next_command = human_command(lock_arguments)
     else:
         next_command = human_command(("rbit", "source", "regenerate", "--project", root))
     message = _source_preview_message(
@@ -349,12 +393,18 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
         changed=changed,
         unchanged=len(document.entries) - len(added) - len(changed),
         producer_graph_invalidation_required=graph_invalidation_required,
-        checked_overlay_outputs=(report.overlay_outputs if report is not None else ()),
+        checked_overlay_outputs=checked_overlay_outputs,
         authority_checked=report is not None,
         classic_preflight_checked=plan is not None and report is not None,
         stale_translation_units=stale_units,
         authority_regeneration_required=bool(authority_error or stale_units),
         authority_error=authority_error,
+        up_to_date=(
+            not source_changed
+            and not graph_invalidation_required
+            and authority_error is None
+            and not stale_units
+        ),
         next_command=next_command,
     )
     return 0
@@ -467,18 +517,26 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
             documents=[],
         )
         return 0
-    lines = [
-        f"Source regeneration: {len(plan.changes)} pin(s) across "
-        f"{len(plan.changed_documents)} document(s)"
-    ]
+    counts_by_document: dict[str, int] = {}
     for change in plan.changes:
-        lines.append(f"  {change.document}: {change.location}")
-        lines.append(f"    {change.before} -> {change.after}")
+        counts_by_document[change.document] = counts_by_document.get(change.document, 0) + 1
+    lines = [
+        f"Source regeneration: {len(plan.changes)} saved source check(s) refreshed "
+        f"across {len(plan.changed_documents)} project file(s)"
+    ]
+    visible_documents = sorted(counts_by_document)[:8]
+    for document in visible_documents:
+        lines.append(f"  {document}: {counts_by_document[document]} check(s)")
+    hidden_documents = len(counts_by_document) - len(visible_documents)
+    if hidden_documents:
+        lines.append(f"  ...and {hidden_documents} more project file(s)")
     if args.apply:
         try:
-            apply_source_regeneration(root, plan)
+            transaction = apply_source_regeneration(root, plan)
         except SourceRegenerationError as exc:
             raise CLIError(f"source regeneration refused: {exc}") from exc
+        if transaction is None:
+            raise AssertionError("source regeneration applied an empty plan")
         next_command = human_command(("rbit", "source", "lock", "--project", root))
         lines.append(f"Next: {next_command}")
         output.emit(
@@ -487,10 +545,11 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
             applied=True,
             changes=rendered_changes,
             documents=list(plan.changed_documents),
+            transaction_id=transaction.transaction_id,
             next_command=next_command,
         )
         return 0
-    lines.append("Dry run: no documents were written; rerun with --apply to write")
+    lines.append("Preview only: no project files were changed; rerun with --apply to save")
     output.emit(
         "source_regenerated",
         "\n".join(lines),

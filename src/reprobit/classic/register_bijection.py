@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from reprobit.binary import ByteIdentityError, require
 
-from .debug import CODEVIEW_SYMBOL_NAME_OFFSETS, local_symbol_kind, parse_codeview_symbol_stream
+from .debug import CODEVIEW_SYMBOL_NAME_OFFSETS, parse_codeview_symbol_stream
 from .foundation import (
     exact_audit_keys,
+    local_symbol_kind,
     require_exact_int,
     require_payload_free_declaration,
     require_sha,

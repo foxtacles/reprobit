@@ -102,6 +102,11 @@ from reprobit.schema import (
     source_manifest_digest,
 )
 from reprobit.source_lock import build_source_manifest
+from reprobit.source_regeneration import (
+    SourceRegenerationError,
+    apply_source_regeneration,
+    plan_source_regeneration,
+)
 from reprobit.state import KeepWorkspace, RunArena
 from reprobit.strict_json import canonical_json, strict_load
 from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES, profile_source_pins_for_paths
@@ -534,6 +539,94 @@ def test_fresh_source_preview_does_not_report_the_unreviewed_project_file_as_rem
     assert event["next_command"] == f"rbit source lock --project {tmp_path}"
 
 
+def test_source_preview_checks_authority_before_reporting_up_to_date(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_donor_overlay_project(project)
+    capsys.readouterr()
+    paths = [
+        "--path",
+        "include/unit.h",
+        "--path",
+        "notes.txt",
+        "--path",
+        "reprobit.toml",
+        "--path",
+        "src/unit.cpp",
+    ]
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "source",
+                "preview",
+                "--project",
+                str(project),
+                *paths,
+            ]
+        )
+        == 0
+    )
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["up_to_date"] is True
+    assert event["authority_checked"] is True
+    assert event["classic_preflight_checked"] is True
+    assert event["next_command"] is None
+
+
+def test_source_preview_does_not_hide_stale_authority_when_source_is_unchanged(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_donor_overlay_project(project)
+    proof_path = project / "reprobit/proofs/unit.proof.json"
+    proof = strict_load(proof_path)
+    assert isinstance(proof, dict)
+    observation = next(
+        item
+        for item in proof["expected_observations"]
+        if item["intervention_id"] == "donor.overlay"
+    )
+    observation["expected_values"]["renderings[0].clean_sha256"] = "0" * 64
+    proof_path.write_bytes(canonical_json(proof))
+    capsys.readouterr()
+    paths = [
+        "--path",
+        "include/unit.h",
+        "--path",
+        "notes.txt",
+        "--path",
+        "reprobit.toml",
+        "--path",
+        "src/unit.cpp",
+    ]
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "source",
+                "preview",
+                "--project",
+                str(project),
+                *paths,
+            ]
+        )
+        == 0
+    )
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["up_to_date"] is False
+    assert event["authority_regeneration_required"] is True
+    assert "donor.overlay" in event["authority_error"]
+    assert "source regenerate" in event["next_command"]
+
+
 def test_source_preview_reports_stale_tu_and_lock_preserves_reviewed_authority(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -793,6 +886,328 @@ def test_source_regenerate_heals_stale_donor_overlay_pins(
     ]
     assert main(["source", "lock", "--project", str(project), *paths]) == 0
     load_project_tree(project)
+
+
+def test_source_regenerate_replays_canonical_overlay_before_donor_operations(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    header = _complete_donor_overlay_project(project, canonical_replay=True)
+    capsys.readouterr()
+    edited_source = b"int main() { return 4; }\n"
+    edited_header = b"// harmless source comment\n#define VALUE 1\n"
+    (project / "src/unit.cpp").write_bytes(edited_source)
+    header.write_bytes(edited_header)
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "source",
+                "regenerate",
+                "--project",
+                str(project),
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["applied"] is True
+    assert isinstance(event["transaction_id"], str)
+
+    proof = json.loads((project / "reprobit/proofs/unit.proof.json").read_bytes())
+    donor_values = next(
+        observation["expected_values"]
+        for observation in proof["expected_observations"]
+        if observation["intervention_id"] == "donor.overlay"
+    )
+    assert (
+        donor_values["renderings[0].rendered_sha256"]
+        == Digest.from_bytes(b"class Spare;\n" + edited_source + b"\n").value
+    )
+    assert (
+        donor_values["renderings[1].rendered_sha256"]
+        == Digest.from_bytes(edited_header + b"\n").value
+    )
+
+    paths = [
+        "--path",
+        "include/unit.h",
+        "--path",
+        "notes.txt",
+        "--path",
+        "reprobit.toml",
+        "--path",
+        "src/unit.cpp",
+    ]
+    assert main(["source", "lock", "--project", str(project), *paths]) == 0
+    load_project_tree(project)
+
+
+def test_source_regeneration_apply_rejects_changed_authority_preimage(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
+    plan = plan_source_regeneration(project)
+    target_name = plan.changed_documents[0]
+    target = project / target_name
+    external_edit = target.read_bytes() + b" \n"
+    target.write_bytes(external_edit)
+    other_preimages = {
+        name: (project / name).read_bytes()
+        for name in plan.changed_documents
+        if name != target_name
+    }
+
+    with pytest.raises(TransactionConflict, match="preimage conflict"):
+        apply_source_regeneration(project, plan)
+
+    assert target.read_bytes() == external_edit
+    assert all((project / name).read_bytes() == data for name, data in other_preimages.items())
+
+
+def test_source_regeneration_apply_rejects_changed_read_only_authority(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
+    plan = plan_source_regeneration(project)
+    unchanged_name = next(
+        name for name in plan.document_preimages if name not in plan.changed_documents
+    )
+    unchanged = project / unchanged_name
+    external_edit = unchanged.read_bytes() + b" \n"
+    unchanged.write_bytes(external_edit)
+    changed_preimages = {name: (project / name).read_bytes() for name in plan.changed_documents}
+
+    with pytest.raises(TransactionConflict, match="preimage conflict"):
+        apply_source_regeneration(project, plan)
+
+    assert unchanged.read_bytes() == external_edit
+    assert all((project / name).read_bytes() == data for name, data in changed_preimages.items())
+
+
+def test_source_regeneration_apply_rejects_changed_project_config(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
+    plan = plan_source_regeneration(project)
+    config = project / "reprobit.toml"
+    external_edit = config.read_bytes() + b"\n# concurrent edit\n"
+    config.write_bytes(external_edit)
+    changed_preimages = {name: (project / name).read_bytes() for name in plan.changed_documents}
+
+    with pytest.raises(TransactionConflict, match="preimage conflict"):
+        apply_source_regeneration(project, plan)
+
+    assert config.read_bytes() == external_edit
+    assert all((project / name).read_bytes() == data for name, data in changed_preimages.items())
+
+
+def test_source_regeneration_apply_requires_build_plan_to_remain_absent(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    build_plan = project / "reprobit/build-plan.json"
+    build_plan.unlink()
+    (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
+    plan = plan_source_regeneration(project)
+    changed_preimages = {name: (project / name).read_bytes() for name in plan.changed_documents}
+    external_plan = b"{}\n"
+    build_plan.write_bytes(external_plan)
+
+    with pytest.raises(TransactionConflict, match="preimage conflict"):
+        apply_source_regeneration(project, plan)
+
+    assert build_plan.read_bytes() == external_plan
+    assert all((project / name).read_bytes() == data for name, data in changed_preimages.items())
+
+
+def test_source_regeneration_accepts_mixed_case_authority_members(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    intervention_root = project / "reprobit/interventions"
+    (intervention_root / "Alpha.json").write_bytes(canonical_json({}))
+    (intervention_root / "zulu.json").write_bytes(canonical_json({}))
+    (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
+
+    plan = plan_source_regeneration(project)
+    result = apply_source_regeneration(project, plan)
+
+    assert result is not None
+
+
+def test_source_regeneration_distinguishes_identical_sources_by_declared_path(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _unit_id, old_digest = _complete_translation_unit_project(project)
+    original = (project / "src/unit.cpp").read_bytes()
+    (project / "src/other.cpp").write_bytes(original)
+    (project / "reprobit/interventions/other.json").write_bytes(
+        canonical_json(
+            {
+                "translation_unit_id": "other",
+                "source": "src/other.cpp",
+                "source_digest": old_digest.model_dump(mode="json"),
+                "interventions": [
+                    {
+                        "id": "donor.other",
+                        "parameters": [
+                            {
+                                "name": "donor_effective_source_sha256",
+                                "value": old_digest.value,
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
+
+    plan = plan_source_regeneration(project)
+
+    assert plan.changes
+    assert "reprobit/interventions/other.json" not in plan.changed_documents
+
+
+def test_source_regeneration_refuses_unbound_stale_digest(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _unit_id, old_digest = _complete_translation_unit_project(project)
+    (project / "reprobit/proofs/unknown.json").write_bytes(
+        canonical_json({"unsupported_source_digest": old_digest.value})
+    )
+    (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
+
+    with pytest.raises(
+        SourceRegenerationError,
+        match="location this regeneration does not understand",
+    ):
+        plan_source_regeneration(project)
+
+
+def test_source_regeneration_refuses_unhandled_cross_tu_donor_pin(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    donor_source = project / "src/other.cpp"
+    donor_source.write_bytes(b"int other() { return 0; }\n")
+    donor_digest = Digest.from_bytes(donor_source.read_bytes())
+    (project / "reprobit/interventions/other.json").write_bytes(
+        canonical_json(
+            {
+                "translation_unit_id": "other",
+                "source": "src/other.cpp",
+                "source_digest": donor_digest.model_dump(mode="json"),
+            }
+        )
+    )
+    unit_path = project / "reprobit/interventions/unit.json"
+    unit = strict_load(unit_path)
+    assert isinstance(unit, dict)
+    unit["interventions"].append(
+        {
+            "id": "donor.cross",
+            "parameters": [
+                {"name": "donor_source", "value": "src/other.cpp"},
+                {"name": "unsupported_source_sha256", "value": donor_digest.value},
+            ],
+        }
+    )
+    unit_path.write_bytes(canonical_json(unit))
+    donor_source.write_bytes(b"// comment\nint other() { return 0; }\n")
+
+    with pytest.raises(
+        SourceRegenerationError,
+        match="location this regeneration does not understand",
+    ):
+        plan_source_regeneration(project)
+
+
+def test_source_regeneration_refreshes_typed_refactor_header_witness(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    unit_id, _source_digest = _complete_translation_unit_project(project)
+    header = project / "notes.txt"
+    original = header.read_bytes()
+    original_digest = Digest.from_bytes(original).value
+    unit_path = project / "reprobit/interventions/unit.json"
+    unit = strict_load(unit_path)
+    assert isinstance(unit, dict)
+    intervention = ClassicRecipeIntervention(
+        id="function.refactor",
+        scope=Scope(target="program", translation_unit=unit_id, function="main"),
+        rationale="exercise one typed source-refactor witness",
+        dependencies=("donor.refactor",),
+        family=ClassicRecipeFamily.RETAIL_EXACT_SOURCE_EQUAL_BODY,
+        role=ClassicRecipeRole.FUNCTION,
+        build_target="program",
+        symbol="main",
+        parameters=(
+            ClassicField(
+                name="target_source_refactor",
+                value={
+                    "kind": "fixed_array_fill_loop_v1",
+                    "array_declaration": {
+                        "path": "notes.txt",
+                        "source_sha256": original_digest,
+                        "source_size": len(original),
+                        "declaration_range_pin": {
+                            "baseline_sha256": Digest.from_bytes(b"VALUE").value
+                        },
+                    },
+                },
+            ),
+        ),
+    )
+    unit["interventions"].append(intervention.model_dump(mode="json"))
+    unit_path.write_bytes(canonical_json(unit))
+    edited = b"class HarmlessForwardDeclaration;\n" + original
+    header.write_bytes(edited)
+
+    plan = plan_source_regeneration(project)
+
+    rewritten = json.loads(plan.documents["reprobit/interventions/unit.json"])
+    witness = rewritten["interventions"][-1]["parameters"][0]["value"]["array_declaration"]
+    assert witness["source_sha256"] == Digest.from_bytes(edited).value
+    assert witness["source_size"] == len(edited)
+    assert witness["declaration_range_pin"] == {
+        "baseline_sha256": Digest.from_bytes(b"VALUE").value
+    }
+
+
+def test_source_regeneration_refuses_unknown_header_witness_shape(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    header = project / "src/unit.cpp"
+    original_digest = Digest.from_bytes(header.read_bytes()).value
+    unit_path = project / "reprobit/interventions/unit.json"
+    unit = strict_load(unit_path)
+    assert isinstance(unit, dict)
+    unit["interventions"].append(
+        {
+            "id": "function.unknown",
+            "parameters": [
+                {
+                    "name": "unsupported_source_witness",
+                    "value": {
+                        "path": "src/unit.cpp",
+                        "source_sha256": original_digest,
+                    },
+                }
+            ],
+        }
+    )
+    unit_path.write_bytes(canonical_json(unit))
+    header.write_bytes(b"class HarmlessForwardDeclaration;\n" + header.read_bytes())
+
+    with pytest.raises(
+        SourceRegenerationError,
+        match="location this regeneration does not understand",
+    ):
+        plan_source_regeneration(project)
 
 
 def test_source_regenerate_reports_nothing_when_pins_match(
@@ -1332,8 +1747,8 @@ def _complete_translation_unit_project(root: Path) -> tuple[str, Digest]:
     return unit_id, source_digest
 
 
-def _complete_donor_overlay_project(root: Path) -> Path:
-    unit_id, source_digest = _complete_translation_unit_project(root)
+def _complete_donor_overlay_project(root: Path, *, canonical_replay: bool = False) -> Path:
+    unit_id, _source_digest = _complete_translation_unit_project(root)
     header = root / "include/unit.h"
     header.parent.mkdir()
     header.write_bytes(b"#define VALUE 1\n")
@@ -1348,7 +1763,6 @@ def _complete_donor_overlay_project(root: Path) -> Path:
     plan = BuildPlanDocument.model_validate_json(plan_path.read_bytes()).model_copy(
         update={"source_manifest_digest": source_manifest_digest(manifest)}
     )
-    plan_path.write_bytes(canonical_json(plan))
 
     symbol = "?main@@YAHXZ"
     function_scope = Scope(
@@ -1358,27 +1772,124 @@ def _complete_donor_overlay_project(root: Path) -> Path:
     )
     source = (root / "src/unit.cpp").read_bytes()
     clean_inputs = (("src/unit.cpp", source), ("include/unit.h", header.read_bytes()))
-    operations = [{"id": "op_append_blank", "op": "append", "gen": {"k": "lines", "n": 1}}]
+    donor_operations: list[dict[str, Any]] = [
+        {"id": "op_append_blank", "op": "append", "gen": {"k": "lines", "n": 1}}
+    ]
+    canonical_operations: list[dict[str, Any]] = [
+        {
+            "id": "op_insert_spare",
+            "op": "insert",
+            "anchor": {
+                "ctx": Digest.from_bytes(b"<SEAT>\0int\0main\0(").value,
+                "b": 0,
+                "a": 3,
+                "at": "start",
+            },
+            "gen": {"k": "fwd", "id": "Spare"},
+        }
+    ]
+    effective_source = b"class Spare;\n" + source if canonical_replay else source
+    effective_source_digest = Digest.from_bytes(effective_source)
+    overlay: ClassicRecipeIntervention | None = None
+    if canonical_replay:
+        graph: dict[str, Any] = {"generated_tus": [], "link_admissions": []}
+        overlay = ClassicRecipeIntervention(
+            id="overlay.canonical",
+            scope=Scope(target="program"),
+            rationale="Render one reviewed canonical source overlay before private donors.",
+            family=ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH,
+            role=ClassicRecipeRole.PROJECT,
+            build_target="program",
+            parameters=(
+                ClassicField(name="graph", value=graph),
+                ClassicField(
+                    name="outputs",
+                    value=[
+                        {
+                            "path": "src/unit.cpp",
+                            "clean": Digest.from_bytes(source).value,
+                            "effective": effective_source_digest.value,
+                            "size": len(effective_source),
+                            "ops": canonical_operations,
+                        }
+                    ],
+                ),
+                ClassicField(name="schema", value=2),
+            ),
+        )
+        plan = plan.model_copy(
+            update={
+                "translation_units": (
+                    plan.translation_units[0].model_copy(
+                        update={"source_digest": effective_source_digest}
+                    ),
+                ),
+                "source_overlay_digest": Digest.from_bytes(canonical_json(graph)),
+                "source_overlay_interventions": (overlay.id,),
+            }
+        )
+        project_intervention_path = root / spec.layout.interventions / "program.json"
+        project_interventions = InterventionDocument.model_validate_json(
+            project_intervention_path.read_bytes()
+        )
+        project_intervention_path.write_bytes(
+            canonical_json(
+                project_interventions.model_copy(
+                    update={"interventions": (*project_interventions.interventions, overlay)}
+                )
+            )
+        )
+        project_proof_path = root / spec.layout.proofs / "program.proof.json"
+        project_proofs = ProofDocument.model_validate_json(project_proof_path.read_bytes())
+        project_proof_path.write_bytes(
+            canonical_json(
+                project_proofs.model_copy(
+                    update={
+                        "expected_observations": (
+                            *project_proofs.expected_observations,
+                            ClassicProofReceipt(
+                                id="proof.overlay.canonical",
+                                intervention_id=overlay.id,
+                                family=overlay.family,
+                            ),
+                        )
+                    }
+                )
+            )
+        )
+    plan_path.write_bytes(canonical_json(plan))
     renderings: list[dict[str, Any]] = [
-        {"path": path, "operations": operations} for path, _data in clean_inputs
+        {"path": path, "operations": donor_operations} for path, _data in clean_inputs
     ]
     pinned_renderings: list[dict[str, Any]] = [
         {
             "path": path,
-            "operations": operations,
+            "operations": donor_operations,
             "clean_sha256": Digest.from_bytes(data).value,
-            "rendered_sha256": Digest.from_bytes(data + b"\n").value,
+            "rendered_sha256": Digest.from_bytes(
+                b"class Spare;\n" + data + b"\n"
+                if canonical_replay and index == 0
+                else data + b"\n"
+            ).value,
         }
-        for path, data in clean_inputs
+        for index, (path, data) in enumerate(clean_inputs)
     ]
+    identity_claim: object = pinned_renderings
+    if canonical_replay:
+        identity_claim = {
+            "canonical_overlay_replay": "owning_translation_unit_v1",
+            "renderings": pinned_renderings,
+        }
     rendering_identity = Digest.from_bytes(
-        (json.dumps(pinned_renderings, indent=2, sort_keys=True) + "\n").encode()
+        (json.dumps(identity_claim, indent=2, sort_keys=True) + "\n").encode()
     ).value
     donor_parameters: dict[str, Any] = {
         "emission_policy": "donor_private_rendering_only",
         "rendering_identity_sha256": rendering_identity,
         "renderings": renderings,
     }
+    if canonical_replay:
+        donor_parameters["canonical_overlay_replay"] = "owning_translation_unit_v1"
     donor = ClassicRecipeIntervention(
         id="donor.overlay",
         scope=Scope(target="program", translation_unit=unit_id),
@@ -1409,7 +1920,7 @@ def _complete_donor_overlay_project(root: Path) -> Path:
                 target_id="program",
                 translation_unit_id=unit_id,
                 source="src/unit.cpp",
-                source_digest=source_digest,
+                source_digest=effective_source_digest,
                 build_target="program",
                 interventions=(donor, function),
             )

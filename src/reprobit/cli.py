@@ -101,6 +101,12 @@ def _lazy_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> in
     return command_discover_grind_init(args, output)
 
 
+def _lazy_repair(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_repair import command_repair
+
+    return command_repair(args, output)
+
+
 def _command_cmake_module(args: argparse.Namespace, output: CLIOutput) -> int:
     from reprobit.cmake import cmake_module_path
 
@@ -671,6 +677,28 @@ def _parser() -> argparse.ArgumentParser:
         help="show full details for one intervention",
     )
     explain.set_defaults(handler=command_explain)
+
+    repair = subcommands.add_parser(
+        "repair",
+        help="repair routine source-edit fallout and prove exact output in one run",
+    )
+    repair.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
+    _add_execution_options(repair, cold_option=False)
+    repair.add_argument(
+        "--policy",
+        choices=tuple(policy.value for policy in AuthenticityPolicy),
+        help="optionally narrow the project's committed authenticity policy",
+    )
+    repair.add_argument(
+        "--report-dir",
+        metavar="PROJECT_RELATIVE_DIRECTORY",
+        help="write report.json and report.html beneath this project directory",
+    )
+    repair.set_defaults(
+        handler=_lazy_repair,
+        action_receipt=None,
+        action_nonce=None,
+    )
 
     build = subcommands.add_parser(
         "build",
