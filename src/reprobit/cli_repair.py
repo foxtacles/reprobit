@@ -71,14 +71,6 @@ def _count_phrase(count: int, singular: str, plural: str | None = None) -> str:
     return f"{count} {word}"
 
 
-def _human_list(items: list[str]) -> str:
-    if len(items) < 2:
-        return "".join(items)
-    if len(items) == 2:
-        return " and ".join(items)
-    return ", ".join(items[:-1]) + f", and {items[-1]}"
-
-
 def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
     """Repair in private, prove every target, then publish once."""
 
@@ -106,7 +98,7 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
 
     try:
         with staged as staged_root:
-            phase = "refreshing mechanical source checks"
+            phase = "refreshing saved source records"
             try:
                 regeneration_plan = plan_source_regeneration(staged_root)
                 apply_source_regeneration(staged_root, regeneration_plan)
@@ -213,32 +205,37 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
     changed_records = len(candidate.records)
     report_html = root / final_report_directory / "report.html"
     if changed_records:
-        adjustments = [
-            _count_phrase(count, singular)
-            for count, singular in (
-                (len(regeneration_plan.changes), "source check"),
-                (repair_result.measured_checks, "measured check"),
-                (repair_result.retired_actions, "obsolete adjustment"),
-                (repair_result.donor_retunes, "donor setting"),
+        guidance_changed = any(
+            (
+                regeneration_plan.changes,
+                repair_result.measured_checks,
+                repair_result.retired_actions,
+                repair_result.donor_retunes,
             )
-            if count
-        ]
+        )
         completion_lines = [
             "Repair complete: "
             f"{_count_phrase(changed_records, 'saved project file')} updated; "
             "every target matches exactly."
         ]
-        if adjustments:
-            adjustment_line = f"Adjusted {_human_list(adjustments)}"
+        if guidance_changed:
             if repair_result.affected_units:
-                adjustment_line += " across " + _count_phrase(
-                    len(repair_result.affected_units),
-                    "affected TU",
+                affected_count = len(repair_result.affected_units)
+                guidance_owner = "its" if affected_count == 1 else "their"
+                completion_lines.append(
+                    "Repaired "
+                    + _count_phrase(
+                        affected_count,
+                        "affected source file",
+                    )
+                    + f" and refreshed {guidance_owner} saved guidance."
                 )
-            completion_lines.append(adjustment_line + ".")
+            else:
+                completion_lines.append("Refreshed saved source guidance.")
         if repair_result.compiled_candidates:
             completion_lines.append(
-                f"Tried {_count_phrase(repair_result.compiled_candidates, 'donor candidate')}."
+                "Tested "
+                f"{_count_phrase(repair_result.compiled_candidates, 'nearby compiler setting')}."
             )
         completion_lines.append(f"Report: {report_html}")
         completion_message = "\n".join(completion_lines)

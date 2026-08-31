@@ -399,6 +399,38 @@ def test_retune_stops_at_the_remaining_command_wide_candidate_budget(
     assert progress[-1][:2] == (2, 2)
 
 
+def test_probe_preserves_an_ordinary_validation_refusal_through_action_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _unit, failures = _fixture()
+    _COMPILE_WINDOWS.clear()
+    monkeypatch.setattr(subject, "probe_donor_compile_windows", _fake_compile_windows)
+    monkeypatch.setattr(
+        candidate_support,
+        "repair_measured_pins",
+        lambda *_args: (_ for _ in ()).throw(
+            MeasuredPinRepairError(
+                "retail relocation target changed",
+                stage="ordinary_validation",
+            )
+        ),
+    )
+
+    result = subject.probe_bounded_donor_retunes(
+        _probe_handle(),
+        failures,
+        clean_sources={"src/unit.cpp": SOURCE},
+        effective_sources={"src/unit.cpp": SOURCE},
+        limit=1,
+        window_size=1,
+    )
+
+    assert result.repairs == ()
+    assert result.refusals[0].best_attempt is not None
+    assert result.refusals[0].best_attempt.stage == "ordinary_validation"
+    assert "action 'function.0' rejected candidate" in result.refusals[0].best_attempt.reason
+
+
 def test_shared_donor_candidate_must_restore_every_failed_action(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

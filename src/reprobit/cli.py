@@ -438,11 +438,11 @@ def _parser() -> argparse.ArgumentParser:
     source_lock.set_defaults(handler=command_source_lock)
     source_regenerate = source_commands.add_parser(
         "regenerate",
-        help="advanced: preview or apply source-check updates without building",
+        help="advanced: preview or apply saved source-record updates without building",
         description=(
             "Advanced maintenance tool. After editing an existing project file, normally "
             "run rbit repair . instead. This command only previews or applies the "
-            "mechanical source-check updates; it does not build or verify the project."
+            "saved source-record updates; it does not build or verify the project."
         ),
     )
     source_regenerate.add_argument(

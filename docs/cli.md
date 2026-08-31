@@ -161,7 +161,7 @@ saved guidance it can safely re-derive, and checks every final binary. You do
 not repair each source file separately.
 
 Other realistic maintenance edits use the same command: changing harmless
-whitespace or comments in a donor header, adding or moving a declaration,
+whitespace or comments in a header, adding or moving a declaration,
 making an assertion conditional for one build mode, or changing an inline
 header body used by several source files. ReproBit tries only a small,
 predictable set of safe adjustments and still requires the final binaries to
@@ -184,7 +184,7 @@ successful source lock prints `rbit import cmake .` only when the recorded build
 graph must be refreshed.
 
 <details>
-<summary>Advanced: inspect or apply only mechanical source-check changes</summary>
+<summary>Advanced: inspect or apply only saved source-record changes</summary>
 
 ### Source regeneration primitive
 

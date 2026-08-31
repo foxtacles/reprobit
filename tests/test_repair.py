@@ -215,11 +215,12 @@ def test_repair_completion_omits_zero_counters_and_uses_plain_pluralization(
     assert main(["repair", str(project)]) == 0
 
     message = capsys.readouterr().out
-    assert "measured check" in message
-    assert "donor setting" in message
-    assert "across 1 affected TU" in message
-    assert "Tried 1 donor candidate." in message
+    assert "Repaired 1 affected source file and refreshed its saved guidance." in message
+    assert "Tested 1 nearby compiler setting." in message
+    assert "saved expectation" not in message
     assert "obsolete adjustment" not in message
+    assert "donor" not in message
+    assert "TU" not in message
     assert "(s)" not in message
 
 
@@ -259,6 +260,35 @@ def test_repair_refusal_emits_stable_candidate_diagnostics_for_machines(
     assert refusal["action_ids"] == ["function.unit"]
     assert refusal["candidates_tried"] == 4
     assert refusal["best_candidate"]["stage"] == "ordinary_validation"
+
+
+def test_repair_refusal_keeps_human_guidance_plain_and_actionable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+
+    def refuse(*_args: object, **_kwargs: object) -> RepairWorkflowResult:
+        raise RepairWorkflowError(
+            "No safe automatic repair restored `tu.unit` after testing 4 nearby compiler "
+            "settings. Closest technical candidate: `classes` 6 -> 8. Technical reason "
+            "it was refused: retail relocation target changed."
+        )
+
+    monkeypatch.setattr("reprobit.cli_repair.repair_classic_records", refuse)
+    capsys.readouterr()
+
+    assert main(["repair", str(project)]) == 2
+
+    message = capsys.readouterr().err
+    assert "Repair stopped while repairing saved build guidance" in message
+    assert "Your source edits are untouched" in message
+    assert "No safe automatic repair restored `tu.unit`" in message
+    assert "Closest technical candidate: `classes` 6 -> 8" in message
+    assert "Diagnostics:" in message
+    assert "Cleanup when finished:" in message
 
 
 def test_repair_publishes_reports_to_the_requested_project_directory(

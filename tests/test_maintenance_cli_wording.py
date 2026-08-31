@@ -51,13 +51,13 @@ def test_source_regenerate_uses_future_tense_for_preview_and_past_tense_for_appl
 
     assert main(["source", "regenerate", "--project", str(project)]) == 0
     preview = capsys.readouterr().out
-    assert "Source-check preview" in preview
+    assert "Source-record preview" in preview
     assert "would be saved" in preview
     assert "no project files changed" in preview
 
     assert main(["source", "regenerate", "--project", str(project), "--apply"]) == 0
     applied = capsys.readouterr().out
-    assert "Source checks refreshed" in applied
+    assert "Saved source records refreshed" in applied
     assert " saved across " in applied
     assert "would be saved" not in applied
     assert "(s)" not in applied
@@ -74,7 +74,7 @@ def test_source_regenerate_plainly_reports_when_no_update_is_needed(
 
     assert main(["source", "regenerate", "--project", str(project)]) == 0
     assert (
-        "No source-check updates are needed; saved records already match current files."
+        "No source-record updates are needed; saved records already match current files."
         in capsys.readouterr().out
     )
 

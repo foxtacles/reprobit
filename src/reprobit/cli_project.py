@@ -672,7 +672,7 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
     if not plan.changes:
         output.emit(
             "source_regenerated",
-            "No source-check updates are needed; saved records already match current files.",
+            "No source-record updates are needed; saved records already match current files.",
             applied=False,
             changes=rendered_changes,
             documents=[],
@@ -683,12 +683,12 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
         counts_by_document[change.document] = counts_by_document.get(change.document, 0) + 1
     if args.apply:
         summary = (
-            f"Source checks refreshed: {_count_phrase(len(plan.changes), 'update')} saved "
+            f"Saved source records refreshed: {_count_phrase(len(plan.changes), 'update')} saved "
             f"across {_count_phrase(len(plan.changed_documents), 'project file')}"
         )
     else:
         summary = (
-            f"Source-check preview: {_count_phrase(len(plan.changes), 'update')} would be saved "
+            f"Source-record preview: {_count_phrase(len(plan.changes), 'update')} would be saved "
             f"across {_count_phrase(len(plan.changed_documents), 'project file')}"
         )
     lines = [summary]

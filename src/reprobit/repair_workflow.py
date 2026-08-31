@@ -92,7 +92,8 @@ def _probe_refusal_error(refusal: ClassicDonorRetuneRefusal) -> RepairWorkflowEr
     attempts = refusal.compiled_candidates
     setting = "setting" if attempts == 1 else "settings"
     lines = [
-        f"No safe adjustment restored `{refusal.unit_id}` after trying {attempts} donor {setting}."
+        f"No safe automatic repair restored `{refusal.unit_id}` after testing "
+        f"{attempts} nearby compiler {setting}."
     ]
     best = refusal.best_attempt
     best_document: dict[str, object] | None = None
@@ -103,8 +104,8 @@ def _probe_refusal_error(refusal: ClassicDonorRetuneRefusal) -> RepairWorkflowEr
                 f"`{change.path[-1]}` {change.before} -> {change.after}"
                 for change in visible_changes
             )
-            lines.append(f"Closest useful candidate: {rendered}.")
-        lines.append(f"Why it was refused: {_one_line(best.reason)}")
+            lines.append(f"Closest technical candidate: {rendered}.")
+        lines.append(f"Technical reason it was refused: {_one_line(best.reason)}")
         best_document = {
             "distance": best.distance,
             "stage": best.stage,
@@ -120,7 +121,7 @@ def _probe_refusal_error(refusal: ClassicDonorRetuneRefusal) -> RepairWorkflowEr
             ],
         }
     else:
-        lines.append(f"Why it was refused: {_one_line(refusal.reason)}")
+        lines.append(f"Technical reason it was refused: {_one_line(refusal.reason)}")
     return RepairWorkflowError(
         " ".join(lines),
         diagnostic={

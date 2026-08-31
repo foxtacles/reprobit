@@ -241,7 +241,12 @@ def validate_retuned_actions(
                     _candidate_materials(failure, donor, materialized, output),
                 )
             )
-        except (MeasuredPinRepairError, ValueError) as exc:
+        except MeasuredPinRepairError as exc:
+            raise MeasuredPinRepairError(
+                f"action {failure.intervention.id!r} rejected candidate: {exc}",
+                stage=exc.stage,
+            ) from exc
+        except ValueError as exc:
             raise MeasuredPinRepairError(
                 f"action {failure.intervention.id!r} rejected candidate: {exc}"
             ) from exc

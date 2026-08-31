@@ -89,7 +89,7 @@ shows the next incomplete step instead of requiring you to remember the sequence
 [platform setup](docs/platforms.md) and the
 [native Windows guide](docs/windows.md) cover unusual hosts.
 
-Once those files are committed, the everyday commands are:
+Once those files are committed, the everyday build and check commands are:
 
 ```console
 rbit validate .

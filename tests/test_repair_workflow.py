@@ -386,9 +386,12 @@ def test_workflow_reports_the_candidate_that_reached_the_strongest_check(
         )
 
     message = str(raised.value)
-    assert "No safe adjustment restored `tu.one` after trying 8 donor settings." in message
-    assert "Closest useful candidate: `classes` 6 -> 8." in message
-    assert "Why it was refused: retail relocation target changed" in message
+    assert (
+        "No safe automatic repair restored `tu.one` after testing 8 nearby compiler settings."
+        in message
+    )
+    assert "Closest technical candidate: `classes` 6 -> 8." in message
+    assert "Technical reason it was refused: retail relocation target changed" in message
     assert raised.value.diagnostic == {
         "unit_id": "tu.one",
         "donor_id": "donor.one",
