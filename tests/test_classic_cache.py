@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
 
 import reprobit.classic_cache as classic_cache_module
-from reprobit.cache import IncrementalCache
+from reprobit.cache import CacheRecord, IncrementalCache
 from reprobit.classic_cache import (
     CompilerDependencyHint,
     DonorDependencyResolutionContext,
@@ -94,6 +95,159 @@ def _hint(base: str) -> CompilerDependencyHint:
             MsvcSbrSource("common.h", 0),
         ),
     )
+
+
+def _hint_record(field: str, value: object) -> CacheRecord:
+    return CacheRecord(
+        PRODUCER_CACHE_IMPLEMENTATION,
+        "producer",
+        "0" * 64,
+        0,
+        (),
+        {field: value},  # type: ignore[dict-item]
+    )
+
+
+def test_compiler_hint_v2_round_trips_a_shared_path_table() -> None:
+    hint = CompilerDependencyHint(
+        "1" * 64,
+        r"R:\build",
+        (
+            MsvcSbrSource(r"R:\source\src\unit.cpp", None),
+            MsvcSbrSource("common.h", 0),
+            MsvcSbrSource("common.h", 0),
+        ),
+    )
+
+    encoded = hint.as_json()
+
+    assert encoded == {
+        "schema": 2,
+        "base_key": "1" * 64,
+        "working_directory": r"R:\build",
+        "paths": [r"R:\source\src\unit.cpp", "common.h"],
+        "sources": [[0, None], [1, 0], [1, 0]],
+        "certifying": False,
+    }
+    assert (
+        CompilerDependencyHint.from_record(_hint_record("compiler_dependency_hint", encoded))
+        == hint
+    )
+
+
+def test_donor_hint_v2_shares_paths_across_traces_and_resets_parents() -> None:
+    hint = DonorTransformDependencyHint(
+        "2" * 64,
+        (
+            DonorDependencyTrace(
+                "donor.alpha",
+                r"R:\donors\alpha",
+                (
+                    MsvcSbrSource("alpha.cpp", None),
+                    MsvcSbrSource("common.h", 0),
+                ),
+            ),
+            DonorDependencyTrace(
+                "donor.beta",
+                r"R:\donors\beta",
+                (
+                    MsvcSbrSource("beta.cpp", None),
+                    MsvcSbrSource("common.h", 0),
+                ),
+            ),
+        ),
+    )
+
+    encoded = hint.as_json()
+
+    assert encoded["paths"] == ["alpha.cpp", "common.h", "beta.cpp"]
+    donors = encoded["donors"]
+    assert isinstance(donors, list)
+    assert donors[0]["sources"] == [[0, None], [1, 0]]
+    assert donors[1]["sources"] == [[2, None], [1, 0]]
+    assert (
+        DonorTransformDependencyHint.from_record(
+            _hint_record("donor_transform_dependency_hint", encoded)
+        )
+        == hint
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    (
+        ("schema-v1", "identity is invalid"),
+        ("duplicate-path", "path table is invalid"),
+        ("unused-path", "unused entries"),
+        ("nul-path", "path table is invalid"),
+        ("bool-path-index", "source fields are invalid"),
+        ("large-path-index", "source fields are invalid"),
+        ("wrong-arity", "source is malformed"),
+        ("forward-parent", "source fields are invalid"),
+        ("bool-parent", "source fields are invalid"),
+        ("noncanonical-first-use", "first-use order"),
+    ),
+)
+def test_compiler_hint_v2_rejects_noncanonical_tables(
+    mutation: str,
+    message: str,
+) -> None:
+    encoded = deepcopy(_hint("3" * 64).as_json())
+    paths = encoded["paths"]
+    sources = encoded["sources"]
+    assert isinstance(paths, list) and isinstance(sources, list)
+    if mutation == "schema-v1":
+        encoded["schema"] = 1
+    elif mutation == "duplicate-path":
+        paths.append(paths[0])
+    elif mutation == "unused-path":
+        paths.append("unused.h")
+    elif mutation == "nul-path":
+        paths[0] = "bad\0path"
+    elif mutation == "bool-path-index":
+        sources[0][0] = True
+    elif mutation == "large-path-index":
+        sources[0][0] = len(paths)
+    elif mutation == "wrong-arity":
+        sources[0] = [0]
+    elif mutation == "forward-parent":
+        sources[1][1] = 1
+    elif mutation == "bool-parent":
+        sources[1][1] = False
+    elif mutation == "noncanonical-first-use":
+        sources[0][0], sources[1][0] = sources[1][0], sources[0][0]
+    else:  # pragma: no cover - parametrization is closed above
+        raise AssertionError(mutation)
+
+    with pytest.raises(classic_cache_module.ClassicCacheHintError, match=message):
+        CompilerDependencyHint.from_record(_hint_record("compiler_dependency_hint", encoded))
+
+
+def test_donor_hint_v2_rejects_parent_indices_crossing_trace_boundaries() -> None:
+    hint = DonorTransformDependencyHint(
+        "4" * 64,
+        (
+            DonorDependencyTrace(
+                "donor.alpha",
+                r"R:\donors\alpha",
+                (MsvcSbrSource("alpha.cpp", None),),
+            ),
+            DonorDependencyTrace(
+                "donor.beta",
+                r"R:\donors\beta",
+                (MsvcSbrSource("beta.cpp", None),),
+            ),
+        ),
+    )
+    encoded = hint.as_json()
+    donors = encoded["donors"]
+    assert isinstance(donors, list)
+    donors[1]["sources"][0][1] = 0
+
+    with pytest.raises(classic_cache_module.ClassicCacheHintError, match="source fields"):
+        DonorTransformDependencyHint.from_record(
+            _hint_record("donor_transform_dependency_hint", encoded)
+        )
 
 
 def _donor_context(

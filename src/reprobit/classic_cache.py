@@ -37,32 +37,51 @@ class ClassicCacheHintError(ValueError):
     """A non-certifying compiler dependency hint is malformed."""
 
 
-def _source_topology_json(sources: tuple[MsvcSbrSource, ...]) -> list[JsonValue]:
-    return [
-        {
-            "raw_path": item.raw_path,
-            "parent_index": item.parent_index,
-        }
-        for item in sources
-    ]
+def _source_topology_json(
+    sources: tuple[MsvcSbrSource, ...],
+    paths: list[str],
+    path_indexes: dict[str, int],
+) -> list[JsonValue]:
+    result: list[JsonValue] = []
+    for item in sources:
+        path_index = path_indexes.get(item.raw_path)
+        if path_index is None:
+            path_index = len(paths)
+            paths.append(item.raw_path)
+            path_indexes[item.raw_path] = path_index
+        result.append([path_index, item.parent_index])
+    return result
 
 
-def _parse_source_topology(value: object, *, label: str) -> tuple[MsvcSbrSource, ...]:
+def _parse_path_table(value: object, *, label: str) -> tuple[str, ...]:
+    if (
+        not isinstance(value, list)
+        or not value
+        or any(not isinstance(path, str) or not path or "\x00" in path for path in value)
+        or len(set(value)) != len(value)
+    ):
+        raise ClassicCacheHintError(f"{label} path table is invalid")
+    return tuple(value)
+
+
+def _parse_source_topology(
+    value: object,
+    *,
+    paths: tuple[str, ...],
+    used_paths: set[int],
+    label: str,
+) -> tuple[MsvcSbrSource, ...]:
     if not isinstance(value, list) or not value:
         raise ClassicCacheHintError(f"{label} source topology is invalid")
     parsed: list[MsvcSbrSource] = []
     for index, source in enumerate(value):
-        if not isinstance(source, dict) or set(source) != {
-            "raw_path",
-            "parent_index",
-        }:
+        if not isinstance(source, list) or len(source) != 2:
             raise ClassicCacheHintError(f"{label} source is malformed")
-        raw_path = source["raw_path"]
-        parent_index = source["parent_index"]
+        path_index, parent_index = source
         if (
-            not isinstance(raw_path, str)
-            or not raw_path
-            or "\x00" in raw_path
+            not isinstance(path_index, int)
+            or isinstance(path_index, bool)
+            or not 0 <= path_index < len(paths)
             or (
                 parent_index is not None
                 and (
@@ -73,8 +92,22 @@ def _parse_source_topology(value: object, *, label: str) -> tuple[MsvcSbrSource,
             )
         ):
             raise ClassicCacheHintError(f"{label} source fields are invalid")
-        parsed.append(MsvcSbrSource(raw_path, parent_index))
+        if path_index not in used_paths:
+            if path_index != len(used_paths):
+                raise ClassicCacheHintError(f"{label} path table is not in first-use order")
+            used_paths.add(path_index)
+        parsed.append(MsvcSbrSource(paths[path_index], parent_index))
     return tuple(parsed)
+
+
+def _require_complete_path_table(
+    paths: tuple[str, ...],
+    used_paths: set[int],
+    *,
+    label: str,
+) -> None:
+    if len(used_paths) != len(paths):
+        raise ClassicCacheHintError(f"{label} path table has unused entries")
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,11 +119,15 @@ class CompilerDependencyHint:
     sources: tuple[MsvcSbrSource, ...]
 
     def as_json(self) -> dict[str, JsonValue]:
+        paths: list[str] = []
+        sources = _source_topology_json(self.sources, paths, {})
+        path_values: list[JsonValue] = list(paths)
         return {
-            "schema": 1,
+            "schema": 2,
             "base_key": self.base_key,
             "working_directory": self.working_directory,
-            "sources": _source_topology_json(self.sources),
+            "paths": path_values,
+            "sources": sources,
             "certifying": False,
         }
 
@@ -101,15 +138,17 @@ class CompilerDependencyHint:
             "schema",
             "base_key",
             "working_directory",
+            "paths",
             "sources",
             "certifying",
         }:
             raise ClassicCacheHintError("compiler cache record has no valid hint")
         base_key = raw["base_key"]
         working_directory = raw["working_directory"]
+        paths = raw["paths"]
         sources = raw["sources"]
         if (
-            raw["schema"] != 1
+            raw["schema"] != 2
             or raw["certifying"] is not False
             or not isinstance(base_key, str)
             or len(base_key) != 64
@@ -118,7 +157,19 @@ class CompilerDependencyHint:
             or not working_directory
         ):
             raise ClassicCacheHintError("compiler dependency hint identity is invalid")
-        parsed = _parse_source_topology(sources, label="compiler dependency hint")
+        parsed_paths = _parse_path_table(paths, label="compiler dependency hint")
+        used_paths: set[int] = set()
+        parsed = _parse_source_topology(
+            sources,
+            paths=parsed_paths,
+            used_paths=used_paths,
+            label="compiler dependency hint",
+        )
+        _require_complete_path_table(
+            parsed_paths,
+            used_paths,
+            label="compiler dependency hint",
+        )
         return cls(base_key, working_directory, parsed)
 
 
@@ -150,17 +201,26 @@ class DonorTransformDependencyHint:
     donors: tuple[DonorDependencyTrace, ...]
 
     def as_json(self) -> dict[str, JsonValue]:
+        paths: list[str] = []
+        path_indexes: dict[str, int] = {}
+        donors: list[JsonValue] = []
+        for donor in self.donors:
+            donor_value: dict[str, JsonValue] = {
+                "donor_id": donor.donor_id,
+                "working_directory": donor.working_directory,
+                "sources": _source_topology_json(
+                    donor.sources,
+                    paths,
+                    path_indexes,
+                ),
+            }
+            donors.append(donor_value)
+        path_values: list[JsonValue] = list(paths)
         return {
-            "schema": 1,
+            "schema": 2,
             "base_key": self.base_key,
-            "donors": [
-                {
-                    "donor_id": donor.donor_id,
-                    "working_directory": donor.working_directory,
-                    "sources": _source_topology_json(donor.sources),
-                }
-                for donor in self.donors
-            ],
+            "paths": path_values,
+            "donors": donors,
             "certifying": False,
         }
 
@@ -170,14 +230,16 @@ class DonorTransformDependencyHint:
         if not isinstance(raw, dict) or set(raw) != {
             "schema",
             "base_key",
+            "paths",
             "donors",
             "certifying",
         }:
             raise ClassicCacheHintError("donor-transform cache record has no valid hint")
         base_key = raw["base_key"]
+        paths = raw["paths"]
         donors = raw["donors"]
         if (
-            raw["schema"] != 1
+            raw["schema"] != 2
             or raw["certifying"] is not False
             or not isinstance(base_key, str)
             or len(base_key) != 64
@@ -186,6 +248,8 @@ class DonorTransformDependencyHint:
             or not donors
         ):
             raise ClassicCacheHintError("donor-transform dependency hint identity is invalid")
+        parsed_paths = _parse_path_table(paths, label="donor-transform dependency hint")
+        used_paths: set[int] = set()
         parsed_donors: list[DonorDependencyTrace] = []
         for donor in donors:
             if not isinstance(donor, dict) or set(donor) != {
@@ -209,6 +273,8 @@ class DonorTransformDependencyHint:
                 )
             parsed_sources = _parse_source_topology(
                 sources,
+                paths=parsed_paths,
+                used_paths=used_paths,
                 label="donor-transform dependency hint",
             )
             parsed_donors.append(
@@ -218,6 +284,11 @@ class DonorTransformDependencyHint:
                     parsed_sources,
                 )
             )
+        _require_complete_path_table(
+            parsed_paths,
+            used_paths,
+            label="donor-transform dependency hint",
+        )
         result = cls(base_key, tuple(parsed_donors))
         _require_canonical_donor_ids(item.donor_id for item in result.donors)
         return result
