@@ -10,6 +10,12 @@ from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
+from reprobit.authority_snapshot import (
+    AuthoritySnapshotError,
+    assert_json_authority_unchanged,
+    capture_file_preimage,
+    capture_json_authority_directories,
+)
 from reprobit.cli_output import CLIOutput, human_command
 from reprobit.cli_paths import CLIError, project_root, relative_output, safe_project_path
 from reprobit.costs import CostBreakdown, InterventionCost, calculate_cost
@@ -412,7 +418,30 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
 
 def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
     root = project_root(args.project)
-    spec = load_project(root)
+    try:
+        config_preimage = capture_file_preimage(root, "reprobit.toml", required=True)
+        spec = load_project(root)
+        if capture_file_preimage(root, "reprobit.toml", required=True) != config_preimage:
+            raise AuthoritySnapshotError("reprobit.toml changed while source lock was starting")
+        control_preimages = {
+            relative: capture_file_preimage(root, relative)
+            for relative in (
+                spec.toolchain.lock_file,
+                spec.layout.source_manifest,
+                spec.layout.build_plan,
+                spec.layout.producer_graph,
+            )
+        }
+        authority_snapshot = capture_json_authority_directories(
+            root,
+            (
+                spec.layout.interventions,
+                spec.layout.proofs,
+                spec.layout.oracles,
+            ),
+        )
+    except AuthoritySnapshotError as exc:
+        raise CLIError(f"cannot seal source-lock inputs: {exc}") from exc
     document = _build_source_document(root, spec, args.path, output)
     document_digest = source_manifest_digest(document)
 
@@ -463,15 +492,55 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
             graph_invalidated = True
 
     transaction = CASTransaction(root)
-    transaction.write(spec.layout.source_manifest, canonical_json(document))
+    transaction.write(
+        spec.layout.source_manifest,
+        canonical_json(document),
+        expected_sha256=control_preimages[spec.layout.source_manifest],
+    )
     if plan is not None:
-        transaction.write(spec.layout.build_plan, canonical_json(plan))
+        transaction.write(
+            spec.layout.build_plan,
+            canonical_json(plan),
+            expected_sha256=control_preimages[spec.layout.build_plan],
+        )
+    else:
+        transaction.assert_unchanged(
+            spec.layout.build_plan,
+            expected_sha256=control_preimages[spec.layout.build_plan],
+        )
     if graph_invalidated:
-        transaction.delete(spec.layout.producer_graph)
+        transaction.delete(
+            spec.layout.producer_graph,
+            expected_sha256=control_preimages[spec.layout.producer_graph],
+        )
     elif graph_present:
-        transaction.assert_unchanged(spec.layout.producer_graph)
+        transaction.assert_unchanged(
+            spec.layout.producer_graph,
+            expected_sha256=control_preimages[spec.layout.producer_graph],
+        )
+    else:
+        transaction.assert_unchanged(spec.layout.producer_graph, expected_sha256=None)
+    transaction.assert_unchanged("reprobit.toml", expected_sha256=config_preimage)
+    transaction.assert_unchanged(
+        spec.toolchain.lock_file,
+        expected_sha256=control_preimages[spec.toolchain.lock_file],
+    )
+    assert_json_authority_unchanged(transaction, authority_snapshot)
+    claimed_paths = {
+        "reprobit.toml",
+        spec.toolchain.lock_file,
+        spec.layout.source_manifest,
+        spec.layout.build_plan,
+        spec.layout.producer_graph,
+        *(
+            relative
+            for directory in authority_snapshot
+            for relative, _digest in directory.file_digests
+        ),
+    }
     for entry in document.entries:
-        transaction.assert_unchanged(entry.path, expected_sha256=entry.digest.value)
+        if entry.path not in claimed_paths:
+            transaction.assert_unchanged(entry.path, expected_sha256=entry.digest.value)
     result = transaction.commit()
     output.emit(
         "source_locked",

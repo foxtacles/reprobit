@@ -1538,6 +1538,50 @@ def test_source_lock_aborts_when_an_admitted_input_races_the_transaction(
     assert plan_path.read_bytes() == plan_before
 
 
+def test_source_lock_aborts_when_validated_authority_races_the_transaction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    capsys.readouterr()
+    manifest_path = project / "reprobit/source-manifest.json"
+    plan_path = project / "reprobit/build-plan.json"
+    proof_path = project / "reprobit/proofs/program.proof.json"
+    manifest_before = manifest_path.read_bytes()
+    plan_before = plan_path.read_bytes()
+    raced_proof = proof_path.read_bytes() + b" \n"
+    original_commit = CASTransaction.commit
+
+    def race_authority(transaction: CASTransaction) -> TransactionResult:
+        proof_path.write_bytes(raced_proof)
+        return original_commit(transaction)
+
+    monkeypatch.setattr(CASTransaction, "commit", race_authority)
+    assert (
+        main(
+            [
+                "source",
+                "lock",
+                "--project",
+                str(project),
+                "--path",
+                "notes.txt",
+                "--path",
+                "reprobit.toml",
+                "--path",
+                "src/unit.cpp",
+            ]
+        )
+        == 2
+    )
+    assert "preimage conflict" in capsys.readouterr().err
+    assert manifest_path.read_bytes() == manifest_before
+    assert plan_path.read_bytes() == plan_before
+    assert proof_path.read_bytes() == raced_proof
+
+
 def _complete_project(root: Path, *, command_build: bool = False) -> None:
     _initialize(root)
     (root / "project-input.txt").write_bytes(b"fixture source authority\n")
