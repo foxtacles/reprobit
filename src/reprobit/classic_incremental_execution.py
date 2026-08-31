@@ -107,7 +107,12 @@ def execute_classic_incremental_plan(
     # Only complete, re-resolvable compiler traces enter bounded base history.
     with cache.lease() as lease:
         for node_id, compiler_state in compiler_states.items():
-            outcome = execution.outcomes[node_id]
+            outcome = execution.outcomes.get(node_id)
+            if outcome is None:
+                # Repair analysis deliberately executes only the dependency
+                # closure of TUs with transforms. Unrelated compiler states
+                # remain useful planning metadata but have no result to index.
+                continue
             # A hit is already present in this bounded recency index.  Rewriting
             # it on every no-change build adds mutable cache traffic without
             # improving lookup quality.
@@ -125,7 +130,9 @@ def execute_classic_incremental_plan(
                 outcome.record,
             )
         for node_id, transform_state_value in transform_states.items():
-            outcome = execution.outcomes[node_id]
+            outcome = execution.outcomes.get(node_id)
+            if outcome is None:
+                continue
             if (
                 outcome.cache_hit
                 or not outcome.publishable

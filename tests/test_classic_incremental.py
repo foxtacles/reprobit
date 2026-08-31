@@ -979,6 +979,13 @@ def test_repair_analysis_runs_only_transform_closure_and_never_caches_provisiona
     state = tmp_path / "state"
     state.mkdir()
     bundle, units, sources = _fixture_bundle(root)
+    unrelated_source = b"int unrelated(void) { return 0; }\n"
+    (root / "unrelated.cpp").write_bytes(unrelated_source)
+    unrelated_compiler = _compiler("utility", 99, source="unrelated.cpp")
+    bundle.producer_graph = bundle.producer_graph.model_copy(
+        update={"nodes": (unrelated_compiler, *bundle.producer_graph.nodes)}
+    )
+    sources[unrelated_compiler.id] = r"R:\source\unrelated.cpp"
 
     class ProvisionalExecutor(_FakeWarmExecutor):
         provisional = True
@@ -1017,6 +1024,10 @@ def test_repair_analysis_runs_only_transform_closure_and_never_caches_provisiona
         sources=sources,
         project_root=root,
         runtime_calls=runtime_calls,
+        source_payloads={
+            "shared.cpp": (root / "shared.cpp").read_bytes(),
+            "unrelated.cpp": unrelated_source,
+        },
         warm_executor=executor,
     )
 
@@ -1049,7 +1060,7 @@ def test_repair_analysis_runs_only_transform_closure_and_never_caches_provisiona
         session=tmp_path / "ordinary",
     )
     assert ordinary.summary.hits == 1
-    assert ordinary.summary.misses == 3
+    assert ordinary.summary.misses == 4
     assert (root / "artifacts/app.exe").is_file()
 
 
