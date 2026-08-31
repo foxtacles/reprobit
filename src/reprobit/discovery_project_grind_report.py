@@ -198,7 +198,9 @@ def render_project_auto_grind_report_html(
 </section>
 </main>
 <footer class="footer"><div class="footer-inner">
-  Canonical summary: <code>{escape(summary_json)}</code> · deterministic local HTML ·
+  Canonical summary:
+  <a class="machine-link" href="{escape(summary_json)}"><code>{escape(summary_json)}</code></a>
+  · deterministic local HTML ·
   no external assets
 </div></footer>
 <script>{REPORT_SCRIPT}</script>

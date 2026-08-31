@@ -180,8 +180,8 @@ Git-tracked file. When existing build records still apply, preview prints the
 exact `source lock` command to run. If preview says it cannot safely update
 which files CMake builds, there is no automatic command for that case yet;
 restore the previous file list instead of deleting saved interventions. A
-successful source lock prints `rbit import cmake .` only when the recorded build
-graph must be refreshed.
+successful source lock prints the next command: normally `rbit import cmake .`
+during setup or after a build-graph refresh, otherwise `rbit status .`.
 
 <details>
 <summary>Advanced: inspect or apply only saved source-record changes</summary>
@@ -465,8 +465,10 @@ changes which run workspaces are retained.
 
 ## Find and save compiler adjustments
 
-The normal workflow starts with a bounded project preview, then repeats fresh
-proofs only when you approve the result:
+Use discovery when a new project's first working build does not yet match its
+reference. (For a later regression in a project that was already exact, use
+`rbit repair .`.) The normal discovery workflow starts with a bounded project
+preview, then repeats fresh proofs only when you approve the result:
 
 ```console
 rbit discover grind . --project-wide

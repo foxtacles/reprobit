@@ -390,6 +390,7 @@ def test_project_grind_report_header_uses_shared_reprobit_mark() -> None:
     assert html.count(REPROBIT_MARK_SVG) == 1
     assert "Project-wide automatic search" in html
     assert "use <code>--reference-object TU=PATH</code>" in html
+    assert 'href="report.json"><code>report.json</code></a>' in html
 
 
 def test_project_grind_report_renders_status_and_evidence_as_markup() -> None:

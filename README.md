@@ -127,6 +127,9 @@ step:
 rbit repair .
 ```
 
+This is the maintenance path after the project has already reached an exact
+match. If a new project builds but does not match yet, start with the bounded
+[`discover grind` workflow](docs/discovery.md) to find its first adjustments.
 `repair` works on a private copy first. It updates the saved build guidance
 affected by your edit, rebuilds every target from scratch, and checks that the
 result is still exact and trustworthy. Only then does it publish the updated
@@ -139,7 +142,8 @@ paths, cleanup, and the advanced preview tool.
 To add a new file to the reviewed source list—or remove a locked one—start with
 `rbit source preview --project .`; repair never silently admits newly tracked
 files. Preview prints a safe `source lock` command when existing build records
-still apply. If the change affects which files CMake builds, ReproBit currently
+still apply. Lock then prints the next setup or status command. If the change
+affects which files CMake builds, ReproBit currently
 refuses the update instead of risking saved interventions; restore the previous
 file list for now. Re-run `rbit import cmake .` only when a successful source
 lock asks for it.

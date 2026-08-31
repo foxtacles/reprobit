@@ -167,9 +167,24 @@ def _build_source_document(
     values: Sequence[str],
     output: CLIOutput,
 ) -> SourceManifestDocument:
-    from reprobit.source_lock import build_source_manifest, git_tracked_paths
+    from reprobit.source_lock import SourceLockError, build_source_manifest, git_tracked_paths
 
-    paths = _explicit_source_paths(root, values) if values else git_tracked_paths(root)
+    if values:
+        paths = _explicit_source_paths(root, values)
+    else:
+        try:
+            paths = git_tracked_paths(root)
+        except SourceLockError as exc:
+            if str(exc) == "the project has no tracked source inputs":
+                detail = "Git has no tracked project files"
+            else:
+                detail = "Git could not inspect this directory as a worktree"
+            raise CLIError(
+                f"cannot select project source automatically: {detail}. "
+                "Make sure Git is installed, then run git init and git add as needed. "
+                "Alternatively, repeat --path PATH to name the complete source input set "
+                "explicitly."
+            ) from exc
     with output.activity("checking the project source files"):
         return build_source_manifest(root, paths, spec=spec, complete=True)
 
@@ -628,11 +643,13 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
             transaction.assert_unchanged(entry.path, expected_sha256=entry.digest.value)
     result = transaction.commit()
     cmake_import_command = (
-        human_command(("rbit", "import", "cmake", root)) if graph_invalidated else None
+        human_command(("rbit", "import", "cmake", root))
+        if graph_invalidated or not graph_present
+        else None
     )
+    next_command = cmake_import_command or human_command(("rbit", "status", root))
     message = f"locked {len(document.entries)} project source input(s)"
-    if cmake_import_command is not None:
-        message += f"\nNext: {cmake_import_command}"
+    message += f"\nNext: {next_command}"
     output.emit(
         "source_locked",
         message,
@@ -640,7 +657,7 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         entries=len(document.entries),
         source_manifest_digest=document_digest.value,
         producer_graph_invalidated=graph_invalidated,
-        next_command=cmake_import_command,
+        next_command=next_command,
         transaction_id=result.transaction_id,
     )
     return 0

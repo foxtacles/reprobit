@@ -1,11 +1,13 @@
 # Find compiler interventions
 
-ReproBit discovery tries small, declaration-only changes that can steer an old
-compiler toward the reference bytes without changing your program's intended
-behavior. The normal human workflow is `grind`: let it make a bounded project
-pass, or select one source and function when you need precise control. ReproBit
-saves a result only when you explicitly approve a run whose candidate passes a
-fresh proof build.
+ReproBit discovery is for a project's initial mismatch: the source builds, but
+has not yet reproduced the reference bytes. It tries small, declaration-only
+changes without changing the program's intended behavior. The normal workflow
+is `grind`: let it make a bounded project pass, or select one source and
+function when you need precise control. ReproBit saves a result only when you
+explicitly approve a run whose candidate passes a fresh proof build. After the
+project has reached an exact match, use `rbit repair .` for regressions caused
+by later benign source edits instead of starting discovery again.
 
 ## Automatic grind
 

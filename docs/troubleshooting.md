@@ -92,8 +92,8 @@ still apply. Repair preserves the exact locked list, so it does not silently
 admit a newly tracked file. If preview says the change to which files CMake
 builds cannot be handled safely, restore the previous file list for now;
 ReproBit does not yet have an automatic update that can preserve every saved
-intervention. A successful source lock prints `rbit import cmake .` only when
-the recorded graph must be refreshed. The NDJSON event keeps the detailed
+intervention. A successful source lock prints the next setup or status command.
+The NDJSON event keeps the detailed
 source-list, build-graph, and saved-record findings for automation.
 
 For advanced diagnosis, `rbit source regenerate --project .` previews only the

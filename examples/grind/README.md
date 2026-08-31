@@ -54,6 +54,17 @@ For one deliberately selected function, the original expert flow remains
 available through `rbit discover init` followed by `rbit discover grind` without
 `--project-wide`.
 
+To repeat the example from its original one-byte mismatch, reset only the two
+files that approval changes, then remove the generated reports:
+
+```console
+git restore -- reprobit/interventions/tu.transform.json reprobit/proofs/tu.transform.proof.json
+rbit clean . --reports
+```
+
+This keeps the prepared compiler, reusable build cache, and generated reference
+binary, so the next grind can start quickly.
+
 <details>
 <summary>Advanced: pinned binary provenance</summary>
 

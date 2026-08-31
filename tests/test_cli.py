@@ -486,6 +486,60 @@ def test_source_lock_transactionally_replaces_the_explicit_read_set(tmp_path: Pa
     assert [item["path"] for item in document["entries"]] == ["CMakeLists.txt"]
 
 
+def test_fresh_source_lock_prints_the_import_next_step(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    _initialize(tmp_path)
+    source = tmp_path / "unit.cpp"
+    source.write_bytes(b"int main() { return 0; }\n")
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "source",
+                "lock",
+                "--project",
+                str(tmp_path),
+                "--path",
+                "unit.cpp",
+            ]
+        )
+        == 0
+    )
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["event"] == "source_locked"
+    assert event["next_command"] == f"rbit import cmake {tmp_path}"
+
+
+@pytest.mark.parametrize(
+    ("initialize_git", "expected"),
+    (
+        (False, "Git could not inspect this directory as a worktree"),
+        (True, "Git has no tracked project files"),
+    ),
+)
+def test_source_preview_explains_how_to_select_files_when_git_cannot(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    initialize_git: bool,
+    expected: str,
+) -> None:
+    _initialize(tmp_path)
+    if initialize_git:
+        subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
+    capsys.readouterr()
+
+    assert main(["source", "preview", "--project", str(tmp_path)]) == 2
+    message = capsys.readouterr().err
+    assert expected in message
+    assert "git init and git add" in message
+    assert "--path PATH" in message
+
+
 def test_default_source_lock_omits_intentionally_deleted_tracked_file(
     tmp_path: Path,
 ) -> None:
