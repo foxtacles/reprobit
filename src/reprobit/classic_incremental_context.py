@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -147,7 +146,13 @@ class PhysicalInputCensus:
         return snapshot.path.resolve(strict=True)
 
     def known_path(self, path: Path) -> Path | None:
-        canonical = Path(os.path.abspath(path)).resolve(strict=False)
+        received = Path(path)
+        if received.is_absolute():
+            with self._lock:
+                exact = self._entries.get(received)
+            if exact is not None:
+                return exact.path
+        canonical = received.resolve(strict=False)
         with self._lock:
             return canonical if canonical in self._entries else None
 
@@ -156,7 +161,7 @@ class PhysicalInputCensus:
             return tuple(sorted(self._entries, key=str))
 
     def validate(self, paths: Sequence[Path]) -> None:
-        selected = {Path(os.path.abspath(path)).resolve(strict=False) for path in paths}
+        selected = {Path(path).resolve(strict=False) for path in paths}
         with self._lock:
             expected = {path: self._entries.get(path) for path in selected}
         missing = tuple(

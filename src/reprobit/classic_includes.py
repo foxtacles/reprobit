@@ -13,6 +13,7 @@ import struct
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
+from functools import lru_cache
 from pathlib import PureWindowsPath
 from types import MappingProxyType
 
@@ -306,6 +307,7 @@ def _normal(value: str) -> str:
     return value.replace("/", "\\")
 
 
+@lru_cache(maxsize=32_768)
 def _absolute(value: str, *, base: str | None = None) -> str:
     raw = _normal(value)
     if not raw or raw.startswith("\\\\") or value.startswith("/"):

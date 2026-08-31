@@ -17,6 +17,7 @@ import struct
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path, PureWindowsPath
 
 
@@ -36,6 +37,7 @@ _DOS_DRIVE_LETTER = re.compile(r"[A-Za-z]", re.ASCII)
 _LOGICAL_SEAT_NAME = re.compile(r"[A-Za-z0-9]+(?:[-_][A-Za-z0-9]+)*", re.ASCII)
 
 
+@lru_cache(maxsize=65_536)
 def normalize_logical_path(value: str | PureWindowsPath) -> str:
     """Return one canonical absolute DOS path without changing its length.
 
