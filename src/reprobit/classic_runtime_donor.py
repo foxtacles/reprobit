@@ -677,8 +677,8 @@ class ClassicDonorComposition:
             dependency_replay,
         )
 
-    def release_probe_invocation(self, invocation: _DonorCompilerInvocation) -> None:
-        """Release one copied diagnostic arena after its result is self-contained."""
+    def release_donor_invocation(self, invocation: _DonorCompilerInvocation) -> None:
+        """Release one donor arena after its result is self-contained."""
 
         donor_root = Path(os.path.abspath(self.build_root.parent / "donors"))
         arena = Path(os.path.abspath(invocation.object_path.parent))
@@ -708,7 +708,6 @@ class ClassicDonorComposition:
         tuple[StepExecutionReceipt, ...],
         InterventionWitness,
     ]:
-        donor = unit.donors[donor_index]
         invocation = self.invoke_donor_compiler(
             supervisor,
             unit,
@@ -718,6 +717,39 @@ class ClassicDonorComposition:
             compiler_epoch=compiler_epoch,
             capture_dependencies=dependency_replays is not None,
         )
+        try:
+            captured = self._capture_donor_invocation(
+                unit,
+                donor_index,
+                invocation,
+                compiler_epoch=compiler_epoch,
+                dependency_replays=dependency_replays,
+            )
+        except BaseException as original:
+            try:
+                self.release_donor_invocation(invocation)
+            except BaseException as cleanup_error:
+                original.add_note(f"classic donor arena cleanup also failed: {cleanup_error}")
+            raise
+        self.release_donor_invocation(invocation)
+        return captured
+
+    def _capture_donor_invocation(
+        self,
+        unit: ClassicPreparedUnit,
+        donor_index: int,
+        invocation: _DonorCompilerInvocation,
+        *,
+        compiler_epoch: ClassicActiveCompilerEpoch,
+        dependency_replays: list[ClassicWarmDonorDependencyReplay] | None,
+    ) -> tuple[
+        _ClassicDonorSemanticMaterial,
+        tuple[StepExecutionReceipt, ...],
+        InterventionWitness,
+    ]:
+        """Copy one completed donor invocation into durable in-memory receipts."""
+
+        donor = unit.donors[donor_index]
         dependency_tracked = donor_requires_dependency_tracking(
             donor.request,
             owning_build_target=unit.plan.build_target,

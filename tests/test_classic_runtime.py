@@ -4969,6 +4969,95 @@ def test_projected_donor_dependency_parse_failure_is_discarded(
     assert tuple(arena.iterdir()) == (arena / "s.cpp",)
 
 
+def _ordinary_donor_arena_fixture(
+    tmp_path: Path,
+) -> tuple[
+    classic_runtime_donor.ClassicDonorComposition,
+    classic_orchestration.ClassicPreparedUnit,
+    classic_execution_records.ClassicActiveCompilerEpoch,
+    Path,
+    classic_runtime_donor._DonorCompilerInvocation,
+]:
+    build_root = tmp_path / "classic" / "build"
+    arena = build_root.parent / "donors" / "candidate"
+    arena.mkdir(parents=True)
+    donor_object = arena / "o.obj"
+    donor_pdb = arena / "o.pdb"
+    donor_object.write_bytes(b"donor object")
+    donor_pdb.write_bytes(b"donor pdb")
+    unit = cast(
+        classic_orchestration.ClassicPreparedUnit,
+        SimpleNamespace(plan=SimpleNamespace(id="tu.program.unit")),
+    )
+    invocation = cast(
+        classic_runtime_donor._DonorCompilerInvocation,
+        SimpleNamespace(object_path=donor_object, pdb_path=donor_pdb),
+    )
+    executor = object.__new__(classic_runtime_donor.ClassicDonorComposition)
+    executor.build_root = build_root
+    executor.invoke_donor_compiler = (  # type: ignore[method-assign]
+        lambda *args, **kwargs: invocation
+    )
+    epoch = cast(
+        classic_execution_records.ClassicActiveCompilerEpoch,
+        SimpleNamespace(namespace_id="fixture"),
+    )
+    return executor, unit, epoch, arena, invocation
+
+
+def test_ordinary_donor_compile_releases_arena_after_capturing_receipts(tmp_path: Path) -> None:
+    executor, unit, epoch, arena, _invocation = _ordinary_donor_arena_fixture(tmp_path)
+    captured = (
+        SimpleNamespace(donor_object=b"donor object"),
+        (SimpleNamespace(step_id="donor.tu.program.unit.0000"),),
+        SimpleNamespace(intervention_id="donor.fixture"),
+    )
+    executor._capture_donor_invocation = (  # type: ignore[method-assign]
+        lambda *args, **kwargs: captured
+    )
+
+    with ProcessSupervisor() as supervisor:
+        result = executor._compile_donor(
+            supervisor,
+            unit,
+            0,
+            CancellationToken(),
+            compiler_epoch=epoch,
+        )
+
+    assert not arena.exists()
+    assert result == captured
+
+
+def test_ordinary_donor_compile_releases_arena_when_receipt_capture_fails(
+    tmp_path: Path,
+) -> None:
+    executor, unit, epoch, arena, _invocation = _ordinary_donor_arena_fixture(tmp_path)
+
+    def fail_capture(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise ClassicProjectError("receipt capture failed")
+
+    executor._capture_donor_invocation = fail_capture  # type: ignore[method-assign]
+
+    with (
+        ProcessSupervisor() as supervisor,
+        pytest.raises(
+            ClassicProjectError,
+            match="receipt capture failed",
+        ),
+    ):
+        executor._compile_donor(
+            supervisor,
+            unit,
+            0,
+            CancellationToken(),
+            compiler_epoch=epoch,
+        )
+
+    assert not arena.exists()
+
+
 def test_exact_compiler_probe_returns_raw_outputs_and_closes_runtime(
     tmp_path: Path,
 ) -> None:
@@ -5342,7 +5431,7 @@ def test_repair_donor_probe_isolates_candidate_failure_and_stops_before_later_wi
     released: list[classic_runtime_donor._DonorCompilerInvocation] = []
     executor.donors = SimpleNamespace(
         invoke_donor_compiler=invoke,
-        release_probe_invocation=released.append,
+        release_donor_invocation=released.append,
     )
     evaluated: list[tuple[classic_repair_probe_execution.ClassicDonorCompileOutcome, ...]] = []
     progress: list[tuple[int, int, str]] = []
@@ -5405,7 +5494,7 @@ def test_probe_invocation_release_removes_only_its_exact_candidate_arena(
         ),
     )
 
-    executor.release_probe_invocation(invocation)
+    executor.release_donor_invocation(invocation)
 
     assert not arena.exists()
     assert sibling.is_dir()

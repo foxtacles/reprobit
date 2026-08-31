@@ -139,11 +139,11 @@ def _compile_output(
         )
     except BaseException as original:
         try:
-            probes.donors.release_probe_invocation(invocation)
+            probes.donors.release_donor_invocation(invocation)
         except BaseException as cleanup_error:
             original.add_note(f"classic donor probe arena cleanup also failed: {cleanup_error}")
         raise
-    probes.donors.release_probe_invocation(invocation)
+    probes.donors.release_donor_invocation(invocation)
     return output
 
 
