@@ -87,8 +87,10 @@ command DAG remains valid when bytes change at an already admitted path, but a
 direct graph input cannot be removed without invalidating the graph. Unrelated
 manifest additions and removals leave the command DAG valid. The command does
 not rewrite translation-unit, intervention, or proof pins. If effective TU bytes
-or a clean overlay input changed, it refuses the transaction and requires the
-adapter's reviewed regeneration workflow.
+or a clean overlay input changed, it refuses the transaction; run
+`rbit source regenerate` (see
+[Regenerate stale source-derived records](#regenerate-stale-source-derived-records))
+to re-derive the mechanical pins before locking again.
 
 ### What setup records
 
@@ -112,6 +114,48 @@ command that checks those bytes against saved project records. `explain` lists
 interventions and their fixed costs; pass `--intervention ID` to select one.
 
 </details>
+
+## Regenerate stale source-derived records
+
+Reviewed records pin the exact bytes they were derived from, so an ordinary
+source edit makes some of them stale, and `source lock` refuses to bless the
+old digests. `source regenerate` re-derives the mechanical ones:
+
+```console
+# After editing admitted source files:
+rbit source regenerate --project .          # dry run: print every proposed pin
+rbit source regenerate --project . --apply  # write the reviewed plan
+rbit source lock --project .
+rbit verify . --report-dir build/reprobit-report
+```
+
+The command re-renders each stale record against the current bytes and
+proposes replacement pins for four record families:
+
+* **Source-overlay outputs** — the clean digest, clean size, and the effective
+  digest of the freshly re-rendered output, with every anchor resolved against
+  the current bytes.
+* **Donor-private overlay renderings** — the proof-carried clean and rendered
+  digests, renderings that replay the owning translation unit's canonical
+  overlay, and the rendering identity over the merged claim.
+* **Declaration-carrier donors** — the `rendered_source_*` pins, the seat
+  witnesses around the prefix and after-includes insertion points, and the
+  effective-source digest.
+* **Translation-unit source digests** — in both the per-unit intervention
+  documents and the build plan.
+
+The dry run prints every before/after digest and writes nothing. `--apply`
+writes all changed documents in one compare-and-swap transaction that also
+asserts the exact source bytes the plan read, so an edit racing the
+regeneration aborts it instead of committing mixed state.
+
+The command fails closed. An overlay anchor that no longer resolves, an empty
+rendering without a replay policy, and a stale digest surviving anywhere the
+planner does not understand each abort the whole plan; such records need their
+own adapter-level re-derivation, not a blessed digest. Regeneration only
+proposes pins: the rewritten tree still has to pass the verifying render at
+`source lock` and the literal byte gate of a from-scratch `verify` before
+anything is certified.
 
 ## Prepare the local compiler
 

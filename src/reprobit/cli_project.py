@@ -324,6 +324,8 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
         if graph_invalidation_required:
             lock_arguments.append("--invalidate-producer-graph")
         next_command = human_command(lock_arguments)
+    else:
+        next_command = human_command(("rbit", "source", "regenerate", "--project", root))
     message = _source_preview_message(
         added=added,
         removed=removed,
@@ -373,19 +375,21 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
 
         if not isinstance(exc, SourceAuthorityError):
             raise
+        regenerate_hint = human_command(("rbit", "source", "regenerate", "--project", root))
         raise CLIError(
             "source lock refused because reviewed source-derived authority must be "
-            f"regenerated: {exc}"
+            f"regenerated: {exc}\nTry: {regenerate_hint}"
         ) from exc
     stale_units = _stale_tu_fields(report)
     if stale_units:
         rendered = ", ".join(
             f"{item['translation_unit_id']} ({item['source']})" for item in stale_units
         )
+        regenerate_hint = human_command(("rbit", "source", "regenerate", "--project", root))
         raise CLIError(
             "source lock refused because effective translation-unit bytes changed; "
             "regenerate the affected intervention and proof authority instead of "
-            f"repinning it: {rendered}"
+            f"repinning it: {rendered}\nTry: {regenerate_hint}"
         )
 
     producer_graph_path = safe_project_path(root, spec.layout.producer_graph)

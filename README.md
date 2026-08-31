@@ -119,6 +119,19 @@ information matched to the files the compiler actually read. Run the same
 command after later changes; ReproBit safely replaces the previous source view
 and removes files that are no longer part of it.
 
+When a source edit makes reviewed records stale — `source lock` refuses to
+bless old digests — regenerate the mechanical pins and relock:
+
+```console
+rbit source regenerate --project .          # dry run: print every proposed pin
+rbit source regenerate --project . --apply
+rbit source lock --project .
+```
+
+See [Regenerate stale source-derived
+records](docs/cli.md#regenerate-stale-source-derived-records) for what the
+command covers and where it deliberately fails closed.
+
 Failed builds keep a private workspace so problems can be inspected. Reclaim
 those workspaces with `rbit clean .`; the reusable build cache is kept by
 default. Use `rbit clean . --cache` when you also want to reclaim cache space,

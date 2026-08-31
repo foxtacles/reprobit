@@ -80,9 +80,16 @@ The separate `rbit graph configure` and `rbit graph extract` commands are only
 for advanced imports that need manual control. With a graph-v3 document,
 ordinary byte edits and unrelated manifest additions or removals do not require
 invalidation; removing a graph input does. If preview says authority regeneration
-is required, do not edit the old digest or rerun lock to bless it. Regenerate
-the affected TU, intervention, and proof documents with the adapter and publish
-them only after their zero-loss and literal gates pass together.
+is required, do not edit the old digest or rerun lock to bless it. Run
+`rbit source regenerate --project .` to review the proposed replacement pins,
+then `--apply` to write them; it re-derives the mechanical record families
+(overlay outputs, donor renderings, declaration-carrier pins, and TU source
+digests) by re-rendering against the current bytes, and fails closed on
+anything it cannot re-prove — see
+[Regenerate stale source-derived records](cli.md#regenerate-stale-source-derived-records).
+A record the command refuses needs its own adapter-level re-derivation, and
+every regenerated document still has to pass `source lock` and a from-scratch
+`verify` before anything is certified.
 
 ## Bytes match but the command exits nonzero
 
