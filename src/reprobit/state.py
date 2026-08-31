@@ -62,6 +62,8 @@ class StateStatus:
     cache_blobs: int = 0
     cache_active_leases: int = 0
     cache_stale_leases: int = 0
+    cache_current_records: int = 0
+    cache_obsolete_records: int = 0
 
     @property
     def run_bytes(self) -> int:
@@ -410,7 +412,12 @@ class StateStore:
         finally:
             lock.close()
 
-    def status(self) -> StateStatus:
+    def status(
+        self,
+        *,
+        cache_implementation: str = "state-maintenance-v1",
+        cache_implementation_family: str | None = None,
+    ) -> StateStatus:
         runs: list[RunState] = []
         if os.path.lexists(self.root):
             with _maintenance_gate(self.root, create=False):
@@ -445,9 +452,9 @@ class StateStore:
 
             cache_status = IncrementalCache(
                 self.root,
-                implementation="state-maintenance-v1",
+                implementation=cache_implementation,
                 create=False,
-            ).status()
+            ).status(implementation_family=cache_implementation_family)
             cache_bytes = cache_status.bytes
             cache_files = cache_status.files
         else:
@@ -472,6 +479,10 @@ class StateStore:
             cache_blobs=cache_status.blobs if cache_status is not None else 0,
             cache_active_leases=(cache_status.active_leases if cache_status is not None else 0),
             cache_stale_leases=(cache_status.stale_leases if cache_status is not None else 0),
+            cache_current_records=(cache_status.current_records if cache_status is not None else 0),
+            cache_obsolete_records=(
+                cache_status.obsolete_records if cache_status is not None else 0
+            ),
         )
 
     def gc(
@@ -481,11 +492,20 @@ class StateStore:
         dry_run: bool = False,
         include_cache: bool = False,
         include_reports: bool = False,
+        obsolete_cache_implementation: str | None = None,
+        obsolete_cache_implementation_family: str | None = None,
     ) -> GCResult:
         """Remove inactive runs and explicitly selected cache or report data."""
 
         if older_than_seconds < 0:
             raise _StateError("GC age cannot be negative")
+        obsolete_cache_requested = obsolete_cache_implementation is not None
+        if obsolete_cache_requested != (obsolete_cache_implementation_family is not None):
+            raise _StateError(
+                "obsolete cache cleanup requires both an implementation and its family"
+            )
+        if include_cache and obsolete_cache_requested:
+            raise _StateError("full and obsolete-only cache cleanup are mutually exclusive")
         cutoff_ns = time.time_ns() - int(older_than_seconds * 1_000_000_000)
         removed: list[Path] = []
         skipped_active: list[Path] = []
@@ -552,18 +572,23 @@ class StateStore:
                         if lease is not None:
                             lease.close()
 
-        if include_cache and os.path.lexists(self.cache_root):
+        if (include_cache or obsolete_cache_requested) and os.path.lexists(self.cache_root):
             if self.cache_root.is_symlink() or not self.cache_root.is_dir():
                 raise _StateError(f"cache root is not a real directory: {self.cache_root}")
             from reprobit.cache import IncrementalCache
 
             cache_result = IncrementalCache(
                 self.root,
-                implementation="state-maintenance-v1",
+                implementation=(
+                    obsolete_cache_implementation
+                    if obsolete_cache_implementation is not None
+                    else "state-maintenance-v1"
+                ),
                 create=False,
             ).gc(
                 older_than_seconds=older_than_seconds,
                 dry_run=dry_run,
+                obsolete_implementation_family=obsolete_cache_implementation_family,
             )
             cache_removed_records = cache_result.removed_records
             cache_removed_blobs = cache_result.removed_blobs

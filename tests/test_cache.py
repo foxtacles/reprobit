@@ -479,6 +479,87 @@ def test_gc_collects_stale_lookup_indexes_with_records(tmp_path: Path) -> None:
     assert result.removed_indexes == 1
 
 
+def test_gc_removes_only_obsolete_implementation_family_records(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    shared = tmp_path / "shared.obj"
+    stale_only = tmp_path / "stale.obj"
+    discovery_only = tmp_path / "discovery.obj"
+    shared.write_bytes(b"shared")
+    stale_only.write_bytes(b"stale only")
+    discovery_only.write_bytes(b"discovery")
+    family = "classic-producer-graph-"
+    current = IncrementalCache(state, implementation=f"{family}current")
+    obsolete = IncrementalCache(state, implementation=f"{family}obsolete")
+    unrelated = IncrementalCache(state, implementation="discovery-current")
+    with current.lease() as lease:
+        current_record = lease.store(
+            "producer",
+            _key("current", implementation=current.implementation),
+            {"shared.obj": shared},
+        )
+        lease.index_record(
+            "producer",
+            "compiler-base",
+            _key("current-base", implementation=current.implementation),
+            current_record,
+        )
+    with obsolete.lease() as lease:
+        obsolete_record = lease.store(
+            "producer",
+            _key("obsolete", implementation=obsolete.implementation),
+            {"shared.obj": shared, "stale.obj": stale_only},
+        )
+        lease.index_record(
+            "producer",
+            "compiler-base",
+            _key("obsolete-base", implementation=obsolete.implementation),
+            obsolete_record,
+        )
+    with unrelated.lease() as lease:
+        unrelated_record = lease.store(
+            "discovery-cell",
+            cache_key(
+                "discovery-cell",
+                {"node": "unrelated"},
+                implementation=unrelated.implementation,
+            ),
+            {"discovery.obj": discovery_only},
+        )
+
+    status = current.status(implementation_family=family)
+    assert status.records == 3
+    assert status.current_records == 1
+    assert status.obsolete_records == 1
+    recent = current.gc(
+        older_than_seconds=3600,
+        obsolete_implementation_family=family,
+    )
+    assert recent.removed_records == 0
+    assert recent.skipped_recent_records == 1
+    preview = current.gc(dry_run=True, obsolete_implementation_family=family)
+    assert preview.removed_records == 1
+    assert preview.removed_blobs == 1
+    assert preview.removed_indexes == 1
+    assert current.status().records == 3
+
+    result = current.gc(obsolete_implementation_family=family)
+
+    assert result.removed_records == 1
+    assert result.removed_blobs == 1
+    assert result.removed_indexes == 1
+    with current.lease() as lease:
+        assert lease.lookup("producer", current_record.key) == current_record
+    with obsolete.lease() as lease:
+        assert lease.lookup("producer", obsolete_record.key) is None
+    with unrelated.lease() as lease:
+        assert lease.lookup("discovery-cell", unrelated_record.key) == unrelated_record
+    status = current.status(implementation_family=family)
+    assert status.records == 2
+    assert status.current_records == 1
+    assert status.obsolete_records == 0
+
+
 def test_concurrent_publishers_converge_on_one_immutable_record(
     tmp_path: Path,
 ) -> None:

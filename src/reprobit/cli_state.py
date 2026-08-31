@@ -30,11 +30,19 @@ def state_root(root: Path, spec: ProjectSpec) -> Path:
 
 
 def command_state_status(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.incremental import (
+        PRODUCER_CACHE_IMPLEMENTATION,
+        PRODUCER_CACHE_IMPLEMENTATION_FAMILY,
+    )
+
     root = project_root(args.project)
     spec = load_project(root)
     state = state_path(root, spec)
     with output.activity("inspecting local ReproBit state", phase="state"):
-        status = StateStore(state, create=False).status()
+        status = StateStore(state, create=False).status(
+            cache_implementation=PRODUCER_CACHE_IMPLEMENTATION,
+            cache_implementation_family=PRODUCER_CACHE_IMPLEMENTATION_FAMILY,
+        )
     active = sum(item.active for item in status.runs)
     retained = len(status.runs) - active
     lines = [
@@ -48,6 +56,19 @@ def command_state_status(args: argparse.Namespace, output: CLIOutput) -> int:
         f"{'file' if status.report_files == 1 else 'files'}, "
         f"{human_bytes(status.report_bytes)}",
     ]
+    if status.cache_current_records or status.cache_obsolete_records:
+        lines.insert(
+            4,
+            "  incremental build records: "
+            f"{status.cache_current_records} current, "
+            f"{status.cache_obsolete_records} obsolete",
+        )
+    if status.cache_obsolete_records:
+        lines.insert(
+            5,
+            "  preview workspace + obsolete cache cleanup: "
+            f"{human_command(('rbit', 'clean', root, '--obsolete-cache', '--preview'))}",
+        )
     output.emit(
         "state_status",
         "\n".join(lines),
@@ -62,6 +83,8 @@ def command_state_status(args: argparse.Namespace, output: CLIOutput) -> int:
         cache_blobs=status.cache_blobs,
         cache_active_leases=status.cache_active_leases,
         cache_stale_leases=status.cache_stale_leases,
+        cache_current_records=status.cache_current_records,
+        cache_obsolete_records=status.cache_obsolete_records,
         report_bytes=status.report_bytes,
         report_files=status.report_files,
         runs=[
@@ -81,6 +104,11 @@ def command_state_status(args: argparse.Namespace, output: CLIOutput) -> int:
 
 
 def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.incremental import (
+        PRODUCER_CACHE_IMPLEMENTATION,
+        PRODUCER_CACHE_IMPLEMENTATION_FAMILY,
+    )
+
     root = project_root(args.project)
     spec = load_project(root)
     state = state_path(root, spec)
@@ -92,7 +120,7 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
         if args.preview
         else (
             "removing inactive build workspaces and selected local data"
-            if args.cache or args.reports
+            if args.cache or args.obsolete_cache or args.reports
             else "removing inactive build workspaces"
         )
     )
@@ -102,6 +130,12 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             dry_run=args.preview,
             include_cache=args.cache,
             include_reports=args.reports,
+            obsolete_cache_implementation=(
+                PRODUCER_CACHE_IMPLEMENTATION if args.obsolete_cache else None
+            ),
+            obsolete_cache_implementation_family=(
+                PRODUCER_CACHE_IMPLEMENTATION_FAMILY if args.obsolete_cache else None
+            ),
         )
     if args.preview:
         next_argv: list[str | Path] = ["rbit", "clean", root]
@@ -109,6 +143,8 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             next_argv.extend(("--older-than-hours", f"{age_hours:g}"))
         if args.cache:
             next_argv.append("--cache")
+        if args.obsolete_cache:
+            next_argv.append("--obsolete-cache")
         if args.reports:
             next_argv.append("--reports")
         has_selection = bool(
@@ -118,12 +154,23 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             or result.reports_removed
         )
         next_command = human_command(next_argv) if has_selection else None
-        if not args.cache:
+        if not args.cache and not args.obsolete_cache:
             cache_summary = "The reusable incremental cache will be kept."
         elif result.cache_active_leases:
             cache_summary = (
                 "Cache cleanup is currently skipped because "
                 f"{result.cache_active_leases} active build(s) are using it."
+            )
+        elif args.obsolete_cache:
+            cache_summary = (
+                f"The selection includes {result.cache_removed_records} obsolete cache "
+                f"record(s) and {result.cache_removed_blobs} unreferenced blob(s); "
+                "the current cache will be kept"
+                + (
+                    f", along with {result.cache_skipped_recent_records} recent obsolete record(s)."
+                    if result.cache_skipped_recent_records
+                    else "."
+                )
             )
         else:
             cache_summary = (
@@ -149,7 +196,8 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             f"{report_summary} "
             f"{next_step}",
             candidates=result.removed,
-            cache_requested=args.cache,
+            cache_requested=args.cache or args.obsolete_cache,
+            obsolete_cache_requested=args.obsolete_cache,
             cache_records=result.cache_removed_records,
             cache_blobs=result.cache_removed_blobs,
             active_cache_leases=result.cache_active_leases,
@@ -163,12 +211,22 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             next_argv=next_argv if next_command is not None else (),
         )
         return 0
-    if not args.cache:
+    if not args.cache and not args.obsolete_cache:
         cache_summary = "The reusable incremental cache was kept."
     elif result.cache_active_leases:
         cache_summary = (
             "Cache cleanup was skipped because "
             f"{result.cache_active_leases} active build(s) are using it."
+        )
+    elif args.obsolete_cache:
+        cache_summary = (
+            f"Removed {result.cache_removed_records} obsolete cache record(s) and "
+            f"{result.cache_removed_blobs} unreferenced blob(s); kept the current cache"
+            + (
+                f" and {result.cache_skipped_recent_records} recent obsolete record(s)."
+                if result.cache_skipped_recent_records
+                else "."
+            )
         )
     else:
         cache_summary = (
@@ -193,7 +251,8 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
         reclaimed_bytes=result.reclaimed_bytes,
         skipped_active=result.skipped_active,
         skipped_recent=result.skipped_recent,
-        cache_requested=args.cache,
+        cache_requested=args.cache or args.obsolete_cache,
+        obsolete_cache_requested=args.obsolete_cache,
         cache_records=result.cache_removed_records,
         cache_blobs=result.cache_removed_blobs,
         active_cache_leases=result.cache_active_leases,

@@ -40,7 +40,11 @@ from reprobit.discovery_cli import (
     _run_discovery_wineserver_command,
 )
 from reprobit.discovery_project_grind import enumerate_project_grind_campaign
-from reprobit.incremental import IncrementalBuildSummary
+from reprobit.incremental import (
+    PRODUCER_CACHE_IMPLEMENTATION,
+    PRODUCER_CACHE_IMPLEMENTATION_FAMILY,
+    IncrementalBuildSummary,
+)
 from reprobit.model import (
     Artifact,
     ArtifactKind,
@@ -3631,6 +3635,69 @@ def test_state_status_and_clean_expose_retained_workspace_lifecycle(
     cleaned = capsys.readouterr().out
     assert "Removed 1 cache record" in cleaned
     assert cache.status().records == 0
+
+
+def test_state_status_guides_safe_obsolete_cache_cleanup(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_project(project)
+    capsys.readouterr()
+    state = project / ".reprobit-state"
+    state.mkdir()
+    current_source = tmp_path / "current.obj"
+    obsolete_source = tmp_path / "obsolete.obj"
+    current_source.write_bytes(b"current")
+    obsolete_source.write_bytes(b"obsolete")
+    obsolete_implementation = f"{PRODUCER_CACHE_IMPLEMENTATION_FAMILY}obsolete"
+    current = IncrementalCache(state, implementation=PRODUCER_CACHE_IMPLEMENTATION)
+    obsolete = IncrementalCache(state, implementation=obsolete_implementation)
+    with current.lease() as lease:
+        current_record = lease.store(
+            "producer",
+            cache_key(
+                "producer",
+                {"node": "current"},
+                implementation=current.implementation,
+            ),
+            {"current.obj": current_source},
+        )
+    with obsolete.lease() as lease:
+        obsolete_record = lease.store(
+            "producer",
+            cache_key(
+                "producer",
+                {"node": "obsolete"},
+                implementation=obsolete.implementation,
+            ),
+            {"obsolete.obj": obsolete_source},
+        )
+
+    assert main(["--format", "ndjson", "state", "status", str(project)]) == 0
+    status = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert status["cache_current_records"] == 1
+    assert status["cache_obsolete_records"] == 1
+    assert main(["state", "status", str(project)]) == 0
+    human_status = capsys.readouterr().out
+    assert "1 current, 1 obsolete" in human_status
+    assert "--obsolete-cache --preview" in human_status
+
+    assert main(["clean", str(project), "--obsolete-cache", "--preview"]) == 0
+    preview = capsys.readouterr().out
+    assert "1 obsolete cache record" in preview
+    assert "current cache will be kept" in preview
+    assert "--obsolete-cache" in preview
+    assert current.status().records == 2
+
+    assert main(["clean", str(project), "--obsolete-cache"]) == 0
+    cleaned = capsys.readouterr().out
+    assert "Removed 1 obsolete cache record" in cleaned
+    assert "kept the current cache" in cleaned
+    with current.lease() as lease:
+        assert lease.lookup("producer", current_record.key) == current_record
+    with obsolete.lease() as lease:
+        assert lease.lookup("producer", obsolete_record.key) is None
 
 
 def test_state_status_and_clean_reports_are_explicit_and_previewable(

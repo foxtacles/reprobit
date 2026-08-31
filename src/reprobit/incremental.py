@@ -33,6 +33,7 @@ from reprobit.source_lock import SourceLockError, receipt_source_input
 from reprobit.strict_json import JsonValue
 
 _PRODUCER_IMPLEMENTATION_ROOTS = ("reprobit.classic_incremental",)
+PRODUCER_CACHE_IMPLEMENTATION_FAMILY = "classic-producer-graph-"
 (
     _INITIAL_PRODUCER_IMPLEMENTATION_DIGEST,
     _PRODUCER_IMPLEMENTATION_PATHS,
@@ -65,7 +66,7 @@ def producer_cache_implementation(
     """Bind the cache namespace to output-affecting warm-build code."""
 
     digest = implementation_digest or producer_implementation_digest()
-    return f"classic-producer-graph-v1-{digest.value}"
+    return f"{PRODUCER_CACHE_IMPLEMENTATION_FAMILY}v1-{digest.value}"
 
 
 PRODUCER_IMPLEMENTATION_DIGEST = _INITIAL_PRODUCER_IMPLEMENTATION_DIGEST
@@ -393,6 +394,7 @@ def producer_cache_key(material: dict[str, JsonValue]) -> str:
 
 __all__ = [
     "PRODUCER_CACHE_IMPLEMENTATION",
+    "PRODUCER_CACHE_IMPLEMENTATION_FAMILY",
     "PRODUCER_IMPLEMENTATION_DIGEST",
     "DeveloperAuthority",
     "IncrementalAuthorityError",

@@ -85,6 +85,8 @@ class CacheStatus:
     files: int
     active_leases: int
     stale_leases: int
+    current_records: int = 0
+    obsolete_records: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -468,7 +470,13 @@ class IncrementalCache:
                 lock.close()
         return active, stale
 
-    def status(self) -> CacheStatus:
+    def status(self, *, implementation_family: str | None = None) -> CacheStatus:
+        if implementation_family is not None:
+            _require_implementation(implementation_family)
+            if not self.implementation.startswith(implementation_family):
+                raise CacheError(
+                    "current cache implementation is outside the selected implementation family"
+                )
         if not os.path.lexists(self.format_root):
             return CacheStatus(0, 0, 0, 0, 0, 0)
         self._ensure_layout()
@@ -477,6 +485,8 @@ class IncrementalCache:
         blobs = 0
         files = 0
         size = 0
+        current_records = 0
+        obsolete_records = 0
         pending = [self.format_root]
         while pending:
             directory = pending.pop()
@@ -494,26 +504,58 @@ class IncrementalCache:
                 files += 1
                 size += stat_result.st_size
                 path = Path(entry.path)
+                try:
+                    record_relative = path.relative_to(self._records_root)
+                except ValueError:
+                    record_relative = None
                 if (
-                    path.suffix == ".json"
+                    record_relative is not None
+                    and path.suffix == ".json"
                     and path.name != "format.json"
-                    and ("records" in path.parts)
                 ):
                     records += 1
-                if "blobs" in path.parts and _HEX.fullmatch(path.name):
+                    if implementation_family is not None:
+                        if len(record_relative.parts) != 4:
+                            raise CachePoisonError(f"cache record path is invalid: {path}")
+                        implementation = record_relative.parts[0]
+                        if not _IMPLEMENTATION.fullmatch(implementation):
+                            raise CachePoisonError(
+                                f"cache record implementation is invalid: {path}"
+                            )
+                        if implementation == self.implementation:
+                            current_records += 1
+                        elif implementation.startswith(implementation_family):
+                            obsolete_records += 1
+                if path.is_relative_to(self._blobs_root) and _HEX.fullmatch(path.name):
                     blobs += 1
-        return CacheStatus(records, blobs, size, files, active, stale)
+        return CacheStatus(
+            records,
+            blobs,
+            size,
+            files,
+            active,
+            stale,
+            current_records,
+            obsolete_records,
+        )
 
     def gc(
         self,
         *,
         older_than_seconds: float = 0.0,
         dry_run: bool = False,
+        obsolete_implementation_family: str | None = None,
     ) -> CacheGCResult:
         """Remove old records then unreferenced blobs under the global GC gate."""
 
         if older_than_seconds < 0:
             raise CacheError("cache GC age cannot be negative")
+        if obsolete_implementation_family is not None:
+            _require_implementation(obsolete_implementation_family)
+            if not self.implementation.startswith(obsolete_implementation_family):
+                raise CacheError(
+                    "current cache implementation is outside the selected implementation family"
+                )
         if not os.path.lexists(self.format_root):
             return CacheGCResult(0, 0, 0, 0, 0, dry_run)
         self._ensure_layout()
@@ -536,6 +578,13 @@ class IncrementalCache:
             retained_records: list[CacheRecord] = []
             for path in sorted(record_paths):
                 record = self._parse_record(path, require_current=False)
+                selected = obsolete_implementation_family is None or (
+                    record.implementation.startswith(obsolete_implementation_family)
+                    and record.implementation != self.implementation
+                )
+                if not selected:
+                    retained_records.append(record)
+                    continue
                 if path.stat(follow_symlinks=False).st_mtime_ns > cutoff:
                     skipped_recent += 1
                     retained_records.append(record)
@@ -570,6 +619,16 @@ class IncrementalCache:
             for path in sorted(self._indexes_root.rglob("*.json")):
                 if path.is_symlink() or not path.is_file():
                     raise CachePoisonError(f"cache index is redirected: {path}")
+                if obsolete_implementation_family is not None:
+                    relative = path.relative_to(self._indexes_root)
+                    if not relative.parts or not _IMPLEMENTATION.fullmatch(relative.parts[0]):
+                        raise CachePoisonError(f"cache index path is invalid: {path}")
+                    implementation = relative.parts[0]
+                    if (
+                        not implementation.startswith(obsolete_implementation_family)
+                        or implementation == self.implementation
+                    ):
+                        continue
                 if path.stat(follow_symlinks=False).st_mtime_ns > cutoff:
                     continue
                 removed_indexes += 1
@@ -591,6 +650,16 @@ class IncrementalCache:
                     continue
                 if lock_path.is_symlink() or not lock_path.is_file():
                     raise CachePoisonError(f"cache index lock is redirected: {lock_path}")
+                if obsolete_implementation_family is not None:
+                    relative = lock_path.relative_to(self._indexes_root)
+                    if not relative.parts or not _IMPLEMENTATION.fullmatch(relative.parts[0]):
+                        raise CachePoisonError(f"cache index lock path is invalid: {lock_path}")
+                    implementation = relative.parts[0]
+                    if (
+                        not implementation.startswith(obsolete_implementation_family)
+                        or implementation == self.implementation
+                    ):
+                        continue
                 if lock_path.with_suffix(".json").exists() or (
                     lock_path.stat(follow_symlinks=False).st_mtime_ns > cutoff
                 ):

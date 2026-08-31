@@ -21,10 +21,11 @@ path is printed; pass `--keep-workspace never` to discard it or `always` to keep
 successful runs too. Use `rbit state status` to inspect disk use and
 `rbit clean --preview` to see how much inactive state can be removed. Run
 `rbit clean` when you are finished diagnosing retained failures. The reusable
-build cache is kept unless you explicitly add `--cache`; preview that broader
-cleanup with `rbit clean --cache --preview` first. Generated verification and
-grind reports are counted by `state status`, kept by default, and removed only
-when you add `--reports`.
+build cache is kept unless you explicitly select cache cleanup. Add
+`--obsolete-cache` to the normal cleanup preview for data this ReproBit version
+cannot reuse, or use `rbit clean --cache --preview` before clearing the complete cache.
+Generated verification and grind reports are counted by `state status`, kept by
+default, and removed only when you add `--reports`.
 
 ## Toolchain doctor reports a digest or tree mismatch
 

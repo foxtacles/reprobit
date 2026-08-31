@@ -150,9 +150,11 @@ lock asks for it.
 
 Failed builds keep a private workspace so problems can be inspected. Reclaim
 those workspaces with `rbit clean .`; the reusable build cache is kept by
-default. Use `rbit clean . --cache` when you also want to reclaim cache space,
-or `rbit clean . --reports` to remove generated verification and grind reports.
-Add `--preview` to see exactly what would be removed.
+default. `rbit state status .` points out cache data the current ReproBit version
+cannot reuse. Include it when cleaning inactive workspaces with
+`rbit clean . --obsolete-cache --preview`; the current cache is kept. Use
+`--cache` to clear the complete cache, or `--reports` to remove generated
+verification and grind reports.
 
 ReproBit uses the remembered authenticated compiler and the locked host launchers. CI can still
 pass explicit machine paths and emit NDJSON. Use `rbit build . --cold` for a non-certifying

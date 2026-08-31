@@ -450,18 +450,21 @@ rbit clean .
 ```
 
 `clean` removes inactive workspaces but keeps the reusable incremental cache and
-saved reports. Add `--cache` or `--reports` only when you also want to remove
-cache data or managed verification and grind reports. Keep `--preview` while
-reviewing the larger selection:
+saved reports. `state status` separates reusable build records from cache data
+left by older ReproBit code and prints the safe cleanup command when it finds
+any. The following preview includes ordinary inactive-workspace cleanup and
+keeps the current cache:
 
 ```console
+rbit clean . --obsolete-cache --preview
 rbit clean . --cache --preview
 rbit clean . --reports --preview
 ```
 
-Use `--older-than-hours 24` to keep recent workspaces and cache records. Active
-runs are never removed. For unusual debugging, the `--keep-workspace` option
-changes which run workspaces are retained.
+Use `--cache` only when you intend to clear the complete incremental cache. Use
+`--older-than-hours 24` to keep recent workspaces and selected cache records.
+Active runs are never removed. For unusual debugging, the `--keep-workspace`
+option changes which run workspaces are retained.
 
 ## Find and save compiler adjustments
 

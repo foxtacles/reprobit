@@ -659,10 +659,16 @@ def _parser() -> argparse.ArgumentParser:
         metavar="HOURS",
         help="keep workspace and cache entries newer than this age (default: 0)",
     )
-    clean.add_argument(
+    cache_cleanup = clean.add_mutually_exclusive_group()
+    cache_cleanup.add_argument(
         "--cache",
         action="store_true",
         help="also remove cache records and blobs old enough for the selected age",
+    )
+    cache_cleanup.add_argument(
+        "--obsolete-cache",
+        action="store_true",
+        help="also remove cache data this ReproBit version cannot reuse; keep the current cache",
     )
     clean.add_argument(
         "--reports",
