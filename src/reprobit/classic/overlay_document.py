@@ -581,6 +581,34 @@ def render_classic_overlay_declarations(
     return _render_outputs(outputs, clean_inputs, session=session)
 
 
+def render_classic_overlay_proposal(
+    declarations: Sequence[Mapping[str, object]],
+    clean_inputs: Mapping[str, bytes],
+    *,
+    session: ClassicOverlayRenderSession | None = None,
+) -> ClassicOverlayRenderResult:
+    """Render declarations whose effective pins are being regenerated.
+
+    This is the narrow seam for the reviewed regeneration workflow: after an
+    admitted source edit, the recorded effective digests are stale by
+    definition, so this renderer resolves every anchor against the supplied
+    clean bytes and returns freshly computed output identities instead of
+    comparing them with the recorded pins.  Each declaration must still carry
+    the digest of the clean bytes it is rendered against, and every anchor
+    that fails to resolve aborts the render.  The proposed identities are
+    only proposals: the rewritten documents must still pass the verifying
+    render at lock time and the literal byte gate at verify time.
+    """
+
+    outputs = _parse_declarations(list(declarations), require_sizes=False)
+    if session is None:
+        with ClassicOverlayRenderSession() as invocation:
+            return _render_outputs(
+                outputs, clean_inputs, session=invocation, verify_output_identity=False
+            )
+    return _render_outputs(outputs, clean_inputs, session=session, verify_output_identity=False)
+
+
 def render_classic_overlay(
     document: Mapping[str, object],
     clean_inputs: Mapping[str, bytes],

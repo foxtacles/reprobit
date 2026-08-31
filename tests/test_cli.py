@@ -662,6 +662,156 @@ def test_source_preview_reports_stale_donor_overlay_input_and_lock_refuses_it(
         assert expected_detail in capsys.readouterr().err
 
 
+def test_source_regenerate_heals_stale_translation_unit_pins(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    unit_id, old_digest = _complete_translation_unit_project(project)
+    capsys.readouterr()
+    edited = b"int main() { return 1; }\n"
+    (project / "src/unit.cpp").write_bytes(edited)
+    unit_path = project / "reprobit/interventions/unit.json"
+    plan_path = project / "reprobit/build-plan.json"
+    before = {path: path.read_bytes() for path in (unit_path, plan_path)}
+
+    assert main(["--format", "ndjson", "source", "regenerate", "--project", str(project)]) == 0
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["event"] == "source_regenerated"
+    assert event["applied"] is False
+    assert {change["after"] for change in event["changes"]} == {Digest.from_bytes(edited).value}
+    assert all(path.read_bytes() == data for path, data in before.items())
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "source",
+                "regenerate",
+                "--project",
+                str(project),
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["applied"] is True
+    assert sorted(event["documents"]) == [
+        "reprobit/build-plan.json",
+        "reprobit/interventions/unit.json",
+    ]
+    unit_document = json.loads(unit_path.read_bytes())
+    assert unit_document["source_digest"]["value"] == Digest.from_bytes(edited).value
+    assert unit_document["source_digest"]["value"] != old_digest.value
+    plan_document = json.loads(plan_path.read_bytes())
+    assert plan_document["translation_units"][0]["id"] == unit_id
+    assert (
+        plan_document["translation_units"][0]["source_digest"]["value"]
+        == Digest.from_bytes(edited).value
+    )
+
+    paths = ["--path", "notes.txt", "--path", "reprobit.toml", "--path", "src/unit.cpp"]
+    assert main(["source", "lock", "--project", str(project), *paths]) == 0
+    load_project_tree(project)
+
+
+def test_source_regenerate_heals_stale_donor_overlay_pins(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    header = _complete_donor_overlay_project(project)
+    capsys.readouterr()
+    edited_header = b"// harmless source comment\n#define VALUE 1\n"
+    header.write_bytes(edited_header)
+    edited_source = b"int main() { return 4; }\n"
+    (project / "src/unit.cpp").write_bytes(edited_source)
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "source",
+                "regenerate",
+                "--project",
+                str(project),
+                "--apply",
+            ]
+        )
+        == 0
+    )
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["applied"] is True
+
+    proof = json.loads((project / "reprobit/proofs/unit.proof.json").read_bytes())
+    donor_values = next(
+        observation["expected_values"]
+        for observation in proof["expected_observations"]
+        if observation["intervention_id"] == "donor.overlay"
+    )
+    assert donor_values["renderings[0].clean_sha256"] == Digest.from_bytes(edited_source).value
+    assert (
+        donor_values["renderings[0].rendered_sha256"]
+        == Digest.from_bytes(edited_source + b"\n").value
+    )
+    assert donor_values["renderings[1].clean_sha256"] == Digest.from_bytes(edited_header).value
+    assert (
+        donor_values["renderings[1].rendered_sha256"]
+        == Digest.from_bytes(edited_header + b"\n").value
+    )
+    unit_document = json.loads((project / "reprobit/interventions/unit.json").read_bytes())
+    donor = next(item for item in unit_document["interventions"] if item["id"] == "donor.overlay")
+    parameters = {field["name"]: field["value"] for field in donor["parameters"]}
+    expected_claim = [
+        {
+            "path": rendering["path"],
+            "operations": rendering["operations"],
+            "clean_sha256": donor_values[f"renderings[{index}].clean_sha256"],
+            "rendered_sha256": donor_values[f"renderings[{index}].rendered_sha256"],
+        }
+        for index, rendering in enumerate(parameters["renderings"])
+    ]
+    assert (
+        parameters["rendering_identity_sha256"]
+        == Digest.from_bytes(
+            (json.dumps(expected_claim, indent=2, sort_keys=True) + "\n").encode()
+        ).value
+    )
+
+    paths = [
+        "--path",
+        "include/unit.h",
+        "--path",
+        "notes.txt",
+        "--path",
+        "reprobit.toml",
+        "--path",
+        "src/unit.cpp",
+    ]
+    assert main(["source", "lock", "--project", str(project), *paths]) == 0
+    load_project_tree(project)
+
+
+def test_source_regenerate_reports_nothing_when_pins_match(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_donor_overlay_project(project)
+    capsys.readouterr()
+    documents = {path: path.read_bytes() for path in sorted((project / "reprobit").rglob("*.json"))}
+
+    assert main(["--format", "ndjson", "source", "regenerate", "--project", str(project)]) == 0
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["event"] == "source_regenerated"
+    assert event["applied"] is False
+    assert event["changes"] == []
+    assert all(path.read_bytes() == data for path, data in documents.items())
+
+
 def test_source_authority_preflights_classic_source_semantics(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

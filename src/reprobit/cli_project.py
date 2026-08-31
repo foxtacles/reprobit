@@ -431,6 +431,72 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
     return 0
 
 
+def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> int:
+    """Regenerate mechanical source-derived pins after admitted source edits."""
+
+    from reprobit.source_regeneration import (
+        SourceRegenerationError,
+        apply_source_regeneration,
+        plan_source_regeneration,
+    )
+
+    root = project_root(args.project)
+    try:
+        plan = plan_source_regeneration(root)
+    except SourceRegenerationError as exc:
+        raise CLIError(f"source regeneration refused: {exc}") from exc
+    rendered_changes = [
+        {
+            "document": change.document,
+            "location": change.location,
+            "before": change.before,
+            "after": change.after,
+        }
+        for change in plan.changes
+    ]
+    if not plan.changes:
+        output.emit(
+            "source_regenerated",
+            "reviewed source-derived authority already matches current bytes",
+            applied=False,
+            changes=rendered_changes,
+            documents=[],
+        )
+        return 0
+    lines = [
+        f"Source regeneration: {len(plan.changes)} pin(s) across "
+        f"{len(plan.changed_documents)} document(s)"
+    ]
+    for change in plan.changes:
+        lines.append(f"  {change.document}: {change.location}")
+        lines.append(f"    {change.before} -> {change.after}")
+    if args.apply:
+        try:
+            apply_source_regeneration(root, plan)
+        except SourceRegenerationError as exc:
+            raise CLIError(f"source regeneration refused: {exc}") from exc
+        next_command = human_command(("rbit", "source", "lock", "--project", root))
+        lines.append(f"Next: {next_command}")
+        output.emit(
+            "source_regenerated",
+            "\n".join(lines),
+            applied=True,
+            changes=rendered_changes,
+            documents=list(plan.changed_documents),
+            next_command=next_command,
+        )
+        return 0
+    lines.append("Dry run: no documents were written; rerun with --apply to write")
+    output.emit(
+        "source_regenerated",
+        "\n".join(lines),
+        applied=False,
+        changes=rendered_changes,
+        documents=list(plan.changed_documents),
+    )
+    return 0
+
+
 def command_source_export(args: argparse.Namespace, output: CLIOutput) -> int:
     """Materialize the reviewed effective source view used by producers."""
 

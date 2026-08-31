@@ -32,6 +32,7 @@ from reprobit.cli_project import (
     command_source_export,
     command_source_lock,
     command_source_preview,
+    command_source_regenerate,
     command_status,
     command_validate,
 )
@@ -429,6 +430,22 @@ def _parser() -> argparse.ArgumentParser:
         help="remove a stale generated graph in the same transaction after source changes",
     )
     source_lock.set_defaults(handler=command_source_lock)
+    source_regenerate = source_commands.add_parser(
+        "regenerate",
+        help=(
+            "re-derive stale mechanical source pins (overlay outputs, donor "
+            "renderings, TU digests) after admitted source edits"
+        ),
+    )
+    source_regenerate.add_argument(
+        "--project", default=".", help="project containing reprobit.toml (default: .)"
+    )
+    source_regenerate.add_argument(
+        "--apply",
+        action="store_true",
+        help="write the regenerated documents (default: dry run)",
+    )
+    source_regenerate.set_defaults(handler=command_source_regenerate)
 
     import_command = subcommands.add_parser(
         "import", help="prepare an existing project for direct ReproBit builds"

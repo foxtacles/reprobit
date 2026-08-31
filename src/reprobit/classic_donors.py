@@ -1357,6 +1357,65 @@ def prepare_donor_compile_request(
     )
 
 
+def derive_special_seat_proof(source: bytes) -> dict[str, object]:
+    """Derive the prefix/after-includes seat witnesses for one effective source.
+
+    This is the producing mirror of the seat validation used when rendering a
+    ``prefix_forward_after_includes_extern`` donor; the derived proof is
+    validated against the same source before it is returned, so a source that
+    cannot host both seats fails here instead of at prepare time.
+    """
+
+    first_end = source.find(b"\n")
+    _require(first_end >= 0 and len(source) >= 64, "source lacks a prefix witness")
+    physical = source.splitlines(keepends=True)
+    includes = [index for index, line in enumerate(physical) if line.startswith(b"#include")]
+    _require(
+        bool(includes) and includes[-1] + 1 < len(physical),
+        "source lacks after-includes seat",
+    )
+    include_index = includes[-1]
+    seat = sum(len(line) for line in physical[: include_index + 1])
+    proof: dict[str, object] = {
+        "kind": "prefix_and_after_last_include_seats_v1",
+        "prefix_offset": 0,
+        "prefix_input_sha256": _digest(b""),
+        "prefix_following_line_sha256": _digest(source[: first_end + 1]),
+        "prefix_context_sha256": _digest(source[:64]),
+        "after_includes_offset": seat,
+        "preceding_line_sha256": _digest(physical[include_index]),
+        "following_line_sha256": _digest(physical[include_index + 1]),
+        "centered_context_sha256": _digest(source[seat - 32 : seat + 32]),
+    }
+    _validate_special_seats(source, proof)
+    return proof
+
+
+def render_declaration_carrier_source(
+    intervention: ClassicRecipeIntervention,
+    receipts: Iterable[ClassicProofReceipt],
+    effective_source: bytes,
+) -> bytes:
+    """Render one ordinary declaration-carrier donor against the given source.
+
+    This is the seam for the reviewed regeneration workflow: it validates the
+    recipe (including any seat proof carried in its parameters) and returns
+    the donor-rendered source bytes without comparing them to the recorded
+    ``rendered_source_*`` pins, so a regeneration can propose replacements
+    that the prepare path then re-proves.
+    """
+
+    validation = validate_donor_recipe(
+        intervention,
+        matching_candidate_constraints(intervention, receipts),
+    )
+    _require(
+        validation.generated_declarations is not None,
+        "classic recipe is not a declaration-carrier donor",
+    )
+    return _render_ordinary_source(validation, effective_source)
+
+
 __all__ = [
     "DONOR_FAMILIES",
     "CandidateConstraints",
@@ -1366,6 +1425,7 @@ __all__ = [
     "DonorIncludeProjection",
     "DonorRecipeValidation",
     "DonorSourceError",
+    "derive_special_seat_proof",
     "donor_overlay_clean_input_pins",
     "donor_requires_dependency_tracking",
     "generate_declaration_shape",
@@ -1375,5 +1435,6 @@ __all__ = [
     "matching_candidate_constraints",
     "merge_candidate_constraints",
     "prepare_donor_compile_request",
+    "render_declaration_carrier_source",
     "validate_donor_recipe",
 ]
