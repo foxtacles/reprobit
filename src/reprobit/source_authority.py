@@ -72,6 +72,24 @@ def _parameter_map(intervention: ClassicRecipeIntervention) -> dict[str, Any]:
     return {item.name: item.value for item in intervention.parameters}
 
 
+def _line_ending_drift_hint(payload: bytes, expected: Digest) -> str | None:
+    """Identify a byte mismatch caused only by checkout newline conversion."""
+
+    lf = payload.replace(b"\r\n", b"\n")
+    if lf != payload and Digest.from_bytes(lf) == expected:
+        return (
+            "the current checkout uses CRLF where the source lock expects LF; "
+            "restore the checkout and declare the line-ending policy in .gitattributes"
+        )
+    crlf = lf.replace(b"\n", b"\r\n")
+    if crlf != payload and Digest.from_bytes(crlf) == expected:
+        return (
+            "the current checkout uses LF where the source lock expects CRLF; "
+            "restore the checkout and declare the line-ending policy in .gitattributes"
+        )
+    return None
+
+
 def _donor_overlay_input_pins(
     intervention: ClassicRecipeIntervention,
     receipts: tuple[ClassicProofReceipt, ...],
@@ -182,10 +200,30 @@ def inspect_source_authority(
         except SourceLockError as exc:
             raise SourceAuthorityError(str(exc)) from exc
         if size != entry.size or digest != entry.digest:
+            drift_hint: str | None = None
+            try:
+                _second_size, second_digest, current = receipt_source_input(
+                    root,
+                    entry.path,
+                    capture=True,
+                )
+            except SourceLockError:
+                current = None
+                second_digest = digest
+            if current is not None and second_digest == digest:
+                drift_hint = _line_ending_drift_hint(current, entry.digest)
+            mismatch = (
+                f"source input differs from portable manifest: {entry.path!r} "
+                f"(expected {entry.digest.value}, found {digest.value})"
+            )
+            if drift_hint is not None:
+                raise SourceAuthorityError(
+                    f"{mismatch}. This is checkout drift, not an intervention change: "
+                    f"{drift_hint}. Do not run repair for this mismatch."
+                )
             raise SourceAuthorityError(
                 "saved ReproBit guidance no longer matches the edited source; "
-                "run rbit repair . Details: source input differs from portable manifest: "
-                f"{entry.path!r} (expected {entry.digest.value}, found {digest.value})"
+                f"run rbit repair . Details: {mismatch}"
             )
         verified_digests[entry.path] = digest
         if data is not None:
