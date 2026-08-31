@@ -8,7 +8,13 @@ from typing import Any, cast
 import pytest
 
 import reprobit.repair_workflow as subject
+from reprobit.classic.donor_retune_candidates import DonorRetuneChange
 from reprobit.classic.redundant_action_repair import RedundantActionRepairError
+from reprobit.classic.repair_probe import (
+    ClassicDonorRetuneAttemptRefusal,
+    ClassicDonorRetuneProbeResult,
+    ClassicDonorRetuneRefusal,
+)
 from reprobit.schema import ClassicRecipeRole
 
 
@@ -31,6 +37,15 @@ def _run(
     analyses: list[object],
 ) -> subject.RepairWorkflowResult:
     bundle_counter = iter(range(100))
+    interventions: list[object] = []
+    seen_interventions: set[int] = set()
+    for analysis in analyses:
+        for refusal in analysis.structural_refusals:
+            intervention = refusal.intervention
+            if id(intervention) in seen_interventions:
+                continue
+            seen_interventions.add(id(intervention))
+            interventions.append(intervention)
     monkeypatch.setattr(
         subject,
         "load_project_tree",
@@ -39,7 +54,7 @@ def _run(
                 SimpleNamespace(model_dump=lambda **_kwargs: {"pass": next(bundle_counter)}),
             ),
             proof_documents=(),
-            interventions=(),
+            interventions=tuple(interventions),
         ),
     )
     monkeypatch.setattr(
@@ -113,7 +128,7 @@ def test_workflow_retires_one_proven_redundant_action_before_donor_search(
         receipt_edits=(object(),),
         removed_donors=("donor",),
     )
-    monkeypatch.setattr(subject, "plan_redundant_action_retirement", lambda *_args: plan)
+    monkeypatch.setattr(subject, "plan_redundant_action_retirements", lambda *_args: plan)
     monkeypatch.setattr(
         subject,
         "apply_classic_authority_edits",
@@ -159,7 +174,7 @@ def test_workflow_rejects_redundant_retirement_that_changes_no_records(
         receipt_edits=(object(),),
         removed_donors=(),
     )
-    monkeypatch.setattr(subject, "plan_redundant_action_retirement", lambda *_args: plan)
+    monkeypatch.setattr(subject, "plan_redundant_action_retirements", lambda *_args: plan)
     monkeypatch.setattr(subject, "apply_classic_authority_edits", lambda *_args, **_kwargs: ())
 
     with pytest.raises(
@@ -186,7 +201,7 @@ def test_workflow_applies_bounded_donor_repairs_and_rechecks_composition(
     )
     monkeypatch.setattr(
         subject,
-        "plan_redundant_action_retirement",
+        "plan_redundant_action_retirements",
         lambda *_args: (_ for _ in ()).throw(RedundantActionRepairError("not redundant")),
     )
     repair = object()
@@ -239,7 +254,7 @@ def test_workflow_passes_one_cumulative_candidate_budget_to_donor_probes(
     )
     monkeypatch.setattr(
         subject,
-        "plan_redundant_action_retirement",
+        "plan_redundant_action_retirements",
         lambda *_args: (_ for _ in ()).throw(RedundantActionRepairError("not redundant")),
     )
     budgets: list[int] = []
@@ -293,7 +308,7 @@ def test_workflow_rejects_donor_repair_that_changes_no_records(
     )
     monkeypatch.setattr(
         subject,
-        "plan_redundant_action_retirement",
+        "plan_redundant_action_retirements",
         lambda *_args: (_ for _ in ()).throw(RedundantActionRepairError("not redundant")),
     )
     monkeypatch.setattr(
@@ -315,7 +330,7 @@ def test_workflow_rejects_donor_repair_that_changes_no_records(
         )
 
 
-def test_workflow_reports_a_plain_bounded_failure(
+def test_workflow_reports_the_candidate_that_reached_the_strongest_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -328,25 +343,72 @@ def test_workflow_reports_a_plain_bounded_failure(
     )
     monkeypatch.setattr(
         subject,
-        "plan_redundant_action_retirement",
+        "plan_redundant_action_retirements",
         lambda *_args: (_ for _ in ()).throw(RedundantActionRepairError("not redundant")),
     )
     monkeypatch.setattr(
         subject,
         "probe_classic_donor_repairs",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            repairs=(),
-            refusals=(SimpleNamespace(reason="no nearby donor setting worked"),),
-            compiled_candidates=8,
+        lambda *_args, **_kwargs: ClassicDonorRetuneProbeResult(
+            (),
+            (
+                ClassicDonorRetuneRefusal(
+                    "tu.one",
+                    "donor.one",
+                    ("function.one",),
+                    8,
+                    "no nearby donor setting worked",
+                    (
+                        ClassicDonorRetuneAttemptRefusal(
+                            2,
+                            (
+                                DonorRetuneChange(
+                                    ("parameters", "classes"),
+                                    6,
+                                    8,
+                                ),
+                            ),
+                            "ordinary_validation",
+                            "retail relocation target changed",
+                        ),
+                    ),
+                ),
+            ),
+            8,
         ),
     )
 
-    with pytest.raises(subject.RepairWorkflowError, match="bounded, ordinarily validated"):
+    with pytest.raises(subject.RepairWorkflowError) as raised:
         _run(
             tmp_path,
             monkeypatch,
             [_analysis(completed=False, refusals=(refusal,))],
         )
+
+    message = str(raised.value)
+    assert "No safe adjustment restored `tu.one` after trying 8 donor settings." in message
+    assert "Closest useful candidate: `classes` 6 -> 8." in message
+    assert "Why it was refused: retail relocation target changed" in message
+    assert raised.value.diagnostic == {
+        "unit_id": "tu.one",
+        "donor_id": "donor.one",
+        "action_ids": ["function.one"],
+        "candidates_tried": 8,
+        "reason": "no nearby donor setting worked",
+        "best_candidate": {
+            "distance": 2,
+            "stage": "ordinary_validation",
+            "reason": "retail relocation target changed",
+            "changes": [
+                {
+                    "path": ["parameters", "classes"],
+                    "before": 6,
+                    "after": 8,
+                    "kind": "knob",
+                }
+            ],
+        },
+    }
 
 
 def test_workflow_stops_when_authority_state_repeats(
@@ -383,13 +445,17 @@ def test_workflow_stops_when_authority_state_repeats(
         )
 
 
-def test_workflow_has_a_small_explicit_pass_ceiling(
+def test_workflow_allows_a_clean_check_after_twenty_four_adjustment_rounds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repair = SimpleNamespace(unit_id="tu.one")
     analyses = [
-        _analysis(completed=True, measured=(repair,)) for _ in range(subject.MAX_REPAIR_PASSES)
+        *(
+            _analysis(completed=True, measured=(repair,))
+            for _ in range(subject.MAX_REPAIR_ADJUSTMENT_ROUNDS)
+        ),
+        _analysis(completed=True),
     ]
     monkeypatch.setattr(
         subject,
@@ -397,7 +463,129 @@ def test_workflow_has_a_small_explicit_pass_ceiling(
         lambda *_args: ("reprobit/proofs/one.json",),
     )
 
-    with pytest.raises(subject.RepairWorkflowError, match="after 24 bounded passes"):
+    result = _run(tmp_path, monkeypatch, analyses)
+
+    assert result.measured_checks == 24
+    assert result.passes == 25
+
+
+def test_workflow_refuses_a_twenty_fifth_adjustment_round(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repair = SimpleNamespace(unit_id="tu.one")
+    analyses = [
+        _analysis(completed=True, measured=(repair,))
+        for _ in range(subject.MAX_REPAIR_ADJUSTMENT_ROUNDS + 1)
+    ]
+    applications = 0
+
+    def apply(*_args: object) -> tuple[str, ...]:
+        nonlocal applications
+        applications += 1
+        return ("reprobit/proofs/one.json",)
+
+    monkeypatch.setattr(subject, "apply_classic_receipt_repairs", apply)
+
+    with pytest.raises(subject.RepairWorkflowError, match="limit of 24"):
         _run(tmp_path, monkeypatch, analyses)
 
+    assert applications == 24
     assert analyses == []
+
+
+def test_workflow_batches_every_visible_redundant_action(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusals = tuple(
+        SimpleNamespace(
+            unit_id=f"tu.{index}",
+            intervention=SimpleNamespace(
+                id=f"function.{index}",
+                role=ClassicRecipeRole.FUNCTION,
+                dependencies=("donor.shared",),
+            ),
+            receipt=SimpleNamespace(id=f"proof.function.{index}"),
+            materials=object(),
+            reason="fresh source already emits the saved function",
+        )
+        for index in range(30)
+    )
+    candidate_counts: list[int] = []
+
+    def plan(_interventions: object, _receipts: object, candidates: tuple[object, ...]) -> object:
+        candidate_counts.append(len(candidates))
+        return SimpleNamespace(
+            intervention_edits=(object(),),
+            receipt_edits=(object(),),
+            removed_donors=("donor.shared",),
+        )
+
+    applications = 0
+
+    def apply(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        nonlocal applications
+        applications += 1
+        return ("reprobit/interventions/functions.json",)
+
+    monkeypatch.setattr(subject, "plan_redundant_action_retirements", plan)
+    monkeypatch.setattr(subject, "apply_classic_authority_edits", apply)
+
+    result = _run(
+        tmp_path,
+        monkeypatch,
+        [
+            _analysis(completed=False, refusals=refusals),
+            _analysis(completed=True),
+        ],
+    )
+
+    assert candidate_counts == [1] * 30 + [30]
+    assert applications == 1
+    assert result.retired_actions == 30
+    assert result.removed_donors == 1
+    assert result.passes == 2
+
+
+def test_retirement_only_rounds_do_not_consume_the_adjustment_limit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusals = tuple(
+        SimpleNamespace(
+            unit_id=f"tu.{index}",
+            intervention=SimpleNamespace(
+                id=f"function.{index}",
+                role=ClassicRecipeRole.FUNCTION,
+                dependencies=("donor.shared",),
+            ),
+            receipt=SimpleNamespace(id=f"proof.function.{index}"),
+            materials=object(),
+            reason="fresh source already emits the saved function",
+        )
+        for index in range(25)
+    )
+    plan = SimpleNamespace(
+        intervention_edits=(object(),),
+        receipt_edits=(object(),),
+        removed_donors=(),
+    )
+    monkeypatch.setattr(subject, "plan_redundant_action_retirements", lambda *_args: plan)
+    monkeypatch.setattr(
+        subject,
+        "apply_classic_authority_edits",
+        lambda *_args, **_kwargs: ("reprobit/interventions/functions.json",),
+    )
+
+    result = _run(
+        tmp_path,
+        monkeypatch,
+        [
+            *(_analysis(completed=False, refusals=(refusal,)) for refusal in refusals),
+            _analysis(completed=True),
+        ],
+    )
+
+    assert result.retired_actions == 25
+    assert result.passes == 26

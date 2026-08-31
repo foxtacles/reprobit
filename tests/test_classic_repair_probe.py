@@ -248,6 +248,77 @@ def test_candidate_windows_are_fair_and_drop_selected_groups() -> None:
     assert tuple(windows) == (("second.2", "second.3"),)
 
 
+def test_best_refusal_prefers_the_candidate_that_reached_ordinary_validation() -> None:
+    measurement_only = subject.ClassicDonorRetuneRefusal(
+        "tu.measurement",
+        "donor.measurement",
+        ("function.measurement",),
+        12,
+        "all measured candidates differed",
+        (
+            subject.ClassicDonorRetuneAttemptRefusal(
+                1,
+                (),
+                "measurement",
+                "body still differs",
+            ),
+        ),
+    )
+    ordinary = subject.ClassicDonorRetuneRefusal(
+        "tu.ordinary",
+        "donor.ordinary",
+        ("function.ordinary",),
+        3,
+        "ordinary checks refused the nearest candidate",
+        (
+            subject.ClassicDonorRetuneAttemptRefusal(
+                3,
+                (),
+                "ordinary_validation",
+                "retail relocation target changed",
+            ),
+        ),
+    )
+
+    result = subject.ClassicDonorRetuneProbeResult((), (measurement_only, ordinary), 15)
+
+    assert result.best_refusal is ordinary
+    assert ordinary.best_attempt is ordinary.attempts[0]
+
+
+def test_best_attempt_uses_distance_then_original_order_for_stable_ties() -> None:
+    farther = subject.ClassicDonorRetuneAttemptRefusal(
+        3,
+        (),
+        "ordinary_validation",
+        "farther",
+    )
+    nearest_first = subject.ClassicDonorRetuneAttemptRefusal(
+        1,
+        (),
+        "ordinary_validation",
+        "nearest first",
+    )
+    nearest_second = subject.ClassicDonorRetuneAttemptRefusal(
+        1,
+        (),
+        "ordinary_validation",
+        "nearest second",
+    )
+    refusal = subject.ClassicDonorRetuneRefusal(
+        "tu.fixture",
+        "donor.fixture",
+        ("function.fixture",),
+        3,
+        "no candidate worked",
+        (farther, nearest_first, nearest_second),
+    )
+
+    assert refusal.best_attempt is nearest_first
+    assert subject.ClassicDonorRetuneProbeResult((), (refusal,), 3).best_refusal is refusal
+    assert subject.ClassicDonorRetuneProbeResult((), (), 0).best_refusal is None
+
+
 def test_retune_uses_small_windows_and_stops_after_first_ordinary_candidate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

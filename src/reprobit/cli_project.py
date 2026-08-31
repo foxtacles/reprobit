@@ -43,6 +43,11 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
+def _count_phrase(count: int, singular: str, plural: str | None = None) -> str:
+    word = singular if count == 1 else (plural or f"{singular}s")
+    return f"{count} {word}"
+
+
 def _render_initial_project(spec: ProjectSpec) -> bytes:
     assert isinstance(spec.build, ProducerGraphBuildAdapter)
     target = spec.targets[0]
@@ -678,21 +683,21 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
         counts_by_document[change.document] = counts_by_document.get(change.document, 0) + 1
     if args.apply:
         summary = (
-            f"Source checks refreshed: {len(plan.changes)} update(s) saved "
-            f"across {len(plan.changed_documents)} project file(s)"
+            f"Source checks refreshed: {_count_phrase(len(plan.changes), 'update')} saved "
+            f"across {_count_phrase(len(plan.changed_documents), 'project file')}"
         )
     else:
         summary = (
-            f"Source-check preview: {len(plan.changes)} update(s) would be saved "
-            f"across {len(plan.changed_documents)} project file(s)"
+            f"Source-check preview: {_count_phrase(len(plan.changes), 'update')} would be saved "
+            f"across {_count_phrase(len(plan.changed_documents), 'project file')}"
         )
     lines = [summary]
     visible_documents = sorted(counts_by_document)[:8]
     for document in visible_documents:
-        lines.append(f"  {document}: {counts_by_document[document]} check(s)")
+        lines.append(f"  {document}: {_count_phrase(counts_by_document[document], 'check')}")
     hidden_documents = len(counts_by_document) - len(visible_documents)
     if hidden_documents:
-        lines.append(f"  ...and {hidden_documents} more project file(s)")
+        lines.append(f"  ...and {_count_phrase(hidden_documents, 'more project file')}")
     if args.apply:
         try:
             transaction = apply_source_regeneration(root, plan)

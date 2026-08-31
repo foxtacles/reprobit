@@ -58,8 +58,9 @@ def test_source_regenerate_uses_future_tense_for_preview_and_past_tense_for_appl
     assert main(["source", "regenerate", "--project", str(project), "--apply"]) == 0
     applied = capsys.readouterr().out
     assert "Source checks refreshed" in applied
-    assert "update(s) saved" in applied
+    assert " saved across " in applied
     assert "would be saved" not in applied
+    assert "(s)" not in applied
     assert f"Next: rbit repair {project}" in applied
 
 

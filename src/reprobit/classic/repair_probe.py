@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from typing import Literal
 
 from reprobit.classic.donor_retune_candidates import (
     DEFAULT_RETUNE_CANDIDATES,
@@ -64,12 +65,28 @@ class ClassicDonorRetuneProbeError(RuntimeError):
     """The requested repair probe is ambiguous or internally inconsistent."""
 
 
+ClassicDonorRetuneAttemptStage = Literal[
+    "preparation",
+    "compilation",
+    "measurement",
+    "ordinary_validation",
+]
+
+_ATTEMPT_STAGE_RANK: dict[ClassicDonorRetuneAttemptStage, int] = {
+    "preparation": 0,
+    "compilation": 1,
+    "measurement": 2,
+    "ordinary_validation": 3,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class ClassicDonorRetuneAttemptRefusal:
     """Why one bounded candidate was not eligible or did not compose."""
 
     distance: int
     changes: tuple[DonorRetuneChange, ...]
+    stage: ClassicDonorRetuneAttemptStage
     reason: str
 
 
@@ -94,8 +111,25 @@ class ClassicDonorRetuneRefusal:
     unit_id: str
     donor_id: str
     action_ids: tuple[str, ...]
+    compiled_candidates: int
     reason: str
     attempts: tuple[ClassicDonorRetuneAttemptRefusal, ...] = ()
+
+    @property
+    def best_attempt(self) -> ClassicDonorRetuneAttemptRefusal | None:
+        """Return the candidate that reached the strongest deterministic check."""
+
+        if not self.attempts:
+            return None
+        _index, attempt = min(
+            enumerate(self.attempts),
+            key=lambda item: (
+                -_ATTEMPT_STAGE_RANK[item[1].stage],
+                item[1].distance,
+                item[0],
+            ),
+        )
+        return attempt
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +139,27 @@ class ClassicDonorRetuneProbeResult:
     repairs: tuple[ClassicDonorRetuneRepair, ...]
     refusals: tuple[ClassicDonorRetuneRefusal, ...]
     compiled_candidates: int
+
+    @property
+    def best_refusal(self) -> ClassicDonorRetuneRefusal | None:
+        """Return the refusal with the most useful deterministic candidate result."""
+
+        if not self.refusals:
+            return None
+
+        def key(item: tuple[int, ClassicDonorRetuneRefusal]) -> tuple[int, int, int]:
+            index, refusal = item
+            attempt = refusal.best_attempt
+            if attempt is None:
+                return (1, 0, index)
+            return (
+                -_ATTEMPT_STAGE_RANK[attempt.stage],
+                attempt.distance,
+                index,
+            )
+
+        _index, refusal = min(enumerate(self.refusals), key=key)
+        return refusal
 
 
 @dataclass(slots=True)
@@ -281,7 +336,9 @@ def _probe_bounded_donor_retunes(
                 limit=limit,
             )
         except DonorRetuneError as exc:
-            group.setup_refusals.append(ClassicDonorRetuneAttemptRefusal(0, (), str(exc)))
+            group.setup_refusals.append(
+                ClassicDonorRetuneAttemptRefusal(0, (), "preparation", str(exc))
+            )
             continue
         for candidate in candidates:
             try:
@@ -304,6 +361,7 @@ def _probe_bounded_donor_retunes(
                     ClassicDonorRetuneAttemptRefusal(
                         candidate.distance,
                         candidate.changes,
+                        "preparation",
                         f"candidate preparation failed: {exc}",
                     )
                 )
@@ -323,6 +381,7 @@ def _probe_bounded_donor_retunes(
                         ClassicDonorRetuneAttemptRefusal(
                             candidate.distance,
                             candidate.changes,
+                            "preparation",
                             "candidate compiler arena collides with a different bounded input",
                         )
                     )
@@ -340,6 +399,7 @@ def _probe_bounded_donor_retunes(
                 group.unit.plan.id,
                 group.donor.intervention.id,
                 group.action_ids,
+                0,
                 (
                     "donor family has no bounded retune candidates"
                     if not group.setup_refusals
@@ -381,6 +441,7 @@ def _probe_bounded_donor_retunes(
                         ClassicDonorRetuneAttemptRefusal(
                             attempt.materialized.distance,
                             attempt.materialized.changes,
+                            "compilation",
                             f"candidate compiler rejected input: {outcome.reason}",
                         )
                     )
@@ -404,6 +465,7 @@ def _probe_bounded_donor_retunes(
                         ClassicDonorRetuneAttemptRefusal(
                             attempt.materialized.distance,
                             attempt.materialized.changes,
+                            exc.stage,
                             str(exc),
                         )
                     )
@@ -461,6 +523,7 @@ def _probe_bounded_donor_retunes(
                 group.unit.plan.id,
                 group.donor.intervention.id,
                 group.action_ids,
+                compiled[group.key],
                 reason,
                 tuple(rejected[group.key]),
             )
@@ -517,6 +580,7 @@ __all__ = [
     "MAX_RETUNE_PROBE_CANDIDATES",
     "MAX_RETUNE_PROBE_WINDOW",
     "ClassicDonorRetuneAttemptRefusal",
+    "ClassicDonorRetuneAttemptStage",
     "ClassicDonorRetuneProbeError",
     "ClassicDonorRetuneProbeResult",
     "ClassicDonorRetuneRefusal",

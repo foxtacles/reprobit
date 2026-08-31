@@ -11,6 +11,7 @@ from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from hashlib import sha256
+from typing import Literal
 
 import reprobit.classic.composition as composition
 from reprobit.binary import ByteIdentityError
@@ -30,9 +31,20 @@ from reprobit.schema import (
     NativeJsonValue,
 )
 
+MeasuredPinRepairStage = Literal["measurement", "ordinary_validation"]
+
 
 class MeasuredPinRepairError(RuntimeError):
     """Fresh compiler products cannot safely refresh one saved receipt."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        stage: MeasuredPinRepairStage = "measurement",
+    ) -> None:
+        super().__init__(message)
+        self.stage = stage
 
 
 @dataclass(frozen=True, slots=True)
@@ -388,21 +400,27 @@ def repair_measured_pins(
             measured, safe_keys = _composition_measurements(intervention, receipt, seed, donor)
         refreshed, changed_keys = _updated_receipt(receipt, measured, safe_keys)
         constraints = merge_candidate_constraints(intervention, refreshed).materialize()
+    except MeasuredPinRepairError:
+        raise
+    except (ByteIdentityError, ClassicProjectError, KeyError, TypeError, ValueError) as exc:
+        raise MeasuredPinRepairError(f"candidate rejected measured-pin repair: {exc}") from exc
+
+    try:
         candidate = (dispatcher or ClassicFamilyDispatcher()).dispatch(
             intervention,
             replace(materials, candidate_constraints=constraints),
         )
         return MeasuredPinRepair(refreshed, changed_keys, candidate)
-    except MeasuredPinRepairError:
-        raise
     except (ByteIdentityError, ClassicProjectError, KeyError, TypeError, ValueError) as exc:
         raise MeasuredPinRepairError(
-            f"ordinary {intervention.family.value} candidate rejected measured-pin repair: {exc}"
+            f"ordinary {intervention.family.value} candidate rejected measured-pin repair: {exc}",
+            stage="ordinary_validation",
         ) from exc
 
 
 __all__ = [
     "MeasuredPinRepair",
     "MeasuredPinRepairError",
+    "MeasuredPinRepairStage",
     "repair_measured_pins",
 ]

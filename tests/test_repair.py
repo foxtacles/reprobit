@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import subprocess
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from reprobit.cli_output import CLIOutput
 from reprobit.cli_paths import CLIError
 from reprobit.project_loader import load_project_tree
 from reprobit.repair import RepairError, capture_repair_snapshot, collect_repair_candidate
-from reprobit.repair_workflow import RepairWorkflowResult
+from reprobit.repair_workflow import RepairWorkflowError, RepairWorkflowResult
 from reprobit.schema import classic_debug_companion_paths
 
 
@@ -180,6 +181,84 @@ def test_repair_noop_reports_that_exact_verification_passed(
     assert main(["repair", str(project)]) == 0
 
     assert "Nothing needed repair; every target still matches exactly" in capsys.readouterr().out
+
+
+def test_repair_completion_omits_zero_counters_and_uses_plain_pluralization(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
+    monkeypatch.setattr(
+        "reprobit.cli_repair.repair_classic_records",
+        lambda *_args, **_kwargs: RepairWorkflowResult(
+            (),
+            ("tu.unit",),
+            1,
+            0,
+            0,
+            1,
+            1,
+            2,
+        ),
+    )
+
+    def verify(args: argparse.Namespace, _output: CLIOutput) -> int:
+        _write_candidate_reports(args)
+        return 0
+
+    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    capsys.readouterr()
+
+    assert main(["repair", str(project)]) == 0
+
+    message = capsys.readouterr().out
+    assert "measured check" in message
+    assert "donor setting" in message
+    assert "across 1 affected TU" in message
+    assert "Tried 1 donor candidate." in message
+    assert "obsolete adjustment" not in message
+    assert "(s)" not in message
+
+
+def test_repair_refusal_emits_stable_candidate_diagnostics_for_machines(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    diagnostic = {
+        "unit_id": "tu.unit",
+        "donor_id": "donor.unit",
+        "action_ids": ["function.unit"],
+        "candidates_tried": 4,
+        "reason": "no nearby donor setting worked",
+        "best_candidate": {
+            "distance": 1,
+            "stage": "ordinary_validation",
+            "reason": "retail relocation target changed",
+            "changes": [],
+        },
+    }
+
+    def refuse(*_args: object, **_kwargs: object) -> RepairWorkflowResult:
+        raise RepairWorkflowError("No safe adjustment restored `tu.unit`.", diagnostic=diagnostic)
+
+    monkeypatch.setattr("reprobit.cli_repair.repair_classic_records", refuse)
+    capsys.readouterr()
+
+    assert main(["--format", "ndjson", "repair", str(project)]) == 2
+
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    refusal = next(event for event in events if event["event"] == "repair_refused")
+    assert refusal["unit_id"] == "tu.unit"
+    assert refusal["donor_id"] == "donor.unit"
+    assert refusal["action_ids"] == ["function.unit"]
+    assert refusal["candidates_tried"] == 4
+    assert refusal["best_candidate"]["stage"] == "ordinary_validation"
 
 
 def test_repair_publishes_reports_to_the_requested_project_directory(

@@ -163,9 +163,10 @@ not repair each source file separately.
 Other realistic maintenance edits use the same command: changing harmless
 whitespace or comments in a donor header, adding or moving a declaration,
 making an assertion conditional for one build mode, or changing an inline
-header body used by several source files. ReproBit attempts only bounded,
-ordinary adjustments and still requires the final binaries to match exactly;
-if an edit is not benign, repair stops without publishing a partial result.
+header body used by several source files. ReproBit tries only a small,
+predictable set of safe adjustments and still requires the final binaries to
+match exactly. If an edit is not benign, repair stops without publishing a
+partial result.
 
 To add a new file to the reviewed source list—or remove a locked one—preview
 the new list:
@@ -187,9 +188,9 @@ graph must be refreshed.
 
 ### Source regeneration primitive
 
-`source regenerate` is the deterministic preview/apply primitive used inside
-the maintenance flow. It is useful when you want to inspect mechanical record
-updates without building or verifying:
+`source regenerate` is the advanced preview used inside the maintenance flow.
+It is useful when you want to inspect mechanical record updates without
+building or verifying:
 
 ```console
 rbit source regenerate --project .          # preview only
@@ -217,8 +218,10 @@ points back to `rbit repair .` for the build and exact check.
 
 The command fails closed when it cannot re-derive a check. It only proposes or
 applies mechanical record changes: it does not lock, build, verify, or certify
-the project. Prefer `rbit repair .` unless you specifically need this
-intermediate view.
+the project. It remains a separate command because this read-only preview is
+useful for diagnosis; `repair` already runs the same planner automatically,
+then handles compiler-dependent fallout and exact verification. Prefer
+`rbit repair .` unless you specifically need the intermediate view.
 
 </details>
 

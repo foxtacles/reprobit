@@ -20,7 +20,7 @@ from reprobit.repair import (
     collect_repair_candidate,
     publish_repair_candidate,
 )
-from reprobit.repair_workflow import repair_classic_records
+from reprobit.repair_workflow import RepairWorkflowError, repair_classic_records
 from reprobit.source_regeneration import (
     SourceRegenerationError,
     apply_source_regeneration,
@@ -64,6 +64,19 @@ def _candidate_args(args: argparse.Namespace, staged_root: Path) -> argparse.Nam
         keep_workspace=KeepWorkspace.NEVER.value,
     )
     return argparse.Namespace(**values)
+
+
+def _count_phrase(count: int, singular: str, plural: str | None = None) -> str:
+    word = singular if count == 1 else (plural or f"{singular}s")
+    return f"{count} {word}"
+
+
+def _human_list(items: list[str]) -> str:
+    if len(items) < 2:
+        return "".join(items)
+    if len(items) == 2:
+        return " and ".join(items)
+    return ", ".join(items[:-1]) + f", and {items[-1]}"
 
 
 def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
@@ -162,6 +175,18 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
         if published:
             cleanup_warning = str(exc)
         else:
+            if (
+                output.output_format == "ndjson"
+                and isinstance(exc, RepairWorkflowError)
+                and exc.diagnostic is not None
+            ):
+                output.emit(
+                    "repair_refused",
+                    str(exc),
+                    diagnostic=True,
+                    phase=phase,
+                    **exc.diagnostic,
+                )
             retained = staged.retained_path
             retained_report = retained / "project" / _CANDIDATE_REPORT_DIRECTORY / "report.html"
             if retained_report.is_file():
@@ -188,20 +213,35 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
     changed_records = len(candidate.records)
     report_html = root / final_report_directory / "report.html"
     if changed_records:
-        adjustments = (
-            f"{len(regeneration_plan.changes)} source check(s), "
-            f"{repair_result.measured_checks} measured check(s), "
-            f"{repair_result.retired_actions} obsolete adjustment(s), and "
-            f"{repair_result.donor_retunes} donor setting(s)"
-        )
-        completion_message = (
-            f"Repair complete: updated {changed_records} saved project file(s) and "
-            "verified every target exactly"
-            f"\nAdjusted {adjustments} across "
-            f"{len(repair_result.affected_units)} affected TU(s); "
-            f"tried {repair_result.compiled_candidates} donor candidate(s)"
-            f"\nReport: {report_html}"
-        )
+        adjustments = [
+            _count_phrase(count, singular)
+            for count, singular in (
+                (len(regeneration_plan.changes), "source check"),
+                (repair_result.measured_checks, "measured check"),
+                (repair_result.retired_actions, "obsolete adjustment"),
+                (repair_result.donor_retunes, "donor setting"),
+            )
+            if count
+        ]
+        completion_lines = [
+            "Repair complete: "
+            f"{_count_phrase(changed_records, 'saved project file')} updated; "
+            "every target matches exactly."
+        ]
+        if adjustments:
+            adjustment_line = f"Adjusted {_human_list(adjustments)}"
+            if repair_result.affected_units:
+                adjustment_line += " across " + _count_phrase(
+                    len(repair_result.affected_units),
+                    "affected TU",
+                )
+            completion_lines.append(adjustment_line + ".")
+        if repair_result.compiled_candidates:
+            completion_lines.append(
+                f"Tried {_count_phrase(repair_result.compiled_candidates, 'donor candidate')}."
+            )
+        completion_lines.append(f"Report: {report_html}")
+        completion_message = "\n".join(completion_lines)
     else:
         completion_message = (
             f"Nothing needed repair; every target still matches exactly\nReport: {report_html}"
