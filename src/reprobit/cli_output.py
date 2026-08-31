@@ -55,6 +55,13 @@ def human_command(argv: Sequence[str | Path]) -> str:
     return subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
 
 
+def count_phrase(count: int, singular: str, plural: str | None = None) -> str:
+    """Render a grammatical count for user-facing CLI text."""
+
+    noun = singular if count == 1 else (plural or f"{singular}s")
+    return f"{count} {noun}"
+
+
 class _ASCIIBarColumn(ProgressColumn):
     """Compact terminal-safe bar using only portable ASCII characters."""
 

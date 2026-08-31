@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from reprobit.build import BuildPlan, BuildStep
 from reprobit.cli_environment import selected_backend
-from reprobit.cli_output import CLIOutput
+from reprobit.cli_output import CLIOutput, count_phrase
 from reprobit.cli_paths import CLIError, project_root, resolve_program, safe_project_path
 from reprobit.cli_state import state_root
 from reprobit.model import AuthenticityPolicy
@@ -303,8 +303,8 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
         output.incremental_summary(incremental_summary)
         completion_message = (
             "Build complete: "
-            f"{incremental_summary.hits + incremental_summary.misses} step(s), "
-            f"{len(receipt.outputs)} output(s)"
+            f"{count_phrase(incremental_summary.hits + incremental_summary.misses, 'step')}, "
+            f"{count_phrase(len(receipt.outputs), 'output')}"
         )
         completion_fields: dict[str, Any] = {
             "nodes": incremental_summary.hits + incremental_summary.misses,
@@ -313,7 +313,8 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
         }
     else:
         completion_message = (
-            f"Build complete: {len(receipt.steps)} step(s), {len(receipt.outputs)} output(s)"
+            f"Build complete: {count_phrase(len(receipt.steps), 'step')}, "
+            f"{count_phrase(len(receipt.outputs), 'output')}"
         )
         completion_fields = {"steps": len(receipt.steps)}
     output.emit(
@@ -483,7 +484,7 @@ def command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
         elif result.verdict.quarantined:
             message_lines.append(
                 "Authenticity: accepted with "
-                f"{quarantine_actions} disclosed exception(s) covering "
+                f"{count_phrase(quarantine_actions, 'disclosed exception')} covering "
                 f"{quarantine_bytes} bytes"
             )
         message_lines.extend(

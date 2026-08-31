@@ -154,7 +154,7 @@ def _require_stable_source_membership(
     details = ["Removed: " + ", ".join(removed)]
     details.extend(
         (
-            "From the project root, review this list with: rbit source preview --project .",
+            "From the project root, review this list with: rbit source preview .",
             "Follow only the safe next command printed by preview. If it says the change "
             "affects which files the project builds, restore the missing file; that "
             "automatic update is not supported yet.",

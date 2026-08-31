@@ -100,6 +100,7 @@ class ProjectGrindOutcome:
     transaction_id: str | None
     cold_report_run_id: Digest | None
     artifacts: ProjectGrindArtifacts | None = None
+    locally_qualified: bool = False
 
 
 ProjectGrindOutcomeFinalizer = Callable[
@@ -113,10 +114,15 @@ class ProjectAutoGrindResult:
     campaign: ProjectGrindCampaign
     outcomes: tuple[ProjectGrindOutcome, ...]
     accepted: bool
+    accept_progress: bool = False
 
     @property
     def exact(self) -> int:
         return sum(outcome.exact for outcome in self.outcomes)
+
+    @property
+    def qualified(self) -> int:
+        return sum(outcome.locally_qualified or outcome.exact for outcome in self.outcomes)
 
     @property
     def published(self) -> int:
@@ -435,6 +441,7 @@ def _compact_outcome(
         transaction_id=result.transaction_id,
         cold_report_run_id=(solution.report.run_id if solution is not None else None),
         artifacts=artifacts,
+        locally_qualified=result.locally_qualified,
     )
 
 
@@ -445,10 +452,20 @@ def run_project_auto_grind(
     reference_assignments: tuple[ProjectReferenceAssignment, ...] = (),
     max_symbols: int = 8,
     accept_exact: bool = False,
+    accept_progress: bool = False,
     progress: GrindProgress | None = None,
     finalize_outcome: ProjectGrindOutcomeFinalizer | None = None,
 ) -> ProjectAutoGrindResult:
-    """Run the existing bounded grind independently for each eligible function."""
+    """Run the bounded grind independently for each eligible function.
+
+    Accepted progress is monotonic in a deliberately local sense: every saved
+    result adds one previously unhandled function whose compiler-produced body
+    matches its project-owned reference object and whose semantic proof passed
+    in a cold run.  It never claims that the complete project is exact.
+    """
+
+    if accept_exact and accept_progress:
+        raise ProjectAutoGrindError("exact and progress acceptance are mutually exclusive")
 
     root = project_root.resolve(strict=True)
     campaign = enumerate_project_grind_campaign(
@@ -532,8 +549,10 @@ def run_project_auto_grind(
                 callbacks=callbacks,
                 plan_relative=plan_relative,
                 accept_exact=accept_exact,
+                accept_progress=accept_progress,
                 progress=item_progress,
             )
+            project_is_exact = detailed_result.exact
             artifacts = (
                 finalize_outcome(index, item, plan, detailed_result)
                 if finalize_outcome is not None
@@ -544,6 +563,19 @@ def run_project_auto_grind(
             # per-symbol result into the next campaign iteration.
             del detailed_result
             completed += item_total
+            if project_is_exact:
+                remaining = sum(item_totals[index:])
+                if remaining and progress is not None:
+                    progress(
+                        completed + remaining,
+                        total,
+                        "grind-skip",
+                        "Project is exact; remaining function searches are unnecessary",
+                        ProgressKind.UNIT_FINISHED,
+                        None,
+                    )
+                completed += remaining
+                break
 
     if completed + 1 != total:
         raise AssertionError("project grind progress differs from its bounded campaign")
@@ -556,7 +588,13 @@ def run_project_auto_grind(
             ProgressKind.UNIT_FINISHED,
             None,
         )
-    return ProjectAutoGrindResult(campaign, tuple(outcomes), accept_exact)
+    compact_outcomes = tuple(outcomes)
+    return ProjectAutoGrindResult(
+        campaign,
+        compact_outcomes,
+        any(outcome.published for outcome in compact_outcomes),
+        accept_progress,
+    )
 
 
 def project_auto_grind_summary(result: ProjectAutoGrindResult) -> Mapping[str, JsonValue]:
@@ -570,15 +608,18 @@ def project_auto_grind_summary(result: ProjectAutoGrindResult) -> Mapping[str, J
         "discovered_symbols": result.campaign.discovered_symbols,
         "attempted_symbols": len(result.outcomes),
         "truncated_symbols": result.campaign.truncated_symbols,
+        "locally_qualified_symbols": result.qualified,
         "exact_symbols": result.exact,
         "published_symbols": result.published,
         "accepted": result.accepted,
+        "accept_progress": result.accept_progress,
         "outcomes": [
             {
                 "target": outcome.item.target_id,
                 "translation_unit": outcome.item.translation_unit_id,
                 "symbol": outcome.item.symbol,
                 "reference_object": outcome.item.reference_object,
+                "locally_qualified": outcome.locally_qualified,
                 "exact": outcome.exact,
                 "published": outcome.published,
                 "states": outcome.states,

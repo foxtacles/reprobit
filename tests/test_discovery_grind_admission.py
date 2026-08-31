@@ -94,6 +94,7 @@ def _cold_boundary(
         cold = False
     elif failure == "verdict_exact":
         byte_exact = False
+        target_exact = False
     elif failure == "logic":
         logic_certified = False
     elif failure == "target_exact":
@@ -149,11 +150,12 @@ def _cold_boundary(
             cold=cold,
             byte_exact=byte_exact,
             logic_certified=logic_certified,
+            toolchain_origin=True,
             quarantines=tuple(SimpleNamespace(id=item) for item in quarantine_ids),
         ),
         targets=(SimpleNamespace(byte_exact=target_exact),),
         costs=SimpleNamespace(project_total=project_total),
-        proof=SimpleNamespace(certificates=tuple(certificates)),
+        proof=SimpleNamespace(certificates=tuple(certificates), audit_issues=()),
     )
     evidence = ColdTrialEvidence(
         accepted=accepted,
@@ -176,15 +178,12 @@ def test_cold_report_accepts_only_the_complete_exact_proof_boundary(
     )
     evidence, context, authored = _cold_boundary()
 
-    assert (
-        grind._validate_cold_report(
-            evidence,
-            context=context,
-            authored=authored,
-            added_cost=26,
-        )
-        is None
-    )
+    assert grind._validate_cold_report(
+        evidence,
+        context=context,
+        authored=authored,
+        added_cost=26,
+    ) == (None, True)
 
 
 @pytest.mark.parametrize(
@@ -193,27 +192,27 @@ def test_cold_report_accepts_only_the_complete_exact_proof_boundary(
         ("project", "cold report belongs to a different project"),
         (
             "policy",
-            "cold verification did not satisfy the committed authenticity policy",
+            "exact candidate did not satisfy the committed authenticity policy",
         ),
         (
             "cold",
-            "cold verification did not reproduce every target byte-identically",
+            "candidate check was not a build from scratch",
         ),
         (
             "verdict_exact",
-            "cold verification did not reproduce every target byte-identically",
+            None,
         ),
-        ("logic", "cold verification did not certify intervention logic"),
-        ("target_exact", "cold report contains a non-exact target"),
+        ("logic", "candidate check did not certify intervention logic"),
+        ("target_exact", "candidate report has inconsistent target exactness"),
         ("quarantine", "candidate introduced an authenticity exception"),
         ("cost", "cold report cost differs from the admitted intervention delta"),
         (
             "missing_certificate",
-            "cold report lacks a passing certificate for discovery.donor",
+            "cold report lacks a passing local proof for discovery.donor",
         ),
         (
             "failed_certificate",
-            "cold report lacks a passing certificate for discovery.donor",
+            "cold report lacks a passing local proof for discovery.donor",
         ),
         (
             "fresh_execution",
@@ -240,7 +239,7 @@ def test_cold_report_accepts_only_the_complete_exact_proof_boundary(
 def test_cold_report_rejects_each_incomplete_admission_claim(
     monkeypatch: pytest.MonkeyPatch,
     failure: str,
-    expected: str,
+    expected: str | None,
 ) -> None:
     monkeypatch.setattr(
         grind,
@@ -249,15 +248,12 @@ def test_cold_report_rejects_each_incomplete_admission_claim(
     )
     evidence, context, authored = _cold_boundary(failure)
 
-    assert (
-        grind._validate_cold_report(
-            evidence,
-            context=context,
-            authored=authored,
-            added_cost=26,
-        )
-        == expected
-    )
+    assert grind._validate_cold_report(
+        evidence,
+        context=context,
+        authored=authored,
+        added_cost=26,
+    ) == (expected, False)
 
 
 def _write_and_snapshot(root: Path, relative: str, payload: bytes) -> ProjectFileSnapshot:

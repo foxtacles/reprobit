@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from reprobit.cli_output import CLIOutput
+from reprobit.cli_output import CLIOutput, count_phrase
 from reprobit.cli_paths import (
     project_root,
     real_directory,
@@ -89,7 +89,7 @@ def command_graph_extract(args: argparse.Namespace, output: CLIOutput) -> int:
         )
     output.emit(
         "producer_graph_extracted",
-        f"committed {len(result.graph.nodes)} direct producer(s) to {result.output}",
+        f"committed {count_phrase(len(result.graph.nodes), 'direct producer')} to {result.output}",
         output=result.output,
         extractor=result.graph.extractor,
         nodes=len(result.graph.nodes),

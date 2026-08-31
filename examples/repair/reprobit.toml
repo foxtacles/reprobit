@@ -1,0 +1,28 @@
+schema_version = 3
+project_id = "repair-sample"
+state_dir = ".reprobit-state"
+
+[build]
+kind = "producer-graph"
+
+[toolchain]
+adapter = "classic-msvc"
+profile = "msvc_4_2"
+lock_file = "reprobit/toolchain.lock.json"
+
+[paths]
+id = "dos-stable-v1"
+source = "R:\\source"
+build = "R:\\build"
+toolchain = "R:\\toolchain"
+
+[verifier]
+kind = "literal"
+
+[authenticity]
+policy = "clean"
+
+[[targets]]
+id = "program"
+artifact = "build/repair.exe"
+oracle = "reference/repair.exe"

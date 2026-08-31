@@ -22,12 +22,13 @@ from reprobit.schema import (
 
 ROOT = Path(__file__).parents[1]
 SAMPLE = ROOT / "examples" / "grind"
+PROGRESS_SAMPLE = ROOT / "examples" / "grind-progress"
 REFERENCE_BODY_SHA256 = "0592ba1107856e319c261ed45129ab9b518486acbde960ada58b2ace9435ccfb"
 REFERENCE_IMAGE_SHA256 = "9c78bd9cfe3c8ded8a9a587165237d2a394719b48be34021a3cb09aff8220aab"
 
 pytestmark = pytest.mark.skipif(
-    os.name != "nt" or not os.environ.get("REPROBIT_MSVC_4_2_ROOT"),
-    reason="requires the authenticated native Windows MSVC 4.2 CI lane",
+    not os.environ.get("REPROBIT_MSVC_4_2_ROOT"),
+    reason="requires an authenticated MSVC 4.2 installation",
 )
 
 
@@ -80,6 +81,7 @@ def _parameters(intervention: ClassicRecipeIntervention) -> dict[str, Any]:
     return {item.name: item.value for item in intervention.parameters}
 
 
+@pytest.mark.skipif(os.name != "nt", reason="covers the native Windows compiler transport")
 def test_native_msvc42_grind_publishes_minimal_authority_then_cold_verifies(
     tmp_path: Path,
 ) -> None:
@@ -158,7 +160,6 @@ def test_native_msvc42_grind_publishes_minimal_authority_then_cold_verifies(
             "discover",
             "grind",
             project,
-            "--project-wide",
             "--accept-exact",
         ),
         cwd=project,
@@ -263,3 +264,127 @@ def test_native_msvc42_grind_publishes_minimal_authority_then_cold_verifies(
     build = report.proof.runtime.preimage.build
     assert build.cold is True
     assert build.outputs and all(item.fresh for item in build.outputs)
+
+
+def test_msvc42_progress_grind_saves_two_mismatches_then_cold_verifies(
+    tmp_path: Path,
+) -> None:
+    configured = os.environ.get("REPROBIT_MSVC_4_2_ROOT")
+    assert configured, "CI must provision REPROBIT_MSVC_4_2_ROOT"
+    toolchain_root = Path(configured).resolve(strict=True)
+
+    project = tmp_path / "grind-progress"
+    shutil.copytree(
+        PROGRESS_SAMPLE,
+        project,
+        ignore=shutil.ignore_patterns(
+            "__pycache__",
+            ".reprobit-discovery",
+            ".reprobit-state",
+            ".reprobit-transactions",
+            "build",
+            "reference",
+        ),
+    )
+    environment = os.environ.copy()
+    environment["REPROBIT_MSVC_4_2_ROOT"] = os.fspath(toolchain_root)
+    environment["PYTHONUTF8"] = "1"
+
+    prepared = _run(
+        (
+            sys.executable,
+            project / "prepare_reference.py",
+            "--toolchain-root",
+            toolchain_root,
+        ),
+        cwd=project,
+        environment=environment,
+    )
+    assert prepared.returncode == 0, prepared.stdout + prepared.stderr
+    reference_image = project / "reference" / "grind-progress.exe"
+    reference_digest = Digest.from_path(reference_image)
+    assert (project / "reference" / "transform_one.obj").is_file()
+    assert (project / "reference" / "transform_two.obj").is_file()
+
+    initial = load_project_tree(project)
+    initial_classic = _classic(initial)
+    assert len(initial_classic) == 1
+    assert initial_classic[0].family is ClassicRecipeFamily.IMAGE_METADATA
+    tu_paths = tuple(
+        sorted(
+            (project / "reprobit" / "interventions").glob("tu.*.json"),
+            key=lambda item: item.name,
+        )
+    )
+    assert len(tu_paths) == 2
+    before = {path.name: Digest.from_path(path) for path in tu_paths}
+
+    grind = _run(
+        (
+            _rbit(),
+            "--format",
+            "ndjson",
+            "discover",
+            "grind",
+            project,
+            "--accept-progress",
+        ),
+        cwd=project,
+        environment=environment,
+    )
+    grind_events = _events(grind)
+    completed = [
+        event for event in grind_events if event.get("event") == "discovery_project_grind_complete"
+    ]
+    assert len(completed) == 1
+    event = completed[0]
+    assert event["accepted"] is True
+    assert event["accept_mode"] == "progress"
+    assert event["attempted_symbols"] == 2
+    assert event["locally_qualified_symbols"] == 2
+    assert event["published_symbols"] == 2
+    assert event["published_progress_symbols"] == 1
+    assert event["exact_symbols"] == 1
+    assert [outcome["published"] for outcome in event["outcomes"]] == [True, True]
+    assert [outcome["exact"] for outcome in event["outcomes"]] == [False, True]
+
+    report_json = Path(event["report_json"])
+    summary = json.loads(report_json.read_bytes())
+    transaction_ids = [outcome["transaction_id"] for outcome in summary["outcomes"]]
+    assert all(isinstance(item, str) and item for item in transaction_ids)
+    assert len(set(transaction_ids)) == 2
+
+    accepted = load_project_tree(project)
+    accepted_classic = _classic(accepted)
+    functions = tuple(item for item in accepted_classic if item.role is ClassicRecipeRole.FUNCTION)
+    donors = tuple(item for item in accepted_classic if item.role is ClassicRecipeRole.DONOR)
+    assert {item.symbol for item in functions} == {"_transform_one", "_transform_two"}
+    assert len(donors) == 2
+    assert calculate_cost(accepted.interventions).project_total == 57
+    assert all(Digest.from_path(path) != before[path.name] for path in tu_paths)
+    assert not tuple(project.glob(".reprobit-grind-*"))
+    assert not (project / "build").exists(), "grind leaked its private candidate build"
+
+    verification = _run(
+        (_rbit(), "--format", "ndjson", "verify", project),
+        cwd=project,
+        environment=environment,
+    )
+    verify_events = _events(verification)
+    final = [event for event in verify_events if event.get("event") == "verification"]
+    assert len(final) == 1
+    assert final[0]["accepted"] is True
+    assert final[0]["targets"] == final[0]["exact_targets"] == 1
+    assert final[0]["total_cost"] == 57
+
+    report = Report.model_validate_json(
+        (project / ".reprobit-state" / "reports" / "report.json").read_bytes()
+    )
+    assert report.verdict.cold is True
+    assert report.verdict.byte_exact is True
+    assert report.verdict.logic_certified is True
+    assert report.verdict.toolchain_origin is True
+    assert report.verdict.clean is True
+    assert report.cache.mode is CacheMode.BYPASSED
+    assert report.targets[0].candidate_digest == report.targets[0].oracle_digest
+    assert report.targets[0].oracle_digest == reference_digest

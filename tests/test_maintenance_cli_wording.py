@@ -40,6 +40,31 @@ def test_source_regenerate_help_marks_it_as_an_advanced_preview_primitive(
     assert "preview without writing" in help_text
 
 
+def test_discovery_grind_help_explains_saved_progress_without_overclaiming(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        main(["discover", "grind", "--help"])
+
+    assert stopped.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "Saved local progress does not prove the complete project" in help_text
+    assert "save bounded, locally proven function adjustments" in help_text
+    assert "project certification" not in help_text
+
+
+def test_graph_extract_help_describes_a_platform_neutral_cmake_tree(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        main(["graph", "extract", "--help"])
+
+    assert stopped.value.code == 0
+    help_text = " ".join(capsys.readouterr().out.split())
+    assert "CMake metadata tree created by rbit graph configure" in help_text
+    assert "Unix Makefiles tree" not in help_text
+
+
 def test_source_regenerate_uses_future_tense_for_preview_and_past_tense_for_apply(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -49,13 +74,13 @@ def test_source_regenerate_uses_future_tense_for_preview_and_past_tense_for_appl
     capsys.readouterr()
     (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
 
-    assert main(["source", "regenerate", "--project", str(project)]) == 0
+    assert main(["source", "regenerate", str(project)]) == 0
     preview = capsys.readouterr().out
     assert "Source-record preview" in preview
     assert "would be saved" in preview
     assert "no project files changed" in preview
 
-    assert main(["source", "regenerate", "--project", str(project), "--apply"]) == 0
+    assert main(["source", "regenerate", str(project), "--apply"]) == 0
     applied = capsys.readouterr().out
     assert "Saved source records refreshed" in applied
     assert " saved across " in applied
@@ -72,7 +97,7 @@ def test_source_regenerate_plainly_reports_when_no_update_is_needed(
     _complete_translation_unit_project(project)
     capsys.readouterr()
 
-    assert main(["source", "regenerate", "--project", str(project)]) == 0
+    assert main(["source", "regenerate", str(project)]) == 0
     assert (
         "No source-record updates are needed; saved records already match current files."
         in capsys.readouterr().out

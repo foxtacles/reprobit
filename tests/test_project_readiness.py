@@ -3,10 +3,12 @@ from __future__ import annotations
 import json
 import shutil
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from reprobit.cli import main
+from reprobit.cli_output import human_command
 from reprobit.project_readiness import inspect_project_readiness, render_project_readiness
 from reprobit.schema import BuildPlanDocument
 from reprobit.strict_json import canonical_json
@@ -49,7 +51,7 @@ def test_fresh_init_reports_all_remaining_authority_at_once(
     build_plan = next(item for item in readiness.items if item.id == "build_plan")
     assert build_plan.next_command is None
     source_lock = next(item for item in readiness.items if item.id == "source_manifest")
-    assert source_lock.next_command == f"rbit source preview --project {project}"
+    assert source_lock.next_command == f"rbit source preview {project}"
     assert "Build graph" in rendered
     assert "Reference metadata" in rendered
     assert "Protected references" in rendered
@@ -82,6 +84,7 @@ def test_fresh_init_reports_all_remaining_authority_at_once(
 def test_valid_project_can_have_no_intervention_or_proof_documents(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project = tmp_path / "project"
     example = Path(__file__).parents[1] / "examples/grind"
@@ -109,14 +112,104 @@ def test_valid_project_can_have_no_intervention_or_proof_documents(
     assert checks["authority"].label == "Final project check"
     assert checks["authority"].detail == "all saved project files agree"
     assert render_project_readiness(readiness) == "Project files ready: 10/10 checks passed"
+
+    local_toolchain = tmp_path / "toolchain"
+    local_toolchain.mkdir()
+    monkeypatch.setattr(
+        "reprobit.project_readiness.resolve_toolchain_root",
+        lambda *_args, **_kwargs: local_toolchain,
+    )
+    monkeypatch.setattr(
+        "reprobit.project_readiness.ClassicMSVCToolchain.doctor",
+        lambda _self, _lock=None: SimpleNamespace(ok=True, checks=()),
+    )
     assert main(["status", str(project)]) == 0
-    assert "Project files ready: 10/10 checks passed" in capsys.readouterr().out
+    assert "Project and machine ready: 11/11 checks passed" in capsys.readouterr().out
 
     assert main(["status", str(project), "--all"]) == 0
     detailed = capsys.readouterr().out
-    assert "Project files ready: 10/10 checks passed" in detailed
+    assert "Project and machine ready: 11/11 checks passed" in detailed
     assert "[ok] Project: project ID grind" in detailed
+    assert f"[ok] Local compiler: available at {local_toolchain}" in detailed
     assert "[ok] Final project check: all saved project files agree" in detailed
+
+
+def test_status_points_a_ready_project_without_a_local_compiler_to_setup(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    shutil.copytree(Path(__file__).parents[1] / "examples/grind", project)
+    reference = project / "reference/grind.exe"
+    reference.parent.mkdir()
+    reference.write_bytes(b"reference")
+    missing = tmp_path / "missing-toolchain"
+    monkeypatch.setattr(
+        "reprobit.project_readiness.resolve_toolchain_root",
+        lambda *_args, **_kwargs: missing,
+    )
+
+    assert main(["status", str(project), "--all"]) == 1
+    rendered = capsys.readouterr().out
+    assert f"[  ] Local compiler: not available on this machine at {missing}" in rendered
+    assert f"Next: rbit setup {project}" in rendered
+
+
+def test_status_rejects_an_empty_local_compiler_directory(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    shutil.copytree(Path(__file__).parents[1] / "examples/grind", project)
+    reference = project / "reference/grind.exe"
+    reference.parent.mkdir()
+    reference.write_bytes(b"reference")
+    empty = tmp_path / "empty-toolchain"
+    empty.mkdir()
+    monkeypatch.setattr(
+        "reprobit.project_readiness.resolve_toolchain_root",
+        lambda *_args, **_kwargs: empty,
+    )
+
+    assert main(["status", str(project), "--all"]) == 1
+    rendered = capsys.readouterr().out
+    assert f"[  ] Local compiler: incomplete at {empty}:" in rendered
+    assert "absent or unsafe" in rendered
+    assert f"Next: rbit setup {project}" in rendered
+
+
+def test_status_rewrites_source_repair_guidance_for_the_supplied_project(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project with spaces"
+    shutil.copytree(Path(__file__).parents[1] / "examples/grind", project)
+    reference = project / "reference/grind.exe"
+    reference.parent.mkdir()
+    reference.write_bytes(b"reference")
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    monkeypatch.setattr(
+        "reprobit.project_readiness.resolve_toolchain_root",
+        lambda *_args, **_kwargs: toolchain,
+    )
+    monkeypatch.setattr(
+        "reprobit.project_readiness.ClassicMSVCToolchain.doctor",
+        lambda _self, _lock=None: SimpleNamespace(ok=True, checks=()),
+    )
+    (project / "transform.cpp").write_text("int changed;\n", encoding="utf-8")
+
+    assert main(["status", str(project), "--all"]) == 1
+    rendered = capsys.readouterr().out
+    repair_command = human_command(("rbit", "repair", project))
+    assert "source input differs from portable manifest" in rendered
+    assert "invalid project tree:" not in rendered
+    assert "run rbit repair ." not in rendered
+    assert f"Next: {repair_command}" in rendered
+    assert rendered.count(repair_command) == 1
 
 
 def test_derived_project_id_is_human_and_schema_safe(tmp_path: Path) -> None:

@@ -23,6 +23,12 @@ is not a ReproBit project, so its guide uses
   unsolved compiler-entropy byte, find the lowest-cost matching declaration
   state, save its two small interventions, and confirm the result with a
   separate build from scratch.
+- [Multi-mismatch grind](grind-progress/README.md) — use a ready two-source
+  project, save locally proven progress in sequence, and finish at the same
+  exact verification gate.
+- [Repair after a shared-header edit](repair/README.md) — start from an exact
+  two-file build, make one harmless header edit, and let `rbit repair .`
+  refresh and verify everything as one safe transaction.
 - [Advanced declaration discovery](declaration-discovery/README.md) — prepare a
   local reference, run a preview-only bounded campaign, reuse completed work,
   extend it by one cell, and inspect its suggestions without changing a

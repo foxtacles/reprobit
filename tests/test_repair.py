@@ -82,7 +82,6 @@ def test_repair_preserves_the_locked_source_set_when_git_tracks_another_file(
             [
                 "source",
                 "lock",
-                "--project",
                 str(project),
                 "--path",
                 "notes.txt",

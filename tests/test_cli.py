@@ -474,7 +474,6 @@ def test_source_lock_transactionally_replaces_the_explicit_read_set(tmp_path: Pa
             [
                 "source",
                 "lock",
-                "--project",
                 str(tmp_path),
                 "--path",
                 "reprobit.toml",
@@ -490,7 +489,7 @@ def test_source_lock_transactionally_replaces_the_explicit_read_set(tmp_path: Pa
     assert [item["path"] for item in document["entries"]] == ["CMakeLists.txt"]
 
 
-def test_fresh_source_lock_prints_the_import_next_step(
+def test_fresh_source_lock_prints_the_actual_setup_next_step(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -506,7 +505,6 @@ def test_fresh_source_lock_prints_the_import_next_step(
                 "ndjson",
                 "source",
                 "lock",
-                "--project",
                 str(tmp_path),
                 "--path",
                 "unit.cpp",
@@ -516,7 +514,8 @@ def test_fresh_source_lock_prints_the_import_next_step(
     )
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert event["event"] == "source_locked"
-    assert event["next_command"] == f"rbit import cmake {tmp_path}"
+    assert event["next_command"] == f"rbit setup {tmp_path}"
+    assert event["next_step"] == f"rbit setup {tmp_path}"
 
 
 @pytest.mark.parametrize(
@@ -537,7 +536,7 @@ def test_source_preview_explains_how_to_select_files_when_git_cannot(
         subprocess.run(("git", "init", "-q"), cwd=tmp_path, check=True)
     capsys.readouterr()
 
-    assert main(["source", "preview", "--project", str(tmp_path)]) == 2
+    assert main(["source", "preview", str(tmp_path)]) == 2
     message = capsys.readouterr().err
     assert expected in message
     assert "git init and git add" in message
@@ -560,7 +559,7 @@ def test_default_source_lock_omits_intentionally_deleted_tracked_file(
     )
     removed.unlink()
 
-    assert main(["source", "lock", "--project", str(tmp_path)]) == 0
+    assert main(["source", "lock", str(tmp_path)]) == 0
     document = strict_load(tmp_path / "reprobit/source-manifest.json")
     assert isinstance(document, dict)
     assert [item["path"] for item in document["entries"]] == ["current.cpp"]
@@ -585,7 +584,6 @@ def test_fresh_source_preview_does_not_report_the_unreviewed_project_file_as_rem
                 "ndjson",
                 "source",
                 "preview",
-                "--project",
                 str(tmp_path),
             ]
         )
@@ -594,7 +592,7 @@ def test_fresh_source_preview_does_not_report_the_unreviewed_project_file_as_rem
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert event["added"] == ["src/unit.cpp"]
     assert event["removed"] == []
-    assert event["next_command"] == f"rbit source lock --project {tmp_path}"
+    assert event["next_command"] == f"rbit source lock {tmp_path}"
     assert event["cmake_import_command"] is None
 
 
@@ -623,7 +621,6 @@ def test_source_preview_checks_authority_before_reporting_up_to_date(
                 "ndjson",
                 "source",
                 "preview",
-                "--project",
                 str(project),
                 *paths,
             ]
@@ -672,7 +669,6 @@ def test_source_preview_does_not_hide_stale_authority_when_source_is_unchanged(
                 "ndjson",
                 "source",
                 "preview",
-                "--project",
                 str(project),
                 *paths,
             ]
@@ -715,7 +711,6 @@ def test_source_preview_reports_stale_tu_and_lock_preserves_reviewed_authority(
                 "ndjson",
                 "source",
                 "preview",
-                "--project",
                 str(project),
                 *paths,
             ]
@@ -731,7 +726,7 @@ def test_source_preview_reports_stale_tu_and_lock_preserves_reviewed_authority(
     assert event["stale_translation_units"][0]["translation_unit_id"] == unit_id
     assert all(path.read_bytes() == data for path, data in before.items())
 
-    assert main(["source", "lock", "--project", str(project), *paths]) == 2
+    assert main(["source", "lock", str(project), *paths]) == 2
     assert "rbit repair" in capsys.readouterr().err
     assert all(path.read_bytes() == data for path, data in before.items())
 
@@ -752,7 +747,6 @@ def test_source_preview_does_not_loop_when_a_compiled_source_is_removed(
                 "ndjson",
                 "source",
                 "preview",
-                "--project",
                 str(project),
                 *paths,
             ]
@@ -765,7 +759,7 @@ def test_source_preview_does_not_loop_when_a_compiled_source_is_removed(
     assert event["next_command"] is None
     assert event["cmake_import_command"] is None
 
-    assert main(["source", "lock", "--project", str(project), *paths]) == 2
+    assert main(["source", "lock", str(project), *paths]) == 2
     message = capsys.readouterr().err
     assert "No safe automatic next step is available" in message
     assert "source preview" not in message
@@ -819,7 +813,6 @@ def test_source_preview_reports_stale_donor_overlay_input_and_lock_refuses_it(
                 "ndjson",
                 "source",
                 "preview",
-                "--project",
                 str(project),
                 *paths,
             ]
@@ -840,7 +833,7 @@ def test_source_preview_reports_stale_donor_overlay_input_and_lock_refuses_it(
         assert event["cmake_import_command"] is None
     assert all(path.read_bytes() == data for path, data in before.items())
 
-    assert main(["source", "lock", "--project", str(project), *paths]) == 2
+    assert main(["source", "lock", str(project), *paths]) == 2
     message = capsys.readouterr().err
     assert "source lock refused" in message
     if with_build_plan:
@@ -871,7 +864,7 @@ def test_source_regenerate_heals_stale_translation_unit_pins(
     plan_path = project / "reprobit/build-plan.json"
     before = {path: path.read_bytes() for path in (unit_path, plan_path)}
 
-    assert main(["--format", "ndjson", "source", "regenerate", "--project", str(project)]) == 0
+    assert main(["--format", "ndjson", "source", "regenerate", str(project)]) == 0
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert event["event"] == "source_regenerated"
     assert event["applied"] is False
@@ -885,7 +878,6 @@ def test_source_regenerate_heals_stale_translation_unit_pins(
                 "ndjson",
                 "source",
                 "regenerate",
-                "--project",
                 str(project),
                 "--apply",
             ]
@@ -910,7 +902,7 @@ def test_source_regenerate_heals_stale_translation_unit_pins(
     )
 
     paths = ["--path", "notes.txt", "--path", "reprobit.toml", "--path", "src/unit.cpp"]
-    assert main(["source", "lock", "--project", str(project), *paths]) == 0
+    assert main(["source", "lock", str(project), *paths]) == 0
     load_project_tree(project)
 
 
@@ -933,7 +925,6 @@ def test_source_regenerate_heals_stale_donor_overlay_pins(
                 "ndjson",
                 "source",
                 "regenerate",
-                "--project",
                 str(project),
                 "--apply",
             ]
@@ -988,7 +979,7 @@ def test_source_regenerate_heals_stale_donor_overlay_pins(
         "--path",
         "src/unit.cpp",
     ]
-    assert main(["source", "lock", "--project", str(project), *paths]) == 0
+    assert main(["source", "lock", str(project), *paths]) == 0
     load_project_tree(project)
 
 
@@ -1011,7 +1002,6 @@ def test_source_regenerate_replays_canonical_overlay_before_donor_operations(
                 "ndjson",
                 "source",
                 "regenerate",
-                "--project",
                 str(project),
                 "--apply",
             ]
@@ -1047,7 +1037,7 @@ def test_source_regenerate_replays_canonical_overlay_before_donor_operations(
         "--path",
         "src/unit.cpp",
     ]
-    assert main(["source", "lock", "--project", str(project), *paths]) == 0
+    assert main(["source", "lock", str(project), *paths]) == 0
     load_project_tree(project)
 
 
@@ -1394,7 +1384,7 @@ def test_source_regenerate_reports_nothing_when_pins_match(
     capsys.readouterr()
     documents = {path: path.read_bytes() for path in sorted((project / "reprobit").rglob("*.json"))}
 
-    assert main(["--format", "ndjson", "source", "regenerate", "--project", str(project)]) == 0
+    assert main(["--format", "ndjson", "source", "regenerate", str(project)]) == 0
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert event["event"] == "source_regenerated"
     assert event["applied"] is False
@@ -1509,7 +1499,7 @@ def test_source_lock_refreshes_unrelated_input_without_repinning_tu_or_proof(
         "src/unit.cpp",
     ]
 
-    assert main(["source", "lock", "--project", str(project), *paths]) == 0
+    assert main(["source", "lock", str(project), *paths]) == 0
     capsys.readouterr()
     plan = BuildPlanDocument.model_validate_json(plan_path.read_bytes())
     assert plan.translation_units[0].source_digest == source_digest
@@ -1557,7 +1547,6 @@ def test_source_lock_removes_pre_v3_entrypoint_authority(
             [
                 "source",
                 "lock",
-                "--project",
                 str(project),
                 "--path",
                 "notes.txt",
@@ -1656,7 +1645,6 @@ def test_source_lock_rejects_generated_overlay_manifest_collision(
             [
                 "source",
                 "lock",
-                "--project",
                 str(project),
                 "--path",
                 "project-input.txt",
@@ -1696,7 +1684,6 @@ def test_source_lock_aborts_when_an_admitted_input_races_the_transaction(
             [
                 "source",
                 "lock",
-                "--project",
                 str(project),
                 "--path",
                 "notes.txt",
@@ -1739,7 +1726,6 @@ def test_source_lock_aborts_when_validated_authority_races_the_transaction(
             [
                 "source",
                 "lock",
-                "--project",
                 str(project),
                 "--path",
                 "notes.txt",
@@ -1811,7 +1797,6 @@ def _complete_project(root: Path, *, command_build: bool = False) -> None:
                 [
                     "source",
                     "lock",
-                    "--project",
                     str(root),
                     "--path",
                     "project-input.txt",
@@ -1825,7 +1810,6 @@ def _complete_project(root: Path, *, command_build: bool = False) -> None:
                 [
                     "source",
                     "lock",
-                    "--project",
                     str(root),
                     "--path",
                     "project-input.txt",
@@ -2360,6 +2344,18 @@ def _fresh_cmake_import_project(root: Path) -> None:
         authority.rmdir()
 
 
+def test_cmake_scaffold_source_guidance_uses_the_supplied_project_path(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project with spaces"
+    _initialize(project)
+
+    with pytest.raises(CLIError, match="source review is incomplete") as caught:
+        cmake_import.scaffold_cmake_authority(project, load_project(project), [])
+
+    assert human_command(("rbit", "source", "preview", project)) in str(caught.value)
+
+
 @pytest.mark.parametrize(
     "raced_path",
     (
@@ -2429,7 +2425,11 @@ def test_cmake_import_scaffolds_and_runs_the_guided_graph_path(
 
     monkeypatch.setattr(
         "reprobit.toolchains.ClassicMSVCToolchain.doctor",
-        lambda self, lock: SimpleNamespace(require_ok=lambda: None),
+        lambda self, lock=None: SimpleNamespace(
+            ok=True,
+            checks=(),
+            require_ok=lambda: None,
+        ),
     )
     monkeypatch.setattr(
         "reprobit.cli_cmake_import.verify_msvc42_cmake_frontend",
@@ -2540,7 +2540,11 @@ def test_cmake_import_uses_authenticated_nmake_on_native_windows(
     )
     monkeypatch.setattr(
         "reprobit.toolchains.ClassicMSVCToolchain.doctor",
-        lambda self, lock: SimpleNamespace(require_ok=lambda: None),
+        lambda self, lock=None: SimpleNamespace(
+            ok=True,
+            checks=(),
+            require_ok=lambda: None,
+        ),
     )
     monkeypatch.setattr(
         "reprobit.cli_cmake_import.verify_msvc42_cmake_frontend",
@@ -2671,7 +2675,6 @@ def test_cmake_import_atomically_creates_project_grind_tu_authority(
             [
                 "source",
                 "lock",
-                "--project",
                 str(project),
                 "--path",
                 "reprobit.toml",
@@ -2748,7 +2751,11 @@ def test_cmake_import_atomically_creates_project_grind_tu_authority(
     )
     monkeypatch.setattr(
         "reprobit.toolchains.ClassicMSVCToolchain.doctor",
-        lambda self, lock: SimpleNamespace(require_ok=lambda: None),
+        lambda self, lock=None: SimpleNamespace(
+            ok=True,
+            checks=(),
+            require_ok=lambda: None,
+        ),
     )
 
     def configure(bundle: ProjectBundle, **options: object) -> SimpleNamespace:
@@ -2867,7 +2874,11 @@ def test_failed_cmake_import_removes_only_its_fresh_scaffold(
     toolchain.mkdir()
     monkeypatch.setattr(
         "reprobit.toolchains.ClassicMSVCToolchain.doctor",
-        lambda self, lock: SimpleNamespace(require_ok=lambda: None),
+        lambda self, lock=None: SimpleNamespace(
+            ok=True,
+            checks=(),
+            require_ok=lambda: None,
+        ),
     )
 
     def fail_configure(bundle: ProjectBundle, **options: object) -> None:
@@ -2932,6 +2943,7 @@ def test_init_is_transactional_and_emits_stable_ndjson(
     )
     assert not source.complete
     assert source.entries == ()
+    assert (root / ".gitignore").read_bytes() == (b"/.reprobit-state/\n/.reprobit-transactions/\n")
 
     assert main(["init", str(root), "--project-id", "sample"]) == 2
     assert "preimage conflict" in capsys.readouterr().err
@@ -2945,6 +2957,87 @@ def test_init_target_drives_human_default_output_paths(tmp_path: Path) -> None:
     assert target.id == "game"
     assert target.artifact == "build/game.exe"
     assert target.oracle == "reference/game.exe"
+
+
+def test_init_preserves_gitignore_and_supports_multiple_targets(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / ".gitignore").write_bytes(b"/build/\n")
+
+    assert (
+        main(
+            [
+                "init",
+                str(root),
+                "--target",
+                "game",
+                "--target",
+                "config",
+                "--artifact",
+                "game=build/GAME.EXE",
+                "--oracle",
+                "config=reference/CONFIG.EXE",
+            ]
+        )
+        == 0
+    )
+
+    assert (root / ".gitignore").read_bytes() == (
+        b"/build/\n/.reprobit-state/\n/.reprobit-transactions/\n"
+    )
+    targets = {target.id: target for target in load_project(root).targets}
+    assert targets["game"].artifact == "build/GAME.EXE"
+    assert targets["game"].oracle == "reference/game.exe"
+    assert targets["config"].artifact == "build/config.exe"
+    assert targets["config"].oracle == "reference/CONFIG.EXE"
+
+
+def test_multi_target_init_requires_qualified_path_overrides(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "project"
+
+    assert (
+        main(
+            [
+                "init",
+                str(root),
+                "--target",
+                "game",
+                "--target",
+                "config",
+                "--artifact",
+                "build/GAME.EXE",
+            ]
+        )
+        == 2
+    )
+    assert "--artifact must use TARGET=PROJECT_PATH" in capsys.readouterr().err
+    assert not root.exists()
+
+
+def test_single_target_init_rejects_a_mistyped_path_mapping(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    root = tmp_path / "project"
+
+    assert (
+        main(
+            [
+                "init",
+                str(root),
+                "--target",
+                "game",
+                "--artifact",
+                "typo=build/GAME.EXE",
+            ]
+        )
+        == 2
+    )
+    assert "--artifact names unknown target 'typo'" in capsys.readouterr().err
+    assert not root.exists()
 
 
 @pytest.mark.skipif(os.name != "posix", reason="Wine backend is supported only on POSIX")
@@ -3056,7 +3149,6 @@ def test_graph_extract_commits_closed_direct_producer_authority(
             [
                 "source",
                 "lock",
-                "--project",
                 str(project),
                 "--path",
                 "reprobit.toml",
@@ -3277,7 +3369,6 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     lock_argv = [
         "source",
         "lock",
-        "--project",
         str(project),
         "--path",
         "reprobit.toml",
@@ -3302,7 +3393,6 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     missing_graph_input = [
         "source",
         "lock",
-        "--project",
         str(project),
         "--path",
         "src/added.h",
@@ -3313,7 +3403,7 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     assert "rbit import cmake" in graph_error
     assert (project / "reprobit/producer-graph.json").is_file()
     assert main([*missing_graph_input, "--invalidate-producer-graph"]) == 0
-    assert "rbit import cmake" in capsys.readouterr().out
+    assert human_command(("rbit", "setup", project)) in capsys.readouterr().out
     assert not (project / "reprobit/producer-graph.json").exists()
 
 
@@ -3599,6 +3689,7 @@ def test_state_status_and_clean_expose_retained_workspace_lifecycle(
         assert "Clean preview:" in preview
         assert "1 inactive workspace" in preview
         assert "reusable incremental cache will be kept" in preview
+        assert "(s)" not in preview
 
         assert main(["clean", str(project)]) == 0
         assert not retained.exists()
@@ -3607,6 +3698,7 @@ def test_state_status_and_clean_expose_retained_workspace_lifecycle(
         assert "Freed " in cleaned
         assert "1 inactive workspace" in cleaned
         assert "reusable incremental cache was kept" in cleaned
+        assert "(s)" not in cleaned
 
         assert main(["clean", str(project), "--cache"]) == 0
         skipped = capsys.readouterr().out
@@ -4142,7 +4234,6 @@ def test_verify_policy_override_can_narrow_but_never_broaden(
             [
                 "source",
                 "lock",
-                "--project",
                 str(project),
                 "--path",
                 "project-input.txt",
@@ -4463,7 +4554,7 @@ def test_source_lock_never_admits_host_ci_configuration(tmp_path: Path) -> None:
         capture_output=True,
     )
 
-    assert main(["source", "lock", "--project", os.fspath(tmp_path)]) == 0
+    assert main(["source", "lock", os.fspath(tmp_path)]) == 0
     manifest = json.loads((tmp_path / "reprobit" / "source-manifest.json").read_text())
     paths = {entry["path"] for entry in manifest["entries"]}
     assert not any(path.startswith(".github/") for path in paths)

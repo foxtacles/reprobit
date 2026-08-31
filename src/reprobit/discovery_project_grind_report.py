@@ -47,12 +47,20 @@ def render_project_auto_grind_report_html(
 
     if len(outcome_reports) != len(result.outcomes):
         raise ValueError("project grind report links differ from campaign outcomes")
-    if result.published:
+    if result.published and result.exact:
         tone = "ok"
-        heading = "Proven adjustments saved"
+        heading = "Exact project reproduced"
         explanation = (
-            "ReproBit searched a bounded set of project functions and saved only exact "
-            "adjustments that passed a fresh verification build."
+            "ReproBit saved locally proven adjustments in sequence. The final fresh build "
+            "matched every target byte for byte, which is the project certification gate."
+        )
+    elif result.published:
+        tone = "warn"
+        heading = "Locally proven progress saved"
+        explanation = (
+            "ReproBit saved only functions that matched their project-owned reference objects "
+            "and passed the required logic checks. The complete project does not match yet, "
+            "so no project certification was issued."
         )
     elif result.exact:
         tone = "ok"
@@ -61,16 +69,25 @@ def render_project_auto_grind_report_html(
             "ReproBit found exact low-cost adjustments, but this preview left project files "
             "unchanged."
         )
+    elif result.qualified:
+        tone = "warn"
+        heading = "Locally proven adjustments ready for review"
+        explanation = (
+            "ReproBit found low-cost function adjustments that passed their local proof checks, "
+            "but the complete project does not match yet. This preview left project files "
+            "unchanged."
+        )
     else:
         tone = "warn"
         heading = "Bounded project search complete"
         explanation = (
-            "No attempted function produced a proven exact adjustment within the current "
+            "No attempted function produced a locally proven adjustment within the current "
             "low-cost search limits. Project files stayed unchanged."
         )
     metrics = (
         ("Functions tried", len(result.outcomes), "bounded project scope"),
-        ("Exact", result.exact, "fresh verification passed"),
+        ("Locally proven", result.qualified, "function and logic checks passed"),
+        ("Project exact", result.exact, "all targets matched in a fresh build"),
         ("Saved", result.published, "explicitly accepted"),
         ("Skipped", len(result.campaign.skips), "unavailable or ineligible"),
     )
@@ -82,16 +99,22 @@ def render_project_auto_grind_report_html(
     outcome_rows = []
     for outcome, report in zip(result.outcomes, outcome_reports, strict=True):
         if outcome.published:
-            status = Markup('<span class="outcome-ok">Saved</span>', "Saved")
+            label = "Exact saved" if outcome.exact else "Progress saved"
+            status = Markup(f'<span class="outcome-ok">{label}</span>', label)
         elif outcome.exact:
             status = Markup(
                 '<span class="outcome-ok">Exact preview</span>',
                 "Exact preview",
             )
+        elif outcome.locally_qualified:
+            status = Markup(
+                '<span class="outcome-ok">Local preview</span>',
+                "Local preview",
+            )
         else:
             status = Markup(
-                '<span class="outcome-muted">No exact state</span>',
-                "No exact state",
+                '<span class="outcome-muted">No proven state</span>',
+                "No proven state",
             )
         evidence = (
             Markup(
@@ -108,7 +131,7 @@ def render_project_auto_grind_report_html(
                 code(outcome.item.translation_unit_id, css_class="identifier"),
                 code(outcome.item.symbol, css_class="identifier"),
                 status,
-                format_integer(outcome.added_cost) if outcome.exact else "—",
+                format_integer(outcome.added_cost) if outcome.locally_qualified else "—",
                 evidence,
             )
         )

@@ -16,7 +16,7 @@ from reprobit.authority_snapshot import (
     capture_file_preimage,
     capture_json_authority_directories,
 )
-from reprobit.cli_output import CLIOutput, human_command
+from reprobit.cli_output import CLIOutput, count_phrase, human_command
 from reprobit.cli_paths import CLIError, project_root, relative_output, safe_project_path
 from reprobit.costs import CostBreakdown, InterventionCost, calculate_cost
 from reprobit.model import Digest
@@ -43,14 +43,8 @@ def _toml_string(value: str) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _count_phrase(count: int, singular: str, plural: str | None = None) -> str:
-    word = singular if count == 1 else (plural or f"{singular}s")
-    return f"{count} {word}"
-
-
 def _render_initial_project(spec: ProjectSpec) -> bytes:
     assert isinstance(spec.build, ProducerGraphBuildAdapter)
-    target = spec.targets[0]
     lines = [
         "schema_version = 3",
         f"project_id = {_toml_string(spec.project_id)}",
@@ -76,12 +70,17 @@ def _render_initial_project(spec: ProjectSpec) -> bytes:
         "[authenticity]",
         'policy = "clean"',
         "",
-        "[[targets]]",
-        f"id = {_toml_string(target.id)}",
-        f"artifact = {_toml_string(target.artifact)}",
-        f"oracle = {_toml_string(target.oracle)}",
-        "",
     ]
+    for target in spec.targets:
+        lines.extend(
+            (
+                "[[targets]]",
+                f"id = {_toml_string(target.id)}",
+                f"artifact = {_toml_string(target.artifact)}",
+                f"oracle = {_toml_string(target.oracle)}",
+                "",
+            )
+        )
     return "\n".join(lines).encode("utf-8")
 
 
@@ -96,13 +95,76 @@ def _derived_project_id(root: Path) -> str:
     return value[:128].rstrip("._-") or "project"
 
 
+def _init_path_overrides(
+    values: Sequence[str] | None,
+    *,
+    option: str,
+    target_ids: tuple[str, ...],
+) -> dict[str, str]:
+    """Parse one plain single-target path or repeatable TARGET=PATH mappings."""
+
+    if not values:
+        return {}
+    if len(target_ids) == 1 and len(values) == 1:
+        target_id, separator, path = values[0].partition("=")
+        if not separator:
+            return {target_ids[0]: values[0]}
+        if target_id not in target_ids:
+            raise CLIError(f"{option} names unknown target {target_id!r}")
+        if not path or "=" in path:
+            raise CLIError(f"{option} must use TARGET=PROJECT_PATH")
+        return {target_id: path}
+
+    overrides: dict[str, str] = {}
+    for value in values:
+        target_id, separator, path = value.partition("=")
+        if not separator or not target_id or not path or "=" in path:
+            raise CLIError(
+                f"{option} must use TARGET=PROJECT_PATH when initializing multiple targets"
+            )
+        if target_id not in target_ids:
+            raise CLIError(f"{option} names unknown target {target_id!r}")
+        if target_id in overrides:
+            raise CLIError(f"{option} repeats target {target_id!r}")
+        overrides[target_id] = path
+    return overrides
+
+
+_LOCAL_STATE_IGNORES = (b"/.reprobit-state/", b"/.reprobit-transactions/")
+
+
+def _updated_gitignore(root: Path) -> bytes | None:
+    """Add only ReproBit's root-local state entries while preserving project text."""
+
+    path = root / ".gitignore"
+    if path.is_symlink() or (path.exists() and not path.is_file()):
+        raise CLIError(f"cannot safely update redirected or non-file ignore list: {path}")
+    current = path.read_bytes() if path.is_file() else b""
+    existing = set(current.splitlines())
+    missing = tuple(entry for entry in _LOCAL_STATE_IGNORES if entry not in existing)
+    if not missing:
+        return None
+    separator = b"" if not current or current.endswith(b"\n") else b"\n"
+    return current + separator + b"\n".join(missing) + b"\n"
+
+
 def command_init(args: argparse.Namespace, output: CLIOutput) -> int:
     root = Path(args.path).expanduser().resolve(strict=False)
     if root.exists() and (not root.is_dir() or root.is_symlink()):
         raise CLIError(f"initialization target is not a real directory: {root}")
-    root.mkdir(parents=True, exist_ok=True)
-    artifact = args.artifact or f"build/{args.target}.exe"
-    oracle = args.oracle or f"reference/{args.target}.exe"
+    target_ids = tuple(args.target or ("program",))
+    if len({target.casefold() for target in target_ids}) != len(target_ids):
+        raise CLIError("--target names must be unique under DOS case folding")
+    artifact_overrides = _init_path_overrides(
+        args.artifact,
+        option="--artifact",
+        target_ids=target_ids,
+    )
+    oracle_overrides = _init_path_overrides(
+        args.oracle,
+        option="--oracle",
+        target_ids=target_ids,
+    )
     spec = ProjectSpec(
         schema_version=3,
         project_id=args.project_id or _derived_project_id(root),
@@ -113,7 +175,14 @@ def command_init(args: argparse.Namespace, output: CLIOutput) -> int:
             build=args.logical_build,
             toolchain=args.logical_toolchain,
         ),
-        targets=(TargetSpec(id=args.target, artifact=artifact, oracle=oracle),),
+        targets=tuple(
+            TargetSpec(
+                id=target_id,
+                artifact=artifact_overrides.get(target_id, f"build/{target_id}.exe"),
+                oracle=oracle_overrides.get(target_id, f"reference/{target_id}.exe"),
+            )
+            for target_id in target_ids
+        ),
     )
     project_data = _render_initial_project(spec)
     initial_manifest = SourceManifestDocument(
@@ -123,6 +192,7 @@ def command_init(args: argparse.Namespace, output: CLIOutput) -> int:
         complete=False,
         entries=(),
     )
+    root.mkdir(parents=True, exist_ok=True)
     transaction = CASTransaction(root)
     transaction.write("reprobit.toml", project_data, expected_sha256=None)
     transaction.write(
@@ -130,6 +200,9 @@ def command_init(args: argparse.Namespace, output: CLIOutput) -> int:
         canonical_json(initial_manifest),
         expected_sha256=None,
     )
+    gitignore = _updated_gitignore(root)
+    if gitignore is not None:
+        transaction.write(".gitignore", gitignore)
     result = transaction.commit()
     next_command = human_command(("rbit", "setup", root))
     output.emit(
@@ -316,11 +389,11 @@ def _source_preview_message(
     stale_units: Sequence[Mapping[str, Any]],
 ) -> str:
     if not added and not removed and not changed:
-        lines = [f"Source files are up to date; {entries} selected input(s)."]
+        lines = [f"Source files are up to date; {count_phrase(entries, 'selected input')}."]
     else:
         lines = [
             f"Source preview: +{len(added)} -{len(removed)} ~{len(changed)}; "
-            f"{entries} selected input(s)"
+            f"{count_phrase(entries, 'selected input')}"
         ]
     if added:
         lines.append("  add: " + ", ".join(added))
@@ -366,7 +439,7 @@ def _source_selection_command(
     *,
     invalidate_graph: bool = False,
 ) -> str:
-    arguments: list[str | Path] = ["rbit", "source", action, "--project", root]
+    arguments: list[str | Path] = ["rbit", "source", action, root]
     for path in paths:
         arguments.extend(("--path", path))
     if invalidate_graph:
@@ -642,14 +715,14 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         if entry.path not in claimed_paths:
             transaction.assert_unchanged(entry.path, expected_sha256=entry.digest.value)
     result = transaction.commit()
-    cmake_import_command = (
-        human_command(("rbit", "import", "cmake", root))
-        if graph_invalidated or not graph_present
-        else None
-    )
-    next_command = cmake_import_command or human_command(("rbit", "status", root))
-    message = f"locked {len(document.entries)} project source input(s)"
-    message += f"\nNext: {next_command}"
+    from reprobit.project_readiness import inspect_project_readiness
+
+    readiness = inspect_project_readiness(root, check_local_environment=True)
+    next_command = readiness.next_command
+    next_step = readiness.next_step
+    message = f"locked {count_phrase(len(document.entries), 'project source input')}"
+    if next_step is not None:
+        message += f"\nNext: {next_step}"
     output.emit(
         "source_locked",
         message,
@@ -658,6 +731,7 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         source_manifest_digest=document_digest.value,
         producer_graph_invalidated=graph_invalidated,
         next_command=next_command,
+        next_step=next_step,
         transaction_id=result.transaction_id,
     )
     return 0
@@ -700,21 +774,21 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
         counts_by_document[change.document] = counts_by_document.get(change.document, 0) + 1
     if args.apply:
         summary = (
-            f"Saved source records refreshed: {_count_phrase(len(plan.changes), 'update')} saved "
-            f"across {_count_phrase(len(plan.changed_documents), 'project file')}"
+            f"Saved source records refreshed: {count_phrase(len(plan.changes), 'update')} saved "
+            f"across {count_phrase(len(plan.changed_documents), 'project file')}"
         )
     else:
         summary = (
-            f"Source-record preview: {_count_phrase(len(plan.changes), 'update')} would be saved "
-            f"across {_count_phrase(len(plan.changed_documents), 'project file')}"
+            f"Source-record preview: {count_phrase(len(plan.changes), 'update')} would be saved "
+            f"across {count_phrase(len(plan.changed_documents), 'project file')}"
         )
     lines = [summary]
     visible_documents = sorted(counts_by_document)[:8]
     for document in visible_documents:
-        lines.append(f"  {document}: {_count_phrase(counts_by_document[document], 'check')}")
+        lines.append(f"  {document}: {count_phrase(counts_by_document[document], 'check')}")
     hidden_documents = len(counts_by_document) - len(visible_documents)
     if hidden_documents:
-        lines.append(f"  ...and {_count_phrase(hidden_documents, 'more project file')}")
+        lines.append(f"  ...and {count_phrase(hidden_documents, 'more project file')}")
     if args.apply:
         try:
             transaction = apply_source_regeneration(root, plan)
@@ -783,8 +857,9 @@ def command_validate(args: argparse.Namespace, output: CLIOutput) -> int:
             )
     output.emit(
         "validated",
-        f"validated {bundle.spec.project_id}: {len(bundle.spec.targets)} target(s), "
-        f"{len(bundle.interventions)} intervention(s)",
+        f"validated {bundle.spec.project_id}: "
+        f"{count_phrase(len(bundle.spec.targets), 'target')}, "
+        f"{count_phrase(len(bundle.interventions), 'intervention')}",
         project_id=bundle.spec.project_id,
         targets=len(bundle.spec.targets),
         interventions=len(bundle.interventions),
@@ -916,7 +991,7 @@ def command_status(args: argparse.Namespace, output: CLIOutput) -> int:
     )
 
     root = project_root(args.project)
-    readiness = inspect_project_readiness(root)
+    readiness = inspect_project_readiness(root, check_local_environment=True)
     output.emit(
         "project_readiness",
         render_project_readiness(readiness, include_ready=args.all),
@@ -924,6 +999,7 @@ def command_status(args: argparse.Namespace, output: CLIOutput) -> int:
         completed=readiness.completed,
         total=len(readiness.items),
         next_command=readiness.next_command,
+        next_step=readiness.next_step,
         checks=[
             {
                 "id": item.id,

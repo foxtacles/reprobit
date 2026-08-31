@@ -40,23 +40,24 @@ the committed overlay graph.
 
 ## Create and inspect a project
 
-This guided path currently initializes one CMake target. Multi-target project
-records are supported, but their initial target list still requires advanced
-project setup.
+Name the real CMake target when initializing. Repeat `--target` for projects
+that produce more than one binary.
 
 ```console
-rbit init . --project-id sample --profile msvc_4_2
+rbit init . --target program
 rbit setup .
-rbit source preview --project .
-rbit source lock --project .
+rbit source preview .
+rbit source lock .
 # Put the reference binary at reference/program.exe, then:
 rbit import cmake .
 rbit status .
 ```
 
-`init` creates the project entry point and an empty, explicitly incomplete
-source record, so a new project cannot appear build-ready before its real files
-are reviewed. `setup` prepares and records the compiler. `source preview`
+`init` creates the project entry point, adds root ignore entries for ReproBit's
+local state, and creates an empty, explicitly incomplete source record, so a
+new project cannot appear build-ready before its real files are reviewed.
+`setup` prepares and records the compiler. `status` also checks that this
+machine can find the remembered compiler. `source preview`
 hashes the proposed Git-tracked read set without writing; `source lock` publishes that set
 after review. Repeat `--path` on either source command to provide an explicit
 complete file or tree set instead. It is not a filter over the current record:
@@ -70,6 +71,8 @@ The simplest setup passes the real CMake target name to `rbit init --target`, so
 the default rebuilt-output and reference filenames follow it. Use
 `--target program=your_cmake_target` during import only when the ReproBit ID
 intentionally differs and its declared artifact still matches the real output.
+For several targets, repeat `--target`; qualify any custom path as
+`--artifact TARGET=PATH` or `--oracle TARGET=PATH`.
 For example, a different CMake target and output can be declared without any
 later JSON edit:
 
@@ -172,7 +175,7 @@ To add a new file to the reviewed source list—or remove a locked one—preview
 the new list:
 
 ```console
-rbit source preview --project .
+rbit source preview .
 ```
 
 Repair keeps using the exact locked list and never silently admits another
@@ -180,8 +183,8 @@ Git-tracked file. When existing build records still apply, preview prints the
 exact `source lock` command to run. If preview says it cannot safely update
 which files CMake builds, there is no automatic command for that case yet;
 restore the previous file list instead of deleting saved interventions. A
-successful source lock prints the next command: normally `rbit import cmake .`
-during setup or after a build-graph refresh, otherwise `rbit status .`.
+successful source lock prints the next required step—usually placing the
+original binary, running `rbit import cmake .`, or checking `rbit status .`.
 
 <details>
 <summary>Advanced: inspect or apply only saved source-record changes</summary>
@@ -193,8 +196,8 @@ It is useful when you want to inspect mechanical record updates without
 building or verifying:
 
 ```console
-rbit source regenerate --project .          # preview only
-rbit source regenerate --project . --apply  # apply only these mechanical changes
+rbit source regenerate .          # preview only
+rbit source regenerate . --apply  # apply only these mechanical changes
 ```
 
 It re-renders stale records against the current bytes and can propose changes
@@ -479,9 +482,7 @@ reference. (For a later regression in a project that was already exact, use
 preview, then repeats fresh proofs only when you approve the result:
 
 ```console
-rbit discover grind . --project-wide
-rbit discover grind . --project-wide --accept-exact
-rbit verify .
+rbit discover grind .
 ```
 
 Project-wide grind needs project-owned reference `.obj` files; it cannot derive
@@ -492,9 +493,19 @@ ID. The preview tries a small round-robin sample across eligible source files
 and keeps its summary at
 `.reprobit-state/reports/grind/project/report.html`. Each outcome links to a
 detailed decision report and a persisted bounded plan. Exact previews show the
-copyable, platform-quoted approval command. `--accept-exact` grants advance
-permission for another fresh proof run to save only the solutions that still
-pass byte identity and logic checks. Review the changed files in `git diff`.
+copyable, platform-quoted approval command. If the whole project is not exact,
+the report can instead offer `--accept-progress` for functions that matched
+their project-owned reference objects and passed fresh logic checks. It saves
+those adjustments one at a time and may itself reach an exact project. Follow
+the printed next step: run another preview if mismatches remain, or run
+`rbit verify .` after an exact result. `--accept-exact` is the stricter path: it
+publishes nothing unless the current candidate makes the complete project
+exact. Review changed files in `git diff`.
+
+```console
+rbit discover grind . --accept-progress  # save proven work; follow its printed next step
+rbit discover grind . --accept-exact     # require an exact project before saving anything
+```
 
 For precise control over one function, the expert flow remains available:
 
@@ -503,23 +514,31 @@ rbit discover init . \
   --source src/widget.cpp \
   --symbol '?Transform@Widget@@QAEHH@Z' \
   --reference reference/widget.obj
-rbit discover grind .
+rbit discover grind . --expert-plan reprobit/discovery.json
 ```
 
-`init` finds the matching compile step and writes a four-state plan. Running
-`grind` without `--project-wide` evaluates only that plan. It writes
+`init` finds the matching compile step and writes a four-state plan. The
+`--expert-plan` route evaluates only that plan. It writes
 `.reprobit-state/reports/grind/report.html`; an exact preview includes its own
-fresh approval command.
+fresh approval command, while a locally proven result offers the progress
+approval command.
 
 The advanced `rbit discover run REQUEST` command is a broader resumable campaign.
 It reports whole-function, private-donor, and same-symbol mosaic proposals but
 does not save them. See the [discovery guide](discovery.md) for both workflows,
 incremental behavior, progress events, and reports.
 
+Use `rbit discover clean REQUEST --preview` and then repeat without `--preview`
+to remove its marker-owned reusable state while keeping the reports. Pass the
+same `--state-directory` used by the campaign when it was customized. Cleanup
+refuses state shared by several request files unless `--all-requests` is given;
+preview that combined cleanup before removing it.
+
 Raw `discover run` proposals are not accepted by certification commands.
-Candidate exploration stays in ignored state. The narrow project-aware
-`discover grind --accept-exact` path reruns the logic checks, rebuilds and
-verifies the candidate from scratch, and saves only a passing exact result.
+Candidate exploration stays in ignored state. The narrow project-aware save
+paths rerun the logic checks and rebuild from scratch. `--accept-progress`
+saves only locally proven function adjustments; `--accept-exact` saves only a
+complete byte-identical result.
 
 ## Render an existing report
 

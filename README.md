@@ -53,29 +53,30 @@ installation. Reference binaries remain project-owned and are never redistribute
 
 ### Project setup outline
 
-The guided quickstart currently initializes one CMake target. From that target's
-existing project directory, create the ReproBit records and prepare the current
-machine:
+From an existing CMake project directory, create the ReproBit records and
+prepare the current machine. Name the real CMake target at initialization:
 
 ```console
-rbit init . --project-id sample --profile msvc_4_2
+rbit init . --target program
 rbit setup .
-rbit source preview --project .
-rbit source lock --project .
+rbit source preview .
+rbit source lock .
 # Put the reference binary at reference/program.exe, then:
 rbit import cmake .
 rbit status .
 ```
 
-`init` creates the project entry point and an empty, explicitly incomplete source record. `setup`
+`init` creates the project entry point, ignores ReproBit's local state, and creates an empty,
+explicitly incomplete source record. `setup`
 downloads the compiler when needed, authenticates it, remembers its location, creates or checks
 the project lock, and tests the host. The two source commands show and then lock the Git-tracked
 files the build may read. `import cmake` creates a small reviewable build plan, records reference
 metadata, configures the existing CMake project once, and saves the direct compiler and linker
 steps. It also creates an empty review file for each unambiguous source file, so discovery can
 start without hand-authored JSON. It does not edit `CMakeLists.txt`, and normal ReproBit builds
-never invoke CMake. If the CMake target is not `program`, the simplest setup is to pass its name
-to `rbit init --target`; the default rebuilt-output and reference filenames follow that target name.
+never invoke CMake. Repeat `--target` when the project produces more than one binary; the default
+rebuilt-output and reference filenames follow each target name. For target-specific custom paths,
+repeat `--artifact TARGET=PATH` or `--oracle TARGET=PATH`.
 For a target with a custom output name, declare both the rebuilt artifact and reference binary
 paths with `--artifact` and `--oracle`, for example:
 
@@ -140,10 +141,11 @@ while the saved records and previously published results stay unchanged. See
 paths, cleanup, and the advanced preview tool.
 
 To add a new file to the reviewed source list—or remove a locked one—start with
-`rbit source preview --project .`; repair never silently admits newly tracked
+`rbit source preview .`; repair never silently admits newly tracked
 files. Preview prints a safe `source lock` command when existing build records
-still apply. Lock then prints the next setup or status command. If the change
-affects which files CMake builds, ReproBit currently
+still apply. Lock then prints the next required step—usually placing the
+original binary, importing CMake, or checking status. If the change affects
+which files CMake builds, ReproBit currently
 refuses the update instead of risking saved interventions; restore the previous
 file list for now. Re-run `rbit import cmake .` only when a successful source
 lock asks for it.

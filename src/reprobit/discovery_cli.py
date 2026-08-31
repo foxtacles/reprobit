@@ -743,16 +743,23 @@ def _validate_selected_artifacts(
 
 def command_discover(args: argparse.Namespace, output: CLIOutput) -> int:
     """Run one non-certifying, preview-only MSVC 4.2 discovery campaign."""
-    from reprobit.state_lock import AdvisoryFileLock
+    from reprobit.discovery_state import DiscoveryStateError, register_state, state_lock
 
     paths = _resolve_paths(args)
-    inputs = _load_campaign_inputs(paths)
-    state_root, runtime_root = _prepare_state_roots(paths)
-    session_lock = AdvisoryFileLock(runtime_root / "session.lock")
+    try:
+        session_lock = state_lock(paths.root, paths.state)
+    except DiscoveryStateError as exc:
+        raise CLIError(str(exc)) from exc
     if not session_lock.acquire(nonblocking=True):
         session_lock.close()
-        raise CLIError(f"another discovery campaign owns {state_root}")
+        raise CLIError(f"another discovery campaign owns {paths.root / paths.state}")
     try:
+        inputs = _load_campaign_inputs(paths)
+        state_root, runtime_root = _prepare_state_roots(paths)
+        try:
+            register_state(paths.root, paths.state, paths.request.name)
+        except DiscoveryStateError as exc:
+            raise CLIError(str(exc)) from exc
         report = _execute_campaign(
             args=args,
             output=output,
@@ -773,4 +780,85 @@ def command_discover(args: argparse.Namespace, output: CLIOutput) -> int:
         session_lock.close()
 
 
-__all__ = ["command_discover"]
+def command_discover_clean(args: argparse.Namespace, output: CLIOutput) -> int:
+    """Preview or remove one marker-owned advanced discovery state tree."""
+
+    from reprobit.discovery_state import (
+        DiscoveryStateError,
+        inspect_owned_state,
+        remove_owned_state,
+        state_lock,
+    )
+    from reprobit.state import human_bytes
+
+    request_candidate = Path(args.request).expanduser()
+    if not request_candidate.is_absolute():
+        request_candidate = Path.cwd() / request_candidate
+    if request_candidate.is_symlink() or not request_candidate.is_file():
+        raise CLIError(f"discovery request is not an existing real file: {request_candidate}")
+    request = request_candidate.resolve(strict=True)
+    root = request.parent
+    state = relative_output(root, args.state_directory)
+    if not state.parts:
+        raise CLIError("discovery state directory must not be the request directory")
+    try:
+        maintenance = state_lock(root, state)
+    except DiscoveryStateError as exc:
+        raise CLIError(str(exc)) from exc
+    if not maintenance.acquire(nonblocking=True):
+        maintenance.close()
+        raise CLIError(f"another discovery campaign owns {root / state}")
+    try:
+        try:
+            usage = inspect_owned_state(
+                root,
+                state,
+                request.name,
+                allow_shared=args.all_requests,
+            )
+        except DiscoveryStateError as exc:
+            raise CLIError(str(exc)) from exc
+        if usage is None:
+            output.emit(
+                "discovery_clean",
+                f"No advanced discovery state exists at {root / state}",
+                request=request,
+                state=root / state,
+                preview=args.preview,
+                removed=False,
+                files=0,
+                bytes=0,
+            )
+            return 0
+        if not args.preview:
+            try:
+                remove_owned_state(
+                    usage,
+                    request.name,
+                    allow_shared=args.all_requests,
+                )
+            except (OSError, DiscoveryStateError) as exc:
+                raise CLIError(f"could not remove discovery state: {exc}") from exc
+        action = "Would remove" if args.preview else "Removed"
+        output.emit(
+            "discovery_clean",
+            (
+                f"{action} {human_bytes(usage.bytes)} in {usage.files} file"
+                f"{'s' if usage.files != 1 else ''} from {usage.path}\n"
+                "Discovery reports were kept."
+            ),
+            request=request,
+            state=usage.path,
+            preview=args.preview,
+            removed=not args.preview,
+            files=usage.files,
+            bytes=usage.bytes,
+            requests=usage.requests,
+            shared=len(usage.requests) > 1,
+        )
+        return 0
+    finally:
+        maintenance.close()
+
+
+__all__ = ["command_discover", "command_discover_clean"]

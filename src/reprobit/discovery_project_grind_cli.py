@@ -107,19 +107,24 @@ def _campaign_callbacks(
     )
 
 
-def _approval_argv(root: Path, args: argparse.Namespace) -> tuple[str, ...]:
+def _campaign_argv(
+    root: Path,
+    args: argparse.Namespace,
+    *,
+    acceptance: str | None = None,
+) -> tuple[str, ...]:
     values = [
         "rbit",
         "discover",
         "grind",
         str(root),
-        "--project-wide",
         "--max-symbols",
         str(args.max_symbols),
     ]
     for value in args.reference_object:
         values.extend(("--reference-object", value))
-    values.append("--accept-exact")
+    if acceptance is not None:
+        values.append(acceptance)
     return tuple(values)
 
 
@@ -187,9 +192,9 @@ def _publish_project_grind_outcome(
             "discover",
             "grind",
             root,
-            "--plan",
+            "--expert-plan",
             plan_relative,
-            "--accept-exact",
+            "--accept-exact" if result.exact else "--accept-progress",
         )
     )
     files[decision_output] = render_grind_report_html(
@@ -199,6 +204,7 @@ def _publish_project_grind_outcome(
         cold_report_json=cold_json_link,
         approval_command=per_symbol_approval,
         verify_command=human_command(verify_argv),
+        continue_command=human_command(("rbit", "discover", "grind", root)),
     ).encode("utf-8")
     with report_publication_lease(state_root):
         transaction = CASTransaction(root)
@@ -225,7 +231,9 @@ def _project_grind_reports(
     state_root: Path,
     result: ProjectAutoGrindResult,
     *,
-    approval_argv: tuple[str, ...],
+    exact_approval_argv: tuple[str, ...],
+    progress_approval_argv: tuple[str, ...],
+    continue_argv: tuple[str, ...],
     verify_argv: tuple[str, ...],
 ) -> tuple[Path, Path, str, tuple[Path, ...], tuple[Path, ...]]:
     directory = _project_report_directory(state_root)
@@ -282,12 +290,21 @@ def _project_grind_reports(
 
     if result.exact and not result.accepted:
         next_kind = "approve"
-        next_argv = approval_argv
+        next_argv = exact_approval_argv
         next_label = "Repeat fresh proofs and save the passing adjustments"
+    elif result.qualified and not result.accepted:
+        next_kind = "save_progress"
+        next_argv = progress_approval_argv
+        next_label = "Save the locally proven adjustments without claiming an exact project"
     elif result.published:
-        next_kind = "verify"
-        next_argv = verify_argv
-        next_label = "Verify the saved project again from scratch"
+        if result.exact:
+            next_kind = "verify"
+            next_argv = verify_argv
+            next_label = "Verify the exact saved project again from scratch"
+        else:
+            next_kind = "continue"
+            next_argv = continue_argv
+            next_label = "Continue with the next bounded project pass"
     else:
         next_kind = None
         next_argv = ()
@@ -356,8 +373,7 @@ def command_discover_project_grind(
     """Run the bounded project-wide low-hanging-fruit search."""
 
     root = project_root(args.project)
-    if args.plan != "reprobit/discovery.json":
-        raise CLIError("--plan belongs to the per-symbol grind; omit it with --project-wide")
+    accept_progress = getattr(args, "accept_progress", False)
     assignments = _project_reference_assignments(args.reference_object)
     state_root = safe_project_path(root, load_project(root).state_dir)
     report_directory = _project_report_directory(state_root)
@@ -394,18 +410,21 @@ def command_discover_project_grind(
             reference_assignments=assignments,
             max_symbols=args.max_symbols,
             accept_exact=args.accept_exact,
+            accept_progress=accept_progress,
             # Preview runs leave authority unchanged, so equal compiler probes are
             # immutable across symbols. Accepted runs can publish after each symbol;
             # compile each later item against that newly updated project state.
             callbacks=_campaign_callbacks(
                 callbacks,
-                reuse_across_symbols=not args.accept_exact,
+                reuse_across_symbols=not (args.accept_exact or accept_progress),
             ),
             progress=progress,
             finalize_outcome=finalize_outcome,
         )
 
-    approval_argv = _approval_argv(root, args)
+    exact_approval_argv = _campaign_argv(root, args, acceptance="--accept-exact")
+    progress_approval_argv = _campaign_argv(root, args, acceptance="--accept-progress")
+    continue_argv = _campaign_argv(root, args)
     report_json: Path | None = None
     report_html: Path | None = None
     decision_reports: tuple[Path, ...] = ()
@@ -440,7 +459,9 @@ def command_discover_project_grind(
             root,
             state_root,
             result,
-            approval_argv=approval_argv,
+            exact_approval_argv=exact_approval_argv,
+            progress_approval_argv=progress_approval_argv,
+            continue_argv=continue_argv,
             verify_argv=verify_argv,
         )
     except Exception as exc:
@@ -462,6 +483,8 @@ def command_discover_project_grind(
         if report_html is not None
         else "Report: unavailable (see the nonfatal warning above)"
     )
+    published_exact = sum(outcome.published and outcome.exact for outcome in result.outcomes)
+    published_progress = result.published - published_exact
     if not result.outcomes:
         message = (
             "No eligible project functions were available for the bounded grind.\n"
@@ -470,15 +493,27 @@ def command_discover_project_grind(
             f"{report_line}"
         )
     elif result.published:
-        message = (
-            f"Saved {result.published} freshly verified exact adjustment"
-            f"{'s' if result.published != 1 else ''} from {len(result.outcomes)} bounded "
-            "function searches.\n"
-            "ReproBit kept only candidates that matched every target byte for byte and passed "
-            "their logic checks. This is a low-hanging-fruit pass, not a complete solver.\n"
-            f"{report_line}\n"
-            f"Next: {human_command(verify_argv)}"
-        )
+        if published_exact:
+            message = (
+                f"Saved {result.published} locally proven adjustment"
+                f"{'s' if result.published != 1 else ''}; the final cold build matched every "
+                "target exactly.\n"
+                "Earlier adjustments in this pass were admitted only as local progress; the "
+                "exact final build is the project certification gate.\n"
+                f"{report_line}\n"
+                f"Next: {human_command(verify_argv)}"
+            )
+        else:
+            message = (
+                f"Saved {published_progress} locally proven adjustment"
+                f"{'s' if published_progress != 1 else ''} from {len(result.outcomes)} bounded "
+                "function searches.\n"
+                "Each saved function matches its project-owned reference object and passed its "
+                "logic checks. The complete project is still not exact, so no project "
+                "certification was issued.\n"
+                f"{report_line}\n"
+                f"Next: {human_command(continue_argv)}"
+            )
     elif result.exact:
         message = (
             f"Found {result.exact} freshly verified exact adjustment"
@@ -486,35 +521,56 @@ def command_discover_project_grind(
             "function searches. Project files stayed unchanged.\n"
             "This is a low-hanging-fruit pass, not a complete solver. Review the report, then "
             "rerun the same fresh proofs and save passing results with:\n"
-            f"{human_command(approval_argv)}\n"
+            f"{human_command(exact_approval_argv)}\n"
+            f"{report_line}"
+        )
+    elif result.qualified:
+        message = (
+            f"Found {result.qualified} locally proven adjustment"
+            f"{'s' if result.qualified != 1 else ''} across {len(result.outcomes)} bounded "
+            "function searches. Project files stayed unchanged.\n"
+            "These functions match their project-owned reference objects and passed their "
+            "logic checks, but the complete project does not match yet. Review the report, "
+            "then save this bounded progress without claiming project certification with:\n"
+            f"{human_command(progress_approval_argv)}\n"
             f"{report_line}"
         )
     else:
         message = (
             f"Tried {len(result.outcomes)} bounded project function"
-            f"{'s' if len(result.outcomes) != 1 else ''}; no exact low-cost adjustment was "
-            "proven. Project files stayed unchanged.\n"
+            f"{'s' if len(result.outcomes) != 1 else ''}; no safe local adjustment was proven. "
+            "Project files stayed unchanged.\n"
             "The grind intentionally stops short of an exhaustive solver.\n"
             f"{report_line}"
         )
-    next_argv = (
-        approval_argv
-        if result.exact and not result.accepted
-        else (verify_argv if result.published else ())
-    )
+    if result.exact and not result.accepted:
+        next_argv = exact_approval_argv
+    elif result.qualified and not result.accepted:
+        next_argv = progress_approval_argv
+    elif published_exact:
+        next_argv = verify_argv
+    elif result.published:
+        next_argv = continue_argv
+    else:
+        next_argv = ()
     output.emit(
         "discovery_project_grind_complete",
         message,
         project=root,
         project_wide=True,
-        accepted=args.accept_exact,
+        accepted=result.accepted,
+        accept_mode=(
+            "progress" if accept_progress else ("exact" if args.accept_exact else "preview")
+        ),
         eligible_units=result.campaign.eligible_units,
         reference_objects=result.campaign.reference_objects,
         discovered_symbols=result.campaign.discovered_symbols,
         attempted_symbols=len(result.outcomes),
         truncated_symbols=result.campaign.truncated_symbols,
+        locally_qualified_symbols=result.qualified,
         exact_symbols=result.exact,
         published_symbols=result.published,
+        published_progress_symbols=published_progress,
         max_symbols=args.max_symbols,
         report_json=report_json,
         report_html=report_html,
@@ -522,7 +578,11 @@ def command_discover_project_grind(
         persisted_plans=persisted_plans,
         report_transaction_id=report_transaction_id,
         report_warning=report_warning,
-        approval_argv=approval_argv if result.exact and not result.accepted else (),
+        approval_argv=(
+            exact_approval_argv
+            if result.exact and not result.accepted
+            else (progress_approval_argv if result.qualified and not result.accepted else ())
+        ),
         verify_argv=verify_argv,
         next_argv=next_argv,
         next_command=human_command(next_argv) if next_argv else None,
@@ -532,6 +592,7 @@ def command_discover_project_grind(
                 "translation_unit": outcome.item.translation_unit_id,
                 "symbol": outcome.item.symbol,
                 "reference_object": outcome.item.reference_object,
+                "locally_qualified": outcome.locally_qualified,
                 "exact": outcome.exact,
                 "published": outcome.published,
                 "added_cost": outcome.added_cost,
@@ -548,7 +609,11 @@ def command_discover_project_grind(
             for skip in result.campaign.skips
         ],
     )
-    return 0 if result.exact else 1
+    if args.accept_exact:
+        return 0 if any(outcome.published and outcome.exact for outcome in result.outcomes) else 1
+    if accept_progress:
+        return 0 if result.published else 1
+    return 0 if result.qualified else 1
 
 
 __all__ = ["command_discover_project_grind"]

@@ -11,8 +11,9 @@ rbit import cmake .
 This one command creates the minimal initial build records and empty per-source
 review shards, configures the existing CMake project without building it, and
 saves the direct compiler and linker graph. It does not edit `CMakeLists.txt`.
-The guided initializer currently starts with one target. ReproBit target IDs map
-to CMake targets with the same name by default. When the ReproBit ID is
+In the single `rbit init` command, repeat `--target NAME` for every binary the
+project produces.
+ReproBit target IDs map to CMake targets with the same name by default. When the ReproBit ID is
 `program` but the CMake target and output are `app`, declare both facts
 explicitly. The `--oracle` option names the reference binary:
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path, PurePosixPath
 
-from reprobit.cli_output import CLIOutput, human_command
+from reprobit.cli_output import CLIOutput, count_phrase, human_command
 from reprobit.cli_paths import CLIError, project_root, safe_project_path
 from reprobit.project_loader import load_project
 from reprobit.schema import ProjectSpec
@@ -46,10 +46,11 @@ def command_state_status(args: argparse.Namespace, output: CLIOutput) -> int:
     active = sum(item.active for item in status.runs)
     retained = len(status.runs) - active
     lines = [
-        f"state: {human_bytes(status.total_bytes)} in {status.total_files} file(s)",
+        f"state: {human_bytes(status.total_bytes)} in {count_phrase(status.total_files, 'file')}",
         f"  runs: {len(status.runs)} ({active} active, {retained} retained), "
         f"{human_bytes(status.run_bytes)}",
-        f"  cache: {status.cache_records} record(s), {status.cache_blobs} blob(s), "
+        f"  cache: {count_phrase(status.cache_records, 'record')}, "
+        f"{count_phrase(status.cache_blobs, 'blob')}, "
         f"{human_bytes(status.cache_bytes)}",
         f"  cache leases: {status.cache_active_leases} active, {status.cache_stale_leases} stale",
         f"  reports: {status.report_files} managed "
@@ -157,26 +158,33 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
         if not args.cache and not args.obsolete_cache:
             cache_summary = "The reusable incremental cache will be kept."
         elif result.cache_active_leases:
+            build_verb = "is" if result.cache_active_leases == 1 else "are"
             cache_summary = (
                 "Cache cleanup is currently skipped because "
-                f"{result.cache_active_leases} active build(s) are using it."
+                f"{count_phrase(result.cache_active_leases, 'active build')} "
+                f"{build_verb} using it."
             )
         elif args.obsolete_cache:
             cache_summary = (
-                f"The selection includes {result.cache_removed_records} obsolete cache "
-                f"record(s) and {result.cache_removed_blobs} unreferenced blob(s); "
+                "The selection includes "
+                f"{count_phrase(result.cache_removed_records, 'obsolete cache record')} and "
+                f"{count_phrase(result.cache_removed_blobs, 'unreferenced blob')}; "
                 "the current cache will be kept"
                 + (
-                    f", along with {result.cache_skipped_recent_records} recent obsolete record(s)."
+                    ", along with "
+                    f"{count_phrase(result.cache_skipped_recent_records, 'recent obsolete record')}"
+                    "."
                     if result.cache_skipped_recent_records
                     else "."
                 )
             )
         else:
             cache_summary = (
-                f"The selection includes {result.cache_removed_records} cache record(s) "
-                f"and {result.cache_removed_blobs} unreferenced blob(s); "
-                f"{result.cache_skipped_recent_records} recent cache record(s) will be kept."
+                "The selection includes "
+                f"{count_phrase(result.cache_removed_records, 'cache record')} "
+                f"and {count_phrase(result.cache_removed_blobs, 'unreferenced blob')}; "
+                f"{count_phrase(result.cache_skipped_recent_records, 'recent cache record')} "
+                "will be kept."
             )
         report_summary = (
             f"The selection includes {result.report_files} managed report "
@@ -192,7 +200,8 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
         output.emit(
             "cleanup_preview",
             f"Clean preview: {human_bytes(result.reclaimed_bytes)} can be freed. "
-            f"Selected {len(result.removed)} inactive workspace(s). {cache_summary} "
+            f"Selected {count_phrase(len(result.removed), 'inactive workspace')}. "
+            f"{cache_summary} "
             f"{report_summary} "
             f"{next_step}",
             candidates=result.removed,
@@ -214,25 +223,30 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
     if not args.cache and not args.obsolete_cache:
         cache_summary = "The reusable incremental cache was kept."
     elif result.cache_active_leases:
+        build_verb = "is" if result.cache_active_leases == 1 else "are"
         cache_summary = (
             "Cache cleanup was skipped because "
-            f"{result.cache_active_leases} active build(s) are using it."
+            f"{count_phrase(result.cache_active_leases, 'active build')} "
+            f"{build_verb} using it."
         )
     elif args.obsolete_cache:
         cache_summary = (
-            f"Removed {result.cache_removed_records} obsolete cache record(s) and "
-            f"{result.cache_removed_blobs} unreferenced blob(s); kept the current cache"
+            f"Removed {count_phrase(result.cache_removed_records, 'obsolete cache record')} "
+            f"and {count_phrase(result.cache_removed_blobs, 'unreferenced blob')}; "
+            "kept the current cache"
             + (
-                f" and {result.cache_skipped_recent_records} recent obsolete record(s)."
+                " and "
+                f"{count_phrase(result.cache_skipped_recent_records, 'recent obsolete record')}"
+                "."
                 if result.cache_skipped_recent_records
                 else "."
             )
         )
     else:
         cache_summary = (
-            f"Removed {result.cache_removed_records} cache record(s) and "
-            f"{result.cache_removed_blobs} unreferenced blob(s); kept "
-            f"{result.cache_skipped_recent_records} recent cache record(s)."
+            f"Removed {count_phrase(result.cache_removed_records, 'cache record')} and "
+            f"{count_phrase(result.cache_removed_blobs, 'unreferenced blob')}; kept "
+            f"{count_phrase(result.cache_skipped_recent_records, 'recent cache record')}."
         )
     report_summary = (
         f"Removed {result.report_files} managed report "
@@ -243,10 +257,11 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
     output.emit(
         "cleanup",
         f"Freed {human_bytes(result.reclaimed_bytes)}. "
-        f"Removed {len(result.removed)} inactive workspace(s). {cache_summary} "
+        f"Removed {count_phrase(len(result.removed), 'inactive workspace')}. "
+        f"{cache_summary} "
         f"{report_summary} "
-        f"Kept {len(result.skipped_active)} active and "
-        f"{len(result.skipped_recent)} recent workspace(s).",
+        f"Kept {count_phrase(len(result.skipped_active), 'active workspace')} and "
+        f"{count_phrase(len(result.skipped_recent), 'recent workspace')}.",
         removed=result.removed,
         reclaimed_bytes=result.reclaimed_bytes,
         skipped_active=result.skipped_active,

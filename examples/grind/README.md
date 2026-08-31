@@ -24,8 +24,8 @@ example:
 cd examples/grind
 rbit setup .
 python prepare_reference.py
-rbit discover grind . --project-wide
-rbit discover grind . --project-wide --accept-exact
+rbit discover grind .
+rbit discover grind . --accept-exact
 rbit verify .
 ```
 
@@ -33,7 +33,7 @@ rbit verify .
 commands need no machine-specific paths. If MSVC 4.2 is already set up on this
 machine, skip that first line.
 
-The first grind is a read-only preview. Project-wide mode looks at committed
+The first grind is a read-only, project-wide preview. It looks at committed
 compiler steps and the available objects under `reference/`. This sample has
 one of each, so no mapping or plan editing is needed. In a larger project,
 name a reference object after its source filename without the extension, use an
@@ -50,9 +50,9 @@ links to each per-function decision and winning build-from-scratch verification
 report. The bounded plan behind every decision is kept beside the report, and
 the page shows the exact copyable command for approval or final verification.
 
-For one deliberately selected function, the original expert flow remains
-available through `rbit discover init` followed by `rbit discover grind` without
-`--project-wide`.
+For one deliberately selected function, the expert flow remains available
+through `rbit discover init` followed by
+`rbit discover grind . --expert-plan reprobit/discovery.json`.
 
 To repeat the example from its original one-byte mismatch, reset only the two
 files that approval changes, then remove the generated reports:

@@ -1300,10 +1300,7 @@ def test_debug_companion_is_receipt_bound_but_outside_authenticity_artifacts() -
         "Debug companion: reproducible — bookkeeping stabilized; symbols, types, "
         "addresses, and source lines preserved."
     ) in collapsed_text
-    assert (
-        "For comparison and analysis only; not a byte-identity target or release artifact."
-        in collapsed_text
-    )
+    assert "For comparison and analysis only; not used to decide byte identity." in collapsed_text
     assert "Comparison files" in rendered
     assert "Matched executable + symbols" in rendered
     assert "Files for comparison tools" in rendered

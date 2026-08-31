@@ -158,8 +158,8 @@ def _render_debug_companion_details(report: Report) -> str:
         caption="Named bookkeeping normalization categories",
     )
     return f"""
-<p><strong>For comparison and analysis only; not a byte-identity target or release
-  artifact.</strong> Each published hash and size below is bound to a fresh build-output
+<p><strong>For comparison and analysis only; not used to decide byte identity.</strong>
+  Each published hash and size below is bound to a fresh build-output
   receipt. Range previews are intentionally bounded; complete counts remain in the record.</p>
 {files}{bindings}{categories}"""
 

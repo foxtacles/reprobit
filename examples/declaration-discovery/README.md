@@ -91,11 +91,13 @@ range without throwing away completed compiler work.
   `python prepare_reference.py --replace` only when you intentionally changed
   the source, campaign, or compiler installation.
 - **The first campaign reports cache hits:** `.sample-state` contains an earlier
-  run. Rename it to keep the old state, then run again with a fresh
-  `.sample-state` directory.
+  run. Preview and remove only that marker-owned campaign state with
+  `rbit discover clean campaign.json --state-directory .sample-state --all-requests --preview`,
+  then repeat without `--preview` if the selection is right.
 - **No proposal matches:** regenerate `reference.obj` with the same toolchain and
   unchanged campaign arguments. Compiler version and switches are part of the
   experiment.
 
 All generated files in this directory are disposable. None of them are saved
-to a verified ReproBit project automatically.
+to a verified ReproBit project automatically. The guarded cleanup command keeps
+the JSON and HTML reports while removing reusable compiler state.

@@ -18,7 +18,7 @@ Obtain them from your project's archival or analysis inputs, place them under
 `reference/`, then run a read-only project preview:
 
 ```console
-rbit discover grind . --project-wide
+rbit discover grind .
 ```
 
 ReproBit first matches an object to the source filename without its extension:
@@ -38,17 +38,45 @@ dropping input.
 The summary is written to
 `.reprobit-state/reports/grind/project/report.html`. It links every attempted
 function to a detailed decision report and keeps the exact bounded plan used for
-that decision beside the report. Exact previews include a copyable approval
-command; accepted runs include the fresh verification command. Project-wide
-grind is a low-hanging-fruit pass, not a promise to solve every compiler
-mismatch. A completed preview exits with status 1 when it finds no exact result,
-but its report is still valid. Approve freshly proven results only after review:
+that decision beside the report. Grind is a low-hanging-fruit pass, not a
+promise to solve every compiler mismatch.
+
+The report can offer either of two safe next steps:
+
+- If one adjustment makes every target match, save only that exact result with
+  `--accept-exact`.
+- If several independent mismatches remain, save the locally proven functions
+  with `--accept-progress`. That pass may itself reach an exact project; if it
+  does not, run the ordinary preview again.
+
+"Locally proven" has a narrow meaning: the freshly compiled function matches
+its project-owned reference object, its logic checks pass in a build from
+scratch, and it introduces no new authenticity exception. ReproBit saves these
+adjustments one at a time, checks the current project before every atomic
+update, and tests later functions against the newly saved state. It does **not**
+claim that the executable is closer overall or that the project is certified.
+Only a final fresh, byte-exact build can make that claim.
+Within each function, progress mode tries candidates cheapest-first and moves on
+as soon as one passes the cold local proof. Preview and exact-only approval keep
+searching the bounded set for a complete project match.
+
+Use the copyable command shown in the report. A typical multi-mismatch loop is:
 
 ```console
-rbit discover grind . --project-wide --accept-exact
+rbit discover grind . --accept-progress
+# If the printed next step says the project still differs:
+rbit discover grind .
+
+# When the report offers the exact path instead:
+rbit discover grind . --accept-exact
 git diff -- reprobit/interventions reprobit/proofs
 rbit verify .
 ```
+
+Both save commands rerun the proof; they never trust an earlier preview. A
+preview exits `0` when it finds an exact or locally proven adjustment and `1`
+when it finds none. A save command exits `0` only when it actually publishes the
+requested kind of result. Invalid input or a runtime failure exits `2`.
 
 For one deliberately selected function, create the small expert plan once:
 
@@ -76,37 +104,40 @@ easy to widen deliberately:
 }
 ```
 
-Run a read-only preview first:
+Run that plan explicitly. An ordinary `grind` remains project-wide:
 
 ```console
-rbit discover grind .
+rbit discover grind . --expert-plan reprobit/discovery.json
 ```
 
 Each candidate is compiled through the project's locked compiler graph. A
-candidate only counts as a solution after a separate build from scratch
-reproduces every target byte for byte and passes the required logic checks.
+candidate can be saved as local progress only after a separate build from
+scratch proves the function and required logic checks. It is exact only when
+that same build also reproduces every target byte for byte.
 Every completed bounded search writes a human summary to
-`.reprobit-state/reports/grind/report.html`, including searches with no exact
-solution. An exact result links to its separate `cold-verification.html` and
-`cold-verification.json` build-from-scratch evidence in the same directory. The
-preview does not change project files.
+`.reprobit-state/reports/grind/report.html`, including searches with no safe
+solution. A chosen result links to its separate fresh-build evidence in the same
+directory. The preview does not change project files.
 
-When the result looks right, authorize a fresh proof run and atomic publication:
+When the result looks right, copy the exact or progress approval command from
+the report. For example:
 
 ```console
-rbit discover grind . --accept-exact
+rbit discover grind . \
+  --expert-plan reprobit/discovery.json \
+  --accept-progress
 git diff -- reprobit/interventions reprobit/proofs
-rbit verify .
 ```
 
 Advance approval is not proof and does not reuse an old preview verdict. ReproBit
 recompiles and verifies the solution from scratch, then changes only the owning
 intervention and proof shards in one compare-and-swap transaction. A concurrent
 source, plan, reference binary, toolchain, graph, or project-record edit aborts
-the save. If no exact solution passes, no project files change. Writing review
-reports is separate from saving the accepted intervention and proof records. If
-the local report cannot be written after those records were saved, the CLI emits
-a nonfatal warning while still reporting the project changes accurately.
+the save. If no result meets the selected approval mode, no project files
+change. Writing review reports is separate from saving the accepted intervention
+and proof records. If the local report cannot be written after those records
+were saved, the CLI emits a nonfatal warning while still reporting the project
+changes accurately.
 
 Try the complete small project in the
 [grind example](../examples/grind/README.md). It intentionally starts one byte
@@ -204,7 +235,20 @@ removes only the fixed, flat set of compiler files and never follows a redirecte
 directory tree.
 
 Raw campaigns deliberately keep this state separate from a project's
-`.reprobit-state`. The `rbit clean` command manages project-local state and does
-not remove `.reprobit-discovery` or another explicitly selected
-`--state-directory`; delete that campaign directory yourself only after its
-reports and candidate objects are no longer needed.
+`.reprobit-state`. Preview its size before removal, then use the guarded cleanup
+command:
+
+```console
+rbit discover clean discovery-request.json --preview
+rbit discover clean discovery-request.json
+```
+
+The command keeps the JSON and HTML reports. It removes only a state tree marked
+by ReproBit for that request, refuses active campaigns, and
+never follows symbolic links, junctions, or other redirected entries. If the
+campaign used `--state-directory DIR`, pass the same option to `discover clean`.
+When several request files deliberately reuse one state directory, cleanup
+refuses to remove their shared cache unless you add `--all-requests`; use
+`--preview --all-requests` first to review the combined size.
+The tiny external lock marker may remain beside the request; reusable campaign
+objects and compiler workspaces do not.

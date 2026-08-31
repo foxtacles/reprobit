@@ -284,7 +284,7 @@ def test_action_summary_writes_outputs(tmp_path: Path, monkeypatch: object) -> N
     assert re.search(r"quarantine-digest=[0-9a-f]{64}\n", received)
     summary_text = summary.read_text(encoding="utf-8")
     assert "not clean" in summary_text
-    assert "1 exception(s) cover 2 byte(s) across 1 range(s)" in summary_text
+    assert "Coverage: 1 exception, 2 bytes, 1 range" in summary_text
     assert re.search(r"Quarantine set: `[0-9a-f]{64}`", summary_text)
     assert "| Exact bytes | Yes |" in summary_text
     assert "| Built from declared source and compiler | No |" in summary_text

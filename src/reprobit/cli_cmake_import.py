@@ -14,7 +14,7 @@ from pathlib import Path
 
 from reprobit.backends import NativeWindowsBackend, backend_for_host
 from reprobit.cli_environment import resolve_classic_execution_inputs
-from reprobit.cli_output import CLIOutput, human_command
+from reprobit.cli_output import CLIOutput, count_phrase, human_command
 from reprobit.cli_paths import (
     CLIError,
     project_root,
@@ -35,6 +35,7 @@ from reprobit.msvc42_provision import (
     verify_msvc42_cmake_frontend,
 )
 from reprobit.project_loader import load_project, load_project_tree
+from reprobit.project_readiness import inspect_project_readiness
 from reprobit.schema import ProducerGraphBuildAdapter
 from reprobit.state import KeepWorkspace, RunArena
 from reprobit.toolchains import MSVC_42, ClassicMSVCToolchain
@@ -121,6 +122,26 @@ def command_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:
     spec = load_project(root)
     if not isinstance(spec.build, ProducerGraphBuildAdapter):
         raise CLIError("CMake import requires a producer-graph project")
+    readiness = inspect_project_readiness(
+        root,
+        check_local_environment=True,
+        local_toolchain_root=args.toolchain_root,
+    )
+    import_prerequisites = {
+        "local_toolchain",
+        "toolchain_lock",
+        "source_manifest",
+        "references",
+    }
+    blocker = next(
+        (item for item in readiness.items if item.id in import_prerequisites and not item.ready),
+        None,
+    )
+    if blocker is not None:
+        next_step = blocker.next_command or blocker.detail
+        raise CLIError(
+            f"CMake import is not ready: {blocker.label}: {blocker.detail}\nNext: {next_step}"
+        )
     backend = backend_for_host()
     execution = resolve_classic_execution_inputs(
         profile=spec.toolchain.profile,
@@ -216,7 +237,7 @@ def command_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:
                     )
             output.emit(
                 "producer_graph_extracted",
-                f"committed {len(graph_result.graph.nodes)} direct producer(s) "
+                f"committed {count_phrase(len(graph_result.graph.nodes), 'direct producer')} "
                 f"to {graph_result.output}",
                 output=graph_result.output,
                 extractor=graph_result.graph.extractor,
@@ -259,8 +280,10 @@ def command_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:
     next_command = human_command(("rbit", "build", root))
     output.emit(
         "cmake_imported",
-        f"CMake import complete: {len(final.producer_graph.nodes)} build step(s) and "
-        f"{len(final.build_plan.translation_units)} TU(s) recorded\nNext: {next_command}",
+        "CMake import complete: "
+        f"{count_phrase(len(final.producer_graph.nodes), 'build step')} and "
+        f"{count_phrase(len(final.build_plan.translation_units), 'TU')} recorded"
+        f"\nNext: {next_command}",
         build_plan=safe_project_path(root, spec.layout.build_plan),
         producer_graph=graph_path,
         scaffold_transaction_id=scaffold.transaction_id,

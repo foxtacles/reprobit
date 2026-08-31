@@ -37,7 +37,7 @@ from reprobit.cli_project import (
     command_validate,
 )
 from reprobit.cli_state import command_clean, command_state_status
-from reprobit.discovery_cli import command_discover
+from reprobit.discovery_cli import command_discover, command_discover_clean
 from reprobit.model import AuthenticityPolicy
 from reprobit.state import KeepWorkspace
 from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES
@@ -251,14 +251,29 @@ def _parser() -> argparse.ArgumentParser:
         default="msvc_4_2",
         help="compiler profile (default: msvc_4_2)",
     )
-    init.add_argument("--target", default="program", help="first target name")
+    init.add_argument(
+        "--target",
+        action="append",
+        metavar="NAME",
+        help="target name (repeatable; default: program)",
+    )
     init.add_argument(
         "--artifact",
-        help="rebuilt output path (default: build/TARGET.exe)",
+        action="append",
+        metavar="[TARGET=]PATH",
+        help=(
+            "rebuilt output path for one target, or TARGET=PATH when repeated "
+            "(default: build/TARGET.exe)"
+        ),
     )
     init.add_argument(
         "--oracle",
-        help="original/reference binary path (default: reference/TARGET.exe)",
+        action="append",
+        metavar="[TARGET=]PATH",
+        help=(
+            "original/reference path for one target, or TARGET=PATH when repeated "
+            "(default: reference/TARGET.exe)"
+        ),
     )
     init_advanced = init.add_argument_group("advanced logical path options")
     init_advanced.add_argument("--logical-source", default=r"R:\source")
@@ -392,7 +407,7 @@ def _parser() -> argparse.ArgumentParser:
         "preview", help="show source changes and records that need review without writing"
     )
     source_preview.add_argument(
-        "--project", default=".", help="project containing reprobit.toml (default: .)"
+        "project", nargs="?", default=".", help="project directory (default: .)"
     )
     source_preview.add_argument(
         "--path",
@@ -422,7 +437,7 @@ def _parser() -> argparse.ArgumentParser:
         "lock", help="safely record tracked or explicitly named source inputs"
     )
     source_lock.add_argument(
-        "--project", default=".", help="project containing reprobit.toml (default: .)"
+        "project", nargs="?", default=".", help="project directory (default: .)"
     )
     source_lock.add_argument(
         "--path",
@@ -446,7 +461,7 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     source_regenerate.add_argument(
-        "--project", default=".", help="project containing reprobit.toml (default: .)"
+        "project", nargs="?", default=".", help="project directory (default: .)"
     )
     source_regenerate.add_argument(
         "--apply",
@@ -587,7 +602,7 @@ def _parser() -> argparse.ArgumentParser:
         "--configured-build-root",
         required=True,
         metavar="DIRECTORY",
-        help="CMake Unix Makefiles tree created by rbit graph configure",
+        help="CMake metadata tree created by rbit graph configure",
     )
     graph_extract.add_argument(
         "--effective-source-root",
@@ -851,9 +866,37 @@ def _parser() -> argparse.ArgumentParser:
     )
     discover_run.set_defaults(handler=command_discover)
 
+    discover_clean = discover_commands.add_parser(
+        "clean",
+        help="preview or remove one advanced discovery campaign's reusable state",
+    )
+    discover_clean.add_argument("request", help="request JSON whose state should be removed")
+    discover_clean.add_argument(
+        "--state-directory",
+        default=".reprobit-discovery",
+        metavar="DIRECTORY",
+        help="campaign state beside the request (default: .reprobit-discovery)",
+    )
+    discover_clean.add_argument(
+        "--preview",
+        action="store_true",
+        help="show what would be removed without changing anything",
+    )
+    discover_clean.add_argument(
+        "--all-requests",
+        action="store_true",
+        help="remove state shared by every request named in its ownership marker",
+    )
+    discover_clean.set_defaults(handler=command_discover_clean)
+
     discover_grind = discover_commands.add_parser(
         "grind",
-        help="preview low-cost adjustments and optionally save a freshly verified exact match",
+        help="find low-cost project adjustments, preview them, and optionally save proven work",
+        description=(
+            "Search a bounded, project-wide set of low-cost adjustments. The default is a "
+            "preview. Saved local progress does not prove the complete project; only a fresh "
+            "byte-exact result does."
+        ),
     )
     discover_grind.add_argument(
         "project",
@@ -861,25 +904,26 @@ def _parser() -> argparse.ArgumentParser:
         default=".",
         help="ReproBit project to search (default: .)",
     )
-    discover_grind.add_argument(
+    grind_acceptance = discover_grind.add_mutually_exclusive_group()
+    grind_acceptance.add_argument(
         "--accept-exact",
         action="store_true",
-        help="rerun the proof and save an exact solution if it still passes",
+        help="save only if a fresh run reproduces the complete project exactly",
     )
-    discover_grind.add_argument(
-        "--project-wide",
+    grind_acceptance.add_argument(
+        "--accept-progress",
         action="store_true",
-        help="try a bounded set of eligible project functions instead of one plan",
+        help=(
+            "save bounded, locally proven function adjustments even while the complete "
+            "project still differs"
+        ),
     )
     discover_grind.add_argument(
         "--reference-object",
         action="append",
         default=[],
         metavar="TU=PROJECT_PATH",
-        help=(
-            "pair a translation unit with a reference .obj in project-wide mode; "
-            "repeat for additional units"
-        ),
+        help=("pair a translation unit with a reference .obj; repeat for additional units"),
     )
     discover_grind.add_argument(
         "--max-symbols",
@@ -889,10 +933,10 @@ def _parser() -> argparse.ArgumentParser:
         help="maximum project functions to try in deterministic order (default: 8; max: 64)",
     )
     discover_grind.add_argument(
-        "--plan",
-        default="reprobit/discovery.json",
+        "--expert-plan",
+        dest="plan",
         metavar="PROJECT_RELATIVE_PATH",
-        help="project discovery plan (default: reprobit/discovery.json)",
+        help="run one deliberately authored per-symbol plan instead of project-wide discovery",
     )
     _add_execution_options(
         discover_grind,

@@ -54,7 +54,7 @@ def test_cli_creates_a_ready_to_grind_project_plan_without_compiling(
     assert plan.symbol == "?Transform@Widget@@QAEHH@Z"
     rendered = capsys.readouterr().out
     assert "No compiler was run" in rendered
-    assert f"Next: rbit discover grind {tmp_path} --plan plans/widget.json" in rendered
+    assert f"Next: rbit discover grind {tmp_path} --expert-plan plans/widget.json" in rendered
 
 
 def test_grind_help_does_not_promise_workspace_retention(
@@ -66,7 +66,8 @@ def test_grind_help_does_not_promise_workspace_retention(
     assert raised.value.code == 0
     rendered = capsys.readouterr().out
     assert "--keep-workspace" not in rendered
-    assert "--project-wide" in rendered
+    assert "project-wide" in rendered
+    assert "--expert-plan" in rendered
     assert "--reference-object TU=PROJECT_PATH" in rendered
     assert "--max-symbols COUNT" in rendered
 
@@ -79,7 +80,8 @@ def test_discover_help_describes_grind_as_a_preview_with_optional_save(
 
     assert raised.value.code == 0
     rendered = capsys.readouterr().out
-    assert "preview low-cost adjustments and optionally save" in rendered
+    assert "find low-cost project adjustments" in rendered
+    assert "optionally save proven work" in rendered
     assert "keep only a freshly verified exact match" not in rendered
 
 

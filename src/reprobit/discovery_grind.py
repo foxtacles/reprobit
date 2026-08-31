@@ -101,6 +101,7 @@ class GrindSolution:
     reused_donor: bool
     authority_files: tuple[str, str]
     report: Report
+    project_exact: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -120,6 +121,10 @@ class ProjectGrindResult:
 
     @property
     def exact(self) -> bool:
+        return self.solution is not None and self.solution.project_exact
+
+    @property
+    def locally_qualified(self) -> bool:
         return self.solution is not None
 
 
@@ -183,20 +188,25 @@ def _validate_cold_report(
     context: ProjectGrindContext,
     authored: DeclarationShapeEqualBodyAuthoring,
     added_cost: int,
-) -> str | None:
-    """Return a rejection reason, or ``None`` for fully admitted evidence."""
+) -> tuple[str | None, bool]:
+    """Return a rejection reason and whether the complete project is exact.
+
+    A non-exact report may still close the two local obligations needed to save
+    one bounded discovery result: the compiler-produced donor matches the
+    project-owned reference object, and the normal semantic checker accepts the
+    composed function.  That is useful progress, but it is never represented as
+    project certification.
+    """
 
     report = evidence.report
     if report.project_id != context.bundle.spec.project_id:
-        return "cold report belongs to a different project"
-    if not evidence.accepted:
-        return "cold verification did not satisfy the committed authenticity policy"
-    if not report.verdict.cold or not report.verdict.byte_exact:
-        return "cold verification did not reproduce every target byte-identically"
+        return "cold report belongs to a different project", False
+    if not report.verdict.cold:
+        return "candidate check was not a build from scratch", False
     if not report.verdict.logic_certified:
-        return "cold verification did not certify intervention logic"
-    if any(not target.byte_exact for target in report.targets):
-        return "cold report contains a non-exact target"
+        return "candidate check did not certify intervention logic", False
+    if report.proof.audit_issues:
+        return "candidate check contains an authenticity audit defect", False
 
     existing_legacy = {
         intervention.id
@@ -204,11 +214,13 @@ def _validate_cold_report(
         if isinstance(intervention, LegacyOracleInstallIntervention)
     }
     if any(item.id not in existing_legacy for item in report.verdict.quarantines):
-        return "candidate introduced an authenticity exception"
+        return "candidate introduced an authenticity exception", False
+    if not report.verdict.toolchain_origin and not existing_legacy:
+        return "candidate check did not preserve toolchain origin", False
 
     original_cost = calculate_cost(context.bundle.interventions).project_total
     if report.costs.project_total != original_cost + added_cost:
-        return "cold report cost differs from the admitted intervention delta"
+        return "cold report cost differs from the admitted intervention delta", False
 
     certificates = {
         certificate.intervention_id: certificate for certificate in report.proof.certificates
@@ -217,17 +229,27 @@ def _validate_cold_report(
         intervention = record.intervention
         certificate = certificates.get(intervention.id)
         if certificate is None or not certificate.passed:
-            return f"cold report lacks a passing certificate for {intervention.id}"
+            return f"cold report lacks a passing local proof for {intervention.id}", False
         names = {obligation.name for obligation in certificate.obligations}
         expected_semantic = classic_semantic_obligation_name(intervention.family)
         if "fresh_execution" not in names or expected_semantic not in names:
-            return f"cold report lacks closed execution proof for {intervention.id}"
+            return f"cold report lacks closed execution proof for {intervention.id}", False
         if (
             len(certificate.semantic_proofs) != 1
             or certificate.semantic_proofs[0].family != intervention.family.value
         ):
-            return f"cold report lacks typed semantic proof for {intervention.id}"
-    return None
+            return f"cold report lacks typed semantic proof for {intervention.id}", False
+
+    project_exact = (
+        evidence.accepted
+        and report.verdict.byte_exact
+        and all(target.byte_exact for target in report.targets)
+    )
+    if report.verdict.byte_exact != all(target.byte_exact for target in report.targets):
+        return "candidate report has inconsistent target exactness", False
+    if report.verdict.byte_exact and not evidence.accepted:
+        return "exact candidate did not satisfy the committed authenticity policy", False
+    return None, project_exact
 
 
 def _publish_solution(
@@ -276,14 +298,20 @@ def run_project_grind(
     callbacks: ProjectGrindCallbacks,
     plan_relative: str = "reprobit/discovery.json",
     accept_exact: bool = False,
+    accept_progress: bool = False,
     progress: GrindProgress | None = None,
 ) -> ProjectGrindResult:
     """Find the cheapest exact declaration intervention and optionally publish it.
 
-    ``accept_exact`` is advance authorization, not evidence.  With or without
-    it, candidates must pass the same fresh compiler probes and cold verifier.
-    Without it an exact solution is reported but the project remains unchanged.
+    Acceptance is advance authorization, not evidence.  With or without it,
+    candidates pass the same fresh compiler probes and cold semantic checks.
+    ``accept_progress`` may publish a locally proven function while other
+    project bytes still differ; only an exact cold result is project
+    certification.
     """
+
+    if accept_exact and accept_progress:
+        raise GrindError("exact and progress acceptance are mutually exclusive")
 
     live_context = resolve_project_grind_context(
         project_root,
@@ -298,6 +326,15 @@ def run_project_grind(
     chosen_documents: tuple[InterventionDocument, ProofDocument] | None = None
     chosen_paths: tuple[str, str] | None = None
     chosen: GrindSolution | None = None
+    progress_choice: (
+        tuple[
+            _QualifiedCandidate,
+            GrindSolution,
+            tuple[InterventionDocument, ProofDocument],
+            tuple[str, str],
+        ]
+        | None
+    ) = None
 
     with StagedProject(
         live_context.root,
@@ -468,7 +505,7 @@ def run_project_grind(
                 kind=ProgressKind.PHASE_STARTED,
             )
             evidence = callbacks.cold_verify(staged_root)
-            reason = _validate_cold_report(
+            reason, project_exact = _validate_cold_report(
                 evidence,
                 context=context,
                 authored=candidate.authored,
@@ -495,12 +532,11 @@ def run_project_grind(
                 del evidence
                 continue
             _advance(progress, completed, total, "grind-verify", state_id)
-            chosen_documents = final_documents
-            chosen_paths = (
+            candidate_paths = (
                 _relative(context.root, context.intervention_path),
                 _relative(context.root, context.proof_path),
             )
-            chosen = GrindSolution(
+            candidate_solution = GrindSolution(
                 state=candidate.state,
                 symbol=context.symbol,
                 donor_id=candidate.authored.donor.intervention.id,
@@ -508,10 +544,30 @@ def run_project_grind(
                 added_cost=candidate.added_cost,
                 added_interventions=candidate.added_interventions,
                 reused_donor=candidate.reused_donor,
-                authority_files=chosen_paths,
+                authority_files=candidate_paths,
                 report=evidence.report,
+                project_exact=project_exact,
             )
-            break
+            # Progress mode is deliberately a cheapest-first fire-and-forget
+            # path.  Once the first sorted candidate passes the same cold
+            # local proof, publishing it is useful even when the whole image
+            # still differs. Preview and exact-only approval keep searching
+            # for a complete project match.
+            if project_exact or accept_progress:
+                chosen_documents = final_documents
+                chosen_paths = candidate_paths
+                chosen = candidate_solution
+                break
+            if progress_choice is None:
+                progress_choice = (
+                    candidate,
+                    candidate_solution,
+                    final_documents,
+                    candidate_paths,
+                )
+
+        if chosen is None and progress_choice is not None:
+            _candidate, chosen, chosen_documents, chosen_paths = progress_choice
 
         for candidate in qualified[cold_trials:]:
             completed += 1
@@ -531,15 +587,20 @@ def run_project_grind(
 
     published = False
     transaction_id: str | None = None
-    if chosen is not None and accept_exact:
+    publish_authorized = chosen is not None and (
+        accept_progress or (accept_exact and chosen.project_exact)
+    )
+    if publish_authorized:
+        if chosen is None:
+            raise AssertionError("grind publication omitted its chosen result")
         if chosen_documents is None or chosen_paths is None:
-            raise AssertionError("exact grind solution omitted its authority documents")
+            raise AssertionError("grind result omitted its authority documents")
         _advance(
             progress,
             completed,
             total,
             "grind-publish",
-            "Publishing the cold-verified intervention pair",
+            "Publishing the locally proven intervention pair",
             kind=ProgressKind.PHASE_STARTED,
         )
         transaction_id = _publish_solution(
@@ -560,7 +621,11 @@ def run_project_grind(
         total,
         total,
         "grind-finalize",
-        "exact solution" if chosen is not None else "bounded search complete",
+        (
+            "exact solution"
+            if chosen is not None and chosen.project_exact
+            else ("local progress" if chosen is not None else "bounded search complete")
+        ),
     )
 
     return ProjectGrindResult(

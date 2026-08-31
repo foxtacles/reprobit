@@ -257,7 +257,7 @@ def test_accepted_campaign_does_not_reuse_probes_after_project_changes() -> None
     )
 
 
-def test_project_auto_grind_reuses_per_symbol_engine_and_aggregates_progress(
+def test_project_auto_grind_stops_after_the_project_becomes_exact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -301,6 +301,7 @@ def test_project_auto_grind_reuses_per_symbol_engine_and_aggregates_progress(
             ProjectGrindResult,
             SimpleNamespace(
                 exact=True,
+                locally_qualified=True,
                 published=accept_exact,
                 states=4,
                 compiler_trials=5,
@@ -340,23 +341,89 @@ def test_project_auto_grind_reuses_per_symbol_engine_and_aggregates_progress(
         finalize_outcome=finalize,
     )
 
-    assert tuple(plan.symbol for plan in plans) == ("_one", "_two")
-    assert acceptances == [True, True]
-    assert result.exact == result.published == 2
+    assert tuple(plan.symbol for plan in plans) == ("_one",)
+    assert acceptances == [True]
+    assert result.exact == result.published == 1
     assert all(not hasattr(outcome, "result") for outcome in result.outcomes)
-    assert [outcome.added_cost for outcome in result.outcomes] == [26, 26]
-    assert finalized == [(1, "_one"), (2, "_two")]
-    assert result.outcomes[1].artifacts == ProjectGrindArtifacts(
-        plan="plans/2.json",
-        decision_report="outcomes/2.html",
-        cold_verification_json="cold/2.json",
-        cold_verification_html="cold/2.html",
+    assert [outcome.added_cost for outcome in result.outcomes] == [26]
+    assert finalized == [(1, "_one")]
+    assert result.outcomes[0].artifacts == ProjectGrindArtifacts(
+        plan="plans/1.json",
+        decision_report="outcomes/1.html",
+        cold_verification_json="cold/1.json",
+        cold_verification_html="cold/1.html",
     )
     gc.collect()
     assert all(reference() is None for reference in report_refs)
     assert observed[-1] == (30, 30)
     assert not tuple(tmp_path.glob(".reprobit-project-grind-*"))
     assert not tuple((tmp_path / ".reprobit-state/runs").glob("grind-*"))
+
+
+def test_project_auto_grind_accumulates_two_independent_local_matches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    items = (
+        ProjectGrindWorkItem("program", "tu.one", "_one", "reference/one.obj"),
+        ProjectGrindWorkItem("program", "tu.two", "_two", "reference/two.obj"),
+    )
+    campaign = ProjectGrindCampaign("sample", 2, 2, 2, 0, items, ())
+    monkeypatch.setattr(
+        project_grind,
+        "enumerate_project_grind_campaign",
+        lambda *_args, **_kwargs: campaign,
+    )
+    monkeypatch.setattr(
+        project_grind,
+        "load_project",
+        lambda _root: SimpleNamespace(state_dir=".reprobit-state"),
+    )
+    calls: list[tuple[str, bool, bool]] = []
+
+    def run_one(
+        _root: Path,
+        *,
+        plan_relative: str,
+        accept_exact: bool,
+        accept_progress: bool,
+        progress: project_grind.GrindProgress,
+        **_kwargs: object,
+    ) -> ProjectGrindResult:
+        plan = ProjectGrindPlan.model_validate_json((tmp_path / plan_relative).read_bytes())
+        calls.append((plan.symbol, accept_exact, accept_progress))
+        progress(14, 14, "grind-finalize", "local progress", ProgressKind.UNIT_FINISHED, None)
+        report = SimpleNamespace(run_id=Digest.from_bytes(plan.symbol.encode()))
+        return cast(
+            ProjectGrindResult,
+            SimpleNamespace(
+                exact=False,
+                locally_qualified=True,
+                published=accept_progress,
+                states=4,
+                compiler_trials=5,
+                qualified_candidates=1,
+                cold_trials=1,
+                solution=SimpleNamespace(added_cost=26, report=report),
+                transaction_id=f"published.{plan.symbol}" if accept_progress else None,
+            ),
+        )
+
+    monkeypatch.setattr(project_grind, "run_project_grind", run_one)
+
+    result = run_project_auto_grind(
+        tmp_path,
+        callbacks=cast(object, SimpleNamespace()),  # type: ignore[arg-type]
+        accept_progress=True,
+    )
+
+    assert calls == [("_one", False, True), ("_two", False, True)]
+    assert result.qualified == result.published == 2
+    assert result.exact == 0
+    assert result.accepted
+    assert result.accept_progress
+    assert all(outcome.locally_qualified for outcome in result.outcomes)
+    assert all(outcome.transaction_id is not None for outcome in result.outcomes)
 
 
 def test_project_grind_report_header_uses_shared_reprobit_mark() -> None:
@@ -419,10 +486,44 @@ def test_project_grind_report_renders_status_and_evidence_as_markup() -> None:
         summary_json="report.json",
     )
 
-    assert '<span class="outcome-muted">No exact state</span>' in html
+    assert '<span class="outcome-muted">No proven state</span>' in html
     assert 'href="result/transform.html"' in html
     assert 'aria-label="Open decision for _transform in tu.transform"' in html
     assert "&lt;span" not in html
+
+
+def test_project_grind_report_distinguishes_saved_progress_from_exactness() -> None:
+    item = ProjectGrindWorkItem("program", "tu.transform", "_transform", "reference.obj")
+    outcome = ProjectGrindOutcome(
+        item=item,
+        exact=False,
+        published=True,
+        states=4,
+        compiler_trials=5,
+        qualified_candidates=1,
+        cold_trials=1,
+        added_cost=26,
+        transaction_id="saved-progress",
+        cold_report_run_id=Digest.from_bytes(b"local proof"),
+        locally_qualified=True,
+    )
+    result = ProjectAutoGrindResult(
+        ProjectGrindCampaign("sample", 1, 1, 1, 0, (item,), ()),
+        (outcome,),
+        True,
+        True,
+    )
+
+    html = render_project_auto_grind_report_html(
+        result,
+        outcome_reports=("result/transform.html",),
+        summary_json="report.json",
+    )
+
+    assert "Locally proven progress saved" in html
+    assert "no project certification was issued" in html
+    assert "Progress saved" in html
+    assert "Exact project reproduced" not in html
 
 
 def test_project_report_persists_plan_decision_and_copyable_next_step(
@@ -499,11 +600,12 @@ def test_project_report_persists_plan_decision_and_copyable_next_step(
         "discover",
         "grind",
         str(root),
-        "--project-wide",
         "--max-symbols",
         "8",
         "--accept-exact",
     )
+    progress_approval_argv = (*approval_argv[:-1], "--accept-progress")
+    continue_argv = approval_argv[:-1]
     verify_argv = ("rbit", "verify", str(root))
     state_root = root / ".reprobit-state"
     report_directory = state_root / "reports/grind/project"
@@ -540,7 +642,9 @@ def test_project_report_persists_plan_decision_and_copyable_next_step(
             root,
             state_root,
             result,
-            approval_argv=approval_argv,
+            exact_approval_argv=approval_argv,
+            progress_approval_argv=progress_approval_argv,
+            continue_argv=continue_argv,
             verify_argv=verify_argv,
         )
     )
@@ -583,7 +687,9 @@ def test_project_report_persists_plan_decision_and_copyable_next_step(
         root,
         state_root,
         published,
-        approval_argv=approval_argv,
+        exact_approval_argv=approval_argv,
+        progress_approval_argv=progress_approval_argv,
+        continue_argv=continue_argv,
         verify_argv=verify_argv,
     )
     published_summary = json.loads(report_json.read_text(encoding="utf-8"))
@@ -709,11 +815,11 @@ def test_project_wide_cli_preview_reports_copyable_acceptance_command(
     machine = StringIO()
     args = argparse.Namespace(
         project=str(tmp_path),
-        project_wide=True,
         reference_object=["tu.transform=reference/reference.obj"],
         max_symbols=3,
-        plan="reprobit/discovery.json",
+        plan=None,
         accept_exact=False,
+        accept_progress=False,
     )
 
     status = grind_cli.command_discover_grind(
@@ -732,7 +838,7 @@ def test_project_wide_cli_preview_reports_copyable_acceptance_command(
     assert project_loads == 1
     assert observed["accept_exact"] is False
     assert event["approval_argv"][-1] == "--accept-exact"
-    assert "--project-wide" in event["approval_argv"]
+    assert "--project-wide" not in event["approval_argv"]
     assert event["report_html"] == str(report_html)
 
 
@@ -805,11 +911,11 @@ def test_project_wide_report_failure_is_nonfatal_and_keeps_compact_outcome(
     status = project_grind_cli.command_discover_project_grind(
         argparse.Namespace(
             project=str(tmp_path),
-            project_wide=True,
             reference_object=[],
             max_symbols=1,
-            plan="reprobit/discovery.json",
+            plan=None,
             accept_exact=True,
+            accept_progress=False,
         ),
         CLIOutput("ndjson", machine, StringIO()),
         callbacks=cast(object, SimpleNamespace()),  # type: ignore[arg-type]

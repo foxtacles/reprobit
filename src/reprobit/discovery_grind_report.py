@@ -34,7 +34,7 @@ def _claim(label: str, *, tone: str) -> str:
 
 
 def _summary(result: ProjectGrindResult) -> tuple[str, str, str, tuple[str, ...]]:
-    if result.published:
+    if result.published and result.exact:
         return (
             "ok",
             "Exact adjustment saved",
@@ -45,6 +45,20 @@ def _summary(result: ProjectGrindResult) -> tuple[str, str, str, tuple[str, ...]
                 _claim("Exact match", tone="ok"),
                 _claim("Fresh verification passed", tone="ok"),
                 _claim("Project files updated", tone="ok"),
+            ),
+        )
+    if result.published:
+        return (
+            "warn",
+            "Locally proven adjustment saved",
+            "The chosen compiler settings reproduced this function from the project-owned "
+            "reference object and passed the required logic checks in a fresh build. The "
+            "complete project does not match yet, so this is saved progress—not project "
+            "certification.",
+            (
+                _claim("Function matched", tone="ok"),
+                _claim("Logic checks passed", tone="ok"),
+                _claim("Project not exact", tone="warn"),
             ),
         )
     if result.exact:
@@ -60,14 +74,28 @@ def _summary(result: ProjectGrindResult) -> tuple[str, str, str, tuple[str, ...]
                 _claim("Review only", tone="warn"),
             ),
         )
+    if result.locally_qualified:
+        return (
+            "warn",
+            "Locally proven adjustment ready for review",
+            "The chosen compiler settings reproduced this function from the project-owned "
+            "reference object and passed the required logic checks in a fresh build. The "
+            "complete project does not match yet, and this preview left project files "
+            "unchanged. This local result is not project certification.",
+            (
+                _claim("Function matched", tone="ok"),
+                _claim("Logic checks passed", tone="ok"),
+                _claim("Review only", tone="warn"),
+            ),
+        )
     return (
         "warn",
-        "No exact adjustment within these search limits",
-        "The complete bounded search finished without an admissible byte-identical state. "
+        "No safe adjustment within these search limits",
+        "The complete bounded search finished without a locally proven function adjustment. "
         "No project files changed.",
         (
             _claim("Search complete", tone="ok"),
-            _claim("No exact match", tone="warn"),
+            _claim("No local match", tone="warn"),
             _claim("Project files unchanged", tone="ok"),
         ),
     )
@@ -94,8 +122,14 @@ def _funnel(result: ProjectGrindResult) -> str:
             display_value=format_integer(result.cold_trials),
         ),
         Bar(
-            label="Exact",
-            detail="Passed byte identity and logic checks",
+            label="Locally proven",
+            detail="Function matched and logic checks passed",
+            value=float(int(result.locally_qualified)),
+            display_value=str(int(result.locally_qualified)),
+        ),
+        Bar(
+            label="Project exact",
+            detail="Every target matched byte for byte",
             value=float(int(result.exact)),
             display_value=str(int(result.exact)),
         ),
@@ -103,7 +137,7 @@ def _funnel(result: ProjectGrindResult) -> str:
     return bar_chart(
         identity="grind-funnel",
         title="Search funnel",
-        description="How the bounded states narrowed to a verified exact result.",
+        description="How the bounded states narrowed to safe progress or an exact project.",
         bars=bars,
     )
 
@@ -151,7 +185,7 @@ def _rejection_chart(result: ProjectGrindResult) -> str:
         title="Why states stopped",
         description="Quick-check and fresh-verification failures by reason.",
         bars=bars,
-        empty_message="No candidate was rejected before the exact state was chosen.",
+        empty_message="No candidate was rejected before the chosen state was found.",
     )
 
 
@@ -162,6 +196,7 @@ def _decision(
     cold_report_html: str | None,
     approval_command: str | None,
     verify_command: str,
+    continue_command: str,
 ) -> str:
     solution = result.solution
     if solution is None:
@@ -194,30 +229,50 @@ def _decision(
             "records."
         )
     if result.published:
-        publish_status = '<div class="status">Project files updated</div>'
-        publish_detail = "The adjustment and verification records were saved together."
+        if result.exact:
+            publish_status = '<div class="status">Exact project files updated</div>'
+            publish_detail = "The adjustment and verification records were saved together."
+            next_instruction = "Review the changed project files, then verify again from scratch:"
+            next_command = verify_command
+        else:
+            publish_status = (
+                '<div class="status warn">Local progress saved — project not exact</div>'
+            )
+            publish_detail = (
+                "The adjustment and its local proof records were saved together without "
+                "claiming project certification."
+            )
+            next_instruction = "Review the changed files, then continue the bounded search:"
+            next_command = continue_command
         files_label = "Changed files"
         next_commands = f"""
-  <p><strong>Review the changed project files, then verify again from scratch:</strong></p>
+  <p><strong>{escape(next_instruction)}</strong></p>
   <pre><code>git diff
-{escape(verify_command)}</code></pre>"""
+{escape(next_command)}</code></pre>"""
     else:
         publish_status = '<div class="status warn">Preview only — project files unchanged</div>'
         publish_detail = "Run the approval command only after reviewing this result."
         files_label = "Files approval would change"
         rendered_approval = approval_command or (
-            f"rbit discover grind . --plan {plan_relative} --accept-exact"
+            f"rbit discover grind . --expert-plan {plan_relative} "
+            f"{'--accept-exact' if result.exact else '--accept-progress'}"
         )
         next_commands = f"""
   <p><strong>Rerun the proof and save the result if it still passes:</strong></p>
   <pre><code>{escape(rendered_approval)}</code></pre>"""
     verification = ""
     if cold_report_html is not None:
+        report_label = (
+            "Open fresh exact verification report"
+            if result.exact
+            else "Open fresh local proof report"
+        )
         verification = f"""
-  <a class="machine-link" href="{escape(cold_report_html)}">Open fresh verification report</a>
+  <a class="machine-link" href="{escape(cold_report_html)}">{report_label}</a>
   <p class="technical-path">Path: <code>{escape(cold_report_html)}</code></p>"""
+    tone = "ok" if result.exact else "warn"
     return f"""
-<article class="card decision-card ok">
+<article class="card decision-card {tone}">
   <p class="eyebrow"><code>{escape(state_id)}</code></p>
   <h3>Selected compiler settings</h3>
   {publish_status}
@@ -254,7 +309,7 @@ def _technical_details(
         ("Plan", plan_relative),
         ("Compiler trials", str(result.compiler_trials)),
         ("Qualified candidates", str(result.qualified_candidates)),
-        ("Cold trials", str(result.cold_trials)),
+        ("Fresh candidate checks", str(result.cold_trials)),
         (
             "New interventions",
             str(result.solution.added_interventions) if result.solution is not None else "0",
@@ -265,7 +320,7 @@ def _technical_details(
         ),
         *solution_values,
         ("Transaction", result.transaction_id or "not published"),
-        ("Cold report JSON", cold_report_json or "not available"),
+        ("Fresh candidate report JSON", cold_report_json or "not available"),
     )
     definitions = "".join(
         f"<dt>{escape(label)}</dt><dd><code>{escape(value)}</code></dd>" for label, value in values
@@ -273,7 +328,7 @@ def _technical_details(
     rejection_rows = tuple(
         (
             code(item.state_id, css_class="identifier"),
-            "Qualification" if item.stage == "qualification" else "Cold verification",
+            "Qualification" if item.stage == "qualification" else "Fresh candidate check",
             item.reason,
         )
         for item in result.rejections
@@ -303,6 +358,7 @@ def render_grind_report_html(
     cold_report_json: str | None = None,
     approval_command: str | None = None,
     verify_command: str = "rbit verify .",
+    continue_command: str = "rbit discover grind .",
 ) -> str:
     """Render one deterministic grind outcome, including bounded failure."""
 
@@ -361,6 +417,7 @@ def render_grind_report_html(
             cold_report_html=cold_report_html,
             approval_command=approval_command,
             verify_command=verify_command,
+            continue_command=continue_command,
         )
     }
 </section>

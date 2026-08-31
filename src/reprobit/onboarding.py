@@ -295,7 +295,11 @@ def command_setup(args: argparse.Namespace, output: CLIOutput) -> int:
 
     backend = selected_backend(args)
     failures = _backend_failures(backend, execute_probe=not args.skip_probe)
-    readiness = inspect_project_readiness(root)
+    readiness = inspect_project_readiness(
+        root,
+        check_local_environment=True,
+        local_toolchain_root=selected_root,
+    )
     lines = [
         (
             f"Environment ready for {installation.profile.display_name}"
@@ -330,6 +334,7 @@ def command_setup(args: argparse.Namespace, output: CLIOutput) -> int:
             for item in readiness.items
         ],
         next_command=readiness.next_command,
+        next_step=readiness.next_step,
     )
     return 0 if not failures else 1
 

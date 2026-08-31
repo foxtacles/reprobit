@@ -193,11 +193,17 @@ jobs:
           python -m pytest -q
           --junitxml="$env:RUNNER_TEMP\native-tests.xml"
           --ignore=tests/test_msvc_grind_integration.py
-      - name: Run the project-wide grind sample end to end
+          --ignore=tests/test_msvc_repair_integration.py
+      - name: Run the project-wide grind samples end to end
         run: >-
           python -m pytest -q
           --junitxml="$env:RUNNER_TEMP\grind-tests.xml"
           tests/test_msvc_grind_integration.py
+      - name: Run the shared-header repair sample end to end
+        run: >-
+          python -m pytest -q
+          --junitxml="$env:RUNNER_TEMP\repair-tests.xml"
+          tests/test_msvc_repair_integration.py
       - name: Upload native diagnostics only
         if: failure()
         uses: actions/upload-artifact@v7
@@ -207,6 +213,7 @@ jobs:
             ${{ runner.temp }}/native-runner.txt
             ${{ runner.temp }}/native-tests.xml
             ${{ runner.temp }}/grind-tests.xml
+            ${{ runner.temp }}/repair-tests.xml
             ${{ runner.temp }}/native-logs/*.log
           if-no-files-found: warn
           retention-days: 7

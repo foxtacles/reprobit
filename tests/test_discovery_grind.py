@@ -16,6 +16,7 @@ from reprobit.discovery_contracts import (
     DeclarationParameter,
     DeclarationState,
     DiscoveryError,
+    declaration_state_id,
 )
 from reprobit.discovery_grind import (
     ColdTrialEvidence,
@@ -37,6 +38,13 @@ def _state(classes: int, functions: int) -> DeclarationState:
 
 def _donor_id(classes: int, functions: int) -> str:
     return f"donor.{classes}.{functions}"
+
+
+def _state_shape_for_test(state: DeclarationState) -> tuple[int, int]:
+    classes = state.parameter("classes")
+    functions = state.parameter("functions")
+    assert type(classes) is int and type(functions) is int
+    return classes, functions
 
 
 @dataclass
@@ -266,7 +274,19 @@ def _install_grind_fixture(
 
     monkeypatch.setattr(grind, "merge_authored_records", merge_records)
     monkeypatch.setattr(grind, "_write_staged_documents", lambda *_args: None)
-    monkeypatch.setattr(grind, "load_project_tree", lambda _root: object())
+    published_ids = tuple(
+        SimpleNamespace(id=identifier)
+        for state in staged_states
+        for identifier in (
+            _donor_id(*_state_shape_for_test(state)),
+            f"function.{'.'.join(str(value) for value in _state_shape_for_test(state))}",
+        )
+    )
+    monkeypatch.setattr(
+        grind,
+        "load_project_tree",
+        lambda _root: SimpleNamespace(interventions=published_ids),
+    )
     monkeypatch.setattr(
         grind,
         "calculate_cost",
@@ -277,7 +297,10 @@ def _install_grind_fixture(
     monkeypatch.setattr(
         grind,
         "_validate_cold_report",
-        lambda evidence, **_kwargs: evidence.report.rejection_reason,
+        lambda evidence, **_kwargs: (
+            evidence.report.rejection_reason,
+            evidence.report.rejection_reason is None,
+        ),
     )
     monkeypatch.setattr(grind, "_publish_solution", publish)
     callbacks = ProjectGrindCallbacks(seed, donors, cold)
@@ -352,6 +375,96 @@ def test_exact_preview_never_calls_publication_without_acceptance(
     assert trace.publication_calls == 0
 
 
+@pytest.mark.parametrize(
+    ("accept_exact", "accept_progress", "published"),
+    (
+        (False, False, False),
+        (True, False, False),
+        (False, True, True),
+    ),
+)
+def test_local_progress_requires_its_explicit_publication_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    accept_exact: bool,
+    accept_progress: bool,
+    published: bool,
+) -> None:
+    live_root, _staged_root, trace, callbacks = _install_grind_fixture(
+        monkeypatch,
+        tmp_path,
+        live_states=(_state(1, 1),),
+    )
+    monkeypatch.setattr(
+        grind,
+        "_validate_cold_report",
+        lambda _evidence, **_kwargs: (None, False),
+    )
+
+    result = run_project_grind(
+        live_root,
+        callbacks=callbacks,
+        accept_exact=accept_exact,
+        accept_progress=accept_progress,
+    )
+
+    assert result.locally_qualified
+    assert not result.exact
+    assert result.published is published
+    assert (result.transaction_id is not None) is published
+    assert trace.publication_calls == int(published)
+
+
+def test_progress_acceptance_stops_after_the_cheapest_cold_proven_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    states = (_state(1, 1), _state(2, 2))
+    live_root, _staged_root, trace, callbacks = _install_grind_fixture(
+        monkeypatch,
+        tmp_path,
+        live_states=states,
+    )
+    monkeypatch.setattr(
+        grind,
+        "_validate_cold_report",
+        lambda _evidence, **_kwargs: (None, False),
+    )
+
+    result = run_project_grind(
+        live_root,
+        callbacks=callbacks,
+        accept_progress=True,
+    )
+
+    assert result.published
+    assert result.locally_qualified
+    assert not result.exact
+    assert result.solution is not None
+    assert result.solution.state == states[0]
+    assert result.cold_trials == 1
+    assert len(trace.cold_calls) == 1
+
+
+def test_grind_rejects_ambiguous_acceptance_modes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    live_root, _staged_root, _trace, callbacks = _install_grind_fixture(
+        monkeypatch,
+        tmp_path,
+        live_states=(_state(1, 1),),
+    )
+
+    with pytest.raises(grind.GrindError, match="mutually exclusive"):
+        run_project_grind(
+            live_root,
+            callbacks=callbacks,
+            accept_exact=True,
+            accept_progress=True,
+        )
+
+
 def test_exact_preview_reuses_and_recertifies_an_identical_existing_donor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -402,6 +515,33 @@ def test_progress_is_monotonic_and_finishes_its_bounded_total(
         completed for completed, _total in progress
     )
     assert progress[-1] == (11, 11)
+
+
+def test_early_exact_result_skips_remaining_qualified_states_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    live_root, _staged_root, trace, callbacks = _install_grind_fixture(
+        monkeypatch,
+        tmp_path,
+        live_states=(_state(1, 1), _state(2, 2)),
+    )
+    events: list[tuple[int, int, str, str]] = []
+
+    result = run_project_grind(
+        live_root,
+        callbacks=callbacks,
+        progress=lambda completed, total, phase, item, *_args: events.append(
+            (completed, total, phase, item)
+        ),
+    )
+
+    assert result.exact
+    assert result.cold_trials == 1
+    assert len(trace.cold_calls) == 1
+    skipped = [item for _completed, _total, phase, item in events if phase == "grind-skip"]
+    assert declaration_state_id(_state(2, 2)) in skipped
+    assert events[-1][:2] == (8, 8)
 
 
 def test_rejected_cold_report_is_released_before_the_next_verifier(

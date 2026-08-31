@@ -55,7 +55,7 @@ def _state() -> DeclarationState:
     )
 
 
-def _solution() -> GrindSolution:
+def _solution(*, project_exact: bool = True) -> GrindSolution:
     report = cast(
         Report,
         SimpleNamespace(run_id=Digest.from_bytes(b"cold report")),
@@ -73,6 +73,7 @@ def _solution() -> GrindSolution:
             "reprobit/proofs/tu.widget.proof.json",
         ),
         report=report,
+        project_exact=project_exact,
     )
 
 
@@ -213,7 +214,7 @@ def test_grind_report_layers_success_funnel_decision_and_technical_details() -> 
     assert '<details class="advanced" id="technical-details">' in rendered
     assert '<details class="advanced" id="technical-details" open>' not in rendered
     assert "Donor intervention" in rendered
-    assert "Cold trials" in rendered
+    assert "Fresh candidate checks" in rendered
     assert "Every recorded grind rejection" in rendered
     assert "<script src=" not in rendered
 
@@ -229,7 +230,7 @@ def test_grind_report_explains_bounded_failure_without_a_verification_link() -> 
         result,
         plan_relative="reprobit/discovery.json",
     )
-    assert "No exact adjustment within these search limits" in rendered
+    assert "No safe adjustment within these search limits" in rendered
     assert "No state chosen" in rendered
     assert "Project files unchanged" in rendered
     assert "candidate object does not match the reference symbol" in rendered
@@ -248,14 +249,43 @@ def test_grind_preview_shows_the_exact_approval_command_and_prospective_files() 
     assert "Changed files:" not in rendered
     assert "Exact adjustment ready for review" in rendered
     assert "Approval will save two adjustment records" in rendered
-    assert "rbit discover grind . --plan reprobit/discovery.json --accept-exact" in rendered
+    assert "rbit discover grind . --expert-plan reprobit/discovery.json --accept-exact" in rendered
 
 
-def _args(root: Path, *, accept_exact: bool) -> argparse.Namespace:
+@pytest.mark.parametrize("published", (False, True))
+def test_grind_report_never_describes_local_progress_as_project_exact(
+    published: bool,
+) -> None:
+    rendered = render_grind_report_html(
+        _result(solution=_solution(project_exact=False), published=published),
+        plan_relative="reprobit/discovery.json",
+        cold_report_html="cold-verification.html",
+    )
+
+    assert "project does not match yet" in rendered
+    assert "project certification" in rendered
+    assert "Exact adjustment" not in rendered
+    assert "Open fresh local proof report" in rendered
+    if published:
+        assert "Locally proven adjustment saved" in rendered
+        assert "Local progress saved — project not exact" in rendered
+        assert "rbit discover grind ." in rendered
+    else:
+        assert "Locally proven adjustment ready for review" in rendered
+        assert "--accept-progress" in rendered
+
+
+def _args(
+    root: Path,
+    *,
+    accept_exact: bool,
+    accept_progress: bool = False,
+) -> argparse.Namespace:
     return argparse.Namespace(
         project=str(root),
         plan="reprobit/discovery.json",
         accept_exact=accept_exact,
+        accept_progress=accept_progress,
     )
 
 
@@ -299,7 +329,7 @@ def test_cli_writes_a_human_grind_report_for_no_solution(
     assert not stale_json.exists()
     assert not stale_html.exists()
     assert unrelated.read_bytes() == b"keep"
-    assert "No exact adjustment within these search limits" in report.read_text(encoding="utf-8")
+    assert "No safe adjustment within these search limits" in report.read_text(encoding="utf-8")
     complete = next(
         item
         for item in (json.loads(line) for line in machine.getvalue().splitlines())
@@ -406,3 +436,47 @@ def test_cold_report_failure_still_writes_the_human_grind_report(
     assert complete["grind_report_html"] == str(report)
     assert complete["cold_verification_report_html"] is None
     assert "cold report unavailable" in complete["report_warning"]
+
+
+@pytest.mark.parametrize(
+    ("accept_exact", "accept_progress", "published", "expected_status"),
+    (
+        (True, False, False, 1),
+        (False, True, True, 0),
+    ),
+)
+def test_save_exit_status_reports_whether_the_requested_publication_happened(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    accept_exact: bool,
+    accept_progress: bool,
+    published: bool,
+    expected_status: int,
+) -> None:
+    _install_cli_result(
+        monkeypatch,
+        _result(solution=_solution(project_exact=False), published=published),
+    )
+    monkeypatch.setattr(grind_cli, "canonical_json", lambda _value: b"{}")
+    monkeypatch.setattr(
+        grind_cli,
+        "render_report_html",
+        lambda _report, **_kwargs: "<!doctype html><title>Local proof</title>",
+    )
+
+    machine = StringIO()
+    status = grind_cli.command_discover_grind(
+        _args(
+            tmp_path,
+            accept_exact=accept_exact,
+            accept_progress=accept_progress,
+        ),
+        CLIOutput("ndjson", machine, StringIO()),
+        prepare_run=lambda *_args, **_kwargs: None,
+        verify_command=lambda *_args, **_kwargs: 0,
+    )
+
+    assert status == expected_status
+    activity = machine.getvalue()
+    assert "Finding and proving a low-cost adjustment" in activity
+    assert "low-cost exact intervention" not in activity

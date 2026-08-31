@@ -100,7 +100,7 @@ def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> 
     result = transaction.commit()
     states = len(enumerate_declaration_states(plan.plan))
     next_command = human_command(
-        ("rbit", "discover", "grind", root, "--plan", destination.as_posix())
+        ("rbit", "discover", "grind", root, "--expert-plan", destination.as_posix())
     )
     output.emit(
         "discovery_grind_plan_created",
@@ -118,7 +118,14 @@ def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> 
         states=states,
         transaction_id=result.transaction_id,
         next_command=next_command,
-        next_argv=("rbit", "discover", "grind", str(root), "--plan", destination.as_posix()),
+        next_argv=(
+            "rbit",
+            "discover",
+            "grind",
+            str(root),
+            "--expert-plan",
+            destination.as_posix(),
+        ),
     )
     return 0
 
@@ -284,7 +291,10 @@ def command_discover_grind(
 ) -> int:
     """Run the public bounded auto-solve workflow."""
 
-    if getattr(args, "project_wide", False):
+    accept_progress = getattr(args, "accept_progress", False)
+    if args.accept_exact and accept_progress:
+        raise CLIError("choose either --accept-exact or --accept-progress, not both")
+    if args.plan is None:
         from reprobit.discovery_project_grind_cli import command_discover_project_grind
 
         return command_discover_project_grind(
@@ -297,16 +307,19 @@ def command_discover_grind(
             ),
         )
     if getattr(args, "reference_object", ()):
-        raise CLIError("--reference-object requires --project-wide")
+        raise CLIError("--reference-object belongs to the default project-wide grind")
+    if getattr(args, "max_symbols", 8) != 8:
+        raise CLIError("--max-symbols belongs to the default project-wide grind")
 
     root = project_root(args.project)
     state_root = safe_project_path(root, load_project(root).state_dir)
     report_directory = state_root / "reports" / "grind"
-    with output.producer_activity("Finding and proving a low-cost exact intervention") as progress:
+    with output.producer_activity("Finding and proving a low-cost adjustment") as progress:
         result = run_project_grind(
             root,
             plan_relative=args.plan,
             accept_exact=args.accept_exact,
+            accept_progress=accept_progress,
             callbacks=_grind_callbacks(
                 args,
                 prepare_run=prepare_run,
@@ -324,15 +337,18 @@ def command_discover_grind(
     cold_report_html: Path | None = None
     report_transaction_id: str | None = None
     report_warnings: list[str] = []
+    acceptance_flag = (
+        "--accept-exact" if solution is not None and solution.project_exact else "--accept-progress"
+    )
     report_approval_command = human_command(
         (
             "rbit",
             "discover",
             "grind",
             root,
-            "--plan",
+            "--expert-plan",
             args.plan,
-            "--accept-exact",
+            acceptance_flag,
         )
     )
     report_verify_command = human_command(("rbit", "verify", root))
@@ -379,6 +395,7 @@ def command_discover_grind(
                 cold_report_json=(desired_cold_json.name if cold_files else None),
                 approval_command=report_approval_command,
                 verify_command=report_verify_command,
+                continue_command=human_command(("rbit", "discover", "grind", root)),
             ).encode("utf-8")
         }
         files.update(cold_files)
@@ -422,7 +439,7 @@ def command_discover_grind(
                 f"- {reason} ({count} state{'s' if count != 1 else ''})" for reason, count in common
             )
         message = (
-            f"No exact solution was found in {result.states} bounded declaration states.\n"
+            f"No safe local adjustment was found in {result.states} bounded declaration states.\n"
             "No project files changed. Widen reprobit/discovery.json "
             f"deliberately if these bounds are too small.{reason_summary}\n"
             f"{grind_report_line}"
@@ -438,17 +455,32 @@ def command_discover_grind(
         )
         review_command = human_command(("git", "diff", "--", intervention_file, proof_file))
         verify_command_text = human_command(("rbit", "verify", root))
-        message = (
-            f"Exact solution saved for '{solution.symbol}': "
-            f"classes={classes}, functions={functions}.\n"
+        outcome_label = "Exact solution" if result.exact else "Local progress"
+        verdict_line = (
             "A fresh build matched every target byte for byte, and both required logic "
-            f"checks passed. {saved_summary} in one safe update.\n"
+            "checks passed."
+            if result.exact
+            else (
+                "The function matched its project-owned reference object and both required logic "
+                "checks passed. The complete project is not exact, so this is not project "
+                "certification."
+            )
+        )
+        next_command = (
+            verify_command_text
+            if result.exact
+            else human_command(("rbit", "discover", "grind", root))
+        )
+        message = (
+            f"{outcome_label} saved for '{solution.symbol}': "
+            f"classes={classes}, functions={functions}.\n"
+            f"{verdict_line} {saved_summary} in one safe update.\n"
             f"Changed: {intervention_file}, {proof_file}\n"
             f"Added cost: {solution.added_cost} relative points.\n"
             f"{grind_report_line}\n"
             f"{cold_report_line}\n"
             f"Review: {review_command}\n"
-            f"Next: {verify_command_text}"
+            f"Next: {next_command}"
         )
     else:
         classes, functions = (solution.state.parameter(name) for name in ("classes", "functions"))
@@ -458,9 +490,9 @@ def command_discover_grind(
                 "discover",
                 "grind",
                 root,
-                "--plan",
+                "--expert-plan",
                 args.plan,
-                "--accept-exact",
+                acceptance_flag,
             )
         )
         reuse_line = (
@@ -469,11 +501,20 @@ def command_discover_grind(
             if solution.reused_donor
             else "Approval will save 2 intervention records and their matching proof records.\n"
         )
-        message = (
-            f"Exact solution found for '{solution.symbol}': "
-            f"classes={classes}, functions={functions}.\n"
+        outcome_label = "Exact solution" if result.exact else "Local progress"
+        verdict_line = (
             "A fresh build matched every target byte for byte, and both required logic "
-            "checks passed. Only review reports were written; project files stayed unchanged.\n"
+            "checks passed."
+            if result.exact
+            else (
+                "The function matched its project-owned reference object and both required logic "
+                "checks passed, but the complete project does not match yet."
+            )
+        )
+        message = (
+            f"{outcome_label} found for '{solution.symbol}': "
+            f"classes={classes}, functions={functions}.\n"
+            f"{verdict_line} Only review reports were written; project files stayed unchanged.\n"
             f"{reuse_line}"
             f"Added cost if approved: {solution.added_cost} relative points.\n"
             f"{grind_report_line}\n"
@@ -487,6 +528,7 @@ def command_discover_grind(
         message,
         project=root,
         exact=result.exact,
+        locally_qualified=result.locally_qualified,
         published=result.published,
         states=result.states,
         compiler_trials=result.compiler_trials,
@@ -515,9 +557,9 @@ def command_discover_grind(
             "discover",
             "grind",
             str(root),
-            "--plan",
+            "--expert-plan",
             args.plan,
-            "--accept-exact",
+            acceptance_flag,
         )
         if solution is not None and not result.published
         else (),
@@ -530,6 +572,10 @@ def command_discover_grind(
             for item in result.rejections
         ],
     )
+    if args.accept_exact:
+        return 0 if result.published and result.exact else 1
+    if accept_progress:
+        return 0 if result.published else 1
     return 0 if solution is not None else 1
 
 

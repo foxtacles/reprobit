@@ -216,7 +216,7 @@ def _render_debug_companions(report: Report) -> str:
   <aside class="card">
     <p><strong>Debug companion: reproducible — bookkeeping stabilized; symbols, types,
       addresses, and source lines preserved.</strong></p>
-    <p>For comparison and analysis only; not a byte-identity target or release artifact.</p>
+    <p>For comparison and analysis only; not used to decide byte identity.</p>
     <a href="#debug-companion-details">See what ReproBit adjusted</a>
   </aside>
   <div class="card-grid">{cards}</div>
@@ -404,9 +404,9 @@ def _next_steps(report: Report) -> tuple[tuple[str, Content], ...]:
                 join_markup(
                     (
                         "Run ",
-                        code("rbit discover grind . --project-wide"),
-                        " to look for low-cost exact adjustments when reference objects are "
-                        "available.",
+                        code("rbit discover grind ."),
+                        " to look for low-cost, locally proven adjustments when reference "
+                        "objects are available.",
                     )
                 ),
             ),
@@ -451,7 +451,7 @@ def _next_steps(report: Report) -> tuple[tuple[str, Content], ...]:
         if len(steps) < 3:
             steps.append(
                 (
-                    "Keep release blocked until every check passes",
+                    "Do not rely on this result until every check passes",
                     "Require a fresh, exact, logic-certified, clean report in CI.",
                 )
             )
@@ -485,8 +485,8 @@ def _next_steps(report: Report) -> tuple[tuple[str, Content], ...]:
                 "tracing checks.",
             ),
             (
-                "Promote only a clean result",
-                "Treat exact output and clean authenticity as separate release gates.",
+                "Rely only on a clean result",
+                "Treat exact output and clean authenticity as separate checks.",
             ),
         )
     return (

@@ -8,6 +8,7 @@ import re
 import sys
 from pathlib import Path, PurePosixPath
 
+from reprobit.cli_output import count_phrase
 from reprobit.model import Digest
 from reprobit.report import Report
 from reprobit.report_io import render_report_html, report_json_href
@@ -126,8 +127,9 @@ def _write_summary(report: Report, *, accepted: bool) -> None:
             [
                 "> [!WARNING]",
                 "> This run used a quarantined reference-byte exception. It is not clean.",
-                f"> {quarantine_count} exception(s) cover {quarantine_bytes} byte(s) "
-                f"across {quarantine_ranges} range(s).",
+                f"> Coverage: {count_phrase(quarantine_count, 'exception')}, "
+                f"{count_phrase(quarantine_bytes, 'byte')}, "
+                f"{count_phrase(quarantine_ranges, 'range')}.",
                 f"> Quarantine set: `{quarantine_digest}`",
                 "",
             ]

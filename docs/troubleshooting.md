@@ -86,18 +86,18 @@ The same `repair` command covers an edit to a shared header, even when many
 source files include it. ReproBit finds the affected work; do not run a command
 for each source file.
 
-For an added or removed file, run `rbit source preview --project .` (with the
+For an added or removed file, run `rbit source preview .` (with the
 same repeatable `--path` values used for an explicit lock). The preview is
 read-only and prints a safe `source lock` command when existing build records
 still apply. Repair preserves the exact locked list, so it does not silently
 admit a newly tracked file. If preview says the change to which files CMake
 builds cannot be handled safely, restore the previous file list for now;
 ReproBit does not yet have an automatic update that can preserve every saved
-intervention. A successful source lock prints the next setup or status command.
+intervention. A successful source lock prints the next required step.
 The NDJSON event keeps the detailed
 source-list, build-graph, and saved-record findings for automation.
 
-For advanced diagnosis, `rbit source regenerate --project .` previews only the
+For advanced diagnosis, `rbit source regenerate .` previews only the
 mechanical record changes that repair can derive. Human output is a concise
 per-document summary; global `--format ndjson` includes every field-level
 before/after value. Add `--apply` only when you intentionally want that

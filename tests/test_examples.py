@@ -9,10 +9,13 @@ from types import ModuleType, SimpleNamespace
 
 from reprobit.discovery_contracts import declaration_state_id, enumerate_declaration_states
 from reprobit.msvc_discovery import MsvcDiscoveryRequest
+from reprobit.project_loader import load_project_tree
+from reprobit.schema import ClassicRecipeFamily, ClassicRecipeIntervention
 
 ROOT = Path(__file__).parents[1]
 EXAMPLES = ROOT / "examples"
 DISCOVERY = EXAMPLES / "declaration-discovery"
+GRIND_PROGRESS = EXAMPLES / "grind-progress"
 
 
 def _load_script(name: str) -> ModuleType:
@@ -48,6 +51,8 @@ def test_example_helpers_have_working_help_and_review_only_output() -> None:
         DISCOVERY / "prepare_reference.py",
         DISCOVERY / "review_report.py",
         EXAMPLES / "grind" / "prepare_reference.py",
+        EXAMPLES / "grind-progress" / "prepare_reference.py",
+        EXAMPLES / "repair" / "prepare_reference.py",
     )
     for script in scripts:
         result = subprocess.run(
@@ -116,3 +121,20 @@ def test_examples_lead_with_the_guided_automatic_workflow() -> None:
     assert automatic in index
     assert advanced in index
     assert index.index(automatic) < index.index(advanced)
+
+
+def test_multi_mismatch_grind_sample_starts_with_two_clean_translation_units() -> None:
+    bundle = load_project_tree(GRIND_PROGRESS)
+
+    assert bundle.spec.project_id == "grind-progress"
+    assert bundle.build_plan is not None
+    assert len(bundle.build_plan.translation_units) == 2
+    assert {unit.source for unit in bundle.build_plan.translation_units} == {
+        "transform_one.cpp",
+        "transform_two.cpp",
+    }
+    classic = tuple(
+        item for item in bundle.interventions if isinstance(item, ClassicRecipeIntervention)
+    )
+    assert len(classic) == 1
+    assert classic[0].family is ClassicRecipeFamily.IMAGE_METADATA

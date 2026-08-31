@@ -26,7 +26,7 @@ from reprobit.strict_json import canonical_json
 from reprobit.transactions import CASTransaction
 
 ROOT = Path(__file__).parents[1]
-GRIND_SAMPLE = ROOT / "examples/grind"
+GRIND_SAMPLE = ROOT / "examples/grind-progress"
 _MAX_FAILURE_LOG_BYTES = 64 * 1024
 
 
@@ -83,7 +83,7 @@ def _seed_timestamp_normalization(project: Path) -> None:
         rationale="Normalize candidate-owned linker timestamps for repeatable verification.",
         family=ClassicRecipeFamily.IMAGE_METADATA,
         role=ClassicRecipeRole.PROJECT,
-        build_target="grind",
+        build_target="grind_progress",
         parameters=(
             ClassicField(name="link_time", value=0),
             ClassicField(name="resource_time", value=0),
@@ -130,32 +130,15 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
             "--target",
             "program",
             "--artifact",
-            "build/grind.exe",
+            "build/grind-progress.exe",
             "--oracle",
-            "reference/grind.exe",
+            "reference/grind-progress.exe",
         ],
     )
-    shutil.copyfile(GRIND_SAMPLE / "transform.cpp", project / "transform.cpp")
+    shutil.copyfile(GRIND_SAMPLE / "transform_one.cpp", project / "transform_one.cpp")
+    shutil.copyfile(GRIND_SAMPLE / "transform_two.cpp", project / "transform_two.cpp")
     shutil.copyfile(GRIND_SAMPLE / "prepare_reference.py", project / "prepare_reference.py")
-    shutil.copyfile(
-        GRIND_SAMPLE / "reprobit/discovery.json",
-        project / "reprobit/discovery.json",
-    )
-    (project / "CMakeLists.txt").write_text(
-        "cmake_minimum_required(VERSION 3.20)\n"
-        "project(reprobit_import_fixture CXX)\n"
-        'set(CMAKE_CXX_FLAGS "")\n'
-        'set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "/Zi /O2 /Ob1")\n'
-        'set(CMAKE_EXE_LINKER_FLAGS "")\n'
-        'set(CMAKE_EXE_LINKER_FLAGS_RELWITHDEBINFO "")\n'
-        'set(CMAKE_CXX_STANDARD_LIBRARIES "")\n'
-        "add_executable(grind transform.cpp)\n"
-        "target_include_directories(grind PRIVATE .)\n"
-        "target_link_options(grind PRIVATE "
-        "/nodefaultlib /entry:transform /subsystem:console)\n"
-        "set_target_properties(grind PROPERTIES OUTPUT_NAME grind)\n",
-        encoding="utf-8",
-    )
+    shutil.copyfile(GRIND_SAMPLE / "CMakeLists.txt", project / "CMakeLists.txt")
     _require_cli_success(
         project,
         [
@@ -172,14 +155,15 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
         [
             "source",
             "lock",
-            "--project",
             str(project),
             "--path",
             "reprobit.toml",
             "--path",
             "CMakeLists.txt",
             "--path",
-            "transform.cpp",
+            "transform_one.cpp",
+            "--path",
+            "transform_two.cpp",
         ],
     )
     prepared = subprocess.run(
@@ -196,8 +180,9 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
         timeout=300,
     )
     assert prepared.returncode == 0, prepared.stdout + prepared.stderr
-    assert (project / "reference/grind.exe").is_file()
-    assert (project / "reference/reference.obj").is_file()
+    assert (project / "reference/grind-progress.exe").is_file()
+    assert (project / "reference/transform_one.obj").is_file()
+    assert (project / "reference/transform_two.obj").is_file()
 
     _require_cli_success(
         project,
@@ -206,7 +191,7 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
             "cmake",
             str(project),
             "--target",
-            "program=grind",
+            "program=grind_progress",
             "--toolchain-root",
             str(toolchain),
             "--keep-workspace",
@@ -217,9 +202,11 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
     bundle = load_project_tree(project)
     assert bundle.producer_graph is not None
     assert bundle.build_plan is not None
-    assert len(bundle.build_plan.translation_units) == 1
-    unit = bundle.build_plan.translation_units[0]
-    assert unit.source == "transform.cpp"
+    assert len(bundle.build_plan.translation_units) == 2
+    assert {unit.source for unit in bundle.build_plan.translation_units} == {
+        "transform_one.cpp",
+        "transform_two.cpp",
+    }
     configure_logs = tuple(
         (project / ".reprobit-state/runs").glob("import-*/cmake/build/configure.log")
     )
@@ -227,13 +214,18 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
     assert "The CXX compiler identification is MSVC 10.20" in configure_logs[0].read_text(
         encoding="utf-8"
     )
-    compiler = next(
+    compilers = tuple(
         node for node in bundle.producer_graph.nodes if node.role is ProducerRole.COMPILER
     )
-    assert {"/zi", "/o2", "/ob1"} <= {argument.casefold() for argument in compiler.arguments}
-    assert (project / "reprobit/interventions" / f"{unit.id}.json").is_file()
-    assert (project / "reprobit/proofs" / f"{unit.id}.json").is_file()
-    assert enumerate_project_grind_campaign(project).eligible_units == 1
+    assert len(compilers) == 2
+    assert all(
+        {"/zi", "/o2", "/ob1"} <= {argument.casefold() for argument in compiler.arguments}
+        for compiler in compilers
+    )
+    for unit in bundle.build_plan.translation_units:
+        assert (project / "reprobit/interventions" / f"{unit.id}.json").is_file()
+        assert (project / "reprobit/proofs" / f"{unit.id}.json").is_file()
+    assert enumerate_project_grind_campaign(project).eligible_units == 2
     _seed_timestamp_normalization(project)
 
     _require_cli_success(
@@ -251,14 +243,18 @@ def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
             "discover",
             "grind",
             str(project),
-            "--project-wide",
-            "--reference-object",
-            f"{unit.id}=reference/reference.obj",
-            "--accept-exact",
+            "--accept-progress",
             "--toolchain-root",
             str(toolchain),
         ],
     )
+    accepted = load_project_tree(project)
+    functions = tuple(
+        item
+        for item in accepted.interventions
+        if isinstance(item, ClassicRecipeIntervention) and item.role is ClassicRecipeRole.FUNCTION
+    )
+    assert {item.symbol for item in functions} == {"_transform_one", "_transform_two"}
     _require_cli_success(
         project,
         [
