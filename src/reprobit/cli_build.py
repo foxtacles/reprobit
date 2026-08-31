@@ -162,11 +162,7 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
         )
     state = state_root(root, bundle.spec)
     cache_override = getattr(args, "_incremental_cache_root", None)
-    cache_state = (
-        Path(cache_override).resolve(strict=True)
-        if cache_override is not None
-        else state
-    )
+    cache_state = Path(cache_override).resolve(strict=True) if cache_override is not None else state
     if not cache_state.is_dir():
         raise CLIError("incremental cache root is not a directory")
     required = tuple(safe_project_path(root, item.artifact) for item in bundle.spec.targets)

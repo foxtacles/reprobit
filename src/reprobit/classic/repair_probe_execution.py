@@ -49,9 +49,7 @@ def _prepared_donors(
         for donor_index, donor in enumerate(unit.donors):
             donor_id = donor.intervention.id
             if donor_id in prepared:
-                raise ClassicProjectError(
-                    f"classic prepared donor ID is ambiguous: {donor_id!r}"
-                )
+                raise ClassicProjectError(f"classic prepared donor ID is ambiguous: {donor_id!r}")
             seat = (
                 unit.plan.build_target.casefold(),
                 unit.plan.source.casefold(),

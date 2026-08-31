@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
+from typing import cast
 
 from reprobit.classic.measured_pin_repair import (
     MeasuredPinRepairError,
@@ -14,10 +15,8 @@ from reprobit.classic.repair_authority import (
     ClassicReceiptEdit,
     apply_classic_authority_edits,
 )
-from reprobit.classic_orchestration import (
-    ClassicMeasuredReceiptRepairRequest,
-    ClassicPreparedUnit,
-)
+from reprobit.classic.repair_dispatch import ClassicMeasuredReceiptRepairRequest
+from reprobit.classic_orchestration import ClassicPreparedUnit
 from reprobit.classic_project import ClassicDispatchMaterials
 from reprobit.schema import (
     ClassicProofReceipt,
@@ -91,13 +90,14 @@ class ClassicRepairSession:
         request: ClassicMeasuredReceiptRepairRequest,
         reason: str,
     ) -> ClassicRepairRefusal:
+        unit = cast(ClassicPreparedUnit, request.unit)
         return ClassicRepairRefusal(
-            request.unit.plan.id,
+            unit.plan.id,
             request.action_index,
             request.intervention,
             request.receipt,
             request.materials,
-            request.unit,
+            unit,
             reason,
         )
 

@@ -50,10 +50,7 @@ def test_source_regenerate_uses_future_tense_for_preview_and_past_tense_for_appl
     assert "would be saved" in preview
     assert "no project files changed" in preview
 
-    assert (
-        main(["source", "regenerate", "--project", str(project), "--apply"])
-        == 0
-    )
+    assert main(["source", "regenerate", "--project", str(project), "--apply"]) == 0
     applied = capsys.readouterr().out
     assert "Source checks refreshed" in applied
     assert "update(s) saved" in applied

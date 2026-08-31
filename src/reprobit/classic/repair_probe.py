@@ -12,6 +12,16 @@ from collections import deque
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
+from reprobit.classic.donor_retune_candidates import (
+    DEFAULT_RETUNE_CANDIDATES,
+    MAX_RETUNE_RADIUS,
+    DonorRetuneChange,
+    DonorRetuneError,
+    enumerate_donor_retune_candidates,
+)
+from reprobit.classic.donor_retune_materialization import (
+    MaterializedDonorRetuneCandidate,
+)
 from reprobit.classic.measured_pin_repair import MeasuredPinRepairError
 from reprobit.classic.repair_authority import (
     ClassicInterventionEdit,
@@ -39,14 +49,6 @@ from reprobit.classic_runtime_probe import (
     ClassicDonorProbeOutput,
     ClassicDonorProbeProgress,
     ClassicProbeExecution,
-)
-from reprobit.donor_retune import (
-    DEFAULT_RETUNE_CANDIDATES,
-    MAX_RETUNE_RADIUS,
-    DonorRetuneChange,
-    DonorRetuneError,
-    MaterializedDonorRetuneCandidate,
-    enumerate_donor_retune_candidates,
 )
 from reprobit.schema import (
     ClassicProofReceipt,
@@ -102,7 +104,6 @@ class ClassicDonorRetuneProbeResult:
     repairs: tuple[ClassicDonorRetuneRepair, ...]
     refusals: tuple[ClassicDonorRetuneRefusal, ...]
     compiled_candidates: int
-    probe_consumed: bool
 
 
 @dataclass(slots=True)
@@ -232,9 +233,7 @@ def _probe_bounded_donor_retunes(
     *,
     clean_sources: Mapping[str, bytes],
     effective_sources: Mapping[str, bytes],
-    canonical_overlay_operations: Mapping[
-        str, Sequence[Mapping[str, object]]
-    ] | None = None,
+    canonical_overlay_operations: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
     radius: int = MAX_RETUNE_RADIUS,
     limit: int = DEFAULT_RETUNE_CANDIDATES,
     window_size: int = DEFAULT_RETUNE_PROBE_WINDOW,
@@ -257,7 +256,7 @@ def _probe_bounded_donor_retunes(
         )
     groups = _group_failures(refusals)
     if not groups:
-        return ClassicDonorRetuneProbeResult((), (), 0, True)
+        return ClassicDonorRetuneProbeResult((), (), 0)
     canonical = canonical_overlay_operations or {}
     by_key = {group.key: group for group in groups}
     attempts: list[_PreparedAttempt] = []
@@ -338,7 +337,7 @@ def _probe_bounded_donor_retunes(
             )
             for group in groups
         )
-        return ClassicDonorRetuneProbeResult((), unavailable, 0, True)
+        return ClassicDonorRetuneProbeResult((), unavailable, 0)
 
     attempt_tuple = tuple(attempts)
     attempts_by_id: dict[str, list[_PreparedAttempt]] = {}
@@ -435,9 +434,7 @@ def _probe_bounded_donor_retunes(
                 group.unit.plan.id,
                 group.donor.intervention.id,
                 group.action_ids,
-                "none of "
-                f"{compiled[group.key]} compiled candidates "
-                "restored composition",
+                f"none of {compiled[group.key]} compiled candidates restored composition",
                 tuple(rejected[group.key]),
             )
         )
@@ -445,7 +442,6 @@ def _probe_bounded_donor_retunes(
         tuple(repairs),
         tuple(refusals_out),
         len(outcomes),
-        True,
     )
 
 
@@ -455,9 +451,7 @@ def probe_bounded_donor_retunes(
     *,
     clean_sources: Mapping[str, bytes],
     effective_sources: Mapping[str, bytes],
-    canonical_overlay_operations: Mapping[
-        str, Sequence[Mapping[str, object]]
-    ] | None = None,
+    canonical_overlay_operations: Mapping[str, Sequence[Mapping[str, object]]] | None = None,
     radius: int = MAX_RETUNE_RADIUS,
     limit: int = DEFAULT_RETUNE_CANDIDATES,
     window_size: int = DEFAULT_RETUNE_PROBE_WINDOW,

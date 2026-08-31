@@ -15,10 +15,10 @@ from reprobit.backends import (
     PosixWineBackend,
 )
 from reprobit.build import BuildPlan
+from reprobit.classic.repair_dispatch import ClassicMeasuredReceiptRepair
 from reprobit.classic.semantic_contracts import CleanSourceInput, ProjectOverlaySourcePair
 from reprobit.classic.source_overlay import plan_project_overlay_compiler_epochs
 from reprobit.classic_orchestration import (
-    ClassicMeasuredReceiptRepair,
     classic_rdata_repack_graph_authority,
     prepare_classic_units,
 )
@@ -89,7 +89,6 @@ class ClassicProducerGraphPreparedRun:
     evidence_provider: ClassicProducerGraphRuntimeEvidenceProvider
     plan: BuildPlan
     intervention_witnesses: tuple[InterventionWitness, ...]
-    provisional: bool = False
 
     def close(self) -> None:
         try:
@@ -652,7 +651,6 @@ def prepare_classic_producer_graph_run(
             evidence_provider=evidence_provider,
             plan=BuildPlan(()),
             intervention_witnesses=tuple(overlay_interventions),
-            provisional=measured_receipt_repair is not None,
         )
     except BaseException as original:
         try:

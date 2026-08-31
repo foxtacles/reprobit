@@ -160,6 +160,13 @@ ReproBit follows the shared header to every affected build step, adjusts the
 saved guidance it can safely re-derive, and checks every final binary. You do
 not repair each source file separately.
 
+Other realistic maintenance edits use the same command: changing harmless
+whitespace or comments in a donor header, adding or moving a declaration,
+making an assertion conditional for one build mode, or changing an inline
+header body used by several source files. ReproBit attempts only bounded,
+ordinary adjustments and still requires the final binaries to match exactly;
+if an edit is not benign, repair stops without publishing a partial result.
+
 Adding or removing a file changes the reviewed source list, so `repair` stops
 before doing any work. Review and accept the new list instead:
 

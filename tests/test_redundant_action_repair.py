@@ -154,9 +154,7 @@ def test_redundant_action_retirement_keeps_a_donor_used_by_another_donor() -> No
     seed = coff_fixture.make_coff()
     action = _action("function_old", "donor_old")
     donor = _donor("donor_old", action.scope)
-    dependent = _donor("donor_dependent").model_copy(
-        update={"dependencies": (donor.id,)}
-    )
+    dependent = _donor("donor_dependent").model_copy(update={"dependencies": (donor.id,)})
     action_receipt = _receipt(action, seed)
 
     result = plan_redundant_action_retirement(

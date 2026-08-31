@@ -184,8 +184,7 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
         )
     else:
         completion_message = (
-            "Nothing needed repair; every target still matches exactly"
-            f"\nReport: {report_html}"
+            f"Nothing needed repair; every target still matches exactly\nReport: {report_html}"
         )
     output.emit(
         "repair_complete",

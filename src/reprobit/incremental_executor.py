@@ -456,8 +456,7 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                             if publish_result
                             else sha256(
                                 (
-                                    f"provisional\0{node.id}\0{final_key}\0"
-                                    f"{uuid.uuid4().hex}"
+                                    f"provisional\0{node.id}\0{final_key}\0{uuid.uuid4().hex}"
                                 ).encode()
                             ).hexdigest()
                         )

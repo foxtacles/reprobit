@@ -5,6 +5,11 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
+from reprobit.classic.donor_retune_candidates import DonorRetuneCandidate
+from reprobit.classic.donor_retune_materialization import (
+    MaterializedDonorRetuneCandidate,
+    materialize_donor_retune_candidate,
+)
 from reprobit.classic.measured_pin_repair import (
     MeasuredPinRepair,
     MeasuredPinRepairError,
@@ -20,11 +25,6 @@ from reprobit.classic_orchestration import (
 )
 from reprobit.classic_project import ClassicDispatchMaterials
 from reprobit.classic_runtime_probe import ClassicDonorProbeOutput
-from reprobit.donor_retune import (
-    DonorRetuneCandidate,
-    MaterializedDonorRetuneCandidate,
-    materialize_donor_retune_candidate,
-)
 from reprobit.schema import ClassicProofReceipt, ClassicRecipeFamily, ClassicRecipeIntervention
 
 
@@ -50,9 +50,7 @@ def _overlay_inputs(
     if replay is None:
         operations = None
     elif operations is None:
-        raise ValueError(
-            f"canonical overlay replay is absent for {donor.request.logical_source!r}"
-        )
+        raise ValueError(f"canonical overlay replay is absent for {donor.request.logical_source!r}")
     return selected, operations
 
 

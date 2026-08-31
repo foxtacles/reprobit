@@ -142,9 +142,7 @@ def _source_membership_drift(
 
     locked = {entry.path for entry in manifest.entries}
     missing_or_unsafe = {
-        relative
-        for relative in locked
-        if not _safe_path(root, relative).is_file()
+        relative for relative in locked if not _safe_path(root, relative).is_file()
     }
     if not is_git_worktree(root):
         return (), tuple(
@@ -366,9 +364,7 @@ def collect_repair_candidate(
         raise RepairError("repair record postimages repeat a path")
     unknown_postimages = set(postimages) - publishable
     if unknown_postimages:
-        raise RepairError(
-            f"repair authorized unknown staged records: {sorted(unknown_postimages)}"
-        )
+        raise RepairError(f"repair authorized unknown staged records: {sorted(unknown_postimages)}")
     unauthorized = set(records) - set(postimages)
     if unauthorized:
         raise RepairError(

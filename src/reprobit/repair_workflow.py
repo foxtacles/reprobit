@@ -23,8 +23,6 @@ from reprobit.repair_donor_analysis import (
 from reprobit.schema import ClassicProofReceipt, ClassicRecipeRole, ProjectBundle, ProjectSpec
 from reprobit.strict_json import canonical_json
 
-MAX_REPAIR_PASSES = 24
-
 
 class RepairWorkflowError(RuntimeError):
     """A bounded repair could not restore ordinary classic composition."""
@@ -81,9 +79,16 @@ def repair_classic_records(
     donor_retunes = 0
     compiled_candidates = 0
     seen_authority: set[str] = set()
+    initial = load_project_tree(staged_root)
+    pass_limit = max(
+        8,
+        len(initial.interventions)
+        + sum(len(document.expected_observations) for document in initial.proof_documents)
+        + 2,
+    )
 
-    for pass_number in range(1, MAX_REPAIR_PASSES + 1):
-        bundle = load_project_tree(staged_root, verify_source_authority=False)
+    for pass_number in range(1, pass_limit + 1):
+        bundle = load_project_tree(staged_root)
         fingerprint = _authority_fingerprint(bundle)
         if fingerprint in seen_authority:
             raise RepairWorkflowError(
@@ -95,13 +100,16 @@ def repair_classic_records(
         affected_units.update(item.unit_id for item in analysis.structural_refusals)
 
         if analysis.measured_repairs:
-            changed_records.update(
-                apply_classic_receipt_repairs(
-                    staged_root,
-                    spec,
-                    analysis.measured_repairs,
-                )
+            changed = apply_classic_receipt_repairs(
+                staged_root,
+                spec,
+                analysis.measured_repairs,
             )
+            if not changed:
+                raise RepairWorkflowError(
+                    "measured repair reported success without changing saved guidance"
+                )
+            changed_records.update(changed)
             measured_checks += len(analysis.measured_repairs)
             continue
 
@@ -132,14 +140,17 @@ def repair_classic_records(
             except RedundantActionRepairError as exc:
                 retirement_failures.append(str(exc))
                 continue
-            changed_records.update(
-                apply_classic_authority_edits(
-                    staged_root,
-                    spec,
-                    interventions=plan.intervention_edits,
-                    receipts=plan.receipt_edits,
-                )
+            changed = apply_classic_authority_edits(
+                staged_root,
+                spec,
+                interventions=plan.intervention_edits,
+                receipts=plan.receipt_edits,
             )
+            if not changed:
+                raise RepairWorkflowError(
+                    "redundant-action retirement reported success without changing saved guidance"
+                )
+            changed_records.update(changed)
             retired_actions += 1
             removed_donors += len(plan.removed_donors)
             retired = True
@@ -157,9 +168,12 @@ def repair_classic_records(
             probe = probe_classic_donor_repairs(args, output, donor_refusals)
             compiled_candidates += probe.compiled_candidates
             if probe.repairs:
-                changed_records.update(
-                    apply_classic_donor_repairs(staged_root, spec, probe.repairs)
-                )
+                changed = apply_classic_donor_repairs(staged_root, spec, probe.repairs)
+                if not changed:
+                    raise RepairWorkflowError(
+                        "donor repair reported success without changing saved guidance"
+                    )
+                changed_records.update(changed)
                 donor_retunes += len(probe.repairs)
                 continue
             probe_reasons = [item.reason for item in probe.refusals]
@@ -173,17 +187,15 @@ def repair_classic_records(
         ]
         detail = next((" ".join(reason.split()) for reason in reasons if reason), "unknown fallout")
         raise RepairWorkflowError(
-            "automatic repair could not find a bounded, ordinarily validated adjustment: "
-            + detail
+            "automatic repair could not find a bounded, ordinarily validated adjustment: " + detail
         )
 
     raise RepairWorkflowError(
-        f"automatic repair did not converge after {MAX_REPAIR_PASSES} bounded passes"
+        f"automatic repair did not converge after {pass_limit} bounded passes"
     )
 
 
 __all__ = [
-    "MAX_REPAIR_PASSES",
     "RepairWorkflowError",
     "RepairWorkflowResult",
     "repair_classic_records",

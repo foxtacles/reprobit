@@ -424,9 +424,7 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
     if next_command is not None:
         message += f"\nNext: {next_command}"
     cmake_import_command = (
-        human_command(("rbit", "import", "cmake", root))
-        if graph_invalidation_required
-        else None
+        human_command(("rbit", "import", "cmake", root)) if graph_invalidation_required else None
     )
     if cmake_import_command is not None:
         message += (

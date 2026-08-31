@@ -5348,8 +5348,7 @@ def test_repair_donor_probe_isolates_candidate_failure_and_stops_before_later_wi
     ) -> bool:
         evaluated.append(outcomes)
         return any(
-            isinstance(item, classic_runtime_probe.ClassicDonorProbeOutput)
-            for item in outcomes
+            isinstance(item, classic_runtime_probe.ClassicDonorProbeOutput) for item in outcomes
         )
 
     outcomes = classic_repair_probe_execution.probe_donor_compile_windows(
@@ -5361,9 +5360,7 @@ def test_repair_donor_probe_isolates_candidate_failure_and_stops_before_later_wi
             ("donor.unstarted",),
         ),
         evaluate=evaluate,
-        progress=lambda completed, total, donor_id: progress.append(
-            (completed, total, donor_id)
-        ),
+        progress=lambda completed, total, donor_id: progress.append((completed, total, donor_id)),
         planned_candidates=3,
     )
 

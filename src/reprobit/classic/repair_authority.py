@@ -10,6 +10,7 @@ from reprobit.model import Digest
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeIntervention,
+    ClassicRecipeRole,
     InterventionDocument,
     ProjectSpec,
     ProofDocument,
@@ -44,6 +45,21 @@ class ClassicInterventionEdit:
             raise ClassicAuthorityRepairError(
                 f"intervention {self.before.id!r} replacement makes no change"
             )
+        if self.before.role is not ClassicRecipeRole.DONOR:
+            raise ClassicAuthorityRepairError(
+                f"intervention {self.before.id!r} replacement is not a donor adjustment"
+            )
+        unchanged = self.after.model_copy(
+            update={
+                "parameters": self.before.parameters,
+                "beneficiaries": self.before.beneficiaries,
+            }
+        )
+        if unchanged != self.before:
+            raise ClassicAuthorityRepairError(
+                f"intervention {self.before.id!r} replacement changes fields outside "
+                "donor parameters or beneficiaries"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +80,11 @@ class ClassicReceiptEdit:
             )
         if self.after == self.before:
             raise ClassicAuthorityRepairError(f"receipt {self.before.id!r} makes no change")
+        unchanged = self.after.model_copy(update={"expected_values": self.before.expected_values})
+        if unchanged != self.before:
+            raise ClassicAuthorityRepairError(
+                f"receipt {self.before.id!r} replacement changes fields outside expected values"
+            )
 
 
 def _authority_path(root: Path, directory: str, member: str) -> tuple[str, Path]:

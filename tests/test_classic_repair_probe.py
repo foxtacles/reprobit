@@ -100,12 +100,10 @@ def _fixture(
         receipts=(donor_receipt,),
     )
     actions = tuple(
-        _action(f"function.{index}", f"?Function{index}@@YAXXZ")
-        for index in range(action_count)
+        _action(f"function.{index}", f"?Function{index}@@YAXXZ") for index in range(action_count)
     )
     action_receipts = tuple(
-        _receipt(action, f"proof.function.{index}")
-        for index, action in enumerate(actions)
+        _receipt(action, f"proof.function.{index}") for index, action in enumerate(actions)
     )
     unit = ClassicPreparedUnit(
         ClassicTranslationUnitPlan(
@@ -279,9 +277,7 @@ def test_retune_uses_small_windows_and_stops_after_first_ordinary_candidate(
         radius=2,
         limit=3,
         window_size=1,
-        progress=lambda completed, total, donor_id: progress.append(
-            (completed, total, donor_id)
-        ),
+        progress=lambda completed, total, donor_id: progress.append((completed, total, donor_id)),
     )
 
     assert len(_COMPILE_WINDOWS) == 2
@@ -289,7 +285,6 @@ def test_retune_uses_small_windows_and_stops_after_first_ordinary_candidate(
     assert progress[-1][:2] == (2, 3)
     assert validations == 2
     assert result.compiled_candidates == 2
-    assert result.probe_consumed is True
     assert result.refusals == ()
     assert len(result.repairs) == 1
     selected = result.repairs[0]
@@ -358,7 +353,6 @@ def test_unsupported_donor_returns_clear_refusal_and_closes_probe(
 
     assert result.repairs == ()
     assert result.compiled_candidates == 0
-    assert result.probe_consumed is True
     assert result.refusals[0].reason == "donor family has no bounded retune candidates"
     assert probes.close_calls == 1
 
@@ -430,5 +424,4 @@ def test_one_candidate_compile_refusal_does_not_abort_later_windows(
     assert len(result.repairs) == 1
     assert result.repairs[0].attempts == 2
     assert result.compiled_candidates == 2
-    assert result.probe_consumed is True
     assert result.refusals == ()

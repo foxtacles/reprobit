@@ -11,13 +11,13 @@ candidate-only terminal pipeline.
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Protocol, cast
+from typing import TYPE_CHECKING, cast
 
 import reprobit.classic.composition as composition
-from reprobit.binary import ByteIdentityError
+import reprobit.classic.repair_dispatch as repair_dispatch
 from reprobit.classic.compiler_identity import (
     Msvc420CompilerIdentity,
     issue_msvc420_compiler_identity,
@@ -99,26 +99,6 @@ class ClassicUnitComposition:
     )
     provisional_repair: bool = False
     incomplete: bool = False
-
-
-@dataclass(frozen=True, slots=True)
-class ClassicMeasuredReceiptRepairRequest:
-    """One failed saved action plus the exact fresh materials that rejected it."""
-
-    intervention: ClassicRecipeIntervention
-    receipt: ClassicProofReceipt
-    materials: ClassicDispatchMaterials
-    failure: Exception
-    unit: ClassicPreparedUnit
-    action_index: int
-
-
-class ClassicMeasuredReceiptRepair(Protocol):
-    """Repair-only measured-pin callback; certification never supplies one."""
-
-    def __call__(
-        self, request: ClassicMeasuredReceiptRepairRequest
-    ) -> ClassicProofReceipt | None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -765,7 +745,7 @@ def compose_classic_unit(
     donor_materials: Mapping[str, _ClassicDonorSemanticMaterial],
     seed_source: bytes,
     legacy_oracles: Mapping[str, PE32VirtualAddressReader] | None = None,
-    measured_receipt_repair: ClassicMeasuredReceiptRepair | None = None,
+    measured_receipt_repair: repair_dispatch.ClassicMeasuredReceiptRepair | None = None,
 ) -> ClassicUnitComposition:
     """Compose one independently compiled TU without access to image-oracle bytes."""
 
@@ -907,70 +887,24 @@ def compose_classic_unit(
             candidate_constraints=values,
             compiler_identity=unit.compiler_identity,
         )
-        try:
-            candidate = dispatcher.dispatch(function, materials)
-        except (
-            ByteIdentityError,
-            ClassicProjectError,
-            ClassicSemanticError,
-            DonorSourceError,
-        ) as exc:
-            repaired_receipt = (
-                measured_receipt_repair(
-                    ClassicMeasuredReceiptRepairRequest(
-                        function,
-                        receipt,
-                        materials,
-                        exc,
-                        unit,
-                        action_index,
-                    )
-                )
-                if measured_receipt_repair is not None
-                else None
+        dispatch = repair_dispatch.dispatch_classic_action(
+            dispatcher,
+            function,
+            materials,
+            receipt,
+            unit,
+            action_index,
+            measured_receipt_repair,
+        )
+        if dispatch.candidate is None:
+            return ClassicUnitComposition(
+                output,
+                tuple(witnesses),
+                provisional_repair=True,
+                incomplete=True,
             )
-            if repaired_receipt is None:
-                if measured_receipt_repair is not None:
-                    return ClassicUnitComposition(
-                        output,
-                        tuple(witnesses),
-                        provisional_repair=True,
-                        incomplete=True,
-                    )
-                raise ClassicProjectError(
-                    f"classic action {function.id!r} "
-                    f"({function.family.value}, {function.symbol!r}) failed: {exc}"
-                ) from exc
-            if (
-                repaired_receipt.id != receipt.id
-                or repaired_receipt.intervention_id != receipt.intervention_id
-                or repaired_receipt.family is not receipt.family
-                or repaired_receipt.expected_values.keys() != receipt.expected_values.keys()
-                or repaired_receipt.model_copy(update={"expected_values": receipt.expected_values})
-                != receipt
-            ):
-                raise ClassicProjectError(
-                    f"repair for classic action {function.id!r} changed more than expected values"
-                ) from exc
-            repaired_values = matching_candidate_constraints(
-                function, (repaired_receipt,)
-            ).materialize()
-            try:
-                candidate = dispatcher.dispatch(
-                    function,
-                    replace(materials, candidate_constraints=repaired_values),
-                )
-            except (
-                ByteIdentityError,
-                ClassicProjectError,
-                ClassicSemanticError,
-                DonorSourceError,
-            ) as repaired_exc:
-                raise ClassicProjectError(
-                    f"classic action {function.id!r} repair did not satisfy its ordinary "
-                    f"composer: {repaired_exc}"
-                ) from repaired_exc
-            provisional_repair = True
+        candidate = dispatch.candidate
+        provisional_repair = provisional_repair or dispatch.provisional_repair
         output = candidate.output
         for donor_id, input_name in sorted(function_donor_inputs.items()):
             donor_uses[donor_id].append(
@@ -1115,8 +1049,6 @@ def classic_rdata_repack(
 
 
 __all__ = [
-    "ClassicMeasuredReceiptRepair",
-    "ClassicMeasuredReceiptRepairRequest",
     "ClassicPreparedDonor",
     "ClassicPreparedUnit",
     "ClassicTerminalComposition",

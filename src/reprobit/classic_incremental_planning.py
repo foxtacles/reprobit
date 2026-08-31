@@ -13,6 +13,7 @@ from typing import cast
 from reprobit.assets import runtime_asset_path
 from reprobit.backends import ExecutionBackend, PosixWineBackend
 from reprobit.classic.arguments import validate_compile_arguments
+from reprobit.classic.repair_dispatch import ClassicMeasuredReceiptRepair
 from reprobit.classic_cache import DonorDependencyResolutionContext
 from reprobit.classic_donors import (
     DonorIncludeProjection,
@@ -30,7 +31,6 @@ from reprobit.classic_incremental_context import (
     snapshot_file,
 )
 from reprobit.classic_orchestration import (
-    ClassicMeasuredReceiptRepair,
     ClassicPreparedUnit,
     classic_compiler_translation_unit_authority,
     classic_rdata_repack_graph_authority,

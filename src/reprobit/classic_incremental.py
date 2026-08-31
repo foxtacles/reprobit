@@ -11,6 +11,7 @@ from pathlib import Path
 from time import monotonic
 
 from reprobit.backends import ExecutionBackend
+from reprobit.classic.repair_dispatch import ClassicMeasuredReceiptRepair
 from reprobit.classic_incremental_context import ClassicIncrementalResult
 from reprobit.classic_incremental_execution import execute_classic_incremental_plan
 from reprobit.classic_incremental_nodes import (
@@ -19,7 +20,6 @@ from reprobit.classic_incremental_nodes import (
 )
 from reprobit.classic_incremental_planning import prepare_classic_incremental_plan
 from reprobit.classic_incremental_targets import add_analysis_nodes, add_terminal_nodes
-from reprobit.classic_orchestration import ClassicMeasuredReceiptRepair
 from reprobit.incremental import DeveloperAuthority
 from reprobit.incremental_executor import IncrementalProgress
 

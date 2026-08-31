@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -54,9 +55,14 @@ class _Arena:
 
 
 class _Prepared:
-    def __init__(self, effective_root: Path, overlay: dict[str, bytes]) -> None:
+    def __init__(
+        self,
+        effective_root: Path,
+        overlay: dict[str, bytes],
+        units: tuple[object, ...],
+    ) -> None:
         self.producer = SimpleNamespace(is_open=True)
-        self.probes = SimpleNamespace(effective_root=effective_root)
+        self.probes = SimpleNamespace(effective_root=effective_root, units=units)
         self.donors = SimpleNamespace(overlay_effective_outputs=overlay)
         self.close_calls = 0
 
@@ -83,7 +89,31 @@ def _args(root: Path) -> argparse.Namespace:
 
 
 def _refusals() -> tuple[ClassicRepairRefusal, ...]:
-    return (cast(ClassicRepairRefusal, object()),)
+    action = SimpleNamespace(id="function.fixture")
+    receipt = SimpleNamespace(
+        id="proof.function.fixture",
+        intervention_id=action.id,
+    )
+    unit = SimpleNamespace(
+        plan=SimpleNamespace(id="unit.fixture"),
+        donors=(),
+        functions=(action,),
+        legacy_actions=(),
+        actions=(action,),
+        receipts=(receipt,),
+        compiler_identity=None,
+    )
+    return (
+        ClassicRepairRefusal(
+            unit_id=unit.plan.id,
+            action_index=0,
+            intervention=cast(Any, action),
+            receipt=cast(Any, receipt),
+            materials=cast(Any, SimpleNamespace(seed_object=b"seed")),
+            unit=cast(Any, unit),
+            reason="saved donor no longer composes",
+        ),
+    )
 
 
 def _wire_preparation(
@@ -107,7 +137,11 @@ def _wire_preparation(
             entries=(SimpleNamespace(path="src/unit.cpp"),),
         ),
     )
-    prepared = _Prepared(effective_root, {"generated.cpp": b"generated overlay"})
+    prepared = _Prepared(
+        effective_root,
+        {"generated.cpp": b"generated overlay"},
+        tuple(item.unit for item in _refusals()),
+    )
     arena = _Arena(tmp_path / "state" / "run")
     execution = object()
     observed: dict[str, Any] = {}
@@ -152,7 +186,7 @@ def test_probe_uses_one_ordinary_runtime_and_exposes_progress(
 ) -> None:
     prepared, arena, observed, execution = _wire_preparation(monkeypatch, tmp_path)
     output = _Output()
-    expected = ClassicDonorRetuneProbeResult((), (), 1, True)
+    expected = ClassicDonorRetuneProbeResult((), (), 1)
     expected_refusals = _refusals()
 
     def probe(probes: object, refusals: object, **values: object):
@@ -194,38 +228,80 @@ def test_probe_uses_one_ordinary_runtime_and_exposes_progress(
     probes, refusals, probe_values = observed["probe"]
     assert probes is prepared.probes
     assert refusals == expected_refusals
+    assert refusals[0].unit is prepared.probes.units[0]
     assert probe_values["clean_sources"] == {"src/unit.cpp": b"clean source"}
     assert probe_values["effective_sources"] == {
         "src/unit.cpp": b"effective source",
         "generated.cpp": b"generated overlay",
     }
     assert probe_values["canonical_overlay_operations"] == {"x": ("op",)}
-    assert output.activities == [
-        ("preparing a safe donor search", "repair-probe-prepare")
-    ]
+    assert output.activities == [("preparing a safe donor search", "repair-probe-prepare")]
     assert output.producer_descriptions == [
         "trying nearby donor settings (the shown total is an upper bound)"
     ]
-    assert output.progress == [
-        (1, 9, "repair-probe", "donor-1", ProgressKind.UNIT_FINISHED, None)
-    ]
+    assert output.progress == [(1, 9, "repair-probe", "donor-1", ProgressKind.UNIT_FINISHED, None)]
     assert prepared.close_calls == 0
     assert arena.entered and arena.exited
 
 
-@pytest.mark.parametrize("probe_consumed", [False, True])
+def test_probe_rejects_stale_prepared_unit_authority_and_closes_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared, _arena, observed, _execution = _wire_preparation(monkeypatch, tmp_path)
+    refusal = _refusals()[0]
+    stale_unit = SimpleNamespace(**vars(refusal.unit))
+    stale_unit.plan = SimpleNamespace(id=refusal.unit_id, source="src/other.cpp")
+    stale = replace(refusal, unit=cast(Any, stale_unit))
+    monkeypatch.setattr(
+        subject,
+        "probe_bounded_donor_retunes",
+        lambda *_args, **_kwargs: pytest.fail("stale authority must not reach the probe"),
+    )
+
+    with pytest.raises(subject.ClassicProjectError, match="no longer matches"):
+        subject.probe_classic_donor_repairs(
+            _args(cast(Path, observed["root"])),
+            cast(Any, _Output()),
+            (stale,),
+        )
+
+    assert prepared.close_calls == 1
+
+
+def test_probe_rejects_refusal_that_names_the_wrong_fresh_action(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared, _arena, observed, _execution = _wire_preparation(monkeypatch, tmp_path)
+    refusal = _refusals()[0]
+    wrong_action = SimpleNamespace(id="function.other")
+    inconsistent = replace(refusal, intervention=cast(Any, wrong_action))
+    monkeypatch.setattr(
+        subject,
+        "probe_bounded_donor_retunes",
+        lambda *_args, **_kwargs: pytest.fail("inconsistent refusal must not reach the probe"),
+    )
+
+    with pytest.raises(subject.ClassicProjectError, match="freshly prepared action"):
+        subject.probe_classic_donor_repairs(
+            _args(cast(Path, observed["root"])),
+            cast(Any, _Output()),
+            (inconsistent,),
+        )
+
+    assert prepared.close_calls == 1
+
+
 def test_probe_closes_any_runtime_the_probe_leaves_open(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    probe_consumed: bool,
 ) -> None:
     prepared, _arena, observed, _execution = _wire_preparation(monkeypatch, tmp_path)
     monkeypatch.setattr(
         subject,
         "probe_bounded_donor_retunes",
-        lambda *_args, **_kwargs: ClassicDonorRetuneProbeResult(
-            (), (), 0, probe_consumed
-        ),
+        lambda *_args, **_kwargs: ClassicDonorRetuneProbeResult((), (), 0),
     )
 
     subject.probe_classic_donor_repairs(
@@ -299,7 +375,7 @@ def test_empty_probe_skips_project_and_runtime_work(
         (),
     )
 
-    assert result == ClassicDonorRetuneProbeResult((), (), 0, False)
+    assert result == ClassicDonorRetuneProbeResult((), (), 0)
 
 
 def test_apply_flattens_all_typed_edits_into_one_transaction(

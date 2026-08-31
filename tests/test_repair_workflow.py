@@ -82,6 +82,21 @@ def test_workflow_persists_measured_repairs_then_requires_a_clean_pass(
     assert result.passes == 2
 
 
+def test_workflow_rejects_measured_repair_that_changes_no_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repair = SimpleNamespace(unit_id="tu.one")
+    monkeypatch.setattr(subject, "apply_classic_receipt_repairs", lambda *_args: ())
+
+    with pytest.raises(subject.RepairWorkflowError, match="measured repair reported success"):
+        _run(
+            tmp_path,
+            monkeypatch,
+            [_analysis(completed=True, measured=(repair,))],
+        )
+
+
 def test_workflow_retires_one_proven_redundant_action_before_donor_search(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -123,6 +138,39 @@ def test_workflow_retires_one_proven_redundant_action_before_donor_search(
     assert result.removed_donors == 1
     assert result.donor_retunes == 0
     assert result.passes == 2
+
+
+def test_workflow_rejects_redundant_retirement_that_changes_no_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal = SimpleNamespace(
+        unit_id="tu.one",
+        intervention=SimpleNamespace(
+            role=ClassicRecipeRole.FUNCTION,
+            dependencies=("donor",),
+        ),
+        receipt=object(),
+        materials=object(),
+        reason="saved function action no longer composes",
+    )
+    plan = SimpleNamespace(
+        intervention_edits=(object(),),
+        receipt_edits=(object(),),
+        removed_donors=(),
+    )
+    monkeypatch.setattr(subject, "plan_redundant_action_retirement", lambda *_args: plan)
+    monkeypatch.setattr(subject, "apply_classic_authority_edits", lambda *_args, **_kwargs: ())
+
+    with pytest.raises(
+        subject.RepairWorkflowError,
+        match="redundant-action retirement reported success",
+    ):
+        _run(
+            tmp_path,
+            monkeypatch,
+            [_analysis(completed=False, refusals=(refusal,))],
+        )
 
 
 def test_workflow_applies_bounded_donor_repairs_and_rechecks_composition(
@@ -173,6 +221,44 @@ def test_workflow_applies_bounded_donor_repairs_and_rechecks_composition(
     assert result.compiled_candidates == 7
     assert result.affected_units == ("tu.shared",)
     assert result.passes == 2
+
+
+def test_workflow_rejects_donor_repair_that_changes_no_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal = SimpleNamespace(
+        unit_id="tu.shared",
+        intervention=SimpleNamespace(
+            role=ClassicRecipeRole.FUNCTION,
+            dependencies=("donor",),
+        ),
+        receipt=object(),
+        materials=object(),
+        reason="donor declaration shape moved",
+    )
+    monkeypatch.setattr(
+        subject,
+        "plan_redundant_action_retirement",
+        lambda *_args: (_ for _ in ()).throw(RedundantActionRepairError("not redundant")),
+    )
+    monkeypatch.setattr(
+        subject,
+        "probe_classic_donor_repairs",
+        lambda *_args: SimpleNamespace(
+            repairs=(object(),),
+            refusals=(),
+            compiled_candidates=1,
+        ),
+    )
+    monkeypatch.setattr(subject, "apply_classic_donor_repairs", lambda *_args: ())
+
+    with pytest.raises(subject.RepairWorkflowError, match="donor repair reported success"):
+        _run(
+            tmp_path,
+            monkeypatch,
+            [_analysis(completed=False, refusals=(refusal,))],
+        )
 
 
 def test_workflow_reports_a_plain_bounded_failure(
