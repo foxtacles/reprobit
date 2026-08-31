@@ -678,6 +678,42 @@ def test_source_preview_reports_stale_tu_and_lock_preserves_reviewed_authority(
     assert all(path.read_bytes() == data for path, data in before.items())
 
 
+def test_source_preview_does_not_loop_when_a_compiled_source_is_removed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    capsys.readouterr()
+    paths = ["--path", "notes.txt", "--path", "reprobit.toml"]
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "source",
+                "preview",
+                "--project",
+                str(project),
+                *paths,
+            ]
+        )
+        == 0
+    )
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["removed"] == ["src/unit.cpp"]
+    assert event["membership_transition_blocked"] is True
+    assert event["next_command"] is None
+    assert event["cmake_import_command"] is None
+
+    assert main(["source", "lock", "--project", str(project), *paths]) == 2
+    message = capsys.readouterr().err
+    assert "No safe automatic next step is available" in message
+    assert "source preview" not in message
+    assert "rbit import cmake" not in message
+
+
 @pytest.mark.parametrize("with_build_plan", [True, False], ids=["planned", "onboarding"])
 @pytest.mark.parametrize("candidate_input", ["changed", "absent"])
 def test_source_preview_reports_stale_donor_overlay_input_and_lock_refuses_it(
@@ -741,8 +777,9 @@ def test_source_preview_reports_stale_donor_overlay_input_and_lock_refuses_it(
         assert "donor.overlay" in event["authority_error"]
     assert expected_detail in event["authority_error"]
     if candidate_input == "absent":
-        assert "source lock" in event["next_command"]
-        assert "rbit repair" not in event["next_command"]
+        assert event["next_command"] is None
+        assert event["membership_transition_blocked"] is True
+        assert event["cmake_import_command"] is None
     assert all(path.read_bytes() == data for path, data in before.items())
 
     assert main(["source", "lock", "--project", str(project), *paths]) == 2
@@ -753,7 +790,8 @@ def test_source_preview_reports_stale_donor_overlay_input_and_lock_refuses_it(
     assert expected_detail in message
     if candidate_input == "absent":
         assert "rbit repair" not in message
-        assert "source preview" in message
+        assert "No safe automatic next step is available" in message
+        assert "source preview" not in message
     assert all(path.read_bytes() == data for path, data in before.items())
     assert plan_path.exists() is with_build_plan
 
@@ -798,6 +836,7 @@ def test_source_regenerate_heals_stale_translation_unit_pins(
     )
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert event["applied"] is True
+    assert event["next_command"] == f"rbit repair {project}"
     assert sorted(event["documents"]) == [
         "reprobit/build-plan.json",
         "reprobit/interventions/unit.json",
@@ -1031,18 +1070,53 @@ def test_source_regeneration_apply_requires_build_plan_to_remain_absent(tmp_path
     assert all((project / name).read_bytes() == data for name, data in changed_preimages.items())
 
 
-def test_source_regeneration_accepts_mixed_case_authority_members(tmp_path: Path) -> None:
+def test_source_regeneration_refuses_untyped_authority_members(tmp_path: Path) -> None:
     project = tmp_path / "project"
     _complete_translation_unit_project(project)
     intervention_root = project / "reprobit/interventions"
     (intervention_root / "Alpha.json").write_bytes(canonical_json({}))
-    (intervention_root / "zulu.json").write_bytes(canonical_json({}))
     (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
 
-    plan = plan_source_regeneration(project)
-    result = apply_source_regeneration(project, plan)
+    with pytest.raises(SourceRegenerationError, match=r"Alpha\.json.*invalid"):
+        plan_source_regeneration(project)
 
-    assert result is not None
+
+def test_source_regeneration_refuses_redirected_authority_members(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    external = tmp_path / "outside.json"
+    external.write_bytes(
+        canonical_json(InterventionDocument(schema_version=3, target_id="program"))
+    )
+    redirected = project / "reprobit/interventions/redirected.json"
+    try:
+        redirected.symlink_to(external)
+    except OSError as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+
+    with pytest.raises(SourceRegenerationError, match="redirected"):
+        plan_source_regeneration(project)
+
+
+def test_source_regeneration_refuses_case_colliding_authority_members(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    intervention_root = project / "reprobit/interventions"
+    payload = canonical_json(InterventionDocument(schema_version=3, target_id="program"))
+    (intervention_root / "Collision.json").write_bytes(payload)
+    (intervention_root / "collision.json").write_bytes(payload)
+    colliding = tuple(
+        path.name
+        for path in intervention_root.iterdir()
+        if path.name.casefold() == "collision.json"
+    )
+    if len(colliding) != 2:
+        pytest.skip("the test filesystem is case-insensitive")
+
+    with pytest.raises(SourceRegenerationError, match="collide by case"):
+        plan_source_regeneration(project)
 
 
 def test_source_regeneration_distinguishes_identical_sources_by_declared_path(
@@ -1052,24 +1126,27 @@ def test_source_regeneration_distinguishes_identical_sources_by_declared_path(
     _unit_id, old_digest = _complete_translation_unit_project(project)
     original = (project / "src/unit.cpp").read_bytes()
     (project / "src/other.cpp").write_bytes(original)
+    other_unit_id = "tu.program.other"
+    donor = ClassicRecipeIntervention(
+        id="donor.other",
+        scope=Scope(target="program", translation_unit=other_unit_id),
+        rationale="Keep an identical source digest bound to its declared path.",
+        family=ClassicRecipeFamily.DECLARATION_SHAPE,
+        role=ClassicRecipeRole.DONOR,
+        build_target="program",
+        parameters=(ClassicField(name="donor_effective_source_sha256", value=old_digest.value),),
+    )
     (project / "reprobit/interventions/other.json").write_bytes(
         canonical_json(
-            {
-                "translation_unit_id": "other",
-                "source": "src/other.cpp",
-                "source_digest": old_digest.model_dump(mode="json"),
-                "interventions": [
-                    {
-                        "id": "donor.other",
-                        "parameters": [
-                            {
-                                "name": "donor_effective_source_sha256",
-                                "value": old_digest.value,
-                            }
-                        ],
-                    }
-                ],
-            }
+            InterventionDocument(
+                schema_version=3,
+                target_id="program",
+                translation_unit_id=other_unit_id,
+                source="src/other.cpp",
+                source_digest=old_digest,
+                build_target="program",
+                interventions=(donor,),
+            )
         )
     )
     (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
@@ -1082,9 +1159,23 @@ def test_source_regeneration_distinguishes_identical_sources_by_declared_path(
 
 def test_source_regeneration_refuses_unbound_stale_digest(tmp_path: Path) -> None:
     project = tmp_path / "project"
-    _unit_id, old_digest = _complete_translation_unit_project(project)
+    unit_id, old_digest = _complete_translation_unit_project(project)
     (project / "reprobit/proofs/unknown.json").write_bytes(
-        canonical_json({"unsupported_source_digest": old_digest.value})
+        canonical_json(
+            ProofDocument(
+                schema_version=3,
+                target_id="program",
+                translation_unit_id=unit_id,
+                expected_observations=(
+                    ClassicProofReceipt(
+                        id="proof.unknown",
+                        intervention_id="donor.unknown",
+                        family=ClassicRecipeFamily.DECLARATION_SHAPE,
+                        expected_values={"unsupported_source_digest": old_digest.value},
+                    ),
+                ),
+            )
+        )
     )
     (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
 
@@ -1101,27 +1192,35 @@ def test_source_regeneration_refuses_unhandled_cross_tu_donor_pin(tmp_path: Path
     donor_source = project / "src/other.cpp"
     donor_source.write_bytes(b"int other() { return 0; }\n")
     donor_digest = Digest.from_bytes(donor_source.read_bytes())
+    other_unit_id = "tu.program.other"
     (project / "reprobit/interventions/other.json").write_bytes(
         canonical_json(
-            {
-                "translation_unit_id": "other",
-                "source": "src/other.cpp",
-                "source_digest": donor_digest.model_dump(mode="json"),
-            }
+            InterventionDocument(
+                schema_version=3,
+                target_id="program",
+                translation_unit_id=other_unit_id,
+                source="src/other.cpp",
+                source_digest=donor_digest,
+                build_target="program",
+            )
         )
     )
     unit_path = project / "reprobit/interventions/unit.json"
     unit = strict_load(unit_path)
     assert isinstance(unit, dict)
-    unit["interventions"].append(
-        {
-            "id": "donor.cross",
-            "parameters": [
-                {"name": "donor_source", "value": "src/other.cpp"},
-                {"name": "unsupported_source_sha256", "value": donor_digest.value},
-            ],
-        }
+    donor = ClassicRecipeIntervention(
+        id="donor.cross",
+        scope=Scope(target="program", translation_unit="tu.program.unit"),
+        rationale="Exercise refusal of an unsupported cross-TU source pin.",
+        family=ClassicRecipeFamily.DECLARATION_SHAPE,
+        role=ClassicRecipeRole.DONOR,
+        build_target="program",
+        parameters=(
+            ClassicField(name="donor_source", value="src/other.cpp"),
+            ClassicField(name="unsupported_source_sha256", value=donor_digest.value),
+        ),
     )
+    unit["interventions"].append(donor.model_dump(mode="json"))
     unit_path.write_bytes(canonical_json(unit))
     donor_source.write_bytes(b"// comment\nint other() { return 0; }\n")
 
@@ -1193,20 +1292,31 @@ def test_source_regeneration_refuses_unknown_header_witness_shape(tmp_path: Path
     unit_path = project / "reprobit/interventions/unit.json"
     unit = strict_load(unit_path)
     assert isinstance(unit, dict)
-    unit["interventions"].append(
-        {
-            "id": "function.unknown",
-            "parameters": [
-                {
-                    "name": "unsupported_source_witness",
-                    "value": {
-                        "path": "src/unit.cpp",
-                        "source_sha256": original_digest,
-                    },
-                }
-            ],
-        }
+    symbol = "?unknown@@YAXXZ"
+    intervention = ClassicRecipeIntervention(
+        id="function.unknown",
+        scope=Scope(
+            target="program",
+            translation_unit="tu.program.unit",
+            function=symbol,
+        ),
+        rationale="Exercise refusal of an unsupported source witness.",
+        dependencies=("donor.unknown",),
+        family=ClassicRecipeFamily.EQUAL_BODY_STRICT,
+        role=ClassicRecipeRole.FUNCTION,
+        build_target="program",
+        symbol=symbol,
+        parameters=(
+            ClassicField(
+                name="unsupported_source_witness",
+                value={
+                    "path": "src/unit.cpp",
+                    "source_sha256": original_digest,
+                },
+            ),
+        ),
     )
+    unit["interventions"].append(intervention.model_dump(mode="json"))
     unit_path.write_bytes(canonical_json(unit))
     header.write_bytes(b"class HarmlessForwardDeclaration;\n" + header.read_bytes())
 

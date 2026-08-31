@@ -34,6 +34,7 @@ def analyze_classic_repair(
     output: CLIOutput,
     *,
     cache_root: Path | None = None,
+    progress_description: str = "checking affected source files",
 ) -> RepairAnalysisResult:
     """Run one warm analysis and distinguish repair fallout from fatal failure."""
 
@@ -45,7 +46,7 @@ def analyze_classic_repair(
         _classic_measured_receipt_repair=session,
         _classic_repair_analysis_only=True,
         _incremental_cache_root=cache_root,
-        _incremental_progress_description="checking affected source files",
+        _incremental_progress_description=progress_description,
     )
     try:
         status = command_build(argparse.Namespace(**values), output)

@@ -687,8 +687,8 @@ def _parser() -> argparse.ArgumentParser:
             "Use this after editing a source file that is already part of the project, "
             "including a shared header used by many source files. ReproBit repairs the "
             "saved build guidance in private, rebuilds, and publishes only after every "
-            "target matches exactly. For added or removed files, use source preview and "
-            "source lock first."
+            "target matches exactly. For added or removed files, start with source "
+            "preview; it prints a safe next command when one is available."
         ),
     )
     repair.add_argument("project", nargs="?", default=".", help="project directory (default: .)")

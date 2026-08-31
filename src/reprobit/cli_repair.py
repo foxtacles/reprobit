@@ -89,9 +89,11 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
     staged = StagedRepairProject(snapshot, keep=KeepWorkspace(args.keep_workspace))
     published = False
     cleanup_warning: str | None = None
+    phase = "preparing a private repair workspace"
 
     try:
         with staged as staged_root:
+            phase = "refreshing mechanical source checks"
             try:
                 regeneration_plan = plan_source_regeneration(staged_root)
                 apply_source_regeneration(staged_root, regeneration_plan)
@@ -105,6 +107,7 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
             )
             command_source_lock(lock_args, candidate_output)
 
+            phase = "repairing saved build guidance"
             candidate_args = _candidate_args(args, staged_root)
             repair_result = repair_classic_records(
                 candidate_args,
@@ -127,6 +130,7 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
                 authorized_records,
             )
 
+            phase = "proving every target from scratch"
             verification_status = command_verify(
                 candidate_args,
                 candidate_output,
@@ -137,12 +141,14 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
                     "authenticity policy"
                 )
 
+            phase = "collecting the verified repair result"
             candidate = collect_repair_candidate(
                 snapshot,
                 staged_root,
                 report_directory=_CANDIDATE_REPORT_DIRECTORY,
                 record_postimages=record_postimages,
             )
+            phase = "publishing the verified repair result"
             transaction = publish_repair_candidate(
                 snapshot,
                 candidate,
@@ -167,20 +173,34 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
             cause = " ".join(str(exc).split())
             if staged.root is not None:
                 cause = cause.replace(str(staged.root), "the private repair workspace")
-            cleanup = human_command(("rbit", "clean", root))
+            cleanup_line = (
+                f"\nCleanup when finished: {human_command(('rbit', 'clean', root))}"
+                if retained.is_dir()
+                else ""
+            )
             raise CLIError(
-                "Repair could not restore exact output. Your source edits are untouched; "
+                f"Repair stopped while {phase}. Your source edits are untouched; "
                 "ReproBit did not publish its staged project records or outputs."
                 f"\nDetails: {cause}{retained_line}"
-                f"\nCleanup when finished: {cleanup}"
+                f"{cleanup_line}"
             ) from exc
 
     changed_records = len(candidate.records)
     report_html = root / final_report_directory / "report.html"
     if changed_records:
+        adjustments = (
+            f"{len(regeneration_plan.changes)} source check(s), "
+            f"{repair_result.measured_checks} measured check(s), "
+            f"{repair_result.retired_actions} obsolete adjustment(s), and "
+            f"{repair_result.donor_retunes} donor setting(s)"
+        )
         completion_message = (
             f"Repair complete: updated {changed_records} saved project file(s) and "
-            f"verified every target exactly\nReport: {report_html}"
+            "verified every target exactly"
+            f"\nAdjusted {adjustments} across "
+            f"{len(repair_result.affected_units)} affected TU(s); "
+            f"tried {repair_result.compiled_candidates} donor candidate(s)"
+            f"\nReport: {report_html}"
         )
     else:
         completion_message = (

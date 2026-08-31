@@ -57,6 +57,7 @@ from reprobit.schema import (
 
 DEFAULT_RETUNE_PROBE_WINDOW = 8
 MAX_RETUNE_PROBE_WINDOW = 16
+MAX_RETUNE_PROBE_CANDIDATES = 256
 
 
 class ClassicDonorRetuneProbeError(RuntimeError):
@@ -188,10 +189,12 @@ def _candidate_windows(
     selected: Mapping[tuple[str, str], ClassicDonorRetuneRepair],
     *,
     window_size: int,
+    candidate_budget: int,
 ) -> Iterable[tuple[str, ...]]:
     """Yield fair lazy windows, dropping groups as soon as they are selected."""
 
     emitted: set[str] = set()
+    remaining = candidate_budget
     for distance in sorted({item.materialized.distance for item in attempts}):
         by_group: dict[tuple[str, str], deque[str]] = {}
         for item in attempts:
@@ -202,9 +205,9 @@ def _candidate_windows(
         group_keys = tuple(
             sorted(by_group, key=lambda item: (item[0].casefold(), item[1].casefold()))
         )
-        while True:
+        while remaining:
             window: list[str] = []
-            while len(window) < window_size:
+            while len(window) < min(window_size, remaining):
                 added = False
                 for group_key in group_keys:
                     if group_key in selected:
@@ -224,6 +227,7 @@ def _candidate_windows(
                     break
             if not window:
                 break
+            remaining -= len(window)
             yield tuple(window)
 
 
@@ -237,6 +241,7 @@ def _probe_bounded_donor_retunes(
     radius: int = MAX_RETUNE_RADIUS,
     limit: int = DEFAULT_RETUNE_CANDIDATES,
     window_size: int = DEFAULT_RETUNE_PROBE_WINDOW,
+    candidate_budget: int = MAX_RETUNE_PROBE_CANDIDATES,
     progress: ClassicDonorProbeProgress | None = None,
 ) -> ClassicDonorRetuneProbeResult:
     """Compile deterministic distance tiers and select ordinarily valid retunes.
@@ -253,6 +258,13 @@ def _probe_bounded_donor_retunes(
     if type(window_size) is not int or not 1 <= window_size <= MAX_RETUNE_PROBE_WINDOW:
         raise ClassicDonorRetuneProbeError(
             f"window_size must be an integer from 1 to {MAX_RETUNE_PROBE_WINDOW}"
+        )
+    if (
+        type(candidate_budget) is not int
+        or not 1 <= candidate_budget <= MAX_RETUNE_PROBE_CANDIDATES
+    ):
+        raise ClassicDonorRetuneProbeError(
+            f"candidate_budget must be an integer from 1 to {MAX_RETUNE_PROBE_CANDIDATES}"
         )
     groups = _group_failures(refusals)
     if not groups:
@@ -416,11 +428,17 @@ def _probe_bounded_donor_retunes(
     outcomes = probe_donor_compile_windows(
         probes,
         units,
-        _candidate_windows(attempt_tuple, selected, window_size=window_size),
+        _candidate_windows(
+            attempt_tuple,
+            selected,
+            window_size=window_size,
+            candidate_budget=candidate_budget,
+        ),
         evaluate=evaluate,
         progress=progress,
-        planned_candidates=len(canonical_attempts),
+        planned_candidates=min(len(canonical_attempts), candidate_budget),
     )
+    compiled_probe_ids = {outcome.donor_id for outcome in outcomes}
 
     repairs: list[ClassicDonorRetuneRepair] = []
     refusals_out: list[ClassicDonorRetuneRefusal] = []
@@ -429,12 +447,21 @@ def _probe_bounded_donor_retunes(
         if repair is not None:
             repairs.append(repair)
             continue
+        untried = {
+            attempt.probe_id for attempt in attempt_tuple if attempt.group_key == group.key
+        } - compiled_probe_ids
+        reason = (
+            "remaining command-wide donor-candidate budget was exhausted after "
+            f"{compiled[group.key]} candidate(s) for this donor"
+            if len(outcomes) >= candidate_budget and untried
+            else f"none of {compiled[group.key]} compiled candidates restored composition"
+        )
         refusals_out.append(
             ClassicDonorRetuneRefusal(
                 group.unit.plan.id,
                 group.donor.intervention.id,
                 group.action_ids,
-                f"none of {compiled[group.key]} compiled candidates restored composition",
+                reason,
                 tuple(rejected[group.key]),
             )
         )
@@ -455,6 +482,7 @@ def probe_bounded_donor_retunes(
     radius: int = MAX_RETUNE_RADIUS,
     limit: int = DEFAULT_RETUNE_CANDIDATES,
     window_size: int = DEFAULT_RETUNE_PROBE_WINDOW,
+    candidate_budget: int = MAX_RETUNE_PROBE_CANDIDATES,
     progress: ClassicDonorProbeProgress | None = None,
 ) -> ClassicDonorRetuneProbeResult:
     """Consume one prepared runtime while attempting bounded donor retunes."""
@@ -469,6 +497,7 @@ def probe_bounded_donor_retunes(
             radius=radius,
             limit=limit,
             window_size=window_size,
+            candidate_budget=candidate_budget,
             progress=progress,
         )
     except BaseException as original:
@@ -485,6 +514,7 @@ def probe_bounded_donor_retunes(
 
 __all__ = [
     "DEFAULT_RETUNE_PROBE_WINDOW",
+    "MAX_RETUNE_PROBE_CANDIDATES",
     "MAX_RETUNE_PROBE_WINDOW",
     "ClassicDonorRetuneAttemptRefusal",
     "ClassicDonorRetuneProbeError",

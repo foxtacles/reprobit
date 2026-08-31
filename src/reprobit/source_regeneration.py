@@ -12,15 +12,18 @@ locking and a from-scratch byte verification before it can be certified.
 
 from __future__ import annotations
 
-import hashlib
+import os
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
 
+from reprobit.authority_snapshot import AuthoritySnapshotError, json_authority_members
 from reprobit.classic.source_regeneration import _derive_classic_source_regeneration
 from reprobit.project_loader import load_project
+from reprobit.schema import BuildPlanDocument, InterventionDocument, ProofDocument
+from reprobit.source_lock import SourceLockError, receipt_source_input
 from reprobit.strict_json import canonical_json, strict_loads
 from reprobit.transactions import CASTransaction, TransactionResult
 
@@ -55,10 +58,6 @@ class RegenerationPlan:
         return tuple(sorted({change.document for change in self.changes}))
 
 
-def _digest(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
-
-
 class _SourceReader:
     """Read project-relative source files once, remembering the exact bytes."""
 
@@ -72,8 +71,6 @@ class _SourceReader:
         if cached is not None:
             return cached
         try:
-            from reprobit.source_lock import SourceLockError, receipt_source_input
-
             _size, digest, data = receipt_source_input(self._root, relative, capture=True)
         except SourceLockError as exc:
             raise SourceRegenerationError(f"{wanted_by} cannot read {relative!r}: {exc}") from exc
@@ -87,11 +84,61 @@ class _SourceReader:
         return dict(self._digests)
 
 
-def _document_paths(root: Path, relative: str) -> tuple[Path, ...]:
-    directory = root / relative
+def _authority_members(root: Path, relative: str) -> tuple[str, ...]:
+    try:
+        members = json_authority_members(root, relative)
+    except AuthoritySnapshotError as exc:
+        raise SourceRegenerationError(
+            f"cannot inspect source-regeneration authority {relative!r}: {exc}"
+        ) from exc
+    directory = root.joinpath(*PurePosixPath(relative).parts)
     if not directory.is_dir():
-        return ()
-    return tuple(sorted(directory.rglob("*.json"), key=lambda item: item.as_posix()))
+        raise SourceRegenerationError(
+            f"source-regeneration authority directory is unavailable: {relative!r}"
+        )
+    return members
+
+
+def _read_project_file(root: Path, relative: str, *, wanted_by: str) -> tuple[bytes, str]:
+    try:
+        _size, digest, data = receipt_source_input(root, relative, capture=True)
+    except SourceLockError as exc:
+        raise SourceRegenerationError(f"{wanted_by} cannot read {relative!r}: {exc}") from exc
+    assert data is not None
+    return data, digest.value
+
+
+def _read_json_document(
+    root: Path,
+    relative: str,
+    model: type[BuildPlanDocument] | type[InterventionDocument] | type[ProofDocument],
+) -> tuple[Any, str]:
+    data, digest = _read_project_file(
+        root,
+        relative,
+        wanted_by="source regeneration",
+    )
+    try:
+        value = strict_loads(data)
+    except ValueError as exc:
+        raise SourceRegenerationError(
+            f"source-regeneration authority {relative!r} is invalid: {exc}"
+        ) from exc
+    _validate_json_document(relative, value, model)
+    return value, digest
+
+
+def _validate_json_document(
+    relative: str,
+    value: Any,
+    model: type[BuildPlanDocument] | type[InterventionDocument] | type[ProofDocument],
+) -> None:
+    try:
+        model.model_validate_json(canonical_json(value))
+    except ValueError as exc:
+        raise SourceRegenerationError(
+            f"source-regeneration authority {relative!r} is invalid: {exc}"
+        ) from exc
 
 
 def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
@@ -99,46 +146,57 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
 
     root = Path(project_root).resolve(strict=True)
     config_relative = "reprobit.toml"
-    config_path = root / config_relative
-    config_data = config_path.read_bytes()
+    config_data, config_digest = _read_project_file(
+        root,
+        config_relative,
+        wanted_by="source regeneration",
+    )
     spec = load_project(root)
-    if config_path.read_bytes() != config_data:
+    if (
+        _read_project_file(
+            root,
+            config_relative,
+            wanted_by="source regeneration",
+        )[0]
+        != config_data
+    ):
         raise SourceRegenerationError("reprobit.toml changed while regeneration was planned")
 
-    intervention_paths = _document_paths(root, spec.layout.interventions)
-    proof_paths = _document_paths(root, spec.layout.proofs)
+    intervention_members = _authority_members(root, spec.layout.interventions)
+    proof_members = _authority_members(root, spec.layout.proofs)
     authority_directories = {
-        spec.layout.interventions: tuple(
-            sorted(
-                (
-                    path.relative_to(root / spec.layout.interventions).as_posix()
-                    for path in intervention_paths
-                ),
-                key=lambda item: (item.casefold(), item),
-            )
-        ),
-        spec.layout.proofs: tuple(
-            sorted(
-                (path.relative_to(root / spec.layout.proofs).as_posix() for path in proof_paths),
-                key=lambda item: (item.casefold(), item),
-            )
-        ),
+        spec.layout.interventions: intervention_members,
+        spec.layout.proofs: proof_members,
     }
     documents: dict[str, Any] = {}
+    document_models: dict[
+        str,
+        type[BuildPlanDocument] | type[InterventionDocument] | type[ProofDocument],
+    ] = {}
     document_preimages: dict[str, str] = {}
-    control_preimages: dict[str, str | None] = {config_relative: _digest(config_data)}
-    for document_path in (*intervention_paths, *proof_paths):
-        name = document_path.relative_to(root).as_posix()
-        data = document_path.read_bytes()
-        documents[name] = strict_loads(data)
-        document_preimages[name] = _digest(data)
+    control_preimages: dict[str, str | None] = {config_relative: config_digest}
+    for directory, members, model in (
+        (spec.layout.interventions, intervention_members, InterventionDocument),
+        (spec.layout.proofs, proof_members, ProofDocument),
+    ):
+        for member in members:
+            name = (PurePosixPath(directory) / member).as_posix()
+            documents[name], document_preimages[name] = _read_json_document(
+                root,
+                name,
+                model,
+            )
+            document_models[name] = model
 
     plan_relative = spec.layout.build_plan
     plan_path = root / plan_relative
-    if plan_path.is_file():
-        data = plan_path.read_bytes()
-        documents[plan_relative] = strict_loads(data)
-        document_preimages[plan_relative] = _digest(data)
+    if os.path.lexists(plan_path):
+        documents[plan_relative], document_preimages[plan_relative] = _read_json_document(
+            root,
+            plan_relative,
+            BuildPlanDocument,
+        )
+        document_models[plan_relative] = BuildPlanDocument
     else:
         control_preimages[plan_relative] = None
 
@@ -149,6 +207,13 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
         reader=reader,
         error_type=SourceRegenerationError,
     )
+    for name in derived.updated_documents:
+        _validate_json_document(name, documents[name], document_models[name])
+    for relative, expected_members in authority_directories.items():
+        if _authority_members(root, relative) != expected_members:
+            raise SourceRegenerationError(
+                f"source-regeneration authority membership changed: {relative!r}"
+            )
     changes = tuple(
         RegenerationChange(change.document, change.location, change.before, change.after)
         for change in derived.changes

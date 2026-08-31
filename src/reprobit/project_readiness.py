@@ -218,11 +218,13 @@ def inspect_project_readiness(root: Path) -> ProjectReadiness:
     prerequisites_ready = all(item.ready for item in items)
     validation_detail = "finish the missing steps above"
     validated = False
+    repairable_source_drift = False
     if prerequisites_ready:
         try:
             load_project_tree(candidate)
         except Exception as error:
             validation_detail = str(error)
+            repairable_source_drift = "run rbit repair ." in validation_detail
         else:
             validated = True
             validation_detail = "all saved project files agree"
@@ -232,7 +234,13 @@ def inspect_project_readiness(root: Path) -> ProjectReadiness:
             "Final project check",
             validated,
             validation_detail,
-            None if validated else human_command(("rbit", "validate", candidate)),
+            (
+                None
+                if validated
+                else human_command(
+                    ("rbit", "repair" if repairable_source_drift else "validate", candidate)
+                )
+            ),
         )
     )
     return ProjectReadiness(candidate, tuple(items))

@@ -7,12 +7,17 @@ them; review and commit the resulting changes like ordinary project files.
 A project has a small `reprobit.toml` entry point and strict JSON files under
 `reprobit/`. After `rbit source lock`, `reprobit/source-manifest.json` lists the
 complete source read set and the hash of every file. Inspect a proposed refresh
-with `rbit source preview`, then publish it with `rbit source lock`. The update
-rechecks every listed file and refuses to overwrite records when a source change
-requires other saved records to be repaired. For normal edits to already-listed
-files, use `rbit repair .`; reserve preview and lock for added or removed files.
-Re-import CMake only when that source-list change also changes which files a
-CMake target compiles. Committed files use
+with `rbit source preview`, then run its printed `rbit source lock` command when
+one is available. The update rechecks every listed file and refuses to overwrite
+records when a source change requires other saved records to be repaired. For
+normal edits to already-listed files, use `rbit repair .`; reserve preview and
+lock for added or removed files.
+Repair preserves the exact locked set and never silently admits a new Git file.
+Preview prints a lock command only when the update is safe. ReproBit currently
+refuses changes to which files CMake builds when they would strand saved
+interventions; restore the previous file list rather than editing those records
+by hand.
+Committed files use
 project-relative source, output, and reference-binary paths plus stable DOS
 paths seen by the compiler. The CLI project root selects the physical checkout;
 `--toolchain-root` supplies the local compiler installation. There is no

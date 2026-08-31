@@ -239,6 +239,7 @@ def test_candidate_windows_are_fair_and_drop_selected_groups() -> None:
             attempts,
             selected,
             window_size=2,
+            candidate_budget=6,
         )
     )
 
@@ -293,6 +294,38 @@ def test_retune_uses_small_windows_and_stops_after_first_ordinary_candidate(
     assert selected.intervention_edits[0].before.id == "donor.fixture"
     assert selected.intervention_edits[0].after is not None
     assert selected.intervention_edits[0].after != selected.intervention_edits[0].before
+
+
+def test_retune_stops_at_the_remaining_command_wide_candidate_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _unit, failures = _fixture()
+    _COMPILE_WINDOWS.clear()
+    monkeypatch.setattr(subject, "probe_donor_compile_windows", _fake_compile_windows)
+    monkeypatch.setattr(
+        candidate_support,
+        "repair_measured_pins",
+        lambda *_args: (_ for _ in ()).throw(MeasuredPinRepairError("still differs")),
+    )
+    progress: list[tuple[int, int, str]] = []
+
+    result = subject.probe_bounded_donor_retunes(
+        _probe_handle(),
+        failures,
+        clean_sources={"src/unit.cpp": SOURCE},
+        effective_sources={"src/unit.cpp": SOURCE},
+        radius=2,
+        limit=3,
+        window_size=8,
+        candidate_budget=2,
+        progress=lambda completed, total, donor_id: progress.append((completed, total, donor_id)),
+    )
+
+    assert [len(window) for window in _COMPILE_WINDOWS] == [2]
+    assert result.compiled_candidates == 2
+    assert result.repairs == ()
+    assert "command-wide donor-candidate budget was exhausted" in result.refusals[0].reason
+    assert progress[-1][:2] == (2, 2)
 
 
 def test_shared_donor_candidate_must_restore_every_failed_action(
@@ -368,6 +401,18 @@ def test_invalid_request_still_closes_probe() -> None:
             clean_sources={"src/unit.cpp": SOURCE},
             effective_sources={"src/unit.cpp": SOURCE},
             window_size=0,
+        )
+
+    assert probes.close_calls == 1
+
+    probes = _probe_handle()
+    with pytest.raises(subject.ClassicDonorRetuneProbeError, match="candidate_budget"):
+        subject.probe_bounded_donor_retunes(
+            probes,
+            failures,
+            clean_sources={"src/unit.cpp": SOURCE},
+            effective_sources={"src/unit.cpp": SOURCE},
+            candidate_budget=0,
         )
 
     assert probes.close_calls == 1

@@ -12,6 +12,7 @@ from reprobit.classic.redundant_action_repair import (
     plan_redundant_action_retirement,
 )
 from reprobit.classic.repair_authority import apply_classic_authority_edits
+from reprobit.classic.repair_probe import MAX_RETUNE_PROBE_CANDIDATES
 from reprobit.classic.repair_session import apply_classic_receipt_repairs
 from reprobit.cli_output import CLIOutput
 from reprobit.project_loader import load_project_tree
@@ -22,6 +23,9 @@ from reprobit.repair_donor_analysis import (
 )
 from reprobit.schema import ClassicProofReceipt, ClassicRecipeRole, ProjectBundle, ProjectSpec
 from reprobit.strict_json import canonical_json
+
+MAX_REPAIR_PASSES = 24
+MAX_REPAIR_DONOR_CANDIDATES = MAX_RETUNE_PROBE_CANDIDATES
 
 
 class RepairWorkflowError(RuntimeError):
@@ -79,15 +83,8 @@ def repair_classic_records(
     donor_retunes = 0
     compiled_candidates = 0
     seen_authority: set[str] = set()
-    initial = load_project_tree(staged_root)
-    pass_limit = max(
-        8,
-        len(initial.interventions)
-        + sum(len(document.expected_observations) for document in initial.proof_documents)
-        + 2,
-    )
 
-    for pass_number in range(1, pass_limit + 1):
+    for pass_number in range(1, MAX_REPAIR_PASSES + 1):
         bundle = load_project_tree(staged_root)
         fingerprint = _authority_fingerprint(bundle)
         if fingerprint in seen_authority:
@@ -95,7 +92,12 @@ def repair_classic_records(
                 "automatic repair reached a previously checked saved-guidance state"
             )
         seen_authority.add(fingerprint)
-        analysis = analyze_classic_repair(args, output, cache_root=cache_root)
+        analysis = analyze_classic_repair(
+            args,
+            output,
+            cache_root=cache_root,
+            progress_description=f"checking affected source files (pass {pass_number})",
+        )
         affected_units.update(item.unit_id for item in analysis.measured_repairs)
         affected_units.update(item.unit_id for item in analysis.structural_refusals)
 
@@ -165,7 +167,22 @@ def repair_classic_records(
             and refusal.intervention.dependencies
         )
         if donor_refusals:
-            probe = probe_classic_donor_repairs(args, output, donor_refusals)
+            remaining_candidates = MAX_REPAIR_DONOR_CANDIDATES - compiled_candidates
+            if remaining_candidates <= 0:
+                raise RepairWorkflowError(
+                    "automatic repair exhausted its command-wide budget of "
+                    f"{MAX_REPAIR_DONOR_CANDIDATES} donor candidates"
+                )
+            probe = probe_classic_donor_repairs(
+                args,
+                output,
+                donor_refusals,
+                candidate_budget=remaining_candidates,
+            )
+            if not 0 <= probe.compiled_candidates <= remaining_candidates:
+                raise RepairWorkflowError(
+                    "donor repair exceeded its remaining command-wide candidate budget"
+                )
             compiled_candidates += probe.compiled_candidates
             if probe.repairs:
                 changed = apply_classic_donor_repairs(staged_root, spec, probe.repairs)
@@ -191,11 +208,13 @@ def repair_classic_records(
         )
 
     raise RepairWorkflowError(
-        f"automatic repair did not converge after {pass_limit} bounded passes"
+        f"automatic repair did not converge after {MAX_REPAIR_PASSES} bounded passes"
     )
 
 
 __all__ = [
+    "MAX_REPAIR_DONOR_CANDIDATES",
+    "MAX_REPAIR_PASSES",
     "RepairWorkflowError",
     "RepairWorkflowResult",
     "repair_classic_records",

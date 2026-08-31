@@ -4,6 +4,7 @@ import sys
 import threading
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
+from hashlib import sha256
 from pathlib import Path
 from types import MappingProxyType
 
@@ -152,7 +153,7 @@ def test_all_hit_dag_never_constructs_runtime(tmp_path: Path) -> None:
     assert (second_root / "second.lib").read_bytes() == b"object library"
 
 
-def test_provisional_result_is_available_to_dependants_but_never_reused(
+def test_provisional_leaf_uses_transient_receipts_without_cache_growth(
     tmp_path: Path,
 ) -> None:
     state = tmp_path / "state"
@@ -160,7 +161,9 @@ def test_provisional_result_is_available_to_dependants_but_never_reused(
     cache = IncrementalCache(state, implementation="dag-test-v1")
     executions = 0
 
-    def run(root: Path) -> NodeOutcome:
+    baseline = cache.status()
+
+    def run(root: Path, *, mutate_on_close: bool = False) -> NodeOutcome:
         nonlocal executions
         root.mkdir()
         output = root / "unit.obj"
@@ -174,11 +177,15 @@ def test_provisional_result_is_available_to_dependants_but_never_reused(
             executions += 1
             output.write_bytes(f"provisional-{executions}".encode())
 
+        def close(_runtime: object) -> None:
+            if mutate_on_close:
+                output.write_bytes(b"changed during close")
+
         result = IncrementalDAGExecutor(
             cache=cache,
             workspace_root=root,
             runtime_factory=object,
-            runtime_close=lambda _runtime: None,
+            runtime_close=close,
             max_workers=1,
         ).execute(
             (
@@ -202,7 +209,20 @@ def test_provisional_result_is_available_to_dependants_but_never_reused(
     assert first.cache_hit is False
     assert second.cache_hit is False
     assert first.key != second.key
+    assert first.record.key == first.key
+    assert first.record.outputs[0].digest == sha256(b"provisional-1").hexdigest()
+    assert first.record.outputs[0].size == len(b"provisional-1")
+    assert dict(first.record.metadata) == {"provisional": True}
     assert executions == 2
+    status = cache.status()
+    assert status.records == baseline.records
+    assert status.blobs == baseline.blobs
+
+    with pytest.raises(IncrementalExecutionError, match="changed before final validation"):
+        run(tmp_path / "mutated", mutate_on_close=True)
+    status = cache.status()
+    assert status.records == baseline.records
+    assert status.blobs == baseline.blobs
 
 
 def test_provisional_taint_prevents_descendant_reuse_and_publication(

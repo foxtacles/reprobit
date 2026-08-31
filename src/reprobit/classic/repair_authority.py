@@ -31,17 +31,26 @@ class ClassicInterventionEdit:
     def __post_init__(self) -> None:
         if self.after is None:
             return
+        try:
+            after = ClassicRecipeIntervention.model_validate(
+                self.after.model_dump(mode="python", warnings=False)
+            )
+        except ValueError as exc:
+            raise ClassicAuthorityRepairError(
+                f"intervention {self.before.id!r} replacement is invalid: {exc}"
+            ) from exc
+        object.__setattr__(self, "after", after)
         if (
-            self.after.id != self.before.id
-            or self.after.role is not self.before.role
-            or self.after.family is not self.before.family
-            or self.after.scope != self.before.scope
-            or self.after.build_target != self.before.build_target
+            after.id != self.before.id
+            or after.role is not self.before.role
+            or after.family is not self.before.family
+            or after.scope != self.before.scope
+            or after.build_target != self.before.build_target
         ):
             raise ClassicAuthorityRepairError(
                 f"intervention {self.before.id!r} replacement changes its identity or scope"
             )
-        if self.after == self.before:
+        if after == self.before:
             raise ClassicAuthorityRepairError(
                 f"intervention {self.before.id!r} replacement makes no change"
             )
@@ -49,7 +58,7 @@ class ClassicInterventionEdit:
             raise ClassicAuthorityRepairError(
                 f"intervention {self.before.id!r} replacement is not a donor adjustment"
             )
-        unchanged = self.after.model_copy(
+        unchanged = after.model_copy(
             update={
                 "parameters": self.before.parameters,
                 "beneficiaries": self.before.beneficiaries,
@@ -70,17 +79,26 @@ class ClassicReceiptEdit:
     def __post_init__(self) -> None:
         if self.after is None:
             return
+        try:
+            after = ClassicProofReceipt.model_validate(
+                self.after.model_dump(mode="python", warnings=False)
+            )
+        except ValueError as exc:
+            raise ClassicAuthorityRepairError(
+                f"receipt {self.before.id!r} replacement is invalid: {exc}"
+            ) from exc
+        object.__setattr__(self, "after", after)
         if (
-            self.after.id != self.before.id
-            or self.after.intervention_id != self.before.intervention_id
-            or self.after.family is not self.before.family
+            after.id != self.before.id
+            or after.intervention_id != self.before.intervention_id
+            or after.family is not self.before.family
         ):
             raise ClassicAuthorityRepairError(
                 f"receipt {self.before.id!r} replacement changes its identity"
             )
-        if self.after == self.before:
+        if after == self.before:
             raise ClassicAuthorityRepairError(f"receipt {self.before.id!r} makes no change")
-        unchanged = self.after.model_copy(update={"expected_values": self.before.expected_values})
+        unchanged = after.model_copy(update={"expected_values": self.before.expected_values})
         if unchanged != self.before:
             raise ClassicAuthorityRepairError(
                 f"receipt {self.before.id!r} replacement changes fields outside expected values"

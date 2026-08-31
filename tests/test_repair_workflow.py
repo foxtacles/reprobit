@@ -193,7 +193,7 @@ def test_workflow_applies_bounded_donor_repairs_and_rechecks_composition(
     monkeypatch.setattr(
         subject,
         "probe_classic_donor_repairs",
-        lambda *_args: SimpleNamespace(
+        lambda *_args, **_kwargs: SimpleNamespace(
             repairs=(repair,),
             refusals=(),
             compiled_candidates=7,
@@ -223,6 +223,60 @@ def test_workflow_applies_bounded_donor_repairs_and_rechecks_composition(
     assert result.passes == 2
 
 
+def test_workflow_passes_one_cumulative_candidate_budget_to_donor_probes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal = SimpleNamespace(
+        unit_id="tu.shared",
+        intervention=SimpleNamespace(
+            role=ClassicRecipeRole.FUNCTION,
+            dependencies=("donor",),
+        ),
+        receipt=object(),
+        materials=object(),
+        reason="donor declaration shape moved",
+    )
+    monkeypatch.setattr(
+        subject,
+        "plan_redundant_action_retirement",
+        lambda *_args: (_ for _ in ()).throw(RedundantActionRepairError("not redundant")),
+    )
+    budgets: list[int] = []
+
+    def probe(
+        *_args: object,
+        candidate_budget: int,
+    ) -> object:
+        budgets.append(candidate_budget)
+        compiled = 250 if len(budgets) == 1 else 6
+        return SimpleNamespace(
+            repairs=(object(),),
+            refusals=(),
+            compiled_candidates=compiled,
+        )
+
+    monkeypatch.setattr(subject, "probe_classic_donor_repairs", probe)
+    monkeypatch.setattr(
+        subject,
+        "apply_classic_donor_repairs",
+        lambda *_args: ("reprobit/interventions/shared.json",),
+    )
+
+    with pytest.raises(subject.RepairWorkflowError, match="command-wide budget of 256"):
+        _run(
+            tmp_path,
+            monkeypatch,
+            [
+                _analysis(completed=False, refusals=(refusal,)),
+                _analysis(completed=False, refusals=(refusal,)),
+                _analysis(completed=False, refusals=(refusal,)),
+            ],
+        )
+
+    assert budgets == [256, 6]
+
+
 def test_workflow_rejects_donor_repair_that_changes_no_records(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -245,7 +299,7 @@ def test_workflow_rejects_donor_repair_that_changes_no_records(
     monkeypatch.setattr(
         subject,
         "probe_classic_donor_repairs",
-        lambda *_args: SimpleNamespace(
+        lambda *_args, **_kwargs: SimpleNamespace(
             repairs=(object(),),
             refusals=(),
             compiled_candidates=1,
@@ -280,7 +334,7 @@ def test_workflow_reports_a_plain_bounded_failure(
     monkeypatch.setattr(
         subject,
         "probe_classic_donor_repairs",
-        lambda *_args: SimpleNamespace(
+        lambda *_args, **_kwargs: SimpleNamespace(
             repairs=(),
             refusals=(SimpleNamespace(reason="no nearby donor setting worked"),),
             compiled_candidates=8,
@@ -327,3 +381,23 @@ def test_workflow_stops_when_authority_state_repeats(
             spec=cast(Any, object()),
             cache_root=tmp_path / "state",
         )
+
+
+def test_workflow_has_a_small_explicit_pass_ceiling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repair = SimpleNamespace(unit_id="tu.one")
+    analyses = [
+        _analysis(completed=True, measured=(repair,)) for _ in range(subject.MAX_REPAIR_PASSES)
+    ]
+    monkeypatch.setattr(
+        subject,
+        "apply_classic_receipt_repairs",
+        lambda *_args: ("reprobit/proofs/one.json",),
+    )
+
+    with pytest.raises(subject.RepairWorkflowError, match="after 24 bounded passes"):
+        _run(tmp_path, monkeypatch, analyses)
+
+    assert analyses == []

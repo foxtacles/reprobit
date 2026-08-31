@@ -13,6 +13,7 @@ from reprobit.classic.repair_authority import (
     apply_classic_authority_edits,
 )
 from reprobit.classic.repair_probe import (
+    MAX_RETUNE_PROBE_CANDIDATES,
     ClassicDonorRetuneProbeResult,
     ClassicDonorRetuneRepair,
     probe_bounded_donor_retunes,
@@ -128,6 +129,8 @@ def probe_classic_donor_repairs(
     args: argparse.Namespace,
     output: CLIOutput,
     refusals: tuple[ClassicRepairRefusal, ...],
+    *,
+    candidate_budget: int = MAX_RETUNE_PROBE_CANDIDATES,
 ) -> ClassicDonorRetuneProbeResult:
     """Search bounded donor retunes without issuing evidence or publishing authority."""
 
@@ -194,6 +197,7 @@ def probe_classic_donor_repairs(
                     clean_sources=clean_sources,
                     effective_sources=effective_sources,
                     canonical_overlay_operations=operations,
+                    candidate_budget=candidate_budget,
                     progress=report_candidate,
                 )
         except BaseException as original:

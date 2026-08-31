@@ -959,16 +959,13 @@ class CacheLease:
             raise CachePoisonError(f"cache blob failed integrity validation: {path}")
         return path
 
-    def stage_record(
+    def _record_request(
         self,
         domain: str,
         key: str,
         outputs: Mapping[str, Path],
-        *,
-        metadata: Mapping[str, JsonValue] | None = None,
-    ) -> CacheRecord:
-        """Publish immutable blobs and build an unpublished record value."""
-
+        metadata: Mapping[str, JsonValue] | None,
+    ) -> tuple[tuple[str, ...], dict[str, JsonValue]]:
         self._require_open()
         _require_domain(domain)
         _require_hex(key, label="cache key")
@@ -981,6 +978,39 @@ class CacheLease:
             _require_output_name(name)
         normalized_metadata = dict(metadata or {})
         canonical_json(normalized_metadata)
+        return names, normalized_metadata
+
+    def snapshot_record(
+        self,
+        domain: str,
+        key: str,
+        outputs: Mapping[str, Path],
+        *,
+        metadata: Mapping[str, JsonValue] | None = None,
+    ) -> CacheRecord:
+        """Capture validated output receipts without publishing cache objects."""
+
+        names, normalized_metadata = self._record_request(domain, key, outputs, metadata)
+        return CacheRecord(
+            self.cache.implementation,
+            domain,
+            key,
+            time.time_ns(),
+            tuple(_file_output_receipt(name, outputs[name]) for name in names),
+            MappingProxyType(normalized_metadata),
+        )
+
+    def stage_record(
+        self,
+        domain: str,
+        key: str,
+        outputs: Mapping[str, Path],
+        *,
+        metadata: Mapping[str, JsonValue] | None = None,
+    ) -> CacheRecord:
+        """Publish immutable blobs and build an unpublished record value."""
+
+        names, normalized_metadata = self._record_request(domain, key, outputs, metadata)
         path = self.cache._record_path(domain, key, create=True)
         existing = self.lookup(domain, key) if os.path.lexists(path) else None
         if existing is not None:

@@ -5339,7 +5339,11 @@ def test_repair_donor_probe_isolates_candidate_failure_and_stops_before_later_wi
             step_id,
         )
 
-    executor.donors = SimpleNamespace(invoke_donor_compiler=invoke)
+    released: list[classic_runtime_donor._DonorCompilerInvocation] = []
+    executor.donors = SimpleNamespace(
+        invoke_donor_compiler=invoke,
+        release_probe_invocation=released.append,
+    )
     evaluated: list[tuple[classic_repair_probe_execution.ClassicDonorCompileOutcome, ...]] = []
     progress: list[tuple[int, int, str]] = []
 
@@ -5372,8 +5376,39 @@ def test_repair_donor_probe_isolates_candidate_failure_and_stops_before_later_wi
         (1, 3, "donor.failure"),
         (2, 3, "donor.match"),
     ]
+    assert len(released) == 1
+    assert released[0].object_payload == b"object:donor.match"
     assert pool.closed is True
     assert executor.producer._runtime_open is False
+
+
+def test_probe_invocation_release_removes_only_its_exact_candidate_arena(
+    tmp_path: Path,
+) -> None:
+    build_root = tmp_path / "classic" / "build"
+    build_root.mkdir(parents=True)
+    donor_root = build_root.parent / "donors"
+    arena = donor_root / "candidate"
+    sibling = donor_root / "sibling"
+    arena.mkdir(parents=True)
+    sibling.mkdir()
+    (arena / "o.obj").write_bytes(b"object")
+    (arena / "o.pdb").write_bytes(b"pdb")
+
+    executor = object.__new__(classic_runtime_donor.ClassicDonorComposition)
+    executor.build_root = build_root
+    invocation = cast(
+        classic_runtime_donor._DonorCompilerInvocation,
+        SimpleNamespace(
+            object_path=arena / "o.obj",
+            pdb_path=arena / "o.pdb",
+        ),
+    )
+
+    executor.release_probe_invocation(invocation)
+
+    assert not arena.exists()
+    assert sibling.is_dir()
 
 
 def test_donor_probe_rejects_unprepared_id_and_still_closes_runtime(tmp_path: Path) -> None:

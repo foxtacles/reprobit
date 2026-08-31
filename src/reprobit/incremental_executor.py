@@ -36,7 +36,7 @@ RuntimeT = TypeVar("RuntimeT")
 
 @dataclass(frozen=True, slots=True)
 class NodeOutcome:
-    """One completed warm node and its immutable cache identity."""
+    """One completed warm node and its immutable output receipt."""
 
     node_id: str
     key: str
@@ -232,6 +232,11 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                     f"incremental node {node.id!r} has data dependencies but no "
                     "receipt-bound input materializer"
                 )
+        data_consumers = {
+            dependency
+            for node in nodes
+            for dependency in set(node.depends_on) - set(node.order_only)
+        }
         output_owners: dict[str, tuple[str, str]] = {}
         canonical_outputs: dict[str, Mapping[str, Path]] = {}
         for node in nodes:
@@ -460,12 +465,20 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                                 ).encode()
                             ).hexdigest()
                         )
-                        staged = lease.stage_record(
-                            node.domain,
-                            staged_key,
-                            canonical_outputs[node.id],
-                            metadata=metadata,
-                        )
+                        if publish_result or node.id in data_consumers:
+                            staged = lease.stage_record(
+                                node.domain,
+                                staged_key,
+                                canonical_outputs[node.id],
+                                metadata=metadata,
+                            )
+                        else:
+                            staged = lease.snapshot_record(
+                                node.domain,
+                                staged_key,
+                                canonical_outputs[node.id],
+                                metadata=metadata,
+                            )
                         if publish_result:
                             with staged_lock:
                                 staged_records.append((node, staged))
@@ -522,16 +535,20 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                 # reusable record from a failed invocation.
                 lazy.close()
                 runtime_closed = True
-                if staged_records:
-                    if self.before_publish is not None:
+                transient_nodes = tuple(
+                    by_id[node_id]
+                    for node_id, outcome in outcomes.items()
+                    if not outcome.publishable and node_id not in data_consumers
+                )
+                if staged_records or transient_nodes:
+                    if staged_records and self.before_publish is not None:
                         self.before_publish()
-                    # A later producer may have mutated an earlier restored or
-                    # staged dependency.  Re-seal every hit and miss as one
-                    # complete workspace outcome set immediately before making
-                    # any newly staged record name reusable.  An all-hit run has
-                    # no trust-boundary publication and each restore was already
-                    # authenticated, so avoid hashing the entire workspace twice.
-                    for node in sorted(nodes, key=lambda item: item.id.casefold()):
+                    # Re-seal the complete outcome set before publishing any
+                    # records.  A transient-only run re-seals just its leaf
+                    # outputs because no later node can consume or mutate them.
+                    validation_nodes = nodes if staged_records else transient_nodes
+                    validation_boundary = "publication" if staged_records else "final validation"
+                    for node in sorted(validation_nodes, key=lambda item: item.id.casefold()):
                         outcome = outcomes[node.id]
                         expected = {item.name: item for item in outcome.record.outputs}
                         if set(expected) != set(canonical_outputs[node.id]):
@@ -547,7 +564,8 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                                 )
                             except SecurePathError as exc:
                                 raise IncrementalExecutionError(
-                                    f"node {node.id!r} output {name!r} changed before publication"
+                                    f"node {node.id!r} output {name!r} changed before "
+                                    f"{validation_boundary}"
                                 ) from exc
                             receipt = expected[name]
                             if (
@@ -556,7 +574,8 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                                 or bool(received.mode & stat.S_IXUSR) != receipt.executable
                             ):
                                 raise IncrementalExecutionError(
-                                    f"node {node.id!r} output {name!r} changed before publication"
+                                    f"node {node.id!r} output {name!r} changed before "
+                                    f"{validation_boundary}"
                                 )
                     for node, staged in sorted(
                         staged_records,

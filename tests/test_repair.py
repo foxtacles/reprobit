@@ -56,7 +56,7 @@ def _track_locked_test_sources(project: Path) -> None:
     subprocess.run(("git", "add", "notes.txt", "src/unit.cpp"), cwd=project, check=True)
 
 
-def test_repair_refuses_a_newly_tracked_source_before_staging(
+def test_repair_preserves_the_locked_source_set_when_git_tracks_another_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -64,28 +64,41 @@ def test_repair_refuses_a_newly_tracked_source_before_staging(
     project = tmp_path / "project"
     _complete_translation_unit_project(project)
     _track_locked_test_sources(project)
+    assert (
+        main(
+            [
+                "source",
+                "lock",
+                "--project",
+                str(project),
+                "--path",
+                "notes.txt",
+                "--path",
+                "src/unit.cpp",
+            ]
+        )
+        == 0
+    )
     added = project / "src/added.cpp"
     added.write_bytes(b"int added;\n")
     subprocess.run(("git", "add", "src/added.cpp"), cwd=project, check=True)
     verified = False
 
-    def verify(*_args: object) -> int:
+    def verify(args: argparse.Namespace, _output: CLIOutput) -> int:
         nonlocal verified
         verified = True
+        staged = Path(args.project)
+        assert not (staged / "src/added.cpp").exists()
+        _write_candidate_reports(args)
         return 0
 
     monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
     capsys.readouterr()
 
-    assert main(["repair", str(project)]) == 2
+    assert main(["repair", str(project)]) == 0
 
-    message = capsys.readouterr().err
-    assert "reviewed source-file list changed (+1 -0)" in message
-    assert "Added: src/added.cpp" in message
-    assert "rbit source preview" in message and "rbit source lock" in message
-    assert "Only if you changed which files CMake builds" in message
-    assert "rbit clean" not in message
-    assert not verified
+    assert "Nothing needed repair" in capsys.readouterr().out
+    assert verified
 
 
 def test_repair_explains_a_removed_locked_source_before_staging(
@@ -113,7 +126,8 @@ def test_repair_explains_a_removed_locked_source_before_staging(
     assert "reviewed source-file list changed (+0 -1)" in message
     assert "Removed: notes.txt" in message
     assert "cannot seal repair input" not in message
-    assert "rbit source preview" in message and "rbit source lock" in message
+    assert "rbit source preview" in message
+    assert "Follow only the safe next command printed by preview" in message
     assert not verified
 
 

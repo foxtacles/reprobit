@@ -109,33 +109,42 @@ def _compile_output(
         step_id=f"probe.repair-donor.{ordinal:04d}.{donor_id}",
         compiler_epoch=compiler_epoch,
     )
-    rendered_inputs = tuple(
-        ClassicDonorProbeInput(
-            logical_path,
-            Digest.from_bytes(payload),
-            len(payload),
-            payload,
+    try:
+        rendered_inputs = tuple(
+            ClassicDonorProbeInput(
+                logical_path,
+                Digest.from_bytes(payload),
+                len(payload),
+                payload,
+            )
+            for logical_path, payload in sorted(
+                donor.request.logical_outputs.items(),
+                key=lambda item: item[0].casefold(),
+            )
         )
-        for logical_path, payload in sorted(
-            donor.request.logical_outputs.items(),
-            key=lambda item: item[0].casefold(),
+        if not rendered_inputs:
+            raise ClassicProjectError(f"classic donor {donor_id!r} lacks logical rendered inputs")
+        output = ClassicDonorProbeOutput(
+            donor_id,
+            unit.plan.id,
+            donor.request.build_target,
+            donor.request.logical_source,
+            invocation.record.node_id,
+            rendered_inputs,
+            Digest.from_bytes(invocation.object_payload),
+            Digest.from_bytes(invocation.pdb_payload),
+            invocation.object_payload,
+            invocation.pdb_payload,
+            _step_receipt(invocation.step_id, invocation.result, invocation.spec),
         )
-    )
-    if not rendered_inputs:
-        raise ClassicProjectError(f"classic donor {donor_id!r} lacks logical rendered inputs")
-    return ClassicDonorProbeOutput(
-        donor_id,
-        unit.plan.id,
-        donor.request.build_target,
-        donor.request.logical_source,
-        invocation.record.node_id,
-        rendered_inputs,
-        Digest.from_bytes(invocation.object_payload),
-        Digest.from_bytes(invocation.pdb_payload),
-        invocation.object_payload,
-        invocation.pdb_payload,
-        _step_receipt(invocation.step_id, invocation.result, invocation.spec),
-    )
+    except BaseException as original:
+        try:
+            probes.donors.release_probe_invocation(invocation)
+        except BaseException as cleanup_error:
+            original.add_note(f"classic donor probe arena cleanup also failed: {cleanup_error}")
+        raise
+    probes.donors.release_probe_invocation(invocation)
+    return output
 
 
 def _compile_window(

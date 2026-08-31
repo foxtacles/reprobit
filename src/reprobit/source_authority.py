@@ -183,7 +183,8 @@ def inspect_source_authority(
             raise SourceAuthorityError(str(exc)) from exc
         if size != entry.size or digest != entry.digest:
             raise SourceAuthorityError(
-                "source input differs from portable manifest: "
+                "saved ReproBit guidance no longer matches the edited source; "
+                "run rbit repair . Details: source input differs from portable manifest: "
                 f"{entry.path!r} (expected {entry.digest.value}, found {digest.value})"
             )
         verified_digests[entry.path] = digest

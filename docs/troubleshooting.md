@@ -87,26 +87,21 @@ for each source file.
 
 For an added or removed file, run `rbit source preview --project .` (with the
 same repeatable `--path` values used for an explicit lock). The preview is
-read-only and prints the `source lock` command to run next. Re-run
-`rbit import cmake .` only if the change adds a compiled file to, or removes one
-from, a CMake target. A newly tracked document or included header does not by
-itself require a CMake import. The NDJSON event keeps the detailed source-list,
-build-graph, and saved-record findings for automation.
-
-Run `rbit source lock --project .`; add `--invalidate-producer-graph` when the
-preview includes it. When CMake target membership changed, rerun the guided
-`rbit import cmake .` command described in [Import a CMake project](cmake.md).
-The separate `rbit graph configure` and `rbit graph extract` commands are only
-for advanced imports that need manual control. With a graph-v3 document,
-ordinary byte edits and unrelated manifest additions or removals do not require
-invalidation; removing a graph input does.
+read-only and prints a safe `source lock` command when existing build records
+still apply. Repair preserves the exact locked list, so it does not silently
+admit a newly tracked file. If preview says the change to which files CMake
+builds cannot be handled safely, restore the previous file list for now;
+ReproBit does not yet have an automatic update that can preserve every saved
+intervention. A successful source lock prints `rbit import cmake .` only when
+the recorded graph must be refreshed. The NDJSON event keeps the detailed
+source-list, build-graph, and saved-record findings for automation.
 
 For advanced diagnosis, `rbit source regenerate --project .` previews only the
 mechanical record changes that repair can derive. Human output is a concise
 per-document summary; global `--format ndjson` includes every field-level
 before/after value. Add `--apply` only when you intentionally want that
-intermediate update without a build. It is not certification and still needs a
-source lock and fresh verification. See the
+intermediate update without a build. It is not certification; after applying,
+the command points back to `rbit repair .` for the build and exact check. See the
 [source regeneration primitive](cli.md#source-regeneration-primitive).
 
 ## Bytes match but the command exits nonzero

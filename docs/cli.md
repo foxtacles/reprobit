@@ -167,18 +167,20 @@ header body used by several source files. ReproBit attempts only bounded,
 ordinary adjustments and still requires the final binaries to match exactly;
 if an edit is not benign, repair stops without publishing a partial result.
 
-Adding or removing a file changes the reviewed source list, so `repair` stops
-before doing any work. Review and accept the new list instead:
+To add a new file to the reviewed source list—or remove a locked one—preview
+the new list:
 
 ```console
 rbit source preview --project .
-rbit source lock --project .
 ```
 
-Run the exact `source lock` command printed by the preview when it includes an
-extra option. Re-run `rbit import cmake .` only if the change also adds a
-compiled file to, or removes one from, a CMake target. Adding a document or an
-included header does not by itself require another CMake import.
+Repair keeps using the exact locked list and never silently admits another
+Git-tracked file. When existing build records still apply, preview prints the
+exact `source lock` command to run. If preview says it cannot safely update
+which files CMake builds, there is no automatic command for that case yet;
+restore the previous file list instead of deleting saved interventions. A
+successful source lock prints `rbit import cmake .` only when the recorded build
+graph must be refreshed.
 
 <details>
 <summary>Advanced: inspect or apply only mechanical source-check changes</summary>
@@ -210,7 +212,8 @@ per-document summary, and writes nothing. With global `--format ndjson`, the
 event's `changes` field contains each field-level before/after value for
 tooling. `--apply` reports what it saved and writes all changed documents in
 one guarded transaction that also checks the exact source bytes read by the
-plan, so a concurrent edit aborts instead of committing mixed state.
+plan, so a concurrent edit aborts instead of committing mixed state. It then
+points back to `rbit repair .` for the build and exact check.
 
 The command fails closed when it cannot re-derive a check. It only proposes or
 applies mechanical record changes: it does not lock, build, verify, or certify

@@ -236,7 +236,7 @@ def current_worktree_authority(
         display = old_by_path[path].path
         raise IncrementalAuthorityError(
             f"current-worktree edit {display!r} invalidates reviewed source-overlay "
-            f"intervention(s): {', '.join(overlay_owners[path])}"
+            f"intervention(s): {', '.join(overlay_owners[path])}; run rbit repair ."
         )
 
     documents_by_unit = {
@@ -265,7 +265,7 @@ def current_worktree_authority(
         if intervention_ids:
             raise IncrementalAuthorityError(
                 f"current-worktree edit {unit.source!r} invalidates reviewed "
-                f"intervention(s): {', '.join(intervention_ids)}"
+                f"intervention(s): {', '.join(intervention_ids)}; run rbit repair ."
             )
         current_entry = current_entries.get(unit.source.casefold())
         if current_entry is None:
@@ -348,7 +348,7 @@ def require_fresh_protected_recursive_inputs(
     raise IncrementalAuthorityError(
         f"current-worktree recursive input edit(s) {paths} affect protected "
         f"translation unit {translation_unit_id!r} and invalidate reviewed "
-        f"intervention(s): {', '.join(intervention_ids)}"
+        f"intervention(s): {', '.join(intervention_ids)}; run rbit repair ."
     )
 
 

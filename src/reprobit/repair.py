@@ -18,9 +18,7 @@ from reprobit.project_loader import load_project
 from reprobit.schema import BuildPlanDocument, ProjectSpec, SourceManifestDocument
 from reprobit.source_lock import (
     SourceLockError,
-    is_git_worktree,
     receipt_source_input,
-    tracked_source_paths,
 )
 from reprobit.state import KeepWorkspace, RunArena, report_publication_lease
 from reprobit.transactions import CASTransaction, TransactionResult
@@ -133,67 +131,38 @@ def _repair_output_paths(spec: ProjectSpec, plan: BuildPlanDocument) -> tuple[st
     return tuple(sorted(values, key=lambda item: (item.casefold(), item)))
 
 
-def _source_membership_drift(
+def _missing_locked_sources(
     root: Path,
-    spec: ProjectSpec,
     manifest: SourceManifestDocument,
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
-    """Compare a repair lock with the same default selector used by source lock."""
+) -> tuple[str, ...]:
+    """Require the exact locked read set without silently selecting new files."""
 
     locked = {entry.path for entry in manifest.entries}
     missing_or_unsafe = {
         relative for relative in locked if not _safe_path(root, relative).is_file()
     }
-    if not is_git_worktree(root):
-        return (), tuple(
-            sorted(
-                missing_or_unsafe,
-                key=lambda item: (item.casefold(), item),
-            )
-        )
-    try:
-        selected = tracked_source_paths(root, spec)
-    except SourceLockError as exc:
-        raise RepairError(f"cannot review the current Git-tracked source files: {exc}") from exc
-    current = set(selected)
-    added = tuple(
-        sorted(
-            current - locked,
-            key=lambda item: (item.casefold(), item),
-        )
-    )
-    removed = tuple(
-        sorted(
-            (locked - current) | missing_or_unsafe,
-            key=lambda item: (item.casefold(), item),
-        )
-    )
-    return added, removed
+    return tuple(sorted(missing_or_unsafe, key=lambda item: (item.casefold(), item)))
 
 
 def _require_stable_source_membership(
     root: Path,
-    spec: ProjectSpec,
     manifest: SourceManifestDocument,
 ) -> None:
-    added, removed = _source_membership_drift(root, spec, manifest)
-    if not added and not removed:
+    removed = _missing_locked_sources(root, manifest)
+    if not removed:
         return
-    details = []
-    if added:
-        details.append("Added: " + ", ".join(added))
-    if removed:
-        details.append("Removed: " + ", ".join(removed))
+    details = ["Removed: " + ", ".join(removed)]
     details.extend(
         (
             "From the project root, review this list with: rbit source preview --project .",
-            "Then accept it with: rbit source lock --project .",
-            "Only if you changed which files CMake builds, follow with: rbit import cmake .",
+            "Follow only the safe next command printed by preview. If it says the change "
+            "affects which files the project builds, restore the missing file; that "
+            "automatic update is not supported yet.",
         )
     )
     raise RepairError(
         "repair cannot start because the reviewed source-file list changed "
-        f"(+{len(added)} -{len(removed)}).\n" + "\n".join(details)
+        f"(+0 -{len(removed)}).\n" + "\n".join(details)
     )
 
 
@@ -214,7 +183,7 @@ def capture_repair_snapshot(project_root: Path) -> RepairSnapshot:
         raise RepairError(f"repair source lock is invalid: {exc}") from exc
     if not manifest.complete:
         raise RepairError("repair needs a complete source lock; run rbit setup first")
-    _require_stable_source_membership(root, spec, manifest)
+    _require_stable_source_membership(root, manifest)
 
     try:
         directories = capture_json_authority_directories(

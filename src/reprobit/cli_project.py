@@ -290,6 +290,7 @@ def _source_preview_message(
     changed: Sequence[Mapping[str, Any]],
     entries: int,
     graph_invalidation_required: bool,
+    membership_transition_blocked: bool,
     authority_checked: bool,
     authority_error: str | None,
     stale_units: Sequence[Mapping[str, Any]],
@@ -308,7 +309,12 @@ def _source_preview_message(
     if changed:
         lines.append("  change: " + ", ".join(str(item["path"]) for item in changed))
     if graph_invalidation_required:
-        lines.append("  build graph: update required after locking these source changes")
+        graph_detail = (
+            "update needed, but these source changes cannot be locked safely yet"
+            if membership_transition_blocked
+            else "update required after locking these source changes"
+        )
+        lines.append(f"  build graph: {graph_detail}")
     if authority_error is not None:
         label = (
             "  saved records still name the previous source-file list: "
@@ -348,19 +354,13 @@ def _source_selection_command(
     return human_command(arguments)
 
 
-def _source_membership_guidance(
-    root: Path,
-    paths: Sequence[str],
-    *,
-    graph_changed: bool,
-) -> str:
-    guidance = f"\nReview: {_source_selection_command('preview', root, paths)}"
-    if graph_changed:
-        guidance += (
-            "\nThen refresh the CMake build records: "
-            f"{human_command(('rbit', 'import', 'cmake', root))}"
-        )
-    return guidance
+def _blocked_source_membership_guidance() -> str:
+    return (
+        "\nNo safe automatic next step is available: ReproBit cannot yet reconcile "
+        "a change to which files the project builds without risking saved interventions. "
+        "Restore the previous source-file list for now; the guided CMake update for this "
+        "case is not supported yet."
+    )
 
 
 def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
@@ -401,30 +401,36 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
     source_changed = document_digest != current_digest
     next_command: str | None = None
     membership_changed = bool(added or removed)
-    if membership_changed or (authority_error is None and not stale_units):
-        if source_changed or graph_invalidation_required:
+    membership_transition_blocked = membership_changed and bool(authority_error or stale_units)
+    if not membership_transition_blocked:
+        if authority_error is not None or stale_units:
+            next_command = human_command(("rbit", "repair", root))
+        elif source_changed or graph_invalidation_required:
             next_command = _source_selection_command(
                 "lock",
                 root,
                 args.path,
                 invalidate_graph=graph_invalidation_required,
             )
-    else:
-        next_command = human_command(("rbit", "repair", root))
     message = _source_preview_message(
         added=added,
         removed=removed,
         changed=changed,
         entries=len(document.entries),
         graph_invalidation_required=graph_invalidation_required,
+        membership_transition_blocked=membership_transition_blocked,
         authority_checked=report is not None,
         authority_error=authority_error,
         stale_units=stale_units,
     )
+    if membership_transition_blocked:
+        message += _blocked_source_membership_guidance()
     if next_command is not None:
         message += f"\nNext: {next_command}"
     cmake_import_command = (
-        human_command(("rbit", "import", "cmake", root)) if graph_invalidation_required else None
+        human_command(("rbit", "import", "cmake", root))
+        if graph_invalidation_required and not membership_transition_blocked
+        else None
     )
     if cmake_import_command is not None:
         message += (
@@ -448,6 +454,7 @@ def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
         stale_translation_units=stale_units,
         repair_required=bool(authority_error or stale_units),
         authority_error=authority_error,
+        membership_transition_blocked=membership_transition_blocked,
         cmake_import_command=cmake_import_command,
         up_to_date=(
             not source_changed
@@ -518,12 +525,7 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         if membership_changed:
             raise CLIError(
                 "source lock refused because saved records still name the previous "
-                f"source-file list: {exc}"
-                + _source_membership_guidance(
-                    root,
-                    args.path,
-                    graph_changed=graph_invalidated,
-                )
+                f"source-file list: {exc}" + _blocked_source_membership_guidance()
             ) from exc
         repair_hint = human_command(("rbit", "repair", root))
         raise CLIError(
@@ -538,12 +540,7 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         if membership_changed:
             raise CLIError(
                 "source lock refused because saved translation-unit records still name "
-                f"the previous source-file list: {rendered}"
-                + _source_membership_guidance(
-                    root,
-                    args.path,
-                    graph_changed=graph_invalidated,
-                )
+                f"the previous source-file list: {rendered}" + _blocked_source_membership_guidance()
             )
         repair_hint = human_command(("rbit", "repair", root))
         raise CLIError(
@@ -703,7 +700,7 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
             raise CLIError(f"source regeneration refused: {exc}") from exc
         if transaction is None:
             raise AssertionError("source regeneration applied an empty plan")
-        next_command = human_command(("rbit", "source", "lock", "--project", root))
+        next_command = human_command(("rbit", "repair", root))
         lines.append(f"Next: {next_command}")
         output.emit(
             "source_regenerated",

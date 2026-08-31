@@ -66,7 +66,7 @@ def test_receipt_replacement_allows_only_expected_values() -> None:
     before = _receipt()
     after = before.model_copy(update={"expected_values": {"rendered_sha256": "after"}})
 
-    assert ClassicReceiptEdit(before, after).after is after
+    assert ClassicReceiptEdit(before, after).after == after
 
     changed_status = after.model_copy(update={"status": "freshly measured"})
     with pytest.raises(ClassicAuthorityRepairError, match="outside expected values"):
@@ -86,7 +86,7 @@ def test_intervention_replacement_allows_current_donor_adjustments(
     before = _donor()
     after = before.model_copy(update=update)
 
-    assert ClassicInterventionEdit(before, after).after is after
+    assert ClassicInterventionEdit(before, after).after == after
 
 
 @pytest.mark.parametrize(
@@ -112,3 +112,29 @@ def test_intervention_replacement_rejects_function_parameter_adjustment() -> Non
 
     with pytest.raises(ClassicAuthorityRepairError, match="not a donor adjustment"):
         ClassicInterventionEdit(before, after)
+
+
+def test_intervention_replacement_revalidates_model_copy_updates() -> None:
+    before = _donor()
+    invalid = before.model_copy(
+        update={
+            "beneficiaries": (
+                Scope(
+                    target="other-program",
+                    translation_unit="unit.fixture",
+                    function="?Function@@YAXXZ",
+                ),
+            )
+        }
+    )
+
+    with pytest.raises(ClassicAuthorityRepairError, match="replacement is invalid"):
+        ClassicInterventionEdit(before, invalid)
+
+
+def test_receipt_replacement_revalidates_model_copy_updates() -> None:
+    before = _receipt()
+    invalid = before.model_copy(update={"expected_values": {"unsupported": object()}})
+
+    with pytest.raises(ClassicAuthorityRepairError, match="replacement is invalid"):
+        ClassicReceiptEdit(before, invalid)

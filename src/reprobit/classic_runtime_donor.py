@@ -677,6 +677,23 @@ class ClassicDonorComposition:
             dependency_replay,
         )
 
+    def release_probe_invocation(self, invocation: _DonorCompilerInvocation) -> None:
+        """Release one copied diagnostic arena after its result is self-contained."""
+
+        donor_root = Path(os.path.abspath(self.build_root.parent / "donors"))
+        arena = Path(os.path.abspath(invocation.object_path.parent))
+        if (
+            invocation.object_path != arena / "o.obj"
+            or invocation.pdb_path != arena / "o.pdb"
+            or arena.parent != donor_root
+        ):
+            raise ClassicProjectError("classic donor probe invocation escaped its arena")
+        if donor_root.is_symlink() or not donor_root.is_dir():
+            raise ClassicProjectError("classic donor arena root is absent or redirected")
+        if arena.is_symlink() or not arena.is_dir():
+            raise ClassicProjectError("classic donor probe arena is absent or redirected")
+        shutil.rmtree(arena)
+
     def _compile_donor(
         self,
         supervisor: ProcessSupervisor,

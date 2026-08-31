@@ -204,6 +204,7 @@ def test_probe_uses_one_ordinary_runtime_and_exposes_progress(
         args,
         cast(Any, output),
         expected_refusals,
+        candidate_budget=17,
     )
 
     assert actual is expected
@@ -235,6 +236,7 @@ def test_probe_uses_one_ordinary_runtime_and_exposes_progress(
         "generated.cpp": b"generated overlay",
     }
     assert probe_values["canonical_overlay_operations"] == {"x": ("op",)}
+    assert probe_values["candidate_budget"] == 17
     assert output.activities == [("preparing a safe donor search", "repair-probe-prepare")]
     assert output.producer_descriptions == [
         "trying nearby donor settings (the shown total is an upper bound)"

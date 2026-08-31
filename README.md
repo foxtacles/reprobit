@@ -136,10 +136,13 @@ while the saved records and previously published results stay unchanged. See
 [Repair after source edits](docs/cli.md#repair-after-source-edits) for report
 paths, cleanup, and the advanced preview tool.
 
-Adding or removing a file is a different operation because it changes the
-reviewed source list. Run `rbit source preview --project .`, then follow the
-`source lock` command it prints. Re-run `rbit import cmake .` only when the
-change also adds a compiled file to, or removes one from, a CMake target.
+To add a new file to the reviewed source list—or remove a locked one—start with
+`rbit source preview --project .`; repair never silently admits newly tracked
+files. Preview prints a safe `source lock` command when existing build records
+still apply. If the change affects which files CMake builds, ReproBit currently
+refuses the update instead of risking saved interventions; restore the previous
+file list for now. Re-run `rbit import cmake .` only when a successful source
+lock asks for it.
 
 Failed builds keep a private workspace so problems can be inspected. Reclaim
 those workspaces with `rbit clean .`; the reusable build cache is kept by
