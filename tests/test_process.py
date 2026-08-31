@@ -311,8 +311,21 @@ def test_successful_parent_cannot_leave_a_process_group_descendant(
 def test_deliberate_cancellation_is_never_retried(tmp_path: Path) -> None:
     counter = tmp_path / "counter"
     token = CancellationToken()
-    timer = threading.Timer(0.08, lambda: token.cancel("requested stop"))
-    timer.start()
+
+    def cancel_after_first_attempt_started() -> None:
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            try:
+                if counter.read_text() == "x":
+                    token.cancel("requested stop")
+                    return
+            except OSError:
+                pass
+            time.sleep(0.01)
+        token.cancel("child did not start")
+
+    watcher = threading.Thread(target=cancel_after_first_attempt_started, daemon=True)
+    watcher.start()
     program = (
         "from pathlib import Path; import time; "
         f"p=Path({str(counter)!r}); p.write_text(p.read_text()+'x' if p.exists() else 'x'); "
@@ -329,7 +342,7 @@ def test_deliberate_cancellation_is_never_retried(tmp_path: Path) -> None:
                 retry_policy=RetryPolicy(max_attempts=2, transient_returncodes=frozenset({75})),
             )
     finally:
-        timer.cancel()
+        watcher.join(timeout=5)
     assert counter.read_text() == "x"
 
 

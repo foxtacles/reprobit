@@ -54,8 +54,8 @@ def _write_outputs(report_path: Path, report: Report, *, accepted: bool) -> None
     output_path = os.environ.get("GITHUB_OUTPUT")
     if not output_path:
         return
-    quarantine_count, quarantine_bytes, quarantine_ranges, quarantine_digest = (
-        _quarantine_metrics(report)
+    quarantine_count, quarantine_bytes, quarantine_ranges, quarantine_digest = _quarantine_metrics(
+        report
     )
     lines = [
         "report-produced=true",
@@ -105,8 +105,8 @@ def _write_summary(report: Report, *, accepted: bool) -> None:
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary_path:
         return
-    quarantine_count, quarantine_bytes, quarantine_ranges, quarantine_digest = (
-        _quarantine_metrics(report)
+    quarantine_count, quarantine_bytes, quarantine_ranges, quarantine_digest = _quarantine_metrics(
+        report
     )
     lines = [
         "## ReproBit byte identity",
