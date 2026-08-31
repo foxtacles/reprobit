@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import stat
 import struct
 import subprocess
@@ -2686,6 +2687,57 @@ def test_analysis_link_stages_private_pair_without_publishing(
     assert executor._progress.completed == 1
 
 
+def test_cold_analysis_link_failure_names_raw_pair_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor, producer, target, node, _project_root, _drive_root = _analysis_link_executor(tmp_path)
+    arena = producer.build_root / ".reprobit-analysis/program"
+    arena.mkdir(parents=True)
+    raw_image = arena / "program.exe"
+    raw_pdb = arena / "program.PDB"
+    raw_image.write_bytes(b"raw image")
+    raw_pdb.write_bytes(b"raw pdb")
+    execution = SimpleNamespace(
+        result=ProcessResult(("LINK.EXE",), 0, b"linked", 1, 0.01),
+        spec=CommandSpec.create(
+            ("LINK.EXE",),
+            cwd=arena,
+            environment={},
+            timeout_seconds=30,
+            log_path=tmp_path / "analysis-link.log",
+        ),
+        image=raw_image,
+        pdb=raw_pdb,
+        plan=SimpleNamespace(arena=arena, pdb=raw_pdb),
+    )
+    monkeypatch.setattr(
+        producer,
+        "execute_private_analysis_link",
+        lambda *_args, **_kwargs: execution,
+    )
+
+    def reject(*_args: object, **_kwargs: object) -> None:
+        raise classic_runtime.ByteIdentityError("invalid raw pair")
+
+    monkeypatch.setattr(classic_runtime, "stabilize_msvc42_debug_companion", reject)
+
+    with pytest.raises(
+        ClassicProjectError,
+        match=rf"raw image/PDB directory: {re.escape(os.fspath(arena))}",
+    ):
+        executor._run_analysis_link(
+            cast(ProcessSupervisor, object()),
+            target,
+            node,
+            b"certified exact image",
+            CancellationToken(),
+        )
+
+    assert raw_image.read_bytes() == b"raw image"
+    assert raw_pdb.read_bytes() == b"raw pdb"
+
+
 def _cold_debug_publication_fixture(
     tmp_path: Path,
 ) -> tuple[
@@ -4174,7 +4226,7 @@ def test_failed_warm_analysis_link_retains_its_raw_debug_pair(
         )
     )
 
-    with pytest.raises(ClassicProjectError, match=r"raw image/PDB retained at"):
+    with pytest.raises(ClassicProjectError, match=r"raw image/PDB directory:"):
         runtime.execute_warm_analysis_link(
             "app",
             inputs=inputs,  # type: ignore[arg-type]

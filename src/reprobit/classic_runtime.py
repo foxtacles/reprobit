@@ -422,7 +422,8 @@ class ClassicProducerGraphBuildExecutor:
         except (ByteIdentityError, OSError) as exc:
             raise ClassicProjectError(
                 f"analysis relink {target.target_id!r} is not a valid MSVC 4.2 "
-                f"debug companion: {exc}"
+                f"debug companion: {exc}; raw image/PDB directory: "
+                f"{execution.plan.arena}"
             ) from exc
         stabilization_elapsed_seconds = time.monotonic() - stabilization_started
         self._progress.emit("analysis-link", step_id)

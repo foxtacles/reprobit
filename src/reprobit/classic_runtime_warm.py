@@ -570,7 +570,7 @@ class ClassicWarmExecution:
         except ByteIdentityError as exc:
             raise ClassicProjectError(
                 f"warm analysis relink {target_id!r} is not a valid MSVC 4.2 "
-                f"debug companion: {exc}; raw image/PDB retained at {execution.plan.arena}"
+                f"debug companion: {exc}; raw image/PDB directory: {execution.plan.arena}"
             ) from exc
         for name, payload in (("image", stabilized.image), ("pdb", stabilized.pdb)):
             destination = outputs[name]
