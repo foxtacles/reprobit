@@ -111,8 +111,12 @@ def _section(
     )
 
 
-def _raw_debug_image() -> bytes:
-    nb10 = struct.pack("<4sIII", b"NB10", 0, RAW_TIME, 0) + PDB_PATH.encode() + b"\0"
+def _raw_debug_image(
+    *,
+    pe_time: int = RAW_TIME,
+    nb10_signature: int = RAW_TIME,
+) -> bytes:
+    nb10 = struct.pack("<4sIII", b"NB10", 0, nb10_signature, 0) + PDB_PATH.encode() + b"\0"
     data = bytearray(NB10_OFFSET + len(nb10))
     data[:2] = b"MZ"
     struct.pack_into("<I", data, 0x3C, PE_OFFSET)
@@ -123,7 +127,7 @@ def _raw_debug_image() -> bytes:
         PE_OFFSET + 4,
         0x014C,
         3,
-        RAW_TIME,
+        pe_time,
         0,
         0,
         0xE0,
@@ -173,7 +177,7 @@ def _raw_debug_image() -> bytes:
         data,
         DEBUG_DIRECTORY_OFFSET,
         0,
-        RAW_TIME,
+        pe_time,
         0,
         0,
         2,
@@ -227,6 +231,16 @@ def test_debug_recoupling_precedes_general_pe_metadata_normalization() -> None:
 def test_raw_image_and_pdb_must_be_the_same_producer_pair() -> None:
     with pytest.raises(ByteIdentityError, match=r"raw MSVC 4.2 debug image and PDB identities"):
         _stabilize(raw_pdb=_synthetic_pdb(signature=RAW_TIME + 1))
+
+
+def test_separate_raw_pe_and_pdb_clock_samples_are_recoupled() -> None:
+    raw = _raw_debug_image(pe_time=RAW_TIME + 1)
+    result = _stabilize(raw_image=raw)
+
+    assert result.audit.image_debug.input_identity.signature == RAW_TIME
+    assert result.audit.image_debug.writes[0].before == RAW_TIME + 1
+    assert result.audit.image_debug.output_identity.signature == EXACT_LINK_TIME
+    assert result.audit.pdb.output_identity.signature == EXACT_LINK_TIME
 
 
 def test_certified_image_is_the_only_metadata_authority() -> None:

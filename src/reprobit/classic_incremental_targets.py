@@ -25,6 +25,7 @@ from reprobit.classic_incremental_keys import (
     terminal_material as build_terminal_material,
 )
 from reprobit.classic_orchestration import classic_terminal_pipeline_authority
+from reprobit.classic_runtime_graph import classic_analysis_compiler_pdb_refs
 from reprobit.incremental import producer_cache_key
 from reprobit.incremental_executor import (
     IncrementalNode,
@@ -201,17 +202,25 @@ def add_analysis_nodes(plan: ClassicIncrementalPlan) -> None:
             exact_logical_image=exact_logical_image,
             added_options=analysis_link_options,
         )
+        compiler_pdbs = classic_analysis_compiler_pdb_refs(graph, linker)
         _analysis_inputs, analysis_input_materializer = staged_reference_inputs(
             analysis_id,
-            linker.inputs,
+            (*linker.inputs, *compiler_pdbs),
         )
-        order_only_dependencies = {item for item in terminal_barrier if item != terminal_id}
+        data_dependencies = {
+            linker.id,
+            terminal_id,
+            *(plan.effective_owner[reference.casefold()] for reference in compiler_pdbs),
+        }
+        order_only_dependencies = {
+            item for item in terminal_barrier if item not in data_dependencies
+        }
         if prior_analysis_id is not None:
             order_only_dependencies.add(prior_analysis_id)
         order_only = tuple(sorted(order_only_dependencies, key=str.casefold))
         dependencies = tuple(
             sorted(
-                {linker.id, terminal_id, *order_only_dependencies},
+                {*data_dependencies, *order_only_dependencies},
                 key=str.casefold,
             )
         )

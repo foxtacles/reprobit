@@ -47,20 +47,32 @@ def _fpo_payload() -> bytes:
     )
 
 
-def _nb10_payload(*, path: str = PDB_PATH, age: int = 0, tail: bytes = b"") -> bytes:
-    return struct.pack("<4sIII", b"NB10", 0, RAW_TIME, age) + path.encode("ascii") + b"\0" + tail
+def _nb10_payload(
+    *,
+    path: str = PDB_PATH,
+    signature: int = RAW_TIME,
+    age: int = 0,
+    tail: bytes = b"",
+) -> bytes:
+    return struct.pack("<4sIII", b"NB10", 0, signature, age) + path.encode("ascii") + b"\0" + tail
 
 
 def _synthetic_image(
     *,
     kinds: tuple[int, ...] = (4, 3, 2),
+    pe_time: int = RAW_TIME,
+    nb10_signature: int = RAW_TIME,
     nb10_age: int = 0,
     nb10_tail: bytes = b"",
 ) -> bytes:
     payload_for = {
         4: _misc_payload(),
         3: _fpo_payload(),
-        2: _nb10_payload(age=nb10_age, tail=nb10_tail),
+        2: _nb10_payload(
+            signature=nb10_signature,
+            age=nb10_age,
+            tail=nb10_tail,
+        ),
     }
     payloads = tuple((kind, payload_for[kind]) for kind in kinds)
     data = bytearray(OVERLAY_OFFSET + sum(len(payload) for _kind, payload in payloads))
@@ -73,7 +85,7 @@ def _synthetic_image(
         PE_OFFSET + 4,
         0x014C,
         1,
-        RAW_TIME,
+        pe_time,
         0,
         0,
         224,
@@ -105,7 +117,7 @@ def _synthetic_image(
             data,
             DEBUG_DIRECTORY_OFFSET + index * 28,
             0,
-            RAW_TIME,
+            pe_time,
             0,
             0,
             kind,
@@ -138,6 +150,21 @@ def test_identity_is_strictly_coupled_to_the_planned_pdb() -> None:
     assert identity.age == 0
     assert identity.pdb_path == PDB_PATH
     assert identity.pdb_identity == Msvc42PdbIdentity(19950814, RAW_TIME, 0)
+
+
+def test_pe_and_pdb_clocks_may_be_sampled_separately() -> None:
+    raw = _synthetic_image(pe_time=RAW_TIME + 1)
+    identity = read_msvc42_debug_companion_identity(raw, expected_pdb_path=PDB_PATH)
+    result = canonicalize_msvc42_debug_companion(
+        raw,
+        link_time=LINK_TIME,
+        expected_pdb_path=PDB_PATH,
+        expected_input_pdb_identity=identity.pdb_identity,
+    )
+
+    assert identity.signature == RAW_TIME
+    assert result.audit.writes[0].before == RAW_TIME + 1
+    assert result.audit.output_identity.signature == LINK_TIME
 
 
 def test_canonicalizer_changes_only_the_coupled_timestamp_fields() -> None:
@@ -295,7 +322,6 @@ def test_nb10_requires_zero_offset_and_age_and_the_exact_terminal_path() -> None
 
     for relative, value, message in (
         (4, 1, "offset is not zero"),
-        (8, RAW_TIME + 1, "signature differs"),
         (12, 1, "age is not zero"),
     ):
         malformed = bytearray(raw)

@@ -24,7 +24,7 @@ from reprobit.msvc42_pe_debug import (
     read_msvc42_debug_companion_identity,
 )
 
-MSVC42_DEBUG_PAIR_POLICY = "msvc42-debug-pair-v1"
+MSVC42_DEBUG_PAIR_POLICY = "msvc42-debug-pair-v2"
 
 
 @dataclass(frozen=True, slots=True)

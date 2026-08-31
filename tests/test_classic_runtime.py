@@ -4091,6 +4091,102 @@ def test_native_logical_role_commands_stay_in_projected_toolchain_authority(
         producer.close()
 
 
+def test_failed_warm_analysis_link_retains_its_raw_debug_pair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compiler = ProducerNode(
+        id="compiler.app.0000",
+        role=ProducerRole.COMPILER,
+        owner="app",
+        arguments=(
+            "/c",
+            "${SOURCE}/app.cpp",
+            "/Fo${BUILD}/app.obj",
+            "/Fd${BUILD}/app.obj.pdb",
+        ),
+        inputs=("source/app.cpp",),
+        outputs=("build/app.obj", "build/app.obj.pdb"),
+    )
+    linker = ProducerNode(
+        id="linker.app.0000",
+        role=ProducerRole.LINKER,
+        owner="app",
+        target_id="app",
+        arguments=("${BUILD}/app.obj", "/out:${BUILD}/app.exe"),
+        inputs=("build/app.obj",),
+        outputs=("build/app.exe",),
+        depends_on=(compiler.id,),
+    )
+    graph = ProducerGraphDocument(
+        schema_version=3,
+        toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
+        path_profile_id="fixture",
+        extractor="cmake-makefiles-v1",
+        nodes=(compiler, linker),
+    )
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    certified = tmp_path / "certified.exe"
+    certified.write_bytes(b"certified")
+    arena = tmp_path / "build/.reprobit-analysis/app"
+    arena.mkdir(parents=True)
+    raw_image = arena / "app.exe"
+    raw_pdb = arena / "app.PDB"
+    raw_image.write_bytes(b"raw image")
+    raw_pdb.write_bytes(b"raw pdb")
+    execution = SimpleNamespace(
+        image=raw_image,
+        pdb=raw_pdb,
+        private_files=(raw_image, raw_pdb),
+        plan=SimpleNamespace(arena=arena, pdb=raw_pdb),
+    )
+    producer = SimpleNamespace(
+        execute_private_analysis_link=lambda *_args, **_kwargs: execution,
+        logical_for_host_path=lambda _path: r"R:\build\app.PDB",
+    )
+    runtime = object.__new__(classic_runtime_warm.ClassicWarmExecution)
+    runtime.graph = graph
+    runtime.targets = (
+        classic_runtime_graph.ClassicProducerTarget(
+            target_id="app",
+            build_target="app",
+            output=tmp_path / "app.exe",
+            pdb=None,
+            link_node_id=linker.id,
+        ),
+    )
+    runtime.producer = producer
+    runtime._warm_staging_root = staging
+    runtime._warm_epoch = lambda **_kwargs: (object(), object())  # type: ignore[method-assign]
+    runtime._materialize_warm_inputs = lambda _inputs: None  # type: ignore[method-assign]
+
+    def reject(*_args: object, **_kwargs: object) -> None:
+        raise classic_runtime_warm.ByteIdentityError("invalid raw pair")
+
+    monkeypatch.setattr(classic_runtime_warm, "stabilize_msvc42_debug_companion", reject)
+    inputs = SimpleNamespace(
+        entries=MappingProxyType(
+            {
+                "build/app.obj": object(),
+                "build/app.obj.pdb": object(),
+            }
+        )
+    )
+
+    with pytest.raises(ClassicProjectError, match=r"raw image/PDB retained at"):
+        runtime.execute_warm_analysis_link(
+            "app",
+            inputs=inputs,  # type: ignore[arg-type]
+            outputs={"image": staging / "app.exe", "pdb": staging / "app.PDB"},
+            certified_image=certified,
+            cancellation=CancellationToken(),
+        )
+
+    assert raw_image.read_bytes() == b"raw image"
+    assert raw_pdb.read_bytes() == b"raw pdb"
+
+
 def test_discarded_warm_dependency_replay_erases_arena_after_parse_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

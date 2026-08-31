@@ -66,6 +66,39 @@ def classic_compiler_product_refs(node: ProducerNode) -> tuple[str, str]:
     return sources[0], objects[0]
 
 
+def classic_analysis_compiler_pdb_refs(
+    graph: ProducerGraphDocument,
+    linker: ProducerNode,
+) -> tuple[str, ...]:
+    """Return compiler PDBs used by one linker's object/archive inputs."""
+
+    if linker.role is not ProducerRole.LINKER or linker not in graph.nodes:
+        raise ClassicProjectError("analysis debug inputs require one graph linker")
+    by_id = {node.id: node for node in graph.nodes}
+    owner_by_output = {
+        output.casefold(): node.id for node in graph.nodes for output in node.outputs
+    }
+    pending = list(linker.inputs)
+    visited: set[str] = set()
+    pdbs: set[str] = set()
+    while pending:
+        reference = pending.pop()
+        owner_id = owner_by_output.get(reference.casefold())
+        if owner_id is None or owner_id in visited:
+            continue
+        visited.add(owner_id)
+        owner = by_id[owner_id]
+        if owner.role is ProducerRole.COMPILER:
+            pdbs.update(
+                output
+                for output in owner.outputs
+                if PurePosixPath(output).suffix.casefold() == ".pdb"
+            )
+        elif owner.role is ProducerRole.LIBRARIAN:
+            pending.extend(owner.inputs)
+    return tuple(sorted(pdbs, key=str.casefold))
+
+
 def _tool_with_role(bundle: ProjectBundle, role: str) -> tuple[str, str]:
     matches = [item for item in bundle.toolchain_lock.tools if role in item.roles]
     if len(matches) != 1:
@@ -428,5 +461,6 @@ def _graph_system_library_map(
 __all__ = [
     "ClassicCompileRecord",
     "ClassicProducerTarget",
+    "classic_analysis_compiler_pdb_refs",
     "classic_compiler_product_refs",
 ]

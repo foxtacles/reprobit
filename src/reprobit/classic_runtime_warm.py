@@ -37,6 +37,7 @@ from reprobit.classic_runtime_files import (
 from reprobit.classic_runtime_graph import (
     ClassicCompileRecord,
     ClassicProducerTarget,
+    classic_analysis_compiler_pdb_refs,
 )
 from reprobit.execution import (
     StepExecutionReceipt,
@@ -544,6 +545,7 @@ class ClassicWarmExecution:
         target = targets[0]
         node = self._warm_node(target.link_node_id)
         expected_inputs = {reference for reference in node.inputs if reference.startswith("build/")}
+        expected_inputs.update(classic_analysis_compiler_pdb_refs(self.graph, node))
         if set(inputs.entries) != expected_inputs or set(outputs) != {"image", "pdb"}:
             raise ClassicProjectError(
                 f"classic warm analysis relink {target_id!r} has an invalid input/output pair"
@@ -559,34 +561,32 @@ class ClassicWarmExecution:
             log_namespace="warm-analysis-link",
         )
         try:
+            stabilized = stabilize_msvc42_debug_companion(
+                _secure_read_bytes(certified_image),
+                _secure_read_bytes(execution.image),
+                _secure_read_bytes(execution.pdb),
+                expected_pdb_path=self.producer.logical_for_host_path(execution.plan.pdb),
+            )
+        except ByteIdentityError as exc:
+            raise ClassicProjectError(
+                f"warm analysis relink {target_id!r} is not a valid MSVC 4.2 "
+                f"debug companion: {exc}; raw image/PDB retained at {execution.plan.arena}"
+            ) from exc
+        for name, payload in (("image", stabilized.image), ("pdb", stabilized.pdb)):
+            destination = outputs[name]
+            if self._warm_staging_root is None:
+                raise ClassicProjectError("classic warm staging root is not bound")
             try:
-                stabilized = stabilize_msvc42_debug_companion(
-                    _secure_read_bytes(certified_image),
-                    _secure_read_bytes(execution.image),
-                    _secure_read_bytes(execution.pdb),
-                    expected_pdb_path=self.producer.logical_for_host_path(execution.plan.pdb),
-                )
-            except ByteIdentityError as exc:
+                Path(os.path.abspath(destination)).relative_to(self._warm_staging_root)
+            except ValueError as exc:
                 raise ClassicProjectError(
-                    f"warm analysis relink {target_id!r} is not a valid MSVC 4.2 "
-                    f"debug companion: {exc}"
+                    f"classic warm analysis output escapes its run: {destination}"
                 ) from exc
-            for name, payload in (("image", stabilized.image), ("pdb", stabilized.pdb)):
-                destination = outputs[name]
-                if self._warm_staging_root is None:
-                    raise ClassicProjectError("classic warm staging root is not bound")
-                try:
-                    Path(os.path.abspath(destination)).relative_to(self._warm_staging_root)
-                except ValueError as exc:
-                    raise ClassicProjectError(
-                        f"classic warm analysis output escapes its run: {destination}"
-                    ) from exc
-                _secure_publish_new_bytes(payload, destination)
-        finally:
-            for path in execution.private_files:
-                if os.path.lexists(path):
-                    _secure_remove_regular(path)
-            execution.plan.arena.rmdir()
+            _secure_publish_new_bytes(payload, destination)
+        for path in execution.private_files:
+            if os.path.lexists(path):
+                _secure_remove_regular(path)
+        execution.plan.arena.rmdir()
         return _step_receipt(step_id, execution.result, execution.spec)
 
     def _warm_unit(self, compiler_node_id: str) -> ClassicPreparedUnit:

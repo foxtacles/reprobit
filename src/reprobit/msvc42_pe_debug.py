@@ -1,9 +1,9 @@
 """Fail-closed identity policy for an MSVC 4.2 debug-companion image.
 
-The VC 4.2 linker binds a PE image to its PDB with an ``NB10`` record.  A
-private analysis relink may have a different wall-clock value even when every
-semantic byte is stable.  This module recognizes the exact old PE/debug
-layout and permits only the three copies of that value to be pinned:
+The VC 4.2 linker binds a PE image to its PDB with an ``NB10`` record.  Its PE
+and debug-directory timestamps are a separate clock sample from that PDB
+identity.  This module recognizes the exact old PE/debug layout and permits
+only those bookkeeping fields to be pinned:
 
 * the PE COFF timestamp;
 * every ``IMAGE_DEBUG_DIRECTORY`` timestamp; and
@@ -38,11 +38,11 @@ _DEBUG_MISC = struct.Struct("<IIB3s")
 _FPO_DATA = struct.Struct("<IIIHH")
 _MSVC42_PDB_VERSION = 19950814
 
-MSVC42_DEBUG_COMPANION_POLICY = "msvc42-pe-debug-companion-v1"
+MSVC42_DEBUG_COMPANION_POLICY = "msvc42-pe-debug-companion-v2"
 
 
 class DebugCompanionCanonicalizationCategory(StrEnum):
-    """The three named sources of the coupled link timestamp."""
+    """The three admitted sources of debug-link bookkeeping time."""
 
     PE_COFF_TIMESTAMP = "pe.coff_timestamp"
     DEBUG_DIRECTORY_TIMESTAMP = "pe.debug_directory_timestamp"
@@ -312,10 +312,6 @@ class _Pe32DebugMap:
                 nb10_signature_offset = payload_offset + 8
 
         require(
-            nb10_signature == raw_timestamp,
-            "NB10 signature differs from the PE/debug timestamp",
-        )
-        require(
             nb10_age is not None and nb10_signature_offset is not None,
             "PE debug data lacks a validated NB10 record",
         )
@@ -405,7 +401,7 @@ def read_msvc42_debug_companion_identity(
     *,
     expected_pdb_path: str,
 ) -> Msvc42DebugCompanionIdentity:
-    """Parse and return one fully coupled VC 4.2 image-side identity."""
+    """Parse and return one validated VC 4.2 image-side PDB identity."""
 
     require(type(data) is bytes, "MSVC 4.2 debug-companion input must be bytes")
     return _Pe32DebugMap(data, expected_pdb_path).parsed.identity
@@ -481,12 +477,13 @@ def canonicalize_msvc42_debug_companion(
     expected_pdb_path: str,
     expected_input_pdb_identity: Msvc42PdbIdentity,
 ) -> CanonicalizedMsvc42DebugCompanion:
-    """Pin only the coupled timestamp fields of a validated VC 4.2 image.
+    """Pin only the timestamp fields of a validated VC 4.2 image.
 
     The mandatory PDB identity must be read from the raw private PDB, not
-    synthesized from the image.  This prevents accidentally rebinding a PDB
-    from another link.  The returned image is reparsed and canonicalized a
-    second time to prove identity coupling and structural idempotence.
+    synthesized from the PE timestamp.  This prevents accidentally rebinding
+    a PDB from another link while admitting the linker's separate PE and PDB
+    clock samples.  The returned image is reparsed and canonicalized a second
+    time to prove identity coupling and structural idempotence.
     """
 
     require(type(data) is bytes, "MSVC 4.2 debug-companion input must be bytes")

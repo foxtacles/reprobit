@@ -18,6 +18,7 @@ import reprobit.classic_incremental_keys as incremental_keys
 import reprobit.classic_incremental_nodes as incremental_nodes
 import reprobit.classic_incremental_planning as incremental_planning
 import reprobit.classic_publication as classic_publication
+import reprobit.classic_runtime_graph as classic_runtime_graph
 import reprobit.incremental as incremental
 import reprobit.incremental_executor as incremental_executor
 from reprobit.backends import BackendCapabilities
@@ -167,6 +168,7 @@ class _FakeWarmExecutor:
         self.bound_oracles: tuple[str, ...] = ()
         self.explicit_authority_verifications = 0
         self.analysis_link_calls: list[str] = []
+        self.analysis_link_inputs: list[tuple[str, ...]] = []
         self.donor_dependencies: dict[str, tuple[ClassicWarmDonorDependencyReplay, ...]] = {}
 
     def bind_warm_staging_root(self, root: Path) -> None:
@@ -253,6 +255,7 @@ class _FakeWarmExecutor:
         del cancellation
         assert certified_image.is_file()
         self.analysis_link_calls.append(target_id)
+        self.analysis_link_inputs.append(tuple(sorted(inputs.entries, key=str.casefold)))
         generation = len(self.analysis_link_calls)
         input_payload = b"|".join(
             item.snapshot.path.read_bytes() for _name, item in sorted(inputs.entries.items())
@@ -316,6 +319,78 @@ def _linker(target: str, compiler: ProducerNode) -> ProducerNode:
         inputs=(object_reference,),
         outputs=(f"build/{target}.exe",),
         depends_on=(compiler.id,),
+    )
+
+
+def test_analysis_debug_inputs_follow_only_object_and_archive_provenance() -> None:
+    direct = _compiler("app", 0)
+    archived = _compiler("static", 1)
+    unrelated = _compiler("other", 2)
+    imported = _compiler("upstream", 3)
+    librarian = ProducerNode(
+        id="librarian.static.0000",
+        role=ProducerRole.LIBRARIAN,
+        owner="static",
+        arguments=("/out:${BUILD}/static.lib", "${BUILD}/static-1.obj"),
+        inputs=("build/static-1.obj",),
+        outputs=("build/static.lib",),
+        depends_on=(archived.id,),
+    )
+    upstream = ProducerNode(
+        id="linker.upstream.0000",
+        role=ProducerRole.LINKER,
+        owner="upstream",
+        target_id="upstream",
+        arguments=(
+            "${BUILD}/upstream-3.obj",
+            "/dll",
+            "/implib:${BUILD}/upstream.lib",
+            "/out:${BUILD}/upstream.dll",
+        ),
+        inputs=("build/upstream-3.obj",),
+        outputs=("build/upstream.dll", "build/upstream.lib"),
+        depends_on=(imported.id,),
+    )
+    linker = ProducerNode(
+        id="linker.app.0000",
+        role=ProducerRole.LINKER,
+        owner="app",
+        target_id="app",
+        arguments=(
+            "${BUILD}/app-0.obj",
+            "${BUILD}/static.lib",
+            "${BUILD}/upstream.lib",
+            "/out:${BUILD}/app.exe",
+        ),
+        inputs=(
+            "build/app-0.obj",
+            "build/static.lib",
+            "build/upstream.lib",
+        ),
+        outputs=("build/app.exe",),
+        depends_on=tuple(
+            sorted(
+                (direct.id, librarian.id, unrelated.id, upstream.id),
+                key=str.casefold,
+            )
+        ),
+    )
+    graph = ProducerGraphDocument(
+        schema_version=3,
+        toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
+        path_profile_id="fixture",
+        extractor="cmake-makefiles-v1",
+        nodes=tuple(
+            sorted(
+                (direct, archived, unrelated, imported, librarian, upstream, linker),
+                key=lambda node: node.id.casefold(),
+            )
+        ),
+    )
+
+    assert classic_runtime_graph.classic_analysis_compiler_pdb_refs(graph, linker) == (
+        "build/app-0.pdb",
+        "build/static-1.pdb",
     )
 
 
@@ -1288,6 +1363,9 @@ def test_analysis_link_pair_is_cacheable_and_both_members_are_published(
     assert first.summary.published_comparison_pairs == 1
     assert first.summary.unchanged_comparison_pairs == 0
     assert executor.analysis_link_calls == ["app"]
+    assert executor.analysis_link_inputs == [
+        ("build/app-0.obj", "build/app-0.pdb"),
+    ]
     assert exact.read_bytes() == b"raw:linker.app.0000:build/app.exe:terminal:app"
     assert companion_image.read_bytes().startswith(b"analysis-image:1:")
     assert pdb.read_bytes().startswith(b"analysis-pdb:1:")
@@ -1458,6 +1536,10 @@ def test_analysis_link_cache_is_local_to_its_target_inputs(
     patch()
     _run(bundle, root=root, state=state, session=tmp_path / "run-1", jobs=2)
     assert executor.analysis_link_calls == ["app", "tool"]
+    assert executor.analysis_link_inputs == [
+        ("build/app-0.obj", "build/app-0.pdb"),
+        ("build/tool-1.obj", "build/tool-1.pdb"),
+    ]
     companion_dir = root / "artifacts" / "reprobit-debug"
     app_image = companion_dir / "app.exe"
     app_pdb = companion_dir / "app.PDB"
@@ -1479,6 +1561,10 @@ def test_analysis_link_cache_is_local_to_its_target_inputs(
     )
 
     assert executor.analysis_link_calls == ["app", "tool", "tool"]
+    assert executor.analysis_link_inputs[-1] == (
+        "build/tool-1.obj",
+        "build/tool-1.pdb",
+    )
     assert second.summary.hits == 5
     assert second.summary.misses == 5
     assert second.summary.published_comparison_pairs == 1
