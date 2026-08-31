@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import inspect
+import re
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -277,8 +278,14 @@ def test_action_summary_writes_outputs(tmp_path: Path, monkeypatch: object) -> N
     assert "clean=false" in received
     assert "byte-exact=true" in received
     assert "toolchain-origin=false" in received
+    assert "quarantine-count=1" in received
+    assert "quarantine-bytes=2" in received
+    assert "quarantine-ranges=1" in received
+    assert re.search(r"quarantine-digest=[0-9a-f]{64}\n", received)
     summary_text = summary.read_text(encoding="utf-8")
     assert "not clean" in summary_text
+    assert "1 exception(s) cover 2 byte(s) across 1 range(s)" in summary_text
+    assert re.search(r"Quarantine set: `[0-9a-f]{64}`", summary_text)
     assert "| Exact bytes | Yes |" in summary_text
     assert "| Built from declared source and compiler | No |" in summary_text
     assert "| Adjustment cost | 10000 relative points |" in summary_text
@@ -303,6 +310,8 @@ def test_action_summary_publishes_safe_outputs_when_report_is_missing(
     assert "report-produced=false" in received
     assert "accepted=false" in received
     assert "byte-exact=\n" in received
+    assert "quarantine-count=\n" in received
+    assert "quarantine-digest=\n" in received
     assert "total-cost=\n" in received
     assert f"report-json={report}" in received
     assert "before it could publish" in summary.read_text(encoding="utf-8")

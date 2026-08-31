@@ -132,6 +132,10 @@ The Action exports:
 | `logic-certified` | Every intervention passed its required checks. |
 | `toolchain-origin` | First-party program bytes came from the declared toolchain. |
 | `quarantined` | An allowlisted reference-byte exception ran. |
+| `quarantine-count` | Number of declared reference-byte exceptions used. |
+| `quarantine-bytes` | Total reference bytes covered by those exceptions. |
+| `quarantine-ranges` | Total artifact ranges covered by those exceptions. |
+| `quarantine-digest` | SHA-256 identity of the complete canonical exception set. |
 | `total-cost` | Total intervention cost in relative points for the project. |
 | `report-json` | Path to the canonical JSON report. |
 | `report-html` | Path to the self-contained HTML report. |
@@ -141,6 +145,10 @@ If verification stops before a validated report exists, `report-produced` is
 zero values. The summary still runs, and the final Action step fails the job
 when verification failed. Upload the report directory with `if: always()` so an
 independent failed claim remains inspectable.
+
+Projects that intentionally permit quarantine should assert the expected count,
+byte total, range total, and digest. That turns a reviewed exception set into a
+non-growing CI boundary instead of checking only that some quarantine occurred.
 
 ## Protection against stale reports
 

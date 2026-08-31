@@ -58,6 +58,18 @@ outputs:
   quarantined:
     description: Whether an allowlisted reference-byte exception ran
     value: ${{ steps.summary.outputs.quarantined }}
+  quarantine-count:
+    description: Number of declared reference-byte exceptions used by this run
+    value: ${{ steps.summary.outputs.quarantine-count }}
+  quarantine-bytes:
+    description: Total number of reference bytes covered by declared exceptions
+    value: ${{ steps.summary.outputs.quarantine-bytes }}
+  quarantine-ranges:
+    description: Total number of artifact ranges covered by declared exceptions
+    value: ${{ steps.summary.outputs.quarantine-ranges }}
+  quarantine-digest:
+    description: SHA-256 identity of the canonical declared exception set
+    value: ${{ steps.summary.outputs.quarantine-digest }}
   total-cost:
     description: Total intervention cost for the selected targets
     value: ${{ steps.summary.outputs.total-cost }}

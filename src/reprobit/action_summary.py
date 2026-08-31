@@ -40,10 +40,23 @@ def _accepted(report: Report) -> bool:
     raise ValueError("REPROBIT_ACCEPTED must be exactly 'true' or 'false'")
 
 
+def _quarantine_metrics(report: Report) -> tuple[int, int, int, str]:
+    quarantines = report.verdict.quarantines
+    return (
+        len(quarantines),
+        sum(item.byte_count for item in quarantines),
+        sum(len(item.ranges) for item in quarantines),
+        Digest.from_bytes(canonical_json(quarantines)).value,
+    )
+
+
 def _write_outputs(report_path: Path, report: Report, *, accepted: bool) -> None:
     output_path = os.environ.get("GITHUB_OUTPUT")
     if not output_path:
         return
+    quarantine_count, quarantine_bytes, quarantine_ranges, quarantine_digest = (
+        _quarantine_metrics(report)
+    )
     lines = [
         "report-produced=true",
         f"accepted={_bool(accepted)}",
@@ -52,6 +65,10 @@ def _write_outputs(report_path: Path, report: Report, *, accepted: bool) -> None
         f"logic-certified={_bool(report.verdict.logic_certified)}",
         f"toolchain-origin={_bool(report.verdict.toolchain_origin)}",
         f"quarantined={_bool(report.verdict.quarantined)}",
+        f"quarantine-count={quarantine_count}",
+        f"quarantine-bytes={quarantine_bytes}",
+        f"quarantine-ranges={quarantine_ranges}",
+        f"quarantine-digest={quarantine_digest}",
         f"total-cost={report.costs.project_total}",
         f"report-json={report_path}",
         f"report-html={report_path.with_suffix('.html')}",
@@ -72,6 +89,10 @@ def _write_missing_outputs(report_path: Path) -> None:
         "logic-certified=",
         "toolchain-origin=",
         "quarantined=",
+        "quarantine-count=",
+        "quarantine-bytes=",
+        "quarantine-ranges=",
+        "quarantine-digest=",
         "total-cost=",
         f"report-json={report_path}",
         f"report-html={report_path.with_suffix('.html')}",
@@ -84,6 +105,9 @@ def _write_summary(report: Report, *, accepted: bool) -> None:
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary_path:
         return
+    quarantine_count, quarantine_bytes, quarantine_ranges, quarantine_digest = (
+        _quarantine_metrics(report)
+    )
     lines = [
         "## ReproBit byte identity",
         "",
@@ -102,6 +126,9 @@ def _write_summary(report: Report, *, accepted: bool) -> None:
             [
                 "> [!WARNING]",
                 "> This run used a quarantined reference-byte exception. It is not clean.",
+                f"> {quarantine_count} exception(s) cover {quarantine_bytes} byte(s) "
+                f"across {quarantine_ranges} range(s).",
+                f"> Quarantine set: `{quarantine_digest}`",
                 "",
             ]
         )
