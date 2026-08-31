@@ -210,7 +210,7 @@ def test_probe_uses_one_ordinary_runtime_and_exposes_progress(
     assert actual is expected
     assert observed["arena"] == (
         tmp_path / "state",
-        "repair-probe",
+        "repairprobe",
         subject.KeepWorkspace.NEVER,
     )
     assert observed["resolve"] == {

@@ -142,7 +142,7 @@ def probe_classic_donor_repairs(
     operations = canonical_overlay_operations(bundle)
     arena = RunArena(
         state_root(root, bundle.spec),
-        kind="repair-probe",
+        kind="repairprobe",
         keep=KeepWorkspace.NEVER,
     )
     with arena:
