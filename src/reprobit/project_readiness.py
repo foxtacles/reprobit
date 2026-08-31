@@ -250,10 +250,12 @@ def render_project_readiness(readiness: ProjectReadiness, *, include_ready: bool
     """Render a compact checklist with one next action."""
 
     if readiness.ready:
-        return f"Project files ready: {readiness.completed}/{len(readiness.items)} checks passed"
-    lines = [
-        f"Project files: {readiness.completed}/{len(readiness.items)} checks ready",
-    ]
+        summary = f"Project files ready: {readiness.completed}/{len(readiness.items)} checks passed"
+        if not include_ready:
+            return summary
+    else:
+        summary = f"Project files: {readiness.completed}/{len(readiness.items)} checks ready"
+    lines = [summary]
     for item in readiness.items:
         if item.ready and not include_ready:
             continue

@@ -75,6 +75,10 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
     """Repair in private, prove every target, then publish once."""
 
     root = project_root(args.project)
+    entrypoint = root / "reprobit.toml"
+    if entrypoint.is_symlink() or not entrypoint.is_file():
+        next_command = human_command(("rbit", "init", root))
+        raise CLIError(f"no ReproBit project found at {entrypoint}\nNext: {next_command}")
     try:
         snapshot = capture_repair_snapshot(root)
     except RepairError as exc:

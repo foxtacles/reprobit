@@ -57,6 +57,18 @@ def _track_locked_test_sources(project: Path) -> None:
     subprocess.run(("git", "add", "notes.txt", "src/unit.cpp"), cwd=project, check=True)
 
 
+def test_repair_names_an_absent_project_and_points_to_init(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(["repair", str(tmp_path)]) == 2
+
+    message = capsys.readouterr().err
+    assert f"no ReproBit project found at {tmp_path / 'reprobit.toml'}" in message
+    assert f"Next: rbit init {tmp_path}" in message
+    assert "cannot seal repair input" not in message
+
+
 def test_repair_preserves_the_locked_source_set_when_git_tracks_another_file(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -112,6 +112,12 @@ def test_valid_project_can_have_no_intervention_or_proof_documents(
     assert main(["status", str(project)]) == 0
     assert "Project files ready: 10/10 checks passed" in capsys.readouterr().out
 
+    assert main(["status", str(project), "--all"]) == 0
+    detailed = capsys.readouterr().out
+    assert "Project files ready: 10/10 checks passed" in detailed
+    assert "[ok] Project: project ID grind" in detailed
+    assert "[ok] Final project check: all saved project files agree" in detailed
+
 
 def test_derived_project_id_is_human_and_schema_safe(tmp_path: Path) -> None:
     project = tmp_path / "1997 Some Game!"
