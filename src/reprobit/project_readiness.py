@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +22,10 @@ class ReadinessItem:
     ready: bool
     detail: str
     next_command: str | None = None
+    broken: bool = False
+    """A saved file exists but cannot be read; ``rbit validate`` explains it."""
+    pending: bool = False
+    """The check cannot run until the items before it are ready."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -72,6 +77,25 @@ def _json_documents(path: Path) -> tuple[Path, ...]:
     )
 
 
+def _unparseable_json(documents: tuple[Path, ...]) -> tuple[Path, ...]:
+    """Return the documents that are not JSON at all (no schema validation)."""
+
+    broken: list[Path] = []
+    for document in documents:
+        try:
+            json.loads(document.read_bytes())
+        except (OSError, ValueError):
+            broken.append(document)
+    return tuple(broken)
+
+
+def _relative(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def inspect_project_readiness(
     root: Path,
     *,
@@ -108,6 +132,7 @@ def inspect_project_readiness(
                     False,
                     f"reprobit.toml is invalid: {error}",
                     None,
+                    broken=True,
                 ),
             ),
         )
@@ -126,27 +151,30 @@ def inspect_project_readiness(
     proof_documents = _json_documents(proofs_directory)
     oracle_documents = _json_documents(oracles_directory)
     references = tuple(project_path(target.oracle) for target in spec.targets)
+    setup_command = human_command(("rbit", "setup", candidate))
+    validate_command = human_command(("rbit", "validate", candidate))
 
     source_ready = False
-    source_detail = f"missing {source}"
+    source_broken = False
+    source_detail = f"run rbit source preview to create {_relative(candidate, source)}"
     if _real_file(source):
         try:
             source_document = SourceManifestDocument.model_validate_json(source.read_bytes())
         except (OSError, ValueError) as error:
-            source_detail = f"invalid {source}: {error}"
+            source_broken = True
+            source_detail = f"{_relative(candidate, source)} is not valid: {error}"
         else:
             source_ready = source_document.complete
             source_detail = (
                 "ready"
                 if source_ready
-                else "source review is incomplete; preview and lock the tracked files"
+                else "run rbit source preview to finish reviewing and locking the tracked files"
             )
 
     items: list[ReadinessItem] = [
         ReadinessItem("project", "Project", True, f"project ID {spec.project_id}"),
     ]
     if check_local_environment:
-        setup_command = human_command(("rbit", "setup", candidate))
         lock_document: ToolchainLock | None = None
         lock_error: OSError | ValueError | None = None
         if _real_file(lock):
@@ -207,15 +235,28 @@ def inspect_project_readiness(
                 "toolchain_lock",
                 "Compiler lock",
                 _real_file(lock),
-                "ready" if _real_file(lock) else f"missing {lock}",
-                (None if _real_file(lock) else human_command(("rbit", "setup", candidate))),
+                (
+                    "ready"
+                    if _real_file(lock)
+                    else f"run rbit setup to create {_relative(candidate, lock)}"
+                ),
+                None if _real_file(lock) else setup_command,
             ),
             ReadinessItem(
                 "source_manifest",
                 "Source lock",
                 source_ready,
                 source_detail,
-                (None if source_ready else human_command(("rbit", "source", "preview", candidate))),
+                (
+                    None
+                    if source_ready
+                    else (
+                        validate_command
+                        if source_broken
+                        else human_command(("rbit", "source", "preview", candidate))
+                    )
+                ),
+                broken=source_broken,
             ),
         ]
     )
@@ -224,10 +265,10 @@ def inspect_project_readiness(
     if not missing_references:
         reference_detail = f"{count_phrase(len(references), 'reference file')} ready"
     elif len(missing_references) == 1:
-        reference_detail = f"Place the original at {missing_references[0]}"
+        reference_detail = f"place the original at {_relative(candidate, missing_references[0])}"
     else:
-        reference_detail = "Place the originals at " + ", ".join(
-            str(path) for path in missing_references
+        reference_detail = "place the originals at " + ", ".join(
+            _relative(candidate, path) for path in missing_references
         )
     items.append(
         ReadinessItem(
@@ -249,7 +290,11 @@ def inspect_project_readiness(
                 identifier,
                 label,
                 present,
-                "ready" if present else f"missing {path}",
+                (
+                    "ready"
+                    if present
+                    else f"run rbit import cmake to create {_relative(candidate, path)}"
+                ),
                 None if present or missing_references else import_command,
             )
         )
@@ -271,13 +316,22 @@ def inspect_project_readiness(
         ),
     ):
         directory_ready = _real_directory(directory)
+        unparseable = _unparseable_json(documents)
         ready = directory_ready and (bool(documents) or not documents_required)
-        if documents:
+        ready = ready and not unparseable
+        next_command = None
+        if unparseable:
+            detail = f"{_relative(candidate, unparseable[0])} is not valid JSON; run rbit validate"
+            next_command = validate_command
+        elif documents:
             detail = count_phrase(len(documents), "document")
         elif not directory_ready:
-            detail = f"create the folder {directory}"
+            detail = f"run rbit import cmake to create {_relative(candidate, directory)}/"
         elif documents_required:
-            detail = f"add reviewed JSON documents beneath {directory}"
+            detail = (
+                "run rbit import cmake to add reviewed JSON documents beneath "
+                f"{_relative(candidate, directory)}/"
+            )
         elif identifier == "interventions":
             detail = "0 documents (valid when no build adjustment is needed)"
         else:
@@ -288,10 +342,12 @@ def inspect_project_readiness(
                 label,
                 ready,
                 detail,
+                next_command,
+                broken=bool(unparseable),
             )
         )
     prerequisites_ready = all(item.ready for item in items if item.id != "local_toolchain")
-    validation_detail = "finish the missing steps above"
+    validation_detail = "not checked until the project files above are ready"
     validated = False
     repairable_source_drift = False
     if prerequisites_ready:
@@ -315,35 +371,43 @@ def inspect_project_readiness(
             validation_detail,
             (
                 None
-                if validated
+                if validated or not prerequisites_ready
                 else human_command(
                     ("rbit", "repair" if repairable_source_drift else "validate", candidate)
                 )
             ),
+            pending=not prerequisites_ready,
         )
     )
     return ProjectReadiness(candidate, tuple(items))
 
 
 def render_project_readiness(readiness: ProjectReadiness, *, include_ready: bool = False) -> str:
-    """Render a compact checklist with one next action."""
+    """Render a compact checklist with one next action.
+
+    The project root appears once in the header; rows name files relative to
+    it. ``[ok]`` passed, ``[  ]`` is still missing, ``[!!]`` exists but cannot
+    be read. A pending check (one that waits for the rows above it) is counted
+    but not listed, because it carries no information of its own yet.
+    """
 
     scope = (
         "Project and machine"
         if any(item.id == "local_toolchain" for item in readiness.items)
         else "Project files"
     )
+    header = f"Project: {readiness.root}"
     if readiness.ready:
         summary = f"{scope} ready: {readiness.completed}/{len(readiness.items)} checks passed"
         if not include_ready:
-            return summary
+            return "\n".join((header, summary))
     else:
         summary = f"{scope}: {readiness.completed}/{len(readiness.items)} checks ready"
-    lines = [summary]
+    lines = [header, summary]
     for item in readiness.items:
-        if item.ready and not include_ready:
+        if (item.ready and not include_ready) or item.pending:
             continue
-        marker = "ok" if item.ready else "  "
+        marker = "ok" if item.ready else ("!!" if item.broken else "  ")
         lines.append(f"[{marker}] {item.label}: {item.detail}")
     if readiness.next_step is not None:
         lines.append(f"Next: {readiness.next_step}")

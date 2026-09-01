@@ -58,3 +58,9 @@ Schema v3 currently recognizes only the reviewed built-in MSVC adapter
 and closed recipe registry. Adding another certification adapter requires a
 ReproBit code and schema release; project files and arbitrary installed packages
 cannot inject executable providers, scripts, or Python callables.
+
+## Contributing
+
+[CONTRIBUTING.md](../CONTRIBUTING.md) maps these layers to the module families
+under `src/reprobit/`, lists the quality gates and the test layout, and
+describes what must change together when a classic recipe family is added.

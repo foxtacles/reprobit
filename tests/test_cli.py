@@ -20,6 +20,7 @@ from reprobit.backends import NativeWindowsBackend, PosixWineBackend
 from reprobit.cache import IncrementalCache, cache_key
 from reprobit.classic_project import ClassicProjectError
 from reprobit.cli import (
+    _parser,
     _positive_seconds,
     main,
 )
@@ -3895,7 +3896,9 @@ def test_cost_and_selected_explain_are_compact_in_text_and_complete_in_ndjson(
 
     assert main(["cost", str(project)]) == 0
     cost_text = capsys.readouterr().out
-    assert "project intervention cost: 1 relative points (model v2)" in cost_text
+    assert "project intervention cost: 1 relative points (cost model v2, see docs/costs.md)" in (
+        cost_text
+    )
     assert "function attribution: 0 attributed + 1 remaining at target/TU scope = 1" in cost_text
     assert "by target (same project total):\n  program: 1 (interventions=1, units=1)" in cost_text
     assert "by class (same project total):\n  State carrier: 1 " in cost_text
@@ -4561,3 +4564,118 @@ def test_source_lock_never_admits_host_ci_configuration(tmp_path: Path) -> None:
     manifest = json.loads((tmp_path / "reprobit" / "source-manifest.json").read_text())
     paths = {entry["path"] for entry in manifest["entries"]}
     assert not any(path.startswith(".github/") for path in paths)
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        ("init",),
+        ("toolchain", "lock"),
+        ("source", "export", "build/reprobit-source"),
+        ("graph", "configure", "--workspace-root", "w", "--toolchain-root", "t"),
+        ("graph", "extract"),
+    ],
+)
+def test_project_is_positional_everywhere_and_project_option_stays_an_alias(
+    prefix: tuple[str, ...],
+) -> None:
+    parser = _parser()
+    required: list[str] = []
+    if prefix[:2] == ("graph", "configure"):
+        required = ["--compiler-transport", "c", "--resource-transport", "r"]
+    elif prefix[:2] == ("graph", "extract"):
+        required = [
+            "--configured-build-root",
+            "b",
+            "--effective-source-root",
+            "s",
+            "--effective-source-digest",
+            "0" * 64,
+            "--toolchain-root",
+            "t",
+        ]
+    assert parser.parse_args([*prefix, *required]).project == "."
+    assert parser.parse_args([*prefix, *required, "elsewhere"]).project == "elsewhere"
+    if prefix != ("init",):
+        alias = parser.parse_args([*prefix, *required, "--project", "elsewhere"])
+        assert alias.project == "elsewhere"
+        subparser = next(
+            action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+        )
+        command = subparser.choices[prefix[0]]
+        if len(prefix) > 1 and prefix[1] in ("lock", "export", "configure", "extract"):
+            nested = next(
+                action
+                for action in command._actions
+                if isinstance(action, argparse._SubParsersAction)
+            )
+            command = nested.choices[prefix[1]]
+        assert "--project" not in command.format_help()
+
+
+def test_format_is_accepted_before_or_after_the_subcommand() -> None:
+    parser = _parser()
+    assert parser.parse_args(["status"]).format == "text"
+    assert parser.parse_args(["--format", "ndjson", "status"]).format == "ndjson"
+    assert parser.parse_args(["status", "--format", "ndjson"]).format == "ndjson"
+    assert parser.parse_args(["source", "lock", "--format", "ndjson", "."]).format == "ndjson"
+    assert (
+        parser.parse_args(["--format", "ndjson", "status", "--format", "ndjson"]).format == "ndjson"
+    )
+
+
+def test_status_honours_format_after_the_subcommand(tmp_path: Path, capsys: Any) -> None:
+    assert main(["status", "--format", "ndjson", str(tmp_path)]) == 1
+    event = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert event["event"] == "project_readiness"
+
+
+def test_os_errors_name_the_path_and_the_system_explanation(
+    tmp_path: Path, capsys: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing = tmp_path / "absent.bin"
+
+    def failing_handler(_args: argparse.Namespace, _output: CLIOutput) -> int:
+        missing.read_bytes()
+        return 0
+
+    monkeypatch.setattr("reprobit.cli._command_cmake_module", failing_handler)
+    assert main(["cmake-module"]) == 2
+    assert capsys.readouterr().err == f"error: cannot read {missing}: No such file or directory\n"
+
+    assert main(["--format", "ndjson", "cmake-module"]) == 2
+    event = json.loads(capsys.readouterr().out)
+    assert event["error_type"] == "FileNotFoundError"
+    assert event["message"].startswith(f"error: cannot read {missing}: ")
+
+
+def test_report_rejects_a_missing_input_before_reading(tmp_path: Path, capsys: Any) -> None:
+    missing = tmp_path / "nonexistent.json"
+    assert main(["report", str(missing)]) == 2
+    assert capsys.readouterr().err == f"error: report input is not an existing file: {missing}\n"
+
+
+def test_incremental_summary_words_a_first_build_plainly() -> None:
+    summary = IncrementalBuildSummary(
+        producer_hits=0,
+        producer_misses=1,
+        transform_hits=0,
+        transform_misses=0,
+        elapsed_seconds=0.5,
+        runtime_init_count=1,
+        invalidations=(("compiler.grind.0000", "no prior dependency hint"),),
+    )
+    human = StringIO()
+    CLIOutput("text", human, StringIO()).incremental_summary(summary)
+    rendered = human.getvalue()
+    assert "no prior dependency hint" not in rendered
+    assert (
+        "compiler.grind.0000: not cached on this machine yet (first build of this step)" in rendered
+    )
+
+
+def test_every_machine_event_carries_a_schema_version() -> None:
+    machine = StringIO()
+    CLIOutput("ndjson", machine, StringIO()).emit("hint", "hello", extra=1)
+    event = json.loads(machine.getvalue())
+    assert event == {"event": "hint", "extra": 1, "message": "hello", "schema_version": 1}

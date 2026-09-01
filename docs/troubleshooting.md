@@ -1,5 +1,118 @@
 # Troubleshooting
 
+## First-run errors
+
+The messages below were reproduced with the current CLI; long absolute paths
+are shortened to `…`. Every error exits `2`; a not-ready `rbit status` exits
+`1`. `rbit status .` is the quickest way to see which of them applies.
+
+### `reprobit.toml has not been created`
+
+```text
+$ rbit status .
+Project: …/empty
+Project files: 0/1 checks ready
+[  ] Project: reprobit.toml has not been created
+Next: rbit init …/empty
+```
+
+You are not in a ReproBit project, or ran the command from the wrong
+directory. Every command takes the project root as its `project` argument;
+run `rbit init` there first (see [getting-started.md](getting-started.md)).
+
+### `Git could not inspect this directory as a worktree`
+
+```text
+$ rbit source preview .
+error: cannot select project source automatically: Git could not inspect this directory as a worktree. Make sure Git is installed, then run git init and git add as needed. Alternatively, repeat --path PATH to name the complete source input set explicitly.
+```
+
+`rbit init` succeeds outside Git, but `source preview` and `source lock`
+select the source set from the Git index. Run `git init` and `git add` the
+sources, or name every input with repeated `--path`.
+
+### `required regular file is absent or redirected: …/bin/CL.EXE`
+
+```text
+$ rbit setup . --toolchain-root /path/to/empty-directory
+authenticating the compiler installation...
+authenticating the compiler installation: failed (error: required regular file is absent or redirected: …/bin/CL.EXE)
+error: required regular file is absent or redirected: …/bin/CL.EXE
+```
+
+The directory given to `--toolchain-root` is not a complete MSVC
+installation. Point it at the real root (the one containing `bin/CL.EXE`),
+or omit the flag so `setup` downloads and authenticates the pinned compiler.
+A later build with a wrong root fails as
+`error: toolchain tree root is absent or unsafe: …/include` and retains its
+workspace; `rbit clean .` removes it.
+
+### `compiler and resource transports must be supplied together`
+
+```text
+$ rbit import cmake . --compiler-transport /path/to/cl-launcher
+error: compiler and resource transports must be supplied together
+```
+
+`--compiler-transport` and `--resource-transport` describe one POSIX launcher
+pair and are only needed for an explicit POSIX override. Pass both or neither
+(see [platforms.md](platforms.md)).
+
+### `is not valid JSON` / `Expecting property name enclosed in double quotes`
+
+```text
+$ rbit status .
+Project: …/project
+Project and machine: 9/11 checks ready
+[!!] Interventions: reprobit/interventions/tu.transform.json is not valid JSON; run rbit validate
+Next: rbit validate …/project
+
+$ rbit validate .
+checking every saved project file...
+checking every saved project file: failed (error: invalid …/reprobit/interventions/tu.transform.json: Expecting property name enclosed in double quotes: line 1 column 22 (char 21))
+error: invalid …/reprobit/interventions/tu.transform.json: Expecting property name enclosed in double quotes: line 1 column 22 (char 21)
+```
+
+A committed record was edited by hand or merged badly. `validate` names the
+file and the parser position. Restore it from Git (`git checkout -- <file>`)
+rather than repairing the JSON by eye; the records are canonical documents.
+
+### `argument --format: invalid choice`
+
+```text
+$ rbit status . --format json
+usage: rbit status [-h] [--all] [project]
+rbit status: error: argument --format: invalid choice: 'json' (choose from 'text', 'ndjson')
+```
+
+`--format` accepts `text` or `ndjson` and may be placed before or after the
+sub-command (`rbit --format ndjson status .` and `rbit status . --format ndjson`
+are equivalent). There is no `json` value; use `ndjson` and read one event per
+line (see [cli.md](cli.md#machine-readable-output)).
+
+### `CMake import configure failed` with `fatal error C1005:`
+
+```text
+$ rbit import cmake .
+configuring the CMake project: failed (error: CMake import configure failed: command failed with exit code 1: …/cmake full output: …
+retained failed CMake import workspace: …/.reprobit-state/runs/import-c782933c060a461abce4a24b2eade020
+error: CMake import configure failed:
+    …
+    Building CXX object CMakeFiles/cmTC_4da49.dir/testCXXCompiler.cxx.obj
+    "…/ReproBit/toolchains/msvc_4_2/wine/x86/cl"  /nologo /TP -D_MBCS  /DWIN32 /D_WINDOWS /Zm1000 /GX  /Zi /Ob0 /Od /GZ -MDd /FoCMakeFiles/cmTC_4da49.dir/testCXXCompiler.cxx.obj
+
+    testCXXCompiler.cxx
+    fatal error C1005:
+    make[1]: *** [CMakeFiles/cmTC_4da49.dir/testCXXCompiler.cxx.obj] Error 2
+```
+
+CMake's compiler test failed inside MSVC 4.2 before ReproBit's own logical
+paths were in effect. This was reproduced with a project checkout roughly 150
+characters deep; the same import succeeded from a path of about 55 characters.
+Move or clone the project to a short path (for example directly under your home
+directory) and rerun `rbit import cmake .`. The retained workspace can be
+removed with `rbit clean .` afterwards.
+
 ## The compiler path looks right but output changes
 
 Equal path length is not sufficient. Check `reprobit.toml` for the complete DOS
@@ -102,8 +215,8 @@ mechanical record changes that repair can derive. Human output is a concise
 per-document summary; global `--format ndjson` includes every field-level
 before/after value. Add `--apply` only when you intentionally want that
 intermediate update without a build. It is not certification; after applying,
-the command points back to `rbit repair .` for the build and exact check. See the
-[source regeneration primitive](cli.md#source-regeneration-primitive).
+the command points back to `rbit repair .` for the build and exact check. See
+[`rbit source regenerate`](cli.md#rbit-source-regenerate).
 
 ## Bytes match but the command exits nonzero
 

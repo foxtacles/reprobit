@@ -109,12 +109,12 @@ Create the ignored configure tree, then extract the closed graph using the
 exact roots reported by the first command:
 
 ```console
-rbit graph configure --project . \
+rbit graph configure . \
   --workspace-root .reprobit-state/import \
   --toolchain-root /opt/toolchains/msvc42 \
   --compiler-transport /opt/toolchains/msvc42/wine/x86/cl \
   --resource-transport /opt/toolchains/msvc42/wine/x86/rc
-rbit graph extract --project . \
+rbit graph extract . \
   --configured-build-root .reprobit-state/import/build \
   --effective-source-root .reprobit-state/import/source \
   --effective-source-digest SHA256_FROM_CONFIGURE \

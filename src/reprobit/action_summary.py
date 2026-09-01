@@ -284,6 +284,9 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # This entry point runs as ``python -m reprobit.action_summary`` inside the
+    # GitHub Action, not under the rbit funnel, so its few diagnostics go to
+    # stderr directly instead of through CLIOutput (there is no --format here).
     parsed = _parser().parse_args(sys.argv[1:] if argv is None else argv)
     report_path = parsed.report_json.resolve(strict=False)
     receipt_path = parsed.receipt.resolve(strict=False) if parsed.receipt is not None else None

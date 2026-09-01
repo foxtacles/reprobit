@@ -47,6 +47,10 @@ ACTIVITY_PHASE_KINDS = frozenset(
 _MAX_FAILURE_DETAIL = 160
 _ASCII_BAR_WIDTH = 24
 
+# Every ndjson event carries this version, matching the progress events'
+# ProgressEvent.schema_version, so consumers can detect a future shape change.
+EVENT_SCHEMA_VERSION = 1
+
 
 def human_command(argv: Sequence[str | Path]) -> str:
     """Render copyable human text while machine events retain the argv array."""
@@ -123,6 +127,17 @@ def _friendly_incremental_phase(phase: str, node_id: str) -> str:
     if node_id.startswith("analysis-link."):
         return _friendly_phase("analysis-link")
     return _friendly_phase(phase)
+
+
+_FRIENDLY_INVALIDATIONS = {
+    # classic_cache.probe_compiler_cache: the cache holds no earlier record
+    # for this step, so nothing could be reused.
+    "no prior dependency hint": "not cached on this machine yet (first build of this step)",
+}
+
+
+def _friendly_invalidation(reason: str) -> str:
+    return _FRIENDLY_INVALIDATIONS.get(reason, reason)
 
 
 def _compact_failure_detail(error: BaseException | str) -> str:
@@ -229,7 +244,12 @@ class CLIOutput:
         **fields: Any,
     ) -> None:
         if self.output_format == "ndjson":
-            document = {"event": event, "message": message, **fields}
+            document = {
+                "event": event,
+                "message": message,
+                "schema_version": EVENT_SCHEMA_VERSION,
+                **fields,
+            }
             self.stdout.write(
                 json.dumps(
                     _jsonable(document),
@@ -270,7 +290,9 @@ class CLIOutput:
         if self.output_format == "text" and summary.invalidations:
             visible = summary.invalidations[:8]
             lines = [message, "Why steps were rebuilt:"]
-            lines.extend(f"  {node_id}: {reason}" for node_id, reason in visible)
+            lines.extend(
+                f"  {node_id}: {_friendly_invalidation(reason)}" for node_id, reason in visible
+            )
             remaining = len(summary.invalidations) - len(visible)
             if remaining:
                 lines.append(f"  ... and {remaining} more")

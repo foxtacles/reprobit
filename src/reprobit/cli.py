@@ -171,65 +171,180 @@ def _add_execution_options(
         "advanced execution options",
         "Defaults are suitable for people; these controls are mainly for CI and unusual hosts.",
     )
-    advanced.add_argument(
-        "--backend",
-        choices=("auto", POSIX_WINE_BACKEND, WINDOWS_NATIVE_BACKEND),
-        default="auto",
-        help="execution backend (default: select from the host platform)",
-    )
-    advanced.add_argument("--wine", default="wine", help="POSIX Wine executable or PATH name")
-    advanced.add_argument(
-        "--wineserver",
-        default="wineserver",
-        help="POSIX wineserver executable or PATH name",
-    )
-    advanced.add_argument(
-        "--toolchain-root",
-        metavar="DIRECTORY",
-        help="physical root of the locally provisioned locked toolchain",
-    )
-    advanced.add_argument(
-        "--compiler-transport",
-        metavar="PATH",
-        help="POSIX transport selector for the locked compiler (paired with resource transport)",
-    )
-    advanced.add_argument(
-        "--resource-transport",
-        metavar="PATH",
-        help="POSIX transport selector for the locked resource compiler",
-    )
-    advanced.add_argument(
-        "--initialization-timeout",
-        type=_positive_seconds,
-        default=600.0,
-        metavar="SECONDS",
-        help="limit for each isolated execution-lane initialization (default: 600)",
-    )
-    advanced.add_argument(
+    _add_host_options(advanced, transports=True)
+    _add_timeout_options(advanced)
+
+
+_TOOLCHAIN_ROOT_HELP = "compiler installation override (normally remembered by rbit setup)"
+
+
+def _add_host_options(
+    group: argparse._ActionsContainer,
+    *,
+    backend: bool = True,
+    wine: bool = True,
+    toolchain_root: bool = True,
+    toolchain_root_help: str = _TOOLCHAIN_ROOT_HELP,
+    transports: bool = False,
+) -> None:
+    """Add the host-selection flags with one help text and metavar per flag.
+
+    Every command that starts the compiler shares these; the flag set is the
+    caller's choice, so a command never grows a flag its handler ignores.
+    """
+
+    if backend:
+        group.add_argument(
+            "--backend",
+            choices=("auto", POSIX_WINE_BACKEND, WINDOWS_NATIVE_BACKEND),
+            default="auto",
+            help="execution backend (default: select from the host platform)",
+        )
+    if wine:
+        group.add_argument(
+            "--wine",
+            default="wine",
+            metavar="PATH_OR_NAME",
+            help="POSIX Wine executable (default: wine from PATH)",
+        )
+        group.add_argument(
+            "--wineserver",
+            default="wineserver",
+            metavar="PATH_OR_NAME",
+            help="POSIX wineserver executable (default: wineserver from PATH)",
+        )
+    if toolchain_root:
+        group.add_argument("--toolchain-root", metavar="DIRECTORY", help=toolchain_root_help)
+    if transports:
+        group.add_argument(
+            "--compiler-transport",
+            metavar="PATH",
+            help=(
+                "POSIX transport selector for the locked compiler "
+                "(paired with --resource-transport)"
+            ),
+        )
+        group.add_argument(
+            "--resource-transport",
+            metavar="PATH",
+            help="POSIX transport selector for the locked resource compiler",
+        )
+
+
+def _add_timeout_options(
+    group: argparse._ActionsContainer,
+    *,
+    initialization: bool = True,
+    compile_default: float = 600.0,
+    link: bool = True,
+    cleanup_default: float = 10.0,
+) -> None:
+    """Add the per-step deadlines with one help text and metavar per flag."""
+
+    if initialization:
+        group.add_argument(
+            "--initialization-timeout",
+            type=_positive_seconds,
+            default=600.0,
+            metavar="SECONDS",
+            help="limit for each isolated execution-lane initialization (default: 600)",
+        )
+    group.add_argument(
         "--compile-timeout",
         type=_positive_seconds,
-        default=600.0,
+        default=compile_default,
         metavar="SECONDS",
-        help="limit for each compiler or resource producer (default: 600)",
+        help=f"limit for each compiler or resource-compiler step (default: {compile_default:g})",
     )
-    advanced.add_argument(
-        "--link-timeout",
-        type=_positive_seconds,
-        default=900.0,
-        metavar="SECONDS",
-        help="limit for each librarian or linker producer (default: 900)",
-    )
-    advanced.add_argument(
+    if link:
+        group.add_argument(
+            "--link-timeout",
+            type=_positive_seconds,
+            default=900.0,
+            metavar="SECONDS",
+            help="limit for each librarian or linker producer (default: 900)",
+        )
+    group.add_argument(
         "--cleanup-timeout",
         type=_positive_seconds,
-        default=10.0,
+        default=cleanup_default,
         metavar="SECONDS",
-        help="limit for draining each isolated execution lane (default: 10)",
+        help=(
+            "limit for stopping each isolated execution lane and its wineserver "
+            f"(default: {cleanup_default:g})"
+        ),
     )
+
+
+def _add_project_argument(
+    command: argparse.ArgumentParser,
+    *,
+    help: str = "project directory (default: .)",
+    alias: bool = False,
+) -> None:
+    """Add the positional project directory, optionally with a hidden --project alias.
+
+    ``--project`` was the spelling on toolchain lock, source export, graph
+    configure and graph extract; it stays accepted but undocumented. The
+    positional suppresses its own default so that a bare ``--project DIR``
+    is not overwritten by the positional's absent value.
+    """
+
+    if alias:
+        command.add_argument("--project", default=".", help=argparse.SUPPRESS)
+        command.add_argument("project", nargs="?", default=argparse.SUPPRESS, help=help)
+        return
+    command.add_argument("project", nargs="?", default=".", help=help)
+
+
+def _subcommand(
+    commands: argparse._SubParsersAction[argparse.ArgumentParser],
+    name: str,
+    *,
+    help: str,
+    description: str | None = None,
+) -> argparse.ArgumentParser:
+    """Register one sub-command whose --help screen repeats its one-line summary.
+
+    argparse shows ``help`` only in the parent's command list; without a
+    ``description`` the command's own ``--help`` opens with a bare usage line.
+    """
+
+    if description is None:
+        description = help[0].upper() + help[1:] + "."
+    command = commands.add_parser(name, help=help, description=description)
+    # Accept ``--format`` after the sub-command as well as before it. The
+    # default is suppressed so a root-level ``--format ndjson`` survives the
+    # sub-parser's namespace merge; the root option documents the choice.
+    command.add_argument(
+        "--format",
+        choices=("text", "ndjson"),
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    return command
+
+
+_EPILOG = """\
+exit status:
+  0    the command completed and its result is ready, clean, or accepted
+  1    an honest negative: status found missing setup, doctor or setup found a
+       failing check, verify was not accepted, or discover grind found nothing
+  2    any error, including usage errors and unreadable project files
+  130  interrupted with Ctrl-C; child processes were asked to drain
+
+--format may also follow the sub-command (rbit status --format ndjson).
+Terms used in this help are defined in docs/glossary.md.
+"""
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="rbit", description=__doc__)
+    parser = argparse.ArgumentParser(
+        prog="rbit",
+        description=__doc__,
+        epilog=_EPILOG,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     parser.add_argument("--version", action="version", version=f"%(prog)s {_VERSION}")
     parser.add_argument(
         "--format",
@@ -239,8 +354,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
-    init = subcommands.add_parser("init", help="start a ReproBit project")
-    init.add_argument("path", nargs="?", default=".", help="project directory (default: .)")
+    init = _subcommand(subcommands, "init", help="start a ReproBit project")
+    _add_project_argument(init)
     init.add_argument(
         "--project-id",
         help="portable project name (default: derive it from the directory)",
@@ -275,22 +390,38 @@ def _parser() -> argparse.ArgumentParser:
             "(default: reference/TARGET.exe)"
         ),
     )
-    init_advanced = init.add_argument_group("advanced logical path options")
-    init_advanced.add_argument("--logical-source", default=r"R:\source")
-    init_advanced.add_argument("--logical-build", default=r"R:\build")
-    init_advanced.add_argument("--logical-toolchain", default=r"R:\toolchain")
+    init_advanced = init.add_argument_group(
+        "advanced logical path options",
+        "Compiler-visible DOS paths recorded in reprobit.toml; every run maps its private "
+        "source, output, and toolchain trees to exactly these spellings.",
+    )
+    init_advanced.add_argument(
+        "--logical-source",
+        default=r"R:\source",
+        metavar="DOS_PATH",
+        help=r"compiler-visible root of the source tree (default: R:\source)",
+    )
+    init_advanced.add_argument(
+        "--logical-build",
+        default=r"R:\build",
+        metavar="DOS_PATH",
+        help=r"compiler-visible root of the build output tree (default: R:\build)",
+    )
+    init_advanced.add_argument(
+        "--logical-toolchain",
+        default=r"R:\toolchain",
+        metavar="DOS_PATH",
+        help=r"compiler-visible root of the compiler installation (default: R:\toolchain)",
+    )
     init.set_defaults(handler=command_init)
 
-    setup = subcommands.add_parser(
+    setup = _subcommand(
+        subcommands,
         "setup",
         help="prepare the compiler and this machine for a project",
     )
-    setup.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
-    setup.add_argument(
-        "--toolchain-root",
-        metavar="DIRECTORY",
-        help="use an existing compiler installation instead of the remembered/default path",
-    )
+    _add_project_argument(setup)
+    setup.add_argument("--toolchain-root", metavar="DIRECTORY", help=_TOOLCHAIN_ROOT_HELP)
     setup.add_argument(
         "--no-provision",
         action="store_true",
@@ -307,28 +438,14 @@ def _parser() -> argparse.ArgumentParser:
         help="skip the bounded execution probe (faster, but less complete)",
     )
     setup_advanced = setup.add_argument_group("advanced host options")
-    setup_advanced.add_argument(
-        "--backend",
-        choices=("auto", POSIX_WINE_BACKEND, WINDOWS_NATIVE_BACKEND),
-        default="auto",
-    )
-    setup_advanced.add_argument("--wine", default="wine")
-    setup_advanced.add_argument("--wineserver", default="wineserver")
+    _add_host_options(setup_advanced, toolchain_root=False)
     setup.set_defaults(handler=_lazy_setup)
 
-    doctor = subcommands.add_parser(
-        "doctor", help="check whether the compiler can run correctly on this machine"
+    doctor = _subcommand(
+        subcommands, "doctor", help="check whether the compiler can run correctly on this machine"
     )
-    doctor.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
-    doctor.add_argument(
-        "--backend",
-        choices=("auto", POSIX_WINE_BACKEND, WINDOWS_NATIVE_BACKEND),
-        default="auto",
-    )
-    doctor.add_argument("--wine", default="wine", help="POSIX Wine executable or PATH name")
-    doctor.add_argument(
-        "--wineserver", default="wineserver", help="POSIX wineserver executable or PATH name"
-    )
+    _add_project_argument(doctor)
+    _add_host_options(doctor, toolchain_root=False)
     doctor.add_argument(
         "--execute-probe",
         action="store_true",
@@ -342,13 +459,16 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument(
         "--toolchain-root",
         metavar="DIRECTORY",
-        help="compiler installation to authenticate",
+        help="compiler installation to authenticate (default: check only the host backend)",
     )
     doctor.set_defaults(handler=_lazy_doctor)
 
-    toolchain = subcommands.add_parser("toolchain", help="install and record exact compiler files")
+    toolchain = _subcommand(
+        subcommands, "toolchain", help="install and record exact compiler files"
+    )
     toolchain_commands = toolchain.add_subparsers(dest="toolchain_command", required=True)
-    provision = toolchain_commands.add_parser(
+    provision = _subcommand(
+        toolchain_commands,
         "provision",
         help="download and authenticate a supported compiler",
     )
@@ -370,12 +490,10 @@ def _parser() -> argparse.ArgumentParser:
         help="do not remember the installed compiler location",
     )
     provision.set_defaults(handler=_lazy_toolchain_provision)
-    lock = toolchain_commands.add_parser(
-        "lock", help="record the exact compiler files this project expects"
+    lock = _subcommand(
+        toolchain_commands, "lock", help="record the exact compiler files this project expects"
     )
-    lock.add_argument(
-        "--project", default=".", help="project containing reprobit.toml (default: .)"
-    )
+    _add_project_argument(lock, alias=True)
     lock.add_argument(
         "--profile",
         choices=tuple(TOOLCHAIN_PROFILES),
@@ -399,16 +517,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     lock.set_defaults(handler=_lazy_toolchain_lock)
 
-    source = subcommands.add_parser(
-        "source", help="review and lock the source files a build may read"
+    source = _subcommand(
+        subcommands, "source", help="review and lock the source files a build may read"
     )
     source_commands = source.add_subparsers(dest="source_command", required=True)
-    source_preview = source_commands.add_parser(
-        "preview", help="show source changes and records that need review without writing"
+    source_preview = _subcommand(
+        source_commands,
+        "preview",
+        help="show source changes and records that need review without writing",
     )
-    source_preview.add_argument(
-        "project", nargs="?", default=".", help="project directory (default: .)"
-    )
+    _add_project_argument(source_preview)
     source_preview.add_argument(
         "--path",
         action="append",
@@ -416,7 +534,8 @@ def _parser() -> argparse.ArgumentParser:
         help="project-relative file or tree to inspect (repeatable; defaults to Git tracked files)",
     )
     source_preview.set_defaults(handler=command_source_preview)
-    source_export = source_commands.add_parser(
+    source_export = _subcommand(
+        source_commands,
         "export",
         help="write the reviewed effective source view used by compilers and analysis tools",
     )
@@ -429,16 +548,12 @@ def _parser() -> argparse.ArgumentParser:
             "(default: build/reprobit-source)"
         ),
     )
-    source_export.add_argument(
-        "--project", default=".", help="project containing reprobit.toml (default: .)"
-    )
+    _add_project_argument(source_export, alias=True)
     source_export.set_defaults(handler=command_source_export)
-    source_lock = source_commands.add_parser(
-        "lock", help="safely record tracked or explicitly named source inputs"
+    source_lock = _subcommand(
+        source_commands, "lock", help="safely record tracked or explicitly named source inputs"
     )
-    source_lock.add_argument(
-        "project", nargs="?", default=".", help="project directory (default: .)"
-    )
+    _add_project_argument(source_lock)
     source_lock.add_argument(
         "--path",
         action="append",
@@ -451,7 +566,8 @@ def _parser() -> argparse.ArgumentParser:
         help="remove a stale generated graph in the same transaction after source changes",
     )
     source_lock.set_defaults(handler=command_source_lock)
-    source_regenerate = source_commands.add_parser(
+    source_regenerate = _subcommand(
+        source_commands,
         "regenerate",
         help="advanced: preview or apply saved source-record updates without building",
         description=(
@@ -460,9 +576,7 @@ def _parser() -> argparse.ArgumentParser:
             "saved source-record updates; it does not build or verify the project."
         ),
     )
-    source_regenerate.add_argument(
-        "project", nargs="?", default=".", help="project directory (default: .)"
-    )
+    _add_project_argument(source_regenerate)
     source_regenerate.add_argument(
         "--apply",
         action="store_true",
@@ -470,17 +584,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     source_regenerate.set_defaults(handler=command_source_regenerate)
 
-    import_command = subcommands.add_parser(
-        "import", help="prepare an existing project for direct ReproBit builds"
+    import_command = _subcommand(
+        subcommands, "import", help="prepare an existing project for direct ReproBit builds"
     )
     import_commands = import_command.add_subparsers(dest="import_command", required=True)
-    cmake_import = import_commands.add_parser(
+    cmake_import = _subcommand(
+        import_commands,
         "cmake",
         help="prepare and record an ordinary CMake project in one guided run",
     )
-    cmake_import.add_argument(
-        "project", nargs="?", default=".", help="project directory (default: .)"
-    )
+    _add_project_argument(cmake_import)
     cmake_import.add_argument(
         "--target",
         action="append",
@@ -495,21 +608,7 @@ def _parser() -> argparse.ArgumentParser:
         help="retain temporary import files: never, on-failure (default), or always",
     )
     cmake_import_advanced = cmake_import.add_argument_group("advanced host and graph options")
-    cmake_import_advanced.add_argument(
-        "--toolchain-root",
-        metavar="DIRECTORY",
-        help="compiler installation override (normally remembered by rbit setup)",
-    )
-    cmake_import_advanced.add_argument(
-        "--compiler-transport",
-        metavar="PATH",
-        help="compiler frontend override used only while CMake configures",
-    )
-    cmake_import_advanced.add_argument(
-        "--resource-transport",
-        metavar="PATH",
-        help="resource-compiler frontend paired with --compiler-transport",
-    )
+    _add_host_options(cmake_import_advanced, backend=False, wine=False, transports=True)
     cmake_import_advanced.add_argument(
         "--cmake",
         default="cmake",
@@ -537,17 +636,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     cmake_import.set_defaults(handler=_lazy_cmake_import)
 
-    graph = subcommands.add_parser(
-        "graph", help="record the compiler and linker steps used by direct builds"
+    graph = _subcommand(
+        subcommands, "graph", help="record the compiler and linker steps used by direct builds"
     )
     graph_commands = graph.add_subparsers(dest="graph_command", required=True)
-    graph_configure = graph_commands.add_parser(
+    graph_configure = _subcommand(
+        graph_commands,
         "configure",
         help="create a fresh CMake metadata tree without building",
     )
-    graph_configure.add_argument(
-        "--project", default=".", help="project containing reprobit.toml (default: .)"
-    )
+    _add_project_argument(graph_configure, alias=True)
     graph_configure.add_argument(
         "--workspace-root",
         required=True,
@@ -591,13 +689,12 @@ def _parser() -> argparse.ArgumentParser:
         help="bounded configure deadline (default: 600)",
     )
     graph_configure.set_defaults(handler=command_graph_configure)
-    graph_extract = graph_commands.add_parser(
+    graph_extract = _subcommand(
+        graph_commands,
         "extract",
         help="record direct compiler and linker steps from that CMake tree",
     )
-    graph_extract.add_argument(
-        "--project", default=".", help="project containing reprobit.toml (default: .)"
-    )
+    _add_project_argument(graph_extract, alias=True)
     graph_extract.add_argument(
         "--configured-build-root",
         required=True,
@@ -639,17 +736,16 @@ def _parser() -> argparse.ArgumentParser:
         ("validate", "check every saved project file", command_validate),
         ("cost", "show intervention cost totals", command_cost),
     ):
-        command = subcommands.add_parser(name, help=help_text)
-        command.add_argument(
-            "project", nargs="?", default=".", help="project directory (default: .)"
-        )
+        command = _subcommand(subcommands, name, help=help_text)
+        _add_project_argument(command)
         command.set_defaults(handler=handler)
 
-    status = subcommands.add_parser(
+    status = _subcommand(
+        subcommands,
         "status",
         help="show what is ready and the next project setup step",
     )
-    status.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
+    _add_project_argument(status)
     status.add_argument(
         "--all",
         action="store_true",
@@ -657,11 +753,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     status.set_defaults(handler=command_status)
 
-    clean = subcommands.add_parser(
+    clean = _subcommand(
+        subcommands,
         "clean",
         help="remove inactive workspaces; cache and reports are opt-in",
     )
-    clean.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
+    _add_project_argument(clean)
     clean.add_argument(
         "--preview",
         action="store_true",
@@ -692,8 +789,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     clean.set_defaults(handler=command_clean)
 
-    explain = subcommands.add_parser("explain", help="explain saved interventions")
-    explain.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
+    explain = _subcommand(subcommands, "explain", help="explain saved interventions")
+    _add_project_argument(explain)
     explain.add_argument(
         "--intervention",
         metavar="ID",
@@ -701,7 +798,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     explain.set_defaults(handler=command_explain)
 
-    repair = subcommands.add_parser(
+    repair = _subcommand(
+        subcommands,
         "repair",
         help="repair edits to already-locked source files and prove exact output",
         description=(
@@ -712,7 +810,7 @@ def _parser() -> argparse.ArgumentParser:
             "preview; it prints a safe next command when one is available."
         ),
     )
-    repair.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
+    _add_project_argument(repair)
     _add_execution_options(repair, cold_option=False)
     repair.add_argument(
         "--policy",
@@ -730,19 +828,21 @@ def _parser() -> argparse.ArgumentParser:
         action_nonce=None,
     )
 
-    build = subcommands.add_parser(
+    build = _subcommand(
+        subcommands,
         "build",
         help="incrementally rebuild changed compiler and linker steps without CMake",
     )
-    build.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
+    _add_project_argument(build)
     _add_execution_options(build, cold_option=True)
     build.set_defaults(handler=command_build)
 
-    verify = subcommands.add_parser(
+    verify = _subcommand(
+        subcommands,
         "verify",
         help="build every target from scratch and check exact bytes and trust evidence",
     )
-    verify.add_argument("project", nargs="?", default=".", help="project directory (default: .)")
+    _add_project_argument(verify)
     _add_execution_options(verify, cold_option=False)
     verify.add_argument(
         "--policy",
@@ -766,7 +866,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     verify.set_defaults(handler=command_verify)
 
-    discover = subcommands.add_parser(
+    discover = _subcommand(
+        subcommands,
         "discover",
         help="find and review low-cost compiler adjustments",
     )
@@ -774,13 +875,12 @@ def _parser() -> argparse.ArgumentParser:
         dest="discovery_command",
         required=True,
     )
-    discover_init = discover_commands.add_parser(
+    discover_init = _subcommand(
+        discover_commands,
         "init",
         help="create a small automatic search plan without compiling",
     )
-    discover_init.add_argument(
-        "project", nargs="?", default=".", help="project directory (default: .)"
-    )
+    _add_project_argument(discover_init)
     discover_init.add_argument(
         "--source",
         required=True,
@@ -805,16 +905,12 @@ def _parser() -> argparse.ArgumentParser:
     )
     discover_init.set_defaults(handler=_lazy_discover_grind_init)
 
-    discover_run = discover_commands.add_parser(
+    discover_run = _subcommand(
+        discover_commands,
         "run",
         help="run a bounded request file (advanced)",
     )
     discover_run.add_argument("request", help="request JSON to run")
-    discover_run.add_argument(
-        "--toolchain-root",
-        metavar="DIRECTORY",
-        help="compiler installation override (normally remembered by rbit setup)",
-    )
     discover_run.add_argument(
         "--report-json",
         metavar="PATH",
@@ -838,35 +934,12 @@ def _parser() -> argparse.ArgumentParser:
         metavar="COUNT",
         help="maximum compiler workers (Wine is safely capped at 4; default: 4)",
     )
-    discover_run.add_argument(
-        "--compile-timeout",
-        type=_positive_seconds,
-        default=120.0,
-        metavar="SECONDS",
-        help="limit for each compiler cell (default: 120)",
-    )
-    discover_run.add_argument(
-        "--wine",
-        default="wine",
-        metavar="PATH_OR_NAME",
-        help="POSIX Wine executable (default: wine from PATH)",
-    )
-    discover_run.add_argument(
-        "--wineserver",
-        default="wineserver",
-        metavar="PATH_OR_NAME",
-        help="POSIX wineserver executable (default: wineserver from PATH)",
-    )
-    discover_run.add_argument(
-        "--cleanup-timeout",
-        type=_positive_seconds,
-        default=10.0,
-        metavar="SECONDS",
-        help="limit for stopping and reaping the private wineserver (default: 10)",
-    )
+    _add_host_options(discover_run, backend=False)
+    _add_timeout_options(discover_run, initialization=False, compile_default=120.0, link=False)
     discover_run.set_defaults(handler=command_discover)
 
-    discover_clean = discover_commands.add_parser(
+    discover_clean = _subcommand(
+        discover_commands,
         "clean",
         help="preview or remove one advanced discovery campaign's reusable state",
     )
@@ -889,7 +962,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     discover_clean.set_defaults(handler=command_discover_clean)
 
-    discover_grind = discover_commands.add_parser(
+    discover_grind = _subcommand(
+        discover_commands,
         "grind",
         help="find low-cost project adjustments, preview them, and optionally save proven work",
         description=(
@@ -945,16 +1019,16 @@ def _parser() -> argparse.ArgumentParser:
     )
     discover_grind.set_defaults(handler=_lazy_discover_grind)
 
-    state = subcommands.add_parser("state", help="inspect local runs, cache, and reports")
+    state = _subcommand(subcommands, "state", help="inspect local runs, cache, and reports")
     state_commands = state.add_subparsers(dest="state_command", required=True)
-    state_status = state_commands.add_parser(
-        "status", help="show retained runs, cache, reports, active leases, and disk usage"
+    state_status = _subcommand(
+        state_commands,
+        "status",
+        help="show retained runs, cache, reports, active leases, and disk usage",
     )
-    state_status.add_argument(
-        "project", nargs="?", default=".", help="project directory (default: .)"
-    )
+    _add_project_argument(state_status)
     state_status.set_defaults(handler=command_state_status)
-    report = subcommands.add_parser("report", help="validate JSON and render self-contained HTML")
+    report = _subcommand(subcommands, "report", help="validate JSON and render self-contained HTML")
     report.add_argument("input", help="canonical report.json to validate and render")
     report.add_argument(
         "--html",
@@ -963,7 +1037,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     report.set_defaults(handler=command_report)
 
-    module = subcommands.add_parser("cmake-module", help="print the packaged CMake module path")
+    module = _subcommand(subcommands, "cmake-module", help="print the packaged CMake module path")
     module.add_argument(
         "--file",
         action="store_true",
@@ -1020,6 +1094,15 @@ def main(argv: list[str] | None = None) -> int:
         # into a traceback, and do not attempt a second write to the same pipe.
         _silence_broken_pipe(output.stdout)
         return 0
+    except OSError as error:
+        # Give a raw OS failure the same shape as every other error line:
+        # which path, then the operating system's own explanation.
+        if error.filename:
+            message = f"error: cannot read {error.filename}: {error.strerror or error}"
+        else:
+            message = f"error: {error}"
+        output.emit("error", message, error_type=type(error).__name__, diagnostic=True)
+        return 2
     except Exception as error:
         output.emit(
             "error",

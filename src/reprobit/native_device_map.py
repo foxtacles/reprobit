@@ -926,6 +926,8 @@ def _run_lineage_broker() -> int:
 
 
 def _main(argv: list[str]) -> int:
+    # Internal helper process spawned by the Windows backend, never an rbit
+    # command: it has no CLIOutput or --format, so diagnostics print to stderr.
     if argv == ["--lineage-broker"]:
         operation = _run_logon_broker
     elif argv == ["--lineage-inner"]:

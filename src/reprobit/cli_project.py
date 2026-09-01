@@ -149,7 +149,7 @@ def _updated_gitignore(root: Path) -> bytes | None:
 
 
 def command_init(args: argparse.Namespace, output: CLIOutput) -> int:
-    root = Path(args.path).expanduser().resolve(strict=False)
+    root = Path(args.project).expanduser().resolve(strict=False)
     if root.exists() and (not root.is_dir() or root.is_symlink()):
         raise CLIError(f"initialization target is not a real directory: {root}")
     target_ids = tuple(args.target or ("program",))
@@ -907,7 +907,7 @@ def _human_cost_breakdown(result: CostBreakdown) -> str:
     attributed = result.project_total - result.unallocated_shared_cost
     lines = [
         f"project intervention cost: {result.project_total} relative points "
-        f"(model v{result.model_version})",
+        f"(cost model v{result.model_version}, see docs/costs.md)",
         f"function attribution: {attributed} attributed + "
         f"{result.unallocated_shared_cost} remaining at target/TU scope "
         f"= {result.project_total}",
@@ -939,7 +939,8 @@ def command_explain(args: argparse.Namespace, output: CLIOutput) -> int:
         if args.intervention is None or item.id == args.intervention
     )
     if args.intervention is not None and not selected:
-        raise CLIError(f"unknown intervention: {args.intervention}")
+        known = ", ".join(item.id for item in bundle.interventions) or "none saved"
+        raise CLIError(f"unknown intervention: {args.intervention} (known: {known})")
     for item in selected:
         cost = costs[item.id]
         summary = (
@@ -963,6 +964,12 @@ def command_explain(args: argparse.Namespace, output: CLIOutput) -> int:
             dependencies=item.dependencies,
             beneficiaries=item.beneficiaries,
         )
+    if args.intervention is None and selected and output.output_format == "text":
+        output.emit(
+            "hint",
+            "hint: rbit explain --intervention ID shows one intervention in full",
+            diagnostic=True,
+        )
     return 0
 
 
@@ -976,11 +983,17 @@ def command_cost(args: argparse.Namespace, output: CLIOutput) -> int:
             if output.output_format == "text"
             else (
                 f"project intervention cost: {result.project_total} relative points "
-                f"(model v{result.model_version})"
+                f"(cost model v{result.model_version})"
             )
         ),
         breakdown=result,
     )
+    if output.output_format == "text" and bundle.interventions:
+        output.emit(
+            "hint",
+            "hint: rbit explain lists each intervention; --intervention ID shows one in full",
+            diagnostic=True,
+        )
     return 0
 
 
@@ -1017,7 +1030,9 @@ def command_status(args: argparse.Namespace, output: CLIOutput) -> int:
 def command_report(args: argparse.Namespace, output: CLIOutput) -> int:
     from reprobit.report_io import read_report_json, write_report_html
 
-    source = Path(args.input).expanduser().resolve(strict=True)
+    source = Path(args.input).expanduser().resolve(strict=False)
+    if not source.is_file():
+        raise CLIError(f"report input is not an existing file: {source}")
     destination = (
         Path(args.html).expanduser().resolve(strict=False)
         if args.html

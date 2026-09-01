@@ -35,9 +35,15 @@ def test_fresh_init_reports_all_remaining_authority_at_once(
     assert not readiness.ready
     assert readiness.items[0].ready
     assert "Compiler lock" in rendered
-    assert "source review is incomplete" in rendered
+    assert "run rbit source preview to finish reviewing and locking" in rendered
     assert "Build plan" in rendered
-    assert f"Place the original at {project / 'reference/program.exe'}" in rendered
+    assert rendered.startswith(f"Project: {project}\n")
+    assert "[  ] Protected references: place the original at reference/program.exe" in rendered
+    assert "[  ] Compiler lock: run rbit setup to create reprobit/toolchain.lock.json" in rendered
+    assert "Final project check" not in rendered
+    assert str(project) not in rendered.removeprefix(f"Project: {project}\n").replace(
+        f"Next: rbit setup {project}", ""
+    )
     references = next(item for item in readiness.items if item.id == "references")
     build_plan_index = next(
         index for index, item in enumerate(readiness.items) if item.id == "build_plan"
@@ -111,7 +117,9 @@ def test_valid_project_can_have_no_intervention_or_proof_documents(
     assert checks["proofs"].detail == "0 documents (valid when there is nothing to prove)"
     assert checks["authority"].label == "Final project check"
     assert checks["authority"].detail == "all saved project files agree"
-    assert render_project_readiness(readiness) == "Project files ready: 10/10 checks passed"
+    assert render_project_readiness(readiness) == (
+        f"Project: {project}\nProject files ready: 10/10 checks passed"
+    )
 
     local_toolchain = tmp_path / "toolchain"
     local_toolchain.mkdir()
@@ -219,3 +227,34 @@ def test_derived_project_id_is_human_and_schema_safe(tmp_path: Path) -> None:
     from reprobit.project_loader import load_project
 
     assert load_project(project).project_id == "project-1997-some-game"
+
+
+def test_status_flags_a_saved_document_that_is_not_json(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    shutil.copytree(Path(__file__).parents[1] / "examples/grind", project)
+    reference = project / "reference/grind.exe"
+    reference.parent.mkdir()
+    reference.write_bytes(b"reference")
+    monkeypatch.setattr(
+        "reprobit.project_readiness.resolve_toolchain_root",
+        lambda *_args, **_kwargs: tmp_path / "missing-toolchain",
+    )
+    document = project / "reprobit/interventions/program.json"
+    document.write_bytes(document.read_bytes()[:20])
+
+    assert main(["status", str(project)]) == 1
+    rendered = capsys.readouterr().out
+    assert (
+        "[!!] Interventions: reprobit/interventions/program.json is not valid JSON; "
+        "run rbit validate"
+    ) in rendered
+    assert "Final project check" not in rendered
+    checks = {item.id: item for item in inspect_project_readiness(project).items}
+    assert not checks["interventions"].ready
+    assert checks["interventions"].next_command == f"rbit validate {project}"
+    assert checks["authority"].pending
+    assert checks["authority"].detail == "not checked until the project files above are ready"

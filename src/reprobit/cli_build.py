@@ -125,6 +125,13 @@ def _quarantine_oracle_targets(bundle: ProjectBundle) -> frozenset[str]:
     )
 
 
+def _project_relative(root: Path, path: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
 def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
     from reprobit.engine import BuildPlanExecutor
 
@@ -317,6 +324,11 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
             f"{count_phrase(len(receipt.outputs), 'output')}"
         )
         completion_fields = {"steps": len(receipt.steps)}
+    if output.output_format == "text":
+        completion_message += "".join(
+            f"\n  {_project_relative(root, item.path)} ({item.size:,} bytes)"
+            for item in receipt.outputs
+        )
     output.emit(
         "build_complete",
         completion_message,
