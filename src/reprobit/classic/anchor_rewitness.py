@@ -41,21 +41,6 @@ def _is_blank(line: bytes) -> bool:
     return not line.strip()
 
 
-def _line_spans(data: bytes) -> list[tuple[int, int]]:
-    """Return (start, end) byte offsets of every line, excluding newlines."""
-
-    spans: list[tuple[int, int]] = []
-    start = 0
-    while start <= len(data):
-        end = data.find(b"\n", start)
-        if end == -1:
-            spans.append((start, len(data)))
-            break
-        spans.append((start, end))
-        start = end + 1
-    return spans
-
-
 def _skipped_pair(data: bytes, offset: int) -> tuple[bytes, bytes]:
     """The nearest non-blank lines before and after an after-newline offset."""
 
@@ -199,9 +184,7 @@ def _rewitness_anchor(
     if len(candidates) == 1:
         boundary = candidates[0]
         lower = index.source_ends[boundary - 1] if boundary else 0
-        upper = (
-            index.source_starts[boundary] if boundary < index.token_count else len(data)
-        )
+        upper = index.source_starts[boundary] if boundary < index.token_count else len(data)
         seat = _rescue_seat(data, lower, upper, before_line_digest, after_line_digest)
         if seat is None:
             return None

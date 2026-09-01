@@ -22,9 +22,7 @@ def _declaration(source: bytes, ops: list[dict[str, object]]) -> dict[str, objec
 
 
 def _render(source: bytes, ops: list[dict[str, object]]) -> bytes:
-    result = render_classic_overlay_proposal(
-        [_declaration(source, ops)], {"src/unit.cpp": source}
-    )
+    result = render_classic_overlay_proposal([_declaration(source, ops)], {"src/unit.cpp": source})
     return result.outputs["src/unit.cpp"]
 
 
@@ -82,7 +80,21 @@ def test_token_move_is_rewitnessed_via_unique_seat_pair() -> None:
             "op": "insert",
             "anchor": {
                 "ctx": _seat_digest(
-                    ["int", "aa", ";", "int", "bb", ";", "<SEAT>", "int", "cc", ";", "int", "dd", ";"]
+                    [
+                        "int",
+                        "aa",
+                        ";",
+                        "int",
+                        "bb",
+                        ";",
+                        "<SEAT>",
+                        "int",
+                        "cc",
+                        ";",
+                        "int",
+                        "dd",
+                        ";",
+                    ]
                 ),
                 "b": 6,
                 "a": 6,
@@ -117,7 +129,6 @@ def test_token_move_is_rewitnessed_via_unique_seat_pair() -> None:
 
 def test_ambiguous_seat_pair_is_never_guessed() -> None:
     # Two identical seams: the drifted seat cannot be re-witnessed uniquely.
-    original = b"int alpha;\nint omega;\nint alpha;\nint omega;\n"
     ops: list[dict[str, object]] = [
         {
             "op": "insert",

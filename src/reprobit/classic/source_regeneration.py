@@ -201,9 +201,7 @@ def _render_or_rewitness(
         result = render_classic_overlay_proposal([declaration], {str(declaration["path"]): clean})
     except ValueError as exc:
         operations = declaration.get("ops")
-        rescued = (
-            rewitness_operations(operations, clean) if isinstance(operations, list) else None
-        )
+        rescued = rewitness_operations(operations, clean) if isinstance(operations, list) else None
         if rescued is None:
             context.reject(f"{label} cannot be re-rendered: {exc}", cause=exc)
         updated_operations, witness_changes = rescued
