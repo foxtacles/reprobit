@@ -28,7 +28,7 @@ ruff check && ruff format --check && mypy && pytest -q
 
 - `ruff check` / `ruff format --check`: lint and formatting (line length 100,
   configuration in `pyproject.toml`).
-- `mypy`: strict typing of `src/reprobit`.
+- `mypy`: strict typing of `src/reprobit` and the CI helpers in `scripts/`.
 - `pytest -q`: the full suite from `tests/` (`testpaths` in `pyproject.toml`;
   `-ra --strict-config --strict-markers` are always on).
 
@@ -130,6 +130,26 @@ Two tiers protect byte identity:
 
 `rbit verify` is always cold. Warm `rbit build` results are useful while
 iterating but never stand in for the verify tier.
+
+## Releasing
+
+There are no scheduled releases; a release is a tag.
+
+1. On `master`, set `version` in `pyproject.toml` and
+   `reprobit.__version__` to the release number (they must agree;
+   `tests/test_package.py` checks that) and land that commit through CI.
+2. Tag it `vX.Y.Z` and push the tag. The CI workflow runs every job on the
+   tag and, when all of them pass, the `release` job checks that the tag
+   names the packaged version (`scripts/check_release_tag.py`), builds the
+   sdist and wheel, re-runs the wheel check, and creates a GitHub release
+   with both files attached and generated notes. Nothing is published to
+   PyPI.
+3. Downstream projects that build with the composite Action should check
+   out ReproBit at that tag (or its commit) rather than at `master`, so a
+   ReproBit regression cannot break their verification without a deliberate
+   update. A second, non-blocking job that tracks `master` is the place to
+   see such regressions early. That pin lives in the downstream workflow,
+   not here.
 
 ## Commits and pull requests
 

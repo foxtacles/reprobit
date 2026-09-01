@@ -79,7 +79,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["reprobit"]
+files = ["src/reprobit", "scripts"]
 
 # These suppressions inventory the pre-existing typing debt in the mechanically
 # extracted classic core. Mypy still analyzes every module and rejects any new

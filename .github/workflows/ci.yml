@@ -67,43 +67,16 @@ jobs:
         run: >-
           ruby -e 'require "yaml";
           YAML.safe_load(File.read("action.yml"), aliases: true)'
-      - run: python -m ruff format --check src tests
-      - run: python -m ruff check src tests
-      - run: python -m mypy src/reprobit
+      - run: python -m ruff format --check src tests scripts
+      - run: python -m ruff check src tests scripts
+      - run: python -m mypy src/reprobit scripts
       - run: python -m build
       - name: Verify wheel contents and installed CLI
         shell: bash
         run: |
           python -m pip install --force-reinstall dist/*.whl
           rbit --version
-          python - <<'PY'
-          from importlib.metadata import distribution
-          from pathlib import Path
-          from reprobit.assets import runtime_asset_path
-          from reprobit.cmake import cmake_module_path
-
-          cmake_module = cmake_module_path() / "ReproBit.cmake"
-          runtime_proxy = runtime_asset_path("ReproBitPathProxy.sh")
-          for path in (cmake_module, runtime_proxy):
-              if not path.is_file():
-                  raise SystemExit(f"wheel omitted {path}")
-          installed = distribution("reprobit")
-          files = {str(item) for item in installed.files or ()}
-          license_root = f"reprobit-{installed.version}.dist-info/licenses"
-          required = {
-              "reprobit/py.typed",
-              f"{license_root}/LICENSE",
-              f"{license_root}/NOTICE",
-          }
-          for directory in ("cmake", "runtime", "schemas"):
-              required.update(
-                  f"share/reprobit/{path.as_posix()}"
-                  for path in Path(directory).rglob("*")
-                  if path.is_file()
-              )
-          if missing := sorted(required - files):
-              raise SystemExit(f"wheel omitted {missing}")
-          PY
+          python scripts/check_wheel.py
 
   wine-msvc42:
     name: Wine / authenticated MSVC 4.2
@@ -125,11 +98,29 @@ jobs:
           wine --version
           command -v wineserver
       - run: python -m pip install -e ".[test]"
+      # The authenticated MSVC 4.2 tree is cached between runs. The key covers
+      # every pin the provisioner authenticates against (file and tree
+      # authorities, the archaic-msvc revisions, the transport assets), so a
+      # changed pin never meets a stale tree; on a hit, `rbit toolchain
+      # provision` re-authenticates every admitted file before anything uses
+      # it. Bump the v1 prefix to discard a cache entry by hand.
+      - name: Restore the authenticated compiler
+        id: msvc42-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/archaic-msvc42
+          key: msvc42-v1-${{ runner.os }}-${{ hashFiles('src/reprobit/msvc42_provision.py', 'src/reprobit/toolchains.py', 'runtime/**') }}
       - name: Provision and authenticate the external compiler
         run: >-
           rbit toolchain provision
           --destination "$RUNNER_TEMP/archaic-msvc42"
           --no-save
+      - name: Save the authenticated compiler
+        if: steps.msvc42-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/archaic-msvc42
+          key: ${{ steps.msvc42-cache.outputs.cache-primary-key }}
       - name: Probe the Wine transport and toolchain
         run: >-
           rbit doctor
@@ -176,11 +167,29 @@ jobs:
           python -c "import platform, struct; print(f'Python={platform.python_version()} ({struct.calcsize(chr(80))*8}-bit)')" |
             Tee-Object -Append "$env:RUNNER_TEMP\native-runner.txt"
       - run: python -m pip install -e ".[test]"
+      # The authenticated MSVC 4.2 tree is cached between runs. The key covers
+      # every pin the provisioner authenticates against (file and tree
+      # authorities, the archaic-msvc revisions, the transport assets), so a
+      # changed pin never meets a stale tree; on a hit, `rbit toolchain
+      # provision` re-authenticates every admitted file before anything uses
+      # it. Bump the v1 prefix to discard a cache entry by hand.
+      - name: Restore the authenticated compiler
+        id: msvc42-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ runner.temp }}/archaic-msvc42
+          key: msvc42-v1-${{ runner.os }}-${{ hashFiles('src/reprobit/msvc42_provision.py', 'src/reprobit/toolchains.py', 'runtime/**') }}
       - name: Provision and authenticate the external compiler
         run: >-
           rbit toolchain provision
           --destination "$env:REPROBIT_MSVC_4_2_ROOT"
           --no-save
+      - name: Save the authenticated compiler
+        if: steps.msvc42-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ runner.temp }}/archaic-msvc42
+          key: ${{ steps.msvc42-cache.outputs.cache-primary-key }}
       - name: Probe native isolation and toolchain
         run: >-
           rbit doctor
@@ -217,3 +226,40 @@ jobs:
             ${{ runner.temp }}/native-logs/*.log
           if-no-files-found: warn
           retention-days: 7
+
+  release:
+    name: GitHub release
+    # A tag push runs every job above; the release is cut only when all of
+    # them pass. Nothing is published to PyPI: the repository holds no PyPI
+    # credentials, so the release carries the sdist and wheel as assets.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [test, lowest-bounds, quality, wine-msvc42, native-msvc42]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+      - run: python -m pip install build -e "."
+      - name: Check that the tag names the packaged version
+        run: python scripts/check_release_tag.py "$GITHUB_REF_NAME"
+      - run: python -m build
+      - name: Verify wheel contents and installed CLI
+        shell: bash
+        run: |
+          python -m pip install --force-reinstall dist/*.whl
+          rbit --version
+          python scripts/check_wheel.py
+      - name: Publish the release with the sdist and wheel attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          gh release create "$GITHUB_REF_NAME"
+          --verify-tag
+          --title "$GITHUB_REF_NAME"
+          --generate-notes
+          dist/*.tar.gz dist/*.whl

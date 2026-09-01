@@ -65,8 +65,10 @@ def test_wheel_declares_required_non_python_assets() -> None:
     ):
         assert (ROOT / relative).is_file()
     workflow = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    assert 'for directory in ("cmake", "runtime", "schemas")' in workflow
-    assert 'f"share/reprobit/{path.as_posix()}"' in workflow
+    assert "python scripts/check_wheel.py" in workflow
+    check = (ROOT / "scripts" / "check_wheel.py").read_text(encoding="utf-8")
+    assert 'for directory in ("cmake", "runtime", "schemas")' in check
+    assert 'f"share/reprobit/{path.relative_to(ROOT).as_posix()}"' in check
 
 
 @pytest.mark.parametrize(
