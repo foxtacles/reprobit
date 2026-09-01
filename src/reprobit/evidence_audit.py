@@ -25,7 +25,7 @@ from reprobit.execution import (
     TargetVerification,
     classic_semantic_obligation_name,
 )
-from reprobit.formats import FormatError, parse_pe32
+from reprobit.formats import FormatError, Pe32Image, parse_pe32
 from reprobit.model import (
     Artifact,
     ArtifactKind,
@@ -165,9 +165,28 @@ def _logical_path(value: str) -> str:
     return value.replace("\\", "/").casefold()
 
 
+def _candidate_pe32_image(
+    target: TargetVerification,
+    images: dict[str, Pe32Image | None],
+) -> Pe32Image | None:
+    """Read and parse one verified target image at most once per audit.
+
+    ``None`` records that the artifact could not be read or is not a PE32
+    image, so later legacy actions on the same target do not retry the read.
+    """
+
+    if target.target_id not in images:
+        try:
+            images[target.target_id] = parse_pe32(target.artifact.read_bytes())
+        except (FormatError, OSError):
+            images[target.target_id] = None
+    return images[target.target_id]
+
+
 def _legacy_quarantine_ranges(
     intervention: LegacyOracleInstallIntervention,
     target: TargetVerification | None,
+    images: dict[str, Pe32Image | None],
 ) -> tuple[tuple[ByteRange, ...], Literal["artifact-file", "function-body"]]:
     """Translate body-relative legacy ranges into final PE file offsets.
 
@@ -184,9 +203,10 @@ def _legacy_quarantine_ranges(
         return relative, "artifact-file"
     if target is None:
         return relative, "function-body"
+    image = _candidate_pe32_image(target, images)
+    if image is None:
+        return relative, "function-body"
     try:
-        data = target.artifact.read_bytes()
-        image = parse_pe32(data)
         mapped: list[ByteRange] = []
         for item in relative:
             address = intervention.oracle_address + item.offset
@@ -199,7 +219,7 @@ def _legacy_quarantine_ranges(
                 raise FormatError("legacy VA range is not file-contiguous")
             mapped.append(ByteRange(offset=start, length=item.length))
         return tuple(mapped), "artifact-file"
-    except (FormatError, OSError):
+    except FormatError:
         return relative, "function-body"
 
 
@@ -513,6 +533,7 @@ class EvidenceAuditor:
             )
 
         quarantines: list[Quarantine] = []
+        candidate_images: dict[str, Pe32Image | None] = {}
         for intervention in bundle.interventions:
             if not isinstance(intervention, LegacyOracleInstallIntervention):
                 continue
@@ -525,6 +546,7 @@ class EvidenceAuditor:
             mapped_ranges, coordinate_space = _legacy_quarantine_ranges(
                 intervention,
                 target_receipts.get(intervention.scope.target),
+                candidate_images,
             )
             coordinate_detail = (
                 "final artifact-file offsets mapped from the declared function VA"

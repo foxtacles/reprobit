@@ -8,6 +8,7 @@ from typing import cast
 import pytest
 
 import reprobit.classic_evidence as classic_evidence
+import reprobit.evidence_audit as evidence_audit
 from reprobit.classic_project import ClassicProjectError, InterventionWitness
 from reprobit.evidence_audit import EvidenceAuditor, EvidenceClaim
 from reprobit.execution import (
@@ -17,6 +18,7 @@ from reprobit.execution import (
     RuntimeEvidence,
     RuntimeEvidenceContext,
     StepExecutionReceipt,
+    TargetVerification,
 )
 from reprobit.model import (
     Artifact,
@@ -31,6 +33,7 @@ from reprobit.model import (
 )
 from reprobit.schema import LegacyOracleInstallIntervention, OracleInstallRange
 from reprobit.strict_json import canonical_json
+from reprobit.verify import ComparisonReceipt
 
 
 def _semantic_proof(*, seed: bytes, candidate: bytes, evidence: bytes) -> SemanticProof:
@@ -491,3 +494,95 @@ def test_group_order_cannot_be_disguised_as_a_composed_producer() -> None:
 
     assert "misclassified-object-transform" in codes
     assert "unattested-composed-producer" in codes
+
+
+def _target_verification(artifact: Path) -> TargetVerification:
+    return TargetVerification(
+        "program",
+        artifact,
+        ComparisonReceipt(
+            candidate_digest="0" * 64,
+            oracle_digest="0" * 64,
+            candidate_size=1,
+            oracle_size=1,
+            byte_exact=True,
+            first_difference_offset=None,
+            candidate_device=0,
+            candidate_inode=0,
+        ),
+    )
+
+
+def test_legacy_range_mapping_parses_each_target_image_once_per_audit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "program.exe"
+    artifact.write_bytes(b"not really a PE image")
+    target = _target_verification(artifact)
+    intervention = _legacy_intervention()
+    reads: list[Path] = []
+    parses: list[bytes] = []
+    original_read_bytes = Path.read_bytes
+
+    def counted_read_bytes(value: Path) -> bytes:
+        reads.append(value)
+        return original_read_bytes(value)
+
+    def fake_parse(data: bytes) -> object:
+        parses.append(data)
+        return SimpleNamespace(
+            image_base=0,
+            rva_to_file_offset=lambda rva: 0x400 + rva,
+        )
+
+    monkeypatch.setattr(Path, "read_bytes", counted_read_bytes)
+    monkeypatch.setattr(evidence_audit, "parse_pe32", fake_parse)
+
+    images: dict[str, object] = {}
+    first = evidence_audit._legacy_quarantine_ranges(
+        intervention,
+        target,
+        cast("dict[str, evidence_audit.Pe32Image | None]", images),
+    )
+    second = evidence_audit._legacy_quarantine_ranges(
+        intervention,
+        target,
+        cast("dict[str, evidence_audit.Pe32Image | None]", images),
+    )
+
+    assert first == second == ((ByteRange(offset=0x401, length=1),), "artifact-file")
+    assert reads == [artifact]
+    assert parses == [b"not really a PE image"]
+    assert set(images) == {"program"}
+
+
+def test_legacy_range_mapping_remembers_an_unmappable_target(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = tmp_path / "program.exe"
+    artifact.write_bytes(b"not a PE image")
+    target = _target_verification(artifact)
+    intervention = _legacy_intervention()
+    parses: list[bytes] = []
+
+    def refuse(data: bytes) -> object:
+        parses.append(data)
+        raise evidence_audit.FormatError("not PE32")
+
+    monkeypatch.setattr(evidence_audit, "parse_pe32", refuse)
+
+    images: dict[str, object] = {}
+    outcomes = [
+        evidence_audit._legacy_quarantine_ranges(
+            intervention,
+            target,
+            cast("dict[str, evidence_audit.Pe32Image | None]", images),
+        )
+        for _ in range(2)
+    ]
+
+    assert outcomes == [((ByteRange(offset=0, length=1),), "function-body")] * 2
+    assert parses == [b"not a PE image"]
+    assert images == {"program": None}

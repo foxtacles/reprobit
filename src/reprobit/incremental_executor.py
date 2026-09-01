@@ -6,12 +6,14 @@ import os
 import stat
 import time
 import uuid
+from collections import deque
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path
+from queue import SimpleQueue
 from threading import Lock
 from types import MappingProxyType
 from typing import Generic, Literal, TypeAlias, TypeVar
@@ -288,8 +290,30 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
         lazy = _LazyRuntime(self.runtime_factory, self.runtime_close)
         cancellation = CancellationToken()
         outcomes: dict[str, NodeOutcome] = {}
-        completed: set[str] = set()
-        pending = dict(by_id)
+        remaining = {node.id: len(set(node.depends_on)) for node in nodes}
+        dependents: dict[str, list[str]] = {node.id: [] for node in nodes}
+        for node in nodes:
+            for dependency in sorted(set(node.depends_on), key=str.casefold):
+                dependents[dependency].append(node.id)
+        # A node behind a dependency cycle could never run; report every such
+        # node with its unmet dependencies before any work or lease is taken.
+        reachable: set[str] = set()
+        frontier = [node.id for node in nodes if remaining[node.id] == 0]
+        counts = dict(remaining)
+        while frontier:
+            node_id = frontier.pop()
+            reachable.add(node_id)
+            for dependent in dependents[node_id]:
+                counts[dependent] -= 1
+                if counts[dependent] == 0:
+                    frontier.append(dependent)
+        if len(reachable) != len(nodes):
+            waiting = {
+                node.id: sorted(set(node.depends_on) - reachable)
+                for node in nodes
+                if node.id not in reachable
+            }
+            raise IncrementalExecutionError(f"incremental graph cannot make progress: {waiting}")
         progress_count = 0
         progress_total = len(nodes) + 1
         progress_lock = Lock()
@@ -326,208 +350,240 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
         runtime_closed = False
         try:
             with self.cache.lease() as lease:
-                while pending:
-                    ready = tuple(
-                        node
-                        for node in sorted(pending.values(), key=lambda item: item.id.casefold())
-                        if set(node.depends_on).issubset(completed)
-                    )
-                    if not ready:
-                        waiting = {
-                            node.id: sorted(set(node.depends_on) - completed)
-                            for node in pending.values()
-                        }
-                        raise IncrementalExecutionError(
-                            f"incremental graph cannot make progress: {waiting}"
-                        )
-                    dependency_snapshot = MappingProxyType(dict(outcomes))
 
-                    def run(
-                        node: IncrementalNode[RuntimeT],
-                        snapshot: Mapping[str, NodeOutcome] = dependency_snapshot,
-                    ) -> NodeOutcome:
-                        cancellation.raise_if_cancelled()
-                        dependencies = MappingProxyType(
-                            {
-                                dependency: snapshot[dependency]
-                                for dependency in node.depends_on
-                                if dependency not in node.order_only
-                            }
-                        )
-                        dependencies_publishable = all(
-                            outcome.publishable for outcome in dependencies.values()
-                        )
-                        prepared_inputs: PreparedNodeInputs | None = None
-                        if node.materialize_before_probe:
-                            assert node.materialize_inputs is not None
-                            prepared_inputs = node.materialize_inputs(lease, snapshot)
-                        if node.probe is not None:
-                            probe = node.probe(lease, dependencies)
-                            key = probe.key
-                            reason = probe.invalidation_reason
-                            record = probe.record
-                            if record is not None and (
-                                key is None
-                                or record.key != key
-                                or record.domain != node.domain
-                                or record.implementation != self.cache.implementation
-                            ):
-                                raise IncrementalExecutionError(
-                                    f"node {node.id!r} probe returned a record from "
-                                    "a different cache identity"
-                                )
-                            if not dependencies_publishable:
-                                record = None
-                                reason = "provisional dependency requires fresh execution"
-                        else:
-                            decision = node.key(dependencies)
-                            if isinstance(decision, NodeKeyDecision):
-                                key = decision.key
-                                reason = decision.invalidation_reason
-                            else:
-                                key = decision
-                                reason = None
-                            record = (
-                                lease.lookup(node.domain, key)
-                                if key is not None and dependencies_publishable
-                                else None
-                            )
-                            if not dependencies_publishable:
-                                reason = "provisional dependency requires fresh execution"
-                        if record is not None:
-                            assert key is not None
-                            lease.restore(
-                                record,
-                                canonical_outputs[node.id],
-                                allowed_root=self.workspace_root,
-                            )
-                            announce(
-                                "cache_hit",
-                                node,
-                                None,
-                                complete=True,
-                            )
-                            return NodeOutcome(node.id, key, record, True)
-                        if reason:
-                            with progress_lock:
-                                invalidations.append((node.id, reason))
-                        # A typed miss is useful immediately, but discovery is
-                        # not completion: the producer, publication, and
-                        # integrity checks still remain.
-                        announce(
-                            "cache_miss",
-                            node,
-                            reason,
-                            complete=False,
-                        )
-                        data_dependencies = set(node.depends_on) - set(node.order_only)
-                        if data_dependencies:
-                            assert node.materialize_inputs is not None
-                            if prepared_inputs is None:
-                                prepared_inputs = node.materialize_inputs(lease, snapshot)
-                        elif prepared_inputs is None:
-                            prepared_inputs = PreparedNodeInputs(MappingProxyType({}))
-                        runtime = lazy.get()
-                        cancellation.raise_if_cancelled()
-                        assert prepared_inputs is not None
-                        node.execute(runtime, cancellation, prepared_inputs)
-                        cancellation.raise_if_cancelled()
-                        if node.final_key is not None:
-                            final_decision = node.final_key(dependencies)
-                            final_key = (
-                                final_decision.key
-                                if isinstance(final_decision, NodeKeyDecision)
-                                else final_decision
-                            )
-                        else:
-                            final_key = key
-                        if final_key is None:
+                def run(
+                    node: IncrementalNode[RuntimeT],
+                    snapshot: Mapping[str, NodeOutcome],
+                ) -> NodeOutcome:
+                    cancellation.raise_if_cancelled()
+                    dependencies = MappingProxyType(
+                        {
+                            dependency: snapshot[dependency]
+                            for dependency in node.depends_on
+                            if dependency not in node.order_only
+                        }
+                    )
+                    dependencies_publishable = all(
+                        outcome.publishable for outcome in dependencies.values()
+                    )
+                    prepared_inputs: PreparedNodeInputs | None = None
+                    if node.materialize_before_probe:
+                        assert node.materialize_inputs is not None
+                        prepared_inputs = node.materialize_inputs(lease, snapshot)
+                    if node.probe is not None:
+                        probe = node.probe(lease, dependencies)
+                        key = probe.key
+                        reason = probe.invalidation_reason
+                        record = probe.record
+                        if record is not None and (
+                            key is None
+                            or record.key != key
+                            or record.domain != node.domain
+                            or record.implementation != self.cache.implementation
+                        ):
                             raise IncrementalExecutionError(
-                                f"node {node.id!r} did not produce a final cache key"
+                                f"node {node.id!r} probe returned a record from "
+                                "a different cache identity"
                             )
-                        for name, output in canonical_outputs[node.id].items():
-                            if output.is_symlink() or not output.is_file():
-                                raise IncrementalExecutionError(
-                                    f"node {node.id!r} omitted output {name!r}: {output}"
-                                )
-                        if node.pre_store is not None:
-                            node.pre_store(runtime, dependencies)
-                        metadata = dict(node.metadata(dependencies))
-                        publish_result = dependencies_publishable and (
-                            node.publish_result is None or node.publish_result()
-                        )
-                        staged_key = (
-                            final_key
-                            if publish_result
-                            else sha256(
-                                (
-                                    f"provisional\0{node.id}\0{final_key}\0{uuid.uuid4().hex}"
-                                ).encode()
-                            ).hexdigest()
-                        )
-                        if publish_result or node.id in data_consumers:
-                            staged = lease.stage_record(
-                                node.domain,
-                                staged_key,
-                                canonical_outputs[node.id],
-                                metadata=metadata,
-                            )
+                        if not dependencies_publishable:
+                            record = None
+                            reason = "provisional dependency requires fresh execution"
+                    else:
+                        decision = node.key(dependencies)
+                        if isinstance(decision, NodeKeyDecision):
+                            key = decision.key
+                            reason = decision.invalidation_reason
                         else:
-                            staged = lease.snapshot_record(
-                                node.domain,
-                                staged_key,
-                                canonical_outputs[node.id],
-                                metadata=metadata,
-                            )
-                        if publish_result:
-                            with staged_lock:
-                                staged_records.append((node, staged))
+                            key = decision
+                            reason = None
+                        record = (
+                            lease.lookup(node.domain, key)
+                            if key is not None and dependencies_publishable
+                            else None
+                        )
+                        if not dependencies_publishable:
+                            reason = "provisional dependency requires fresh execution"
+                    if record is not None:
+                        assert key is not None
+                        lease.restore(
+                            record,
+                            canonical_outputs[node.id],
+                            allowed_root=self.workspace_root,
+                        )
                         announce(
-                            "unit_finished",
+                            "cache_hit",
                             node,
                             None,
                             complete=True,
                         )
-                        return NodeOutcome(
-                            node.id,
-                            staged_key,
-                            staged,
-                            False,
-                            publish_result,
+                        return NodeOutcome(node.id, key, record, True)
+                    if reason:
+                        with progress_lock:
+                            invalidations.append((node.id, reason))
+                    # A typed miss is useful immediately, but discovery is
+                    # not completion: the producer, publication, and
+                    # integrity checks still remain.
+                    announce(
+                        "cache_miss",
+                        node,
+                        reason,
+                        complete=False,
+                    )
+                    data_dependencies = set(node.depends_on) - set(node.order_only)
+                    if data_dependencies:
+                        assert node.materialize_inputs is not None
+                        if prepared_inputs is None:
+                            prepared_inputs = node.materialize_inputs(lease, snapshot)
+                    elif prepared_inputs is None:
+                        prepared_inputs = PreparedNodeInputs(MappingProxyType({}))
+                    runtime = lazy.get()
+                    cancellation.raise_if_cancelled()
+                    assert prepared_inputs is not None
+                    node.execute(runtime, cancellation, prepared_inputs)
+                    cancellation.raise_if_cancelled()
+                    if node.final_key is not None:
+                        final_decision = node.final_key(dependencies)
+                        final_key = (
+                            final_decision.key
+                            if isinstance(final_decision, NodeKeyDecision)
+                            else final_decision
                         )
+                    else:
+                        final_key = key
+                    if final_key is None:
+                        raise IncrementalExecutionError(
+                            f"node {node.id!r} did not produce a final cache key"
+                        )
+                    for name, output in canonical_outputs[node.id].items():
+                        if output.is_symlink() or not output.is_file():
+                            raise IncrementalExecutionError(
+                                f"node {node.id!r} omitted output {name!r}: {output}"
+                            )
+                    if node.pre_store is not None:
+                        node.pre_store(runtime, dependencies)
+                    metadata = dict(node.metadata(dependencies))
+                    publish_result = dependencies_publishable and (
+                        node.publish_result is None or node.publish_result()
+                    )
+                    staged_key = (
+                        final_key
+                        if publish_result
+                        else sha256(
+                            (f"provisional\0{node.id}\0{final_key}\0{uuid.uuid4().hex}").encode()
+                        ).hexdigest()
+                    )
+                    if publish_result or node.id in data_consumers:
+                        staged = lease.stage_record(
+                            node.domain,
+                            staged_key,
+                            canonical_outputs[node.id],
+                            metadata=metadata,
+                        )
+                    else:
+                        staged = lease.snapshot_record(
+                            node.domain,
+                            staged_key,
+                            canonical_outputs[node.id],
+                            metadata=metadata,
+                        )
+                    if publish_result:
+                        with staged_lock:
+                            staged_records.append((node, staged))
+                    announce(
+                        "unit_finished",
+                        node,
+                        None,
+                        complete=True,
+                    )
+                    return NodeOutcome(
+                        node.id,
+                        staged_key,
+                        staged,
+                        False,
+                        publish_result,
+                    )
 
-                    with ThreadPoolExecutor(max_workers=min(self.max_workers, len(ready))) as pool:
-                        futures = {pool.submit(run, node): node for node in ready}
+                # One pool serves the whole run.  A node is submitted the
+                # moment its last dependency has an outcome and a worker is
+                # free, so a transform no longer waits for the slowest
+                # unrelated compile.  Released nodes go to the front of the
+                # ready queue: finishing a pipeline beats starting another one,
+                # which is what overlaps the transform and link phases with the
+                # compile backlog.  The outcome snapshot a node receives holds
+                # every node finished before it was submitted, which includes
+                # its whole dependency closure.  Completions arrive through one
+                # queue so waiting costs nothing per node in flight.  Up to one
+                # extra worker's worth of ready nodes is queued ahead of time so
+                # a freed thread never idles while this thread waits for its
+                # turn to submit the next one.
+                finished: SimpleQueue[tuple[IncrementalNode[RuntimeT], Future[NodeOutcome]]] = (
+                    SimpleQueue()
+                )
+                in_flight: dict[Future[NodeOutcome], IncrementalNode[RuntimeT]] = {}
+                ready: deque[IncrementalNode[RuntimeT]] = deque(
+                    sorted(
+                        (node for node in nodes if remaining[node.id] == 0),
+                        key=lambda item: item.id.casefold(),
+                    )
+                )
+                pool = ThreadPoolExecutor(max_workers=min(self.max_workers, len(nodes)))
+
+                def pump() -> None:
+                    snapshot = MappingProxyType(dict(outcomes))
+                    while ready and len(in_flight) < 2 * self.max_workers:
+                        node = ready.popleft()
+                        future = pool.submit(run, node, snapshot)
+                        in_flight[future] = node
+
+                        def completed(
+                            done: Future[NodeOutcome],
+                            *,
+                            current: IncrementalNode[RuntimeT] = node,
+                        ) -> None:
+                            finished.put((current, done))
+
+                        future.add_done_callback(completed)
+
+                try:
+                    pump()
+                    while in_flight:
+                        node, future = finished.get()
+                        del in_flight[future]
                         try:
-                            for future in as_completed(futures):
-                                node = futures[future]
-                                try:
-                                    outcome = future.result()
-                                except Exception as exc:
-                                    cancellation.cancel(f"incremental node {node.id} failed")
-                                    for sibling in futures:
-                                        sibling.cancel()
-                                    raise IncrementalExecutionError(
-                                        f"incremental node {node.id!r} failed: {exc}"
-                                    ) from exc
-                                outcomes[node.id] = outcome
-                                if node.phase is IncrementalPhase.TRANSFORM:
-                                    if outcome.cache_hit:
-                                        transform_hits += 1
-                                    else:
-                                        transform_misses += 1
-                                elif outcome.cache_hit:
-                                    producer_hits += 1
-                                else:
-                                    producer_misses += 1
-                        except BaseException:
-                            cancellation.cancel("incremental sibling failed")
-                            for future in futures:
-                                future.cancel()
-                            raise
-                    for node in ready:
-                        completed.add(node.id)
-                        del pending[node.id]
+                            outcome = future.result()
+                        except Exception as exc:
+                            cancellation.cancel(f"incremental node {node.id} failed")
+                            for sibling in in_flight:
+                                sibling.cancel()
+                            raise IncrementalExecutionError(
+                                f"incremental node {node.id!r} failed: {exc}"
+                            ) from exc
+                        outcomes[node.id] = outcome
+                        if node.phase is IncrementalPhase.TRANSFORM:
+                            if outcome.cache_hit:
+                                transform_hits += 1
+                            else:
+                                transform_misses += 1
+                        elif outcome.cache_hit:
+                            producer_hits += 1
+                        else:
+                            producer_misses += 1
+                        released: list[IncrementalNode[RuntimeT]] = []
+                        for dependent in dependents[node.id]:
+                            remaining[dependent] -= 1
+                            if remaining[dependent] == 0:
+                                released.append(by_id[dependent])
+                        ready.extendleft(
+                            sorted(released, key=lambda item: item.id.casefold(), reverse=True)
+                        )
+                        pump()
+                except BaseException:
+                    cancellation.cancel("incremental sibling failed")
+                    for future in in_flight:
+                        future.cancel()
+                    raise
+                finally:
+                    pool.shutdown(wait=True)
                 # Blobs are immutable and may safely converge during
                 # execution, but record names remain unpublished until every
                 # producer-readable namespace closes cleanly.  A failed close
