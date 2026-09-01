@@ -80,38 +80,3 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 python_version = "3.11"
 strict = true
 files = ["src/reprobit", "scripts"]
-
-# These suppressions inventory the pre-existing typing debt in the mechanically
-# extracted classic core. Mypy still analyzes every module and rejects any new
-# diagnostic category, unlike a file-wide ignore-errors pragma.
-[[tool.mypy.overrides]]
-module = "reprobit.classic.register_candidates"
-disable_error_code = ["arg-type", "assignment", "index", "return-value"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.relational"
-disable_error_code = [
-  "arg-type", "assignment", "attr-defined", "call-overload", "operator", "return-value",
-  "type-var", "var-annotated",
-]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.rewriting"
-disable_error_code = ["arg-type", "assignment", "call-overload", "index", "var-annotated"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.scheduling"
-disable_error_code = [
-  "arg-type", "assignment", "call-overload", "misc", "no-untyped-call", "no-untyped-def",
-]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.scheduling_apply"
-disable_error_code = [
-  "arg-type", "assignment", "index", "misc", "no-untyped-call", "no-untyped-def", "return-value",
-  "union-attr",
-]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.scheduling_web_recolour"
-disable_error_code = ["arg-type"]

@@ -417,6 +417,20 @@ class ReEncodingPrimitiveTest(unittest.TestCase):
         _image, proof = apply_fixture()
         self.assertNotIn(6, dict(proof["relocation_reseat"]))
 
+    def test_each_region_is_re_encoded_under_its_own_mapping(self):
+        # A second region after the first swaps ECX and EDX, so the load at
+        # 22 becomes `mov edx, [_Nil]` while the EDI/EBP region keeps its own
+        # sigma.  Re-encoding every instruction with the last region's mapping
+        # would leave the first region untouched and fail the image check.
+        second = {"start": 22, "end": 28, "mapping": {"ecx": "edx", "edx": "ecx"}}
+        image, proof = apply_fixture(regions=(REGION, second))
+        self.assertEqual(image, IMAGE[:24] + bytes.fromhex("8b15") + IMAGE[26:])
+        self.assertEqual(proof["region_instruction_counts"], [4, 1])
+        self.assertEqual(proof["rewritten_field_offsets"], [15, 17, 19, 21, 23])
+        self.assertEqual(proof["growth"], [[16, 16, 2, 3], [18, 19, 2, 3]])
+        self.assertEqual(proof["relocation_reseat"], [[24, 26]])
+        self.assertEqual(proof["branch_repairs"], [12])
+
     def test_refuses_ebp_without_the_frame_proof(self):
         with self.assertRaises(ByteIdentityError) as caught:
             apply_fixture(frame_pointer_free=False)

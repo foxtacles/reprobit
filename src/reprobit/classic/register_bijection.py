@@ -214,12 +214,12 @@ def apply_register_bijection(
     output = bytes(image)
     require(len(image) == len(body), f"{context}: the image changed the body length")
     image_instructions = decode_ia32_bijection_body(
-        output, f"{context} output", relocations, code_length
+        output, f"{context} image", relocations, code_length
     )
     require(
         [(item["offset"], item["length"]) for item in image_instructions]
         == [(item["offset"], item["length"]) for item in instructions],
-        f"{context}: the output changed an instruction boundary",
+        f"{context}: the image changed an instruction boundary",
     )
     for left, right in zip(image_instructions, instructions, strict=True):
         form = _bijection_form_for(right["opcode"])
@@ -229,7 +229,7 @@ def apply_register_bijection(
             left["opcode"] & mask == right["opcode"] & mask
             and left["flow"] == right["flow"]
             and (left["target"] == right["target"]),
-            f"{context}: the output changed an opcode or a branch",
+            f"{context}: the image changed an opcode or a branch",
         )
     for left, right in zip(image_instructions, instructions, strict=True):
         expected_reads = frozenset(
@@ -242,12 +242,12 @@ def apply_register_bijection(
         )
         require(
             left["reads"] == expected_reads and left["writes"] == expected_writes,
-            f"{context}: the output's operand set at {right['offset']} is not the bijection's output",
+            f"{context}: the image's operand set at {right['offset']} is not the bijection's image",
         )
     changed = sorted({index for index in range(len(body)) if body[index] != output[index]})
     require(
         changed == sorted(set(rewritten)),
-        f"{context}: the output changed a byte the bijection did not name",
+        f"{context}: the image changed a byte the bijection did not name",
     )
     return (
         output,
@@ -321,6 +321,8 @@ def apply_codeview_register_bijection(
             try:
                 name = _codeview_register_name(image, field_at, context)
             except ByteIdentityError:
+                # The record names a non-general register, one outside the CodeView
+                # x86 table; the mapping cannot touch it, and the next record is tried.
                 continue
             if name not in mapping:
                 continue
@@ -402,7 +404,7 @@ def apply_codeview_register_bijection(
     require(
         [
             (item["offset"], item["size"], item["type"], item["name"])
-            for item in parse_codeview_symbol_stream(output, f"{context} output")
+            for item in parse_codeview_symbol_stream(output, f"{context} image")
         ]
         == [(item["offset"], item["size"], item["type"], item["name"]) for item in records],
         f"{context}: the mapped stream is not the same record list",

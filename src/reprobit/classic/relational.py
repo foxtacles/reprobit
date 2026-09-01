@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import struct
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, cast
 
 from reprobit.binary import require
 from reprobit.coff_format import (
@@ -54,6 +55,8 @@ RELATIONAL_FORM_RECIPE = CandidateRecipe(
     admissible_closures=(tuple(RELATIONAL_FORM_FPO_CLOSURE), tuple(RELATIONAL_FORM_EH_CLOSURE)),
 )
 IA32_ARITHMETIC_FLAGS = frozenset({"cf", "pf", "af", "zf", "sf", "of"})
+# (flags read, flags written) by one instruction form.
+_FlagEffect = tuple[frozenset[str], frozenset[str]]
 IA32_RELATIONAL_PRESERVED_FLAGS = frozenset({"zf"})
 IA32_RELATIONAL_CHANGED_FLAGS = IA32_ARITHMETIC_FLAGS - IA32_RELATIONAL_PRESERVED_FLAGS
 IA32_CONDITION_FLAGS = {
@@ -119,7 +122,7 @@ def _ia32_relational_flag_table() -> dict[int, Any]:
     Everything absent falls back to the fail-closed default (reads every
     flag, writes none), which can only cause a refusal.
     """
-    quiet = (frozenset(), frozenset())
+    quiet: _FlagEffect = (frozenset(), frozenset())
     table = {}
     for opcode in (
         136,
@@ -215,7 +218,7 @@ def _ia32_relational_group_table() -> dict[int, Any]:
         digit: (frozenset({"cf"}) if digit in (2, 3) else frozenset(), IA32_ARITHMETIC_FLAGS)
         for digit in range(8)
     }
-    group3 = {
+    group3: dict[int, _FlagEffect] = {
         0: (frozenset(), IA32_ARITHMETIC_FLAGS),
         1: (frozenset(), IA32_ARITHMETIC_FLAGS),
         2: (frozenset(), frozenset()),
@@ -225,7 +228,7 @@ def _ia32_relational_group_table() -> dict[int, Any]:
         6: (frozenset(), frozenset()),
         7: (frozenset(), frozenset()),
     }
-    group5 = {
+    group5: dict[int, _FlagEffect] = {
         digit: (frozenset(), IA32_ARITHMETIC_FLAGS - {"cf"} if digit in (0, 1) else frozenset())
         for digit in range(8)
     }
@@ -233,7 +236,7 @@ def _ia32_relational_group_table() -> dict[int, Any]:
         digit: (frozenset({"cf"}) if digit in (2, 3) else frozenset(), frozenset({"cf", "of"}))
         for digit in range(8)
     }
-    shift_var = {
+    shift_var: dict[int, _FlagEffect] = {
         digit: (frozenset({"cf"}) if digit in (2, 3) else frozenset(), frozenset())
         for digit in range(8)
     }
@@ -257,7 +260,9 @@ def _ia32_relational_group_table() -> dict[int, Any]:
 IA32_RELATIONAL_GROUP_FLAG_EFFECTS = _ia32_relational_group_table()
 
 
-def relational_form_delegate(expected_closure: object, expected_code_renames: object) -> str:
+def relational_form_delegate(
+    expected_closure: Iterable[object], expected_code_renames: object
+) -> str:
     """Name the installation delegate from the PINS alone.
 
     Identical in spirit to `register_bijection_delegate`, minus its relocation
@@ -283,7 +288,7 @@ def ia32_relational_flow_walk(
     every flag and writes none, so an unmodelled instruction can only make a
     flag look MORE live.
     """
-    require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
+    require(isinstance(body, (bytes, bytearray)) and bool(body), f"{context}: body is empty")
     body = bytes(body)
     relocations = relocations or {}
     limit = len(body) if code_length is None else code_length
@@ -292,7 +297,7 @@ def ia32_relational_flow_walk(
         f"{context}: code length is out of range",
     )
     code = body[:limit]
-    items = []
+    items: list[dict[str, Any]] = []
     offset = 0
     while offset < len(code):
         length = supported_ia32_instruction_length(code[offset:], f"{context} at {offset}")
@@ -373,7 +378,7 @@ def ia32_relational_flow_walk(
                 flow = "call"
             elif extension == 4:
                 require(
-                    external_entries,
+                    bool(external_entries),
                     f"{context}: a computed jump at {offset} makes the control-flow graph unknowable",
                 )
                 flow = "computed"
@@ -386,7 +391,7 @@ def ia32_relational_flow_walk(
             flow, target, condition = ("exit", None, None)
         if flow == "jcc" and condition is not None:
             reads = IA32_CONDITION_FLAGS[condition]
-            writes = frozenset()
+            writes: frozenset[str] = frozenset()
         elif flow in ("jcc", "jmp", "call", "ret", "exit"):
             reads = frozenset({"zf"}) if opcode in (224, 225) else frozenset()
             writes = frozenset()
@@ -485,19 +490,19 @@ def apply_relational_form(
     provenance, retail equality and debug fidelity around it.
     """
     require_payload_free_declaration(sites, f"{context} relational-form declaration")
-    require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
+    require(isinstance(body, (bytes, bytearray)) and bool(body), f"{context}: body is empty")
     body = bytes(body)
-    require(isinstance(sites, list) and sites, f"{context}: no site is declared")
+    require(isinstance(sites, list) and bool(sites), f"{context}: no site is declared")
     items, successors, entries = ia32_relational_flow_walk(
         body, relocations, context, code_length, external_entries
     )
     index_of = {item["offset"]: index for index, item in enumerate(items)}
-    predecessors = [[] for _ in items]
+    predecessors: list[list[int]] = [[] for _ in items]
     for index, edges in enumerate(successors):
         for edge in edges:
             predecessors[edge].append(index)
     live = ia32_relational_flag_liveness(items, successors, context)
-    image = bytearray(body)
+    image_buffer = bytearray(body)
     rewritten = []
     proved = []
     for ordinal, site in enumerate(sites):
@@ -565,18 +570,22 @@ def apply_relational_form(
         )
         if site.get("reencode"):
             modrm_at = compare_byte + 1
-            modrm = image[modrm_at]
+            modrm = image_buffer[modrm_at]
             require(modrm >> 6 == 3, f"{site_context}: reencode requires a register-direct compare")
             require(
                 modrm_at not in relocation_offsets,
                 f"{site_context}: a rewritten byte overlaps a relocation",
             )
-            image[modrm_at] = modrm & 192 | (modrm & 7) << 3 | modrm >> 3 & 7
-            image[branch_byte] = image[branch_byte] & 240 | IA32_CONDITION_CODES[image_name]
+            image_buffer[modrm_at] = modrm & 192 | (modrm & 7) << 3 | modrm >> 3 & 7
+            image_buffer[branch_byte] = (
+                image_buffer[branch_byte] & 240 | IA32_CONDITION_CODES[image_name]
+            )
             rewritten.extend([modrm_at, branch_byte])
         else:
-            image[compare_byte] = IA32_RELATIONAL_COMPARE_PAIRS[compare["opcode"]]
-            image[branch_byte] = image[branch_byte] & 240 | IA32_CONDITION_CODES[image_name]
+            image_buffer[compare_byte] = IA32_RELATIONAL_COMPARE_PAIRS[compare["opcode"]]
+            image_buffer[branch_byte] = (
+                image_buffer[branch_byte] & 240 | IA32_CONDITION_CODES[image_name]
+            )
             rewritten.extend([compare_byte, branch_byte])
         image_compare_opcode = (
             compare["opcode"]
@@ -601,7 +610,7 @@ def apply_relational_form(
             not offending,
             f"{context}: the external entry at {items[entry]['offset']} has {offending} live, and the reversal changes it",
         )
-    image = bytes(image)
+    image = bytes(image_buffer)
     require(image != body, f"{context}: the image does not move the body")
     rewritten = sorted(set(rewritten))
     require(len(rewritten) == 2 * len(sites), f"{context}: two sites rewrite the same byte")
@@ -702,6 +711,7 @@ def relational_form_external_entries(
 def validate_relational_form(value: object, context: str, body_length: int) -> dict[str, Any]:
     """Validate one relational-form certificate declaration."""
     require(isinstance(value, dict), f"{context} must be an object")
+    value = cast(dict[str, Any], value)
     exact_audit_keys(
         value,
         {
@@ -720,6 +730,7 @@ def validate_relational_form(value: object, context: str, body_length: int) -> d
     require(value.get("kind") == RELATIONAL_FORM_KIND, f"{context}.kind differs")
     sites = value.get("sites")
     require(isinstance(sites, list) and 1 <= len(sites) <= 64, f"{context}.sites is invalid")
+    sites = cast(list[Any], sites)
     normalized_sites = []
     previous = -1
     for index, site in enumerate(sites):
@@ -770,6 +781,7 @@ def validate_relational_form(value: object, context: str, body_length: int) -> d
         and all(type(offset) is int and 0 <= offset < body_length for offset in offsets),
         f"{context}.expected_rewritten_offsets is invalid",
     )
+    offsets = cast(list[int], offsets)
     external = value.get("expected_external_entries")
     require(
         isinstance(external, list)
@@ -777,6 +789,7 @@ def validate_relational_form(value: object, context: str, body_length: int) -> d
         and all(type(item) is int and 0 < item < body_length for item in external),
         f"{context}.expected_external_entries is invalid",
     )
+    external = cast(list[int], external)
     rationale = value.get("authenticity_rationale")
     require(
         isinstance(rationale, str) and len(rationale) >= 40,
@@ -878,9 +891,9 @@ def produce_relational_form_candidate(
     )
     require_pinned_length(function, image, "relational-form")
     semantic_detail = candidate_relocation_semantics(installed_rows, function, "relational-form")
-    derived = bytearray(donor_bytes)
-    derived[dp["raw_offset"] : dp["raw_offset"] + dp["raw_size"]] = image
-    derived = bytes(derived)
+    derived_buffer = bytearray(donor_bytes)
+    derived_buffer[dp["raw_offset"] : dp["raw_offset"] + dp["raw_size"]] = image
+    derived = bytes(derived_buffer)
     effective = equal_body_effective(function, mangled, delegate, declared_renames=True)
     composed, detail, checked, cp = install_equal_body(
         seed_bytes, derived, effective, mangled, image, "relational-form"

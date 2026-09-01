@@ -945,7 +945,7 @@ def apply_simulated_region_rewrite(
     changed = {offs for offs in range(len(body)) if body[offs] != output[offs]}
     declared = {offs for region in proved for offs in region["rewritten_offsets"]}
     require(
-        changed <= declared, f"{context}: the output changed a byte outside the declared regions"
+        changed <= declared, f"{context}: the image changed a byte outside the declared regions"
     )
     return (
         output,

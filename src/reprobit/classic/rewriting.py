@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError, require
 from reprobit.coff_format import CoffObject, coff_body, detailed_relocations
@@ -77,7 +78,7 @@ COMPOSED_REWRITING_RECIPE = CandidateRecipe(
 )
 
 
-def composed_rewriting_delegate(expected_closure: object) -> str:
+def composed_rewriting_delegate(expected_closure: Iterable[object]) -> str:
     """Name the installation delegate from the closure pin alone.
 
     The installed object is the SEED with its own body replaced, so there is
@@ -222,7 +223,7 @@ def produce_composed_rewriting_candidate(
                 f"composed-rewriting simulated rewrite {index} rewrote a different byte set from its declaration",
             )
         region_rewrite_detail = region_proof["regions"]
-    form_detail = []
+    form_detail: list[Any] = []
     if spec.get("commutative_operand_forms"):
         image, form_proof = apply_commutative_operand_form(
             image,
@@ -234,9 +235,10 @@ def produce_composed_rewriting_candidate(
             frozenset(external_entries),
             internal_targets,
         )
+        form_sites = cast(list[dict[str, Any]], form_proof["sites"])
         # The primitive returns one item per declaration; that count is not pinned here.
         for index, (item, site) in enumerate(
-            zip(spec["commutative_operand_forms"], form_proof["sites"], strict=False)
+            zip(spec["commutative_operand_forms"], form_sites, strict=False)
         ):
             require(
                 site["expected_rewritten_offsets"] == item["expected_rewritten_offsets"]
@@ -244,7 +246,7 @@ def produce_composed_rewriting_candidate(
                 and (site["operation"] == item["operation"]),
                 f"composed-rewriting commutative form {index} rewrote a different site from its declaration",
             )
-        form_detail = form_proof["sites"]
+        form_detail = form_sites
     exchange_site_detail = []
     if spec.get("esp_argument_exchanges"):
         image, exchange_site_proof = apply_esp_argument_exchange(
@@ -395,11 +397,11 @@ def produce_composed_rewriting_candidate(
         records = []
         for position in range(sp["relocation_count"]):
             entry_at = table_at + position * 10
-            record = bytearray(lined_seed_bytes[entry_at : entry_at + 10])
-            old_at = int.from_bytes(record[0:4], "little")
+            record_buffer = bytearray(lined_seed_bytes[entry_at : entry_at + 10])
+            old_at = int.from_bytes(record_buffer[0:4], "little")
             if old_at in x87_relocation_moves:
-                record[0:4] = x87_relocation_moves[old_at].to_bytes(4, "little")
-            records.append(bytes(record))
+                record_buffer[0:4] = x87_relocation_moves[old_at].to_bytes(4, "little")
+            records.append(bytes(record_buffer))
         records.sort(key=lambda record: int.from_bytes(record[0:4], "little"))
         lined_seed_bytes[table_at : table_at + sp["relocation_count"] * 10] = b"".join(records)
         installed_rows = sorted(
@@ -453,7 +455,7 @@ def produce_composed_rewriting_candidate(
         sha256_bytes(debug_stream) == spec["expected_seed_debug_s_sha256"],
         "composed-rewriting debug$S differs from its pin",
     )
-    claimed = {}
+    claimed: dict[int, int] = {}
     for index, item in enumerate(spec.get("register_bijections") or []):
         for record in parse_codeview_symbol_stream(debug_stream, "composed-rewriting debug$S"):
             if record["type"] != CODEVIEW_REGISTER_RECORD_TYPE:
@@ -462,6 +464,8 @@ def produce_composed_rewriting_candidate(
             try:
                 name = _codeview_register_name(debug_stream, field_at, "composed-rewriting debug$S")
             except ByteIdentityError:
+                # The record names a non-general register, one outside the CodeView
+                # x86 table; no bijection can claim it, and the next record is tried.
                 continue
             if name not in item["mapping"]:
                 continue
@@ -515,11 +519,11 @@ def produce_composed_rewriting_candidate(
         sha256_bytes(debug_image) == spec["expected_image_debug_s_sha256"],
         "composed-rewriting mapped debug$S differs from its pin",
     )
-    composed = bytearray(composed)
-    composed[debug_child["raw_offset"] : debug_child["raw_offset"] + debug_child["raw_size"]] = (
-        debug_image
-    )
-    composed = bytes(composed)
+    composed_buffer = bytearray(composed)
+    composed_buffer[
+        debug_child["raw_offset"] : debug_child["raw_offset"] + debug_child["raw_size"]
+    ] = debug_image
+    composed = bytes(composed_buffer)
     final = CoffObject(composed)
     fp = final.function_section(mangled)
     require(coff_body(final, fp) == image, "composed-rewriting output changed the installed body")
@@ -763,7 +767,7 @@ def produce_donor_rewriting_candidate(
                 f"donor-rewriting fp-exchange {index} rewrote a different byte set from its declaration",
             )
         exchange_detail = exchange_proof["exchanges"]
-    form_detail = []
+    form_detail: list[Any] = []
     if spec.get("commutative_operand_forms"):
         image, form_proof = apply_commutative_operand_form(
             image,
@@ -775,9 +779,10 @@ def produce_donor_rewriting_candidate(
             frozenset(external_entries),
             internal_targets,
         )
+        form_sites = cast(list[dict[str, Any]], form_proof["sites"])
         # The primitive returns one item per declaration; that count is not pinned here.
         for index, (item, site) in enumerate(
-            zip(spec["commutative_operand_forms"], form_proof["sites"], strict=False)
+            zip(spec["commutative_operand_forms"], form_sites, strict=False)
         ):
             require(
                 site["expected_rewritten_offsets"] == item["expected_rewritten_offsets"]
@@ -785,7 +790,7 @@ def produce_donor_rewriting_candidate(
                 and (site["operation"] == item["operation"]),
                 f"donor-rewriting commutative form {index} rewrote a different site from its declaration",
             )
-        form_detail = form_proof["sites"]
+        form_detail = form_sites
     rewrite_detail = []
     relocation_moves = {}
     if spec.get("simulated_region_rewrites"):

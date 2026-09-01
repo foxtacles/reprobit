@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError, require
 from reprobit.coff_format import (
@@ -119,7 +119,7 @@ def produce_register_bijection_candidate(
         require(
             len(seed_rows) == len(donor_rows), "register-bijection donor relocation count differs"
         )
-        code_renames = []
+        code_renames: list[tuple[int, str]] = []
         for left, right in zip(seed_rows, donor_rows, strict=True):
             if left["target"] == right["target"]:
                 continue
@@ -133,7 +133,7 @@ def produce_register_bijection_candidate(
                 ),
                 "register-bijection donor renames a non-local relocation",
             )
-            code_renames.append((right["offset"], kind))
+            code_renames.append((right["offset"], cast(str, kind)))
     else:
         code_renames = require_instruction_mosaic_semantic_relocations(
             seed, sp, donor, dp, "register-bijection code"
@@ -221,9 +221,9 @@ def produce_register_bijection_candidate(
     require(image != donor_body, "register-bijection image does not move the donor body")
     require_pinned_length(function, image, "register-bijection")
     semantic_detail = candidate_relocation_semantics(installed_rows, function, "register-bijection")
-    derived = bytearray(donor_bytes)
-    derived[dp["raw_offset"] : dp["raw_offset"] + dp["raw_size"]] = image
-    derived = bytes(derived)
+    derived_buffer = bytearray(donor_bytes)
+    derived_buffer[dp["raw_offset"] : dp["raw_offset"] + dp["raw_size"]] = image
+    derived = bytes(derived_buffer)
     effective = equal_body_effective(function, mangled, delegate, declared_renames=True)
     composed, detail, checked, cp = install_equal_body(
         seed_bytes, derived, effective, mangled, image, "register-bijection"
@@ -256,11 +256,11 @@ def produce_register_bijection_candidate(
         sha256_bytes(debug_image) == spec["expected_image_debug_s_sha256"],
         "register-bijection mapped debug$S differs from its pin",
     )
-    composed = bytearray(composed)
-    composed[debug_child["raw_offset"] : debug_child["raw_offset"] + debug_child["raw_size"]] = (
-        debug_image
-    )
-    composed = bytes(composed)
+    composed_buffer = bytearray(composed)
+    composed_buffer[
+        debug_child["raw_offset"] : debug_child["raw_offset"] + debug_child["raw_size"]
+    ] = debug_image
+    composed = bytes(composed_buffer)
     final = CoffObject(composed)
     fp = final.function_section(mangled)
     require(coff_body(final, fp) == image, "register-bijection output changed the installed body")
@@ -301,7 +301,7 @@ def _reencoded_donor_object(
     proof: dict[str, Any],
     context: str,
     fpo_required: bool = True,
-) -> bytes:
+) -> tuple[bytes, dict[str, Any]]:
     """Re-seat one COMDAT's dependent COFF records around a resized body.
 
     Obligations 14 to 16.  The donor is an authentic compiler object; this

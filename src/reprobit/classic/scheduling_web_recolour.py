@@ -237,7 +237,7 @@ def apply_web_recolour(
             )
             buffer[byte_index] = (buffer[byte_index] & ~(7 << shift) | target_number << shift) & 255
             rewritten.append(byte_index)
-        require(rewritten, f"{web_context}: the recolour rewrites nothing")
+        require(bool(rewritten), f"{web_context}: the recolour rewrites nothing")
         candidate = bytes(buffer)
         require(
             len(candidate) == len(image), f"{web_context}: the recolour changed the body length"

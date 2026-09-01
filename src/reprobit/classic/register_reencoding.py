@@ -676,10 +676,10 @@ def apply_register_bijection_reencoding(
             continue
         numbers = {
             _IA32_REGISTER_NUMBERS[source]: _IA32_REGISTER_NUMBERS[destination]
-            for source, destination in region["mapping"].items()
+            for source, destination in owning_region["mapping"].items()
         }
         raw, kind, touched = _reencoded_instruction(
-            body, item, region["mapping"], numbers, relocation_offsets, context
+            body, item, owning_region["mapping"], numbers, relocation_offsets, context
         )
         rewritten_fields.extend(touched)
         require(

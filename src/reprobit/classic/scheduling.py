@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from typing import Any
 
 from reprobit.binary import require
@@ -62,7 +63,9 @@ INSTRUCTION_SCHEDULE_RECIPE = CandidateRecipe(
 
 
 def instruction_schedule_delegate(
-    expected_closure: object, expected_code_renames: object, relocation_reseat: bool = False
+    expected_closure: Iterable[object],
+    expected_code_renames: object,
+    relocation_reseat: bool = False,
 ) -> str:
     """Name the installation delegate from the PINS alone.
 
@@ -131,7 +134,9 @@ def produce_web_recolour_candidate(
         "web-recolour donor external entry set differs from the seed",
     )
 
-    def _schedule(windows, phase):
+    image = seed_body
+
+    def _schedule(windows: list[dict[str, Any]], phase: str) -> list[Any]:
         nonlocal image
         if not windows:
             return []
@@ -147,9 +152,9 @@ def produce_web_recolour_candidate(
         require(
             not schedule_proof["relocation_reseat"], "web-recolour refuses to move a relocation"
         )
-        return schedule_proof["windows"]
+        windows_detail: list[Any] = schedule_proof["windows"]
+        return windows_detail
 
-    image = seed_body
     schedule_detail = _schedule(spec.get("windows") or [], "schedule")
     declared_fpo = spec.get("expected_fpo_record")
     names_ebp = any(
@@ -406,15 +411,15 @@ def produce_instruction_schedule_candidate(
     )
     require_pinned_length(function, image, "instruction-schedule")
     semantic_detail = candidate_relocation_semantics(image_rows, function, "instruction-schedule")
-    derived = bytearray(donor_bytes)
-    derived[dp["raw_offset"] : dp["raw_offset"] + dp["raw_size"]] = image
+    derived_buffer = bytearray(donor_bytes)
+    derived_buffer[dp["raw_offset"] : dp["raw_offset"] + dp["raw_size"]] = image
     if moved:
         for ordinal, row in enumerate(donor_rows):
             if row["offset"] not in moved:
                 continue
             record_at = dp["relocation_offset"] + ordinal * 10
-            derived[record_at : record_at + 4] = moved[row["offset"]].to_bytes(4, "little")
-    derived = bytes(derived)
+            derived_buffer[record_at : record_at + 4] = moved[row["offset"]].to_bytes(4, "little")
+    derived = bytes(derived_buffer)
     effective = equal_body_effective(function, mangled, delegate, declared_renames=True)
     composed, detail, checked, cp = install_equal_body(
         seed_bytes, derived, effective, mangled, image, "instruction-schedule"

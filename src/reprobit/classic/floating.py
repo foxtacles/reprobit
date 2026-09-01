@@ -406,19 +406,17 @@ def apply_fp_sum_reassociation(
             }
         )
     output = bytes(image)
-    require(output != body, f"{context}: the output does not move the body")
+    require(output != body, f"{context}: the image does not move the body")
     changed = {offset for offset in range(len(body)) if body[offset] != output[offset]}
     declared = {offset for chain in proved for offset in chain["rewritten_offsets"]}
-    require(
-        changed <= declared, f"{context}: the output changed a byte outside the declared chains"
-    )
+    require(changed <= declared, f"{context}: the image changed a byte outside the declared chains")
     image_items, _image_successors, image_entries = ia32_relational_flow_walk(
-        output, relocations, f"{context} output", code_length, external_entries
+        output, relocations, f"{context} image", code_length, external_entries
     )
     require(
         {item["target"] for item in image_items if item.get("target") is not None} == branch_targets
         and image_entries == entries,
-        f"{context}: the output changed a branch target or an entry",
+        f"{context}: the image changed a branch target or an entry",
     )
     return (
         output,

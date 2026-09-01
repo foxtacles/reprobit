@@ -549,14 +549,13 @@ def _produce_instruction_mosaic_candidate_core(
         "instruction-mosaic donor body differs from its pin",
     )
     if self_permutation:
-        permutation_record = cast(dict[str, Any], permutation)
         permutation = validate_instruction_self_permutation(
             function["instruction_self_permutation"], "instruction self-permutation", donor_body
         )
         require(
             all(
-                item["end"] <= permutation_record["target_start"]
-                or item["start"] >= permutation_record["target_end"]
+                item["end"] <= permutation["target_start"]
+                or item["start"] >= permutation["target_end"]
                 for item in ranges
             ),
             "instruction mosaic same-offset ranges overlap the self-permutation window",

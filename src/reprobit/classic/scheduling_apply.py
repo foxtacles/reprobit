@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterator
+from typing import Any, cast
 
 from reprobit.binary import require
 from reprobit.ia32_decode import supported_ia32_instruction_length
@@ -70,7 +71,7 @@ def ia32_schedule_body_walk(
     internal_targets: frozenset[int] | None = None,
 ) -> tuple[list[tuple[int, int]], set[Any]]:
     """Boundaries and interior branch targets of a whole COMDAT body."""
-    require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
+    require(isinstance(body, (bytes, bytearray)) and bool(body), f"{context}: body is empty")
     body = bytes(body)
     relocations = relocations or {}
     limit = len(body) if code_length is None else code_length
@@ -140,6 +141,7 @@ def ia32_schedule_body_walk(
             internal_targets is not None,
             f"{context}: a computed jump at {computed[0]} makes the window's entry set unknowable without the relocated in-body target set",
         )
+        internal_targets = cast(frozenset[int], internal_targets)
         stray = sorted(
             target for target in internal_targets if target < limit and target not in starts
         )
@@ -204,8 +206,8 @@ def apply_instruction_schedule(
     instructions = [{"offset": start, "length": length} for start, length in spans]
     boundaries = {start for start, _ in spans}
     boundaries.add(limit)
-    frontier_instructions = None
-    frontier_successors = None
+    frontier_instructions: list[dict[str, Any]] | None = None
+    frontier_successors: list[list[int]] | None = None
     if IA32_SCHEDULE_PRIVATE_STACK_OBJECT_THEOREM in frontier_markers:
         frontier_instructions = decode_ia32_bijection_body(
             body, f"{context} private-stack/object body", relocations, code_length
@@ -216,7 +218,7 @@ def apply_instruction_schedule(
             internal_targets,
             external_entries,
         )
-    image = bytearray(body)
+    image_buffer = bytearray(body)
     detail = []
     previous_end = 0
     for index, window in enumerate(windows):
@@ -231,7 +233,7 @@ def apply_instruction_schedule(
         )
         inside = [item for item in instructions if start <= item["offset"] < end]
         require(
-            inside and inside[-1]["offset"] + inside[-1]["length"] == end,
+            bool(inside) and inside[-1]["offset"] + inside[-1]["length"] == end,
             f"{window_context}: the window does not end on an instruction boundary",
         )
         require(len(inside) >= 2, f"{window_context}: a window needs at least two instructions")
@@ -266,12 +268,14 @@ def apply_instruction_schedule(
             )
         else:
             require(
-                overlapping,
+                bool(overlapping),
                 f"{window_context}: a relocation reseat is declared but no relocation operand lies inside the window",
             )
             require(
-                relocations, f"{window_context}: a relocation reseat needs the relocation records"
+                bool(relocations),
+                f"{window_context}: a relocation reseat needs the relocation records",
             )
+            reseat_records = cast(dict[int, Any], relocations)
             lengths_in = [item["length"] for item in inside]
             starts_in = [item["offset"] for item in inside]
             seated = {}
@@ -279,8 +283,8 @@ def apply_instruction_schedule(
             for position in window["target_order"]:
                 seated[position] = cursor
                 cursor += lengths_in[position]
-            for offset in sorted(relocations):
-                record = relocations[offset]
+            for offset in sorted(reseat_records):
+                record = reseat_records[offset]
                 width = record["width"]
                 if offset + width <= start or offset >= end:
                     require(
@@ -305,6 +309,7 @@ def apply_instruction_schedule(
                     position is not None,
                     f"{window_context}: the relocation at {offset} straddles an instruction boundary",
                 )
+                position = cast(int, position)
                 window_reseat.append([offset, seated[position] + (offset - starts_in[position])])
             require(
                 window_reseat == declared_reseat,
@@ -377,8 +382,8 @@ def apply_instruction_schedule(
                 stack_frontier["boundary"] = derive_private_stack_object_boundary(
                     StackObjectQuery(
                         body=body,
-                        instructions=frontier_instructions,
-                        successors=frontier_successors,
+                        instructions=cast(list[dict[str, Any]], frontier_instructions),
+                        successors=cast(list[list[int]], frontier_successors),
                         relocations=relocations or {},
                         external_entries=frozenset(external_entries or ()),
                         start=start,
@@ -402,15 +407,19 @@ def apply_instruction_schedule(
             [len(piece) for piece in original] == list(window["source_instruction_lengths"]),
             f"{window_context}: the window's instruction partition differs from its declaration",
         )
-        pieces = [bytearray(piece) for piece in original]
+        piece_buffers = [bytearray(piece) for piece in original]
         adjusted_spans = {}
         for index, at, _old_value, new_value in window_stack:
-            found = ia32_esp_relative_displacement(body, inside[index])
+            # Each stack-adjustment row was derived from this instruction's own
+            # ESP displacement, so the displacement is present.
+            found = cast(tuple[Any, ...], ia32_esp_relative_displacement(body, inside[index]))
             local = at - inside[index]["offset"]
             size = found[1]
-            pieces[index][local : local + size] = new_value.to_bytes(size, "little", signed=True)
+            piece_buffers[index][local : local + size] = new_value.to_bytes(
+                size, "little", signed=True
+            )
             adjusted_spans[index] = list(range(local, local + size))
-        pieces = [bytes(piece) for piece in pieces]
+        pieces = [bytes(piece) for piece in piece_buffers]
         for index, (before_piece, after_piece) in enumerate(zip(original, pieces, strict=True)):
             changed_bytes = [
                 position
@@ -436,7 +445,7 @@ def apply_instruction_schedule(
             len(reordered) == end - start,
             f"{window_context}: the reordering changed the window length",
         )
-        image[start:end] = reordered
+        image_buffer[start:end] = reordered
         window_detail = {
             "start": start,
             "end": end,
@@ -463,7 +472,7 @@ def apply_instruction_schedule(
         if stack_frontier is not None:
             window_detail["stack_frontier"] = stack_frontier
         detail.append(window_detail)
-    image = bytes(image)
+    image = bytes(image_buffer)
     require(len(image) == len(body), f"{context}: the reordering changed the body length")
     require(image != body, f"{context}: the reordering moves nothing")
     reseat = [pair for item in detail for pair in item["relocation_reseat"]]
@@ -483,7 +492,7 @@ def apply_instruction_schedule(
     image_instructions = [{"offset": start, "length": length} for start, length in image_spans]
     window_spans = [(item["start"], item["end"]) for item in windows]
 
-    def _in_window(offset):
+    def _in_window(offset: int) -> bool:
         return any((start <= offset < end for start, end in window_spans))
 
     require(
@@ -530,7 +539,7 @@ def apply_instruction_schedule(
     )
 
 
-def _instruction_spans(order: list[int], pieces: list[bytes]):
+def _instruction_spans(order: list[int], pieces: list[bytes]) -> Iterator[tuple[int, int]]:
     """The (offset, length) spans the reordered pieces occupy."""
     cursor = 0
     for source in order:

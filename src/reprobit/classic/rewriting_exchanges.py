@@ -195,7 +195,7 @@ def apply_esp_argument_exchange(
             rewritten.append(byte_index)
     output = bytes(image)
     image_instructions = decode_ia32_bijection_body(
-        output, f"{context} output", relocations, code_length
+        output, f"{context} image", relocations, code_length
     )
     require(
         [(entry["offset"], entry["length"]) for entry in image_instructions]
@@ -463,6 +463,6 @@ def apply_fp_pointer_exchange(
     changed = {offset for offset in range(len(body)) if body[offset] != output[offset]}
     declared = {offset for item in proved for offset in item["rewritten_offsets"]}
     require(
-        changed <= declared, f"{context}: the output changed a byte outside the declared exchanges"
+        changed <= declared, f"{context}: the image changed a byte outside the declared exchanges"
     )
     return (output, {"kind": FP_POINTER_EXCHANGE_KIND, "exchanges": proved})

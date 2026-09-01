@@ -10,7 +10,7 @@ Normal candidate producers must never import this module.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 from reprobit.binary import ByteIdentityError, require
 from reprobit.coff_format import (
@@ -1121,16 +1121,13 @@ def compose_retail_exact_simulated_elision(
         "byte(s) differ under the relocation mask",
     )
 
-    derived_object, derived_detail = cast(
-        tuple[bytes, dict[str, Any]],
-        _reencoded_donor_object(
-            pre_image_bytes,
-            mangled,
-            image,
-            proof,
-            "simulated-elision derived",
-            fpo_required=False,
-        ),
+    derived_object, derived_detail = _reencoded_donor_object(
+        pre_image_bytes,
+        mangled,
+        image,
+        proof,
+        "simulated-elision derived",
+        fpo_required=False,
     )
     effective = {
         "mangled": mangled,
