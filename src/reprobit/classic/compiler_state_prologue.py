@@ -26,8 +26,9 @@ from .compiler_state_prologue_evidence import (
     _fpo_pair,
     _prologue_shape,
 )
-from .compiler_state_prologue_web import _prove_whole_function_web
+from .compiler_state_prologue_web import PrologueWebEvidence, WebPlan, _prove_whole_function_web
 from .compiler_state_prologue_window import (
+    PrologueWindow,
     _prove_window_stack_and_dag,
     _try_saved_prologue_candidate,
 )
@@ -202,30 +203,36 @@ def _try_saved_prologue_web_permutation(
     )
 
     adjustments, save_by_register, target_position, window_proof = _prove_window_stack_and_dag(
-        pair.clean_body,
-        pair.effective_body,
-        clean_window,
-        effective_window,
-        clean_to_effective_local,
-        clean_window_indexes,
-        clean_saves,
-        order,
-        cycle,
+        PrologueWindow(
+            clean_body=pair.clean_body,
+            effective_body=pair.effective_body,
+            clean_window=clean_window,
+            effective_window=effective_window,
+            clean_to_effective_local=clean_to_effective_local,
+            clean_window_indexes=clean_window_indexes,
+            clean_saves=clean_saves,
+            order=order,
+            cycle=cycle,
+        )
     )
 
     image, web_proof = _prove_whole_function_web(
-        pair,
-        clean_instructions,
-        effective_instructions,
-        clean_records,
-        effective_records,
-        clean_window_indexes,
-        effective_window_indexes,
-        pair_index,
-        cycle,
-        adjustments,
-        save_by_register,
-        target_position,
+        PrologueWebEvidence(
+            pair=pair,
+            clean_instructions=clean_instructions,
+            effective_instructions=effective_instructions,
+            clean_records=clean_records,
+            effective_records=effective_records,
+            clean_window_indexes=clean_window_indexes,
+            effective_window_indexes=effective_window_indexes,
+            pair_index=pair_index,
+        ),
+        WebPlan(
+            cycle=cycle,
+            adjustments=adjustments,
+            save_by_register=save_by_register,
+            target_position=target_position,
+        ),
     )
 
     saved_names = [name for name, _index, _offset in clean_saves]

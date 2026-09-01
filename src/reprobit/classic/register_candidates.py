@@ -167,7 +167,7 @@ def produce_register_bijection_candidate(
             len(seed_rows) == len(donor_rows), "register-bijection donor relocation count differs"
         )
         code_renames = []
-        for left, right in zip(seed_rows, donor_rows):
+        for left, right in zip(seed_rows, donor_rows, strict=True):
             if left["target"] == right["target"]:
                 continue
             kind = local_symbol_kind(left["target"])
@@ -189,7 +189,9 @@ def produce_register_bijection_candidate(
         [[offset, kind] for offset, kind in code_renames] == function["expected_code_renames"],
         "register-bijection code rename set changed",
     )
-    seed_targets = {right["offset"]: left["target"] for left, right in zip(seed_rows, donor_rows)}
+    seed_targets = {
+        right["offset"]: left["target"] for left, right in zip(seed_rows, donor_rows, strict=True)
+    }
     donor_targets = {row["offset"]: row["target"] for row in donor_rows}
     require(
         [
@@ -207,7 +209,7 @@ def produce_register_bijection_candidate(
     )
     moves = [
         [left["offset"], right["offset"]]
-        for left, right in zip(seed_rows, donor_rows)
+        for left, right in zip(seed_rows, donor_rows, strict=True)
         if left["offset"] != right["offset"]
     ]
     require(
@@ -220,7 +222,8 @@ def produce_register_bijection_candidate(
         "register-bijection donor call/branch relocation targets differ from the seed",
     )
     installed_rows = [
-        {**left, "offset": right["offset"]} for left, right in zip(seed_rows, donor_rows)
+        {**left, "offset": right["offset"]}
+        for left, right in zip(seed_rows, donor_rows, strict=True)
     ]
     relocation_offsets = frozenset(
         row["offset"] + byte for row in installed_rows for byte in range(row["width"])
@@ -354,7 +357,7 @@ def produce_register_bijection_candidate(
     if delegate == "equal_body_eh_reloc_layout":
         moving = [
             ordinal
-            for ordinal, (left, right) in enumerate(zip(seed_rows, donor_rows))
+            for ordinal, (left, right) in enumerate(zip(seed_rows, donor_rows, strict=True))
             if left["offset"] != right["offset"]
         ]
         allowed |= {

@@ -11,9 +11,11 @@ from reprobit.classic.compiler_identity import (
     MSVC420_WIN32_I386_TARGET,
     Msvc420CompilerIdentity,
 )
+from reprobit.classic.foundation import RelocationView
 from reprobit.classic.scheduling_apply import apply_instruction_schedule
 from reprobit.classic.scheduling_dependence import (
     IA32_SCHEDULE_PRIVATE_STACK_OBJECT_THEOREM,
+    ScheduleTheoremContext,
     _ia32_schedule_private_stack_object_projection,
     ia32_esp_relative_displacement,
     ia32_esp_used_only_as_a_base,
@@ -21,6 +23,7 @@ from reprobit.classic.scheduling_dependence import (
     ia32_schedule_stack_adjustments,
 )
 from reprobit.classic.semantic_errors import ClassicSemanticError
+from reprobit.classic.stack_frontier_object import DebugEvidence
 
 from .compiler_state_eh import (
     _apply_frame_push_schedule,
@@ -173,14 +176,16 @@ def _window_declaration(
     if private_stack_object and not _is_topological(edges, order_list):
         try:
             projected, _receipt = _ia32_schedule_private_stack_object_projection(
-                cast(list[dict[Any, Any]], inside),
-                facts,
-                edges,
-                order_list,
-                IA32_SCHEDULE_PRIVATE_STACK_OBJECT_THEOREM,
-                body,
+                ScheduleTheoremContext(
+                    instructions=cast(list[dict[Any, Any]], inside),
+                    facts=facts,
+                    strict_edges=edges,
+                    order=order_list,
+                    theorem=IA32_SCHEDULE_PRIVATE_STACK_OBJECT_THEOREM,
+                    body=body,
+                    compiler_identity=compiler_identity,
+                ),
                 stack_adjustments,
-                compiler_identity,
                 "MSVC 4.20 compiler-state schedule",
             )
         except ByteIdentityError:
@@ -333,22 +338,26 @@ def _apply_schedules(
                 [declaration],
                 relocation_bytes,
                 "MSVC 4.20 compiler-state schedule",
-                relocations=source_records,
+                view=RelocationView(relocations=source_records),
                 external_entries=frozenset(pair.external_entries),
                 compiler_identity=compiler_identity,
-                fpo_evidence_body=(
-                    pair.fpo_evidence.clean_body if pair.fpo_evidence is not None else None
+                debug_evidence=DebugEvidence(
+                    fpo_body=(
+                        pair.fpo_evidence.clean_body if pair.fpo_evidence is not None else None
+                    ),
+                    debug_body=(
+                        pair.debug_evidence.clean_body if pair.debug_evidence is not None else None
+                    ),
+                    fpo_receipt_digest=(
+                        pair.fpo_evidence.receipt_digest if pair.fpo_evidence is not None else None
+                    ),
+                    debug_receipt_digest=(
+                        pair.debug_evidence.receipt_digest
+                        if pair.debug_evidence is not None
+                        else None
+                    ),
+                    function_owner=pair.owner,
                 ),
-                debug_evidence_body=(
-                    pair.debug_evidence.clean_body if pair.debug_evidence is not None else None
-                ),
-                fpo_evidence_receipt=(
-                    pair.fpo_evidence.receipt_digest if pair.fpo_evidence is not None else None
-                ),
-                debug_evidence_receipt=(
-                    pair.debug_evidence.receipt_digest if pair.debug_evidence is not None else None
-                ),
-                function_owner=pair.owner,
             )
             moved = {int(source): int(target) for source, target in proof["relocation_reseat"]}
             state = _ImageState(

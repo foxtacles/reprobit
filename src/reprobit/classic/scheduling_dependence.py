@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any
 
 from reprobit.binary import require
@@ -313,7 +314,7 @@ def _require_ia32_schedule_stack_frontier(
         if item["opcode"] in _IA32_SCHEDULE_STACK_PUSH_OPCODES
     ]
     require(pushes, f"{context}: the stack-frontier theorem names no register PUSH")
-    for index, (instruction, fact) in enumerate(zip(instructions, facts)):
+    for index, (instruction, fact) in enumerate(zip(instructions, facts, strict=True)):
         if index in pushes:
             offset = instruction["offset"]
             require(
@@ -392,18 +393,37 @@ def _ia32_schedule_stack_frontier_pair(
     return (push, explicit) if memory is not None and memory["base"] != "esp" else None
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ScheduleTheoremContext:
+    """One window's strict dependence DAG and the scope a stack theorem projects it in.
+
+    ``instructions`` and ``facts`` are the window's decoded instructions and
+    their dependence facts, ``strict_edges`` the DAG measured without any
+    theorem, ``order`` the declared target permutation, ``theorem`` the
+    declared marker, ``body`` the whole function body the offsets index and
+    ``compiler_identity`` the evidence the theorem is scoped to.
+    """
+
+    instructions: list[dict[str, Any]]
+    facts: list[dict[str, Any]]
+    strict_edges: list[list[Any]]
+    order: list[int]
+    theorem: object
+    body: bytes
+    compiler_identity: Msvc420CompilerIdentity | None
+
+
 def _ia32_schedule_stack_frontier_projection(
-    instructions: list[dict[str, Any]],
-    facts: list[dict[str, Any]],
-    strict_edges: list[list[Any]],
-    order: list[int],
-    theorem: object,
-    body: bytes,
-    stack_adjusted: bool,
-    compiler_identity: Msvc420CompilerIdentity | None,
-    context: str,
+    theorem_context: ScheduleTheoremContext, stack_adjusted: bool, context: str
 ) -> tuple[list[list[Any]], dict[str, Any]]:
     """Project only crossed PUSH/non-ESP memory edges from one strict DAG."""
+    instructions = theorem_context.instructions
+    facts = theorem_context.facts
+    strict_edges = theorem_context.strict_edges
+    order = theorem_context.order
+    theorem = theorem_context.theorem
+    body = theorem_context.body
+    compiler_identity = theorem_context.compiler_identity
     require(
         type(compiler_identity) is Msvc420CompilerIdentity
         and compiler_identity.target == MSVC420_WIN32_I386_TARGET,
@@ -461,15 +481,7 @@ def _ia32_schedule_stack_frontier_projection(
 
 
 def _ia32_schedule_private_stack_object_projection(
-    instructions: list[dict[str, Any]],
-    facts: list[dict[str, Any]],
-    strict_edges: list[list[Any]],
-    order: list[int],
-    theorem: object,
-    body: bytes,
-    stack_adjustments: list[list[int]],
-    compiler_identity: Msvc420CompilerIdentity | None,
-    context: str,
+    theorem_context: ScheduleTheoremContext, stack_adjustments: list[list[int]], context: str
 ) -> tuple[list[list[Any]], dict[str, Any]]:
     """Project crossed private-stack/object memory edges for one compiler.
 
@@ -479,6 +491,13 @@ def _ia32_schedule_private_stack_object_projection(
     the schedule can be installed.
     """
 
+    instructions = theorem_context.instructions
+    facts = theorem_context.facts
+    strict_edges = theorem_context.strict_edges
+    order = theorem_context.order
+    theorem = theorem_context.theorem
+    body = theorem_context.body
+    compiler_identity = theorem_context.compiler_identity
     require(
         theorem == IA32_SCHEDULE_PRIVATE_STACK_OBJECT_THEOREM,
         f"{context}: private-stack/object theorem differs",

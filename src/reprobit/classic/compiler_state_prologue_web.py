@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any, TypedDict, cast
 
 from reprobit.binary import ByteIdentityError
@@ -35,20 +36,57 @@ def _require(condition: object, message: str) -> None:
         raise ClassicSemanticError(message)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PrologueWebEvidence:
+    """The two decoded bodies of a saved-prologue pair and their correspondence.
+
+    ``pair`` carries the bodies and their evidence, the two instruction
+    sequences and relocation record maps describe each body, the two
+    ``*_window_indexes`` locate the selected window in each, and
+    ``pair_index`` maps every clean instruction to its effective twin.
+    """
+
+    pair: CompilerStateCodePair
+    clean_instructions: Sequence[_Instruction]
+    effective_instructions: Sequence[_Instruction]
+    clean_records: Mapping[int, _RelocationRecord]
+    effective_records: Mapping[int, _RelocationRecord]
+    clean_window_indexes: Sequence[int]
+    effective_window_indexes: Sequence[int]
+    pair_index: Mapping[int, int]
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class WebPlan:
+    """What the window proof derived for the whole-function web proof.
+
+    ``cycle`` is the register-web cycle, ``adjustments`` the measured stack
+    rebases inside the window, ``save_by_register`` where each saved
+    register's push sits in the window and ``target_position`` the position
+    each window instruction takes in the effective order.
+    """
+
+    cycle: Mapping[str, str]
+    adjustments: Sequence[Sequence[int]]
+    save_by_register: Mapping[str, int]
+    target_position: Mapping[int, int]
+
+
 def _prove_whole_function_web(
-    pair: CompilerStateCodePair,
-    clean_instructions: Sequence[_Instruction],
-    effective_instructions: Sequence[_Instruction],
-    clean_records: Mapping[int, _RelocationRecord],
-    effective_records: Mapping[int, _RelocationRecord],
-    clean_window_indexes: Sequence[int],
-    effective_window_indexes: Sequence[int],
-    pair_index: Mapping[int, int],
-    cycle: Mapping[str, str],
-    adjustments: Sequence[Sequence[int]],
-    save_by_register: Mapping[str, int],
-    target_position: Mapping[int, int],
+    evidence: PrologueWebEvidence, plan: WebPlan
 ) -> tuple[bytes, dict[str, object]]:
+    pair = evidence.pair
+    clean_instructions = evidence.clean_instructions
+    effective_instructions = evidence.effective_instructions
+    clean_records = evidence.clean_records
+    effective_records = evidence.effective_records
+    clean_window_indexes = evidence.clean_window_indexes
+    effective_window_indexes = evidence.effective_window_indexes
+    pair_index = evidence.pair_index
+    cycle = plan.cycle
+    adjustments = plan.adjustments
+    save_by_register = plan.save_by_register
+    target_position = plan.target_position
     try:
         clean_successors = ia32_web_control_flow(
             cast(list[dict[Any, Any]], clean_instructions),

@@ -22,6 +22,7 @@ from .composition_same_slot import compose_same_slot_resize
 from .debug import parse_codeview_symbol_stream
 from .floating import apply_fp_sum_reassociation, apply_x87_squared_addend_exchange
 from .foundation import (
+    RelocationView,
     require_payload_free_declaration,
     sha256_bytes,
 )
@@ -180,6 +181,9 @@ def produce_composed_rewriting_candidate(
             "composed-rewriting in-body relocated target set changed",
         )
     code_length = spec.get("expected_code_length")
+    view = RelocationView(
+        relocations=relocation_symbols, code_length=code_length, internal_targets=internal_targets
+    )
     image = seed_body
     external_entries = relational_form_external_entries(
         seed, sp, "composed-rewriting external entries"
@@ -196,11 +200,9 @@ def produce_composed_rewriting_candidate(
             windows,
             relocation_offsets,
             "composed-rewriting schedule",
-            relocation_symbols,
-            code_length,
-            internal_targets,
-            frozenset(external_entries),
-            compiler_identity,
+            view=view,
+            external_entries=frozenset(external_entries),
+            compiler_identity=compiler_identity,
         )
         require(
             not schedule_proof["relocation_reseat"],
@@ -219,7 +221,10 @@ def produce_composed_rewriting_candidate(
             frozenset(external_entries),
             internal_targets,
         )
-        for index, (item, chain) in enumerate(zip(spec["fp_sum_rotations"], fp_proof["chains"])):
+        # The primitive returns one item per declaration; that count is not pinned here.
+        for index, (item, chain) in enumerate(
+            zip(spec["fp_sum_rotations"], fp_proof["chains"], strict=False)
+        ):
             require(
                 chain["rewritten_offsets"] == item["expected_rewritten_offsets"],
                 f"composed-rewriting fp-sum chain {index} rewrote a different byte set from its declaration",
@@ -239,8 +244,9 @@ def produce_composed_rewriting_candidate(
             internal_targets,
         )
         seed_row_offsets = {row["offset"] for row in seed_rows}
+        # The primitive returns one item per declaration; that count is not pinned here.
         for index, (item, chain) in enumerate(
-            zip(spec["x87_squared_addend_exchanges"], x87_proof["chains"])
+            zip(spec["x87_squared_addend_exchanges"], x87_proof["chains"], strict=False)
         ):
             require(
                 chain["rewritten_offsets"] == item["expected_rewritten_offsets"],
@@ -272,8 +278,9 @@ def produce_composed_rewriting_candidate(
         require(
             not region_proof["relocation_reseat"], "composed-rewriting refuses to move a relocation"
         )
+        # The primitive returns one item per declaration; that count is not pinned here.
         for index, (item, region) in enumerate(
-            zip(spec["simulated_region_rewrites"], region_proof["regions"])
+            zip(spec["simulated_region_rewrites"], region_proof["regions"], strict=False)
         ):
             require(
                 region["rewritten_offsets"] == item["expected_rewritten_offsets"],
@@ -292,8 +299,9 @@ def produce_composed_rewriting_candidate(
             frozenset(external_entries),
             internal_targets,
         )
+        # The primitive returns one item per declaration; that count is not pinned here.
         for index, (item, site) in enumerate(
-            zip(spec["commutative_operand_forms"], form_proof["sites"])
+            zip(spec["commutative_operand_forms"], form_proof["sites"], strict=False)
         ):
             require(
                 site["expected_rewritten_offsets"] == item["expected_rewritten_offsets"]
@@ -312,8 +320,9 @@ def produce_composed_rewriting_candidate(
             relocation_symbols,
             code_length,
         )
+        # The primitive returns one item per declaration; that count is not pinned here.
         for index, (item, site) in enumerate(
-            zip(spec["esp_argument_exchanges"], exchange_site_proof["sites"])
+            zip(spec["esp_argument_exchanges"], exchange_site_proof["sites"], strict=False)
         ):
             require(
                 site["rewritten_offsets"] == item["expected_rewritten_offsets"],
@@ -479,9 +488,7 @@ def produce_composed_rewriting_candidate(
         spec,
         mangled,
         "composed-rewriting debug fidelity",
-        relocation_symbols,
-        code_length,
-        internal_targets,
+        view=view,
     )
     pinned_length = function["retail_oracle"]["length"]
     require(pinned_length == len(image), "composed-rewriting linked length changed")
@@ -822,7 +829,7 @@ def produce_donor_rewriting_candidate(
         len(donor_rows) == len(seed_rows_d1),
         "donor-rewriting relocation count differs from the seed",
     )
-    for ordinal, (donor_row, seed_row) in enumerate(zip(donor_rows, seed_rows_d1)):
+    for ordinal, (donor_row, seed_row) in enumerate(zip(donor_rows, seed_rows_d1, strict=True)):
         if ordinal in divergences:
             expected_seed, expected_donor = divergences[ordinal]
             require(
@@ -850,6 +857,9 @@ def produce_donor_rewriting_candidate(
             "donor-rewriting in-body relocated target set changed",
         )
     code_length = spec.get("expected_code_length")
+    view = RelocationView(
+        relocations=relocation_symbols, code_length=code_length, internal_targets=internal_targets
+    )
     external_entries = relational_form_external_entries(
         donor, dp, "donor-rewriting external entries"
     )
@@ -918,7 +928,10 @@ def produce_donor_rewriting_candidate(
             frozenset(external_entries),
             internal_targets,
         )
-        for index, (item, chain) in enumerate(zip(spec["fp_sum_rotations"], fp_proof["chains"])):
+        # The primitive returns one item per declaration; that count is not pinned here.
+        for index, (item, chain) in enumerate(
+            zip(spec["fp_sum_rotations"], fp_proof["chains"], strict=False)
+        ):
             require(
                 chain["rewritten_offsets"] == item["expected_rewritten_offsets"],
                 f"donor-rewriting fp-sum chain {index} rewrote a different byte set from its declaration",
@@ -936,8 +949,9 @@ def produce_donor_rewriting_candidate(
             frozenset(external_entries),
             internal_targets,
         )
+        # The primitive returns one item per declaration; that count is not pinned here.
         for index, (item, exchange) in enumerate(
-            zip(spec["fp_pointer_exchanges"], exchange_proof["exchanges"])
+            zip(spec["fp_pointer_exchanges"], exchange_proof["exchanges"], strict=False)
         ):
             require(
                 exchange["rewritten_offsets"] == item["expected_rewritten_offsets"],
@@ -956,8 +970,9 @@ def produce_donor_rewriting_candidate(
             frozenset(external_entries),
             internal_targets,
         )
+        # The primitive returns one item per declaration; that count is not pinned here.
         for index, (item, site) in enumerate(
-            zip(spec["commutative_operand_forms"], form_proof["sites"])
+            zip(spec["commutative_operand_forms"], form_proof["sites"], strict=False)
         ):
             require(
                 site["expected_rewritten_offsets"] == item["expected_rewritten_offsets"]
@@ -979,8 +994,9 @@ def produce_donor_rewriting_candidate(
             frozenset(external_entries),
             internal_targets,
         )
+        # The primitive returns one item per declaration; that count is not pinned here.
         for index, (item, region) in enumerate(
-            zip(spec["simulated_region_rewrites"], rewrite_proof["regions"])
+            zip(spec["simulated_region_rewrites"], rewrite_proof["regions"], strict=False)
         ):
             require(
                 region["rewritten_offsets"] == item["expected_rewritten_offsets"],
@@ -1005,8 +1021,9 @@ def produce_donor_rewriting_candidate(
             frozenset(external_entries),
             internal_targets,
         )
+        # The primitive returns one item per declaration; that count is not pinned here.
         for index, (item, chain) in enumerate(
-            zip(spec["x87_squared_addend_exchanges"], x87_proof["chains"])
+            zip(spec["x87_squared_addend_exchanges"], x87_proof["chains"], strict=False)
         ):
             require(
                 chain["rewritten_offsets"] == item["expected_rewritten_offsets"],
@@ -1027,11 +1044,9 @@ def produce_donor_rewriting_candidate(
             windows,
             relocation_offsets,
             "donor-rewriting schedule",
-            relocation_symbols,
-            code_length,
-            internal_targets,
-            frozenset(external_entries),
-            compiler_identity,
+            view=view,
+            external_entries=frozenset(external_entries),
+            compiler_identity=compiler_identity,
         )
         require(
             not schedule_proof["relocation_reseat"],
@@ -1095,7 +1110,7 @@ def produce_donor_rewriting_candidate(
         all(
             (
                 left["offset"] == right["offset"] and left["length"] == right["length"]
-                for left, right in zip(donor_instructions, image_instructions)
+                for left, right in zip(donor_instructions, image_instructions, strict=True)
                 if left["offset"] not in window_bytes
             )
         ),
@@ -1143,9 +1158,7 @@ def produce_donor_rewriting_candidate(
         spec,
         mangled,
         "donor-rewriting debug fidelity",
-        relocation_symbols,
-        code_length,
-        internal_targets,
+        view=view,
     )
     changed = sorted(index for index in range(len(donor_body)) if donor_body[index] != image[index])
     require(

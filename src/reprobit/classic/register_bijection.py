@@ -217,7 +217,7 @@ def apply_register_bijection(
         == [(item["offset"], item["length"]) for item in instructions],
         f"{context}: the image changed an instruction boundary",
     )
-    for left, right in zip(image_instructions, instructions):
+    for left, right in zip(image_instructions, instructions, strict=True):
         form = _bijection_form_for(right["opcode"])
         opreg = form is not None and form["opreg"] is not None
         mask = 248 if opreg else 65535
@@ -227,7 +227,7 @@ def apply_register_bijection(
             and (left["target"] == right["target"]),
             f"{context}: the image changed an opcode or a branch",
         )
-    for left, right in zip(image_instructions, instructions):
+    for left, right in zip(image_instructions, instructions, strict=True):
         expected_reads = frozenset(
             mapping.get(name, name) if start <= right["offset"] < end else name
             for name in right["reads"]
@@ -340,7 +340,7 @@ def apply_codeview_register_bijection(
             f"{context}: the donor's debug$S record list differs from the seed's",
         )
         movable = set()
-        for seed_record, donor_record in zip(records, donor_records):
+        for seed_record, donor_record in zip(records, donor_records, strict=True):
             if seed_record["type"] == CODEVIEW_REGISTER_RECORD_TYPE:
                 field_at = _codeview_register_field(seed_record, context)
                 movable.update((field_at, field_at + 1))

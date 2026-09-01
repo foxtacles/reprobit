@@ -290,7 +290,7 @@ def produce_cross_tu_complete_target_resize_candidate(
     )
     debug_differences = [
         index
-        for index, (left, right) in enumerate(zip(target_debug, complete_debug))
+        for index, (left, right) in enumerate(zip(target_debug, complete_debug, strict=True))
         if left != right
     ]
     require(
@@ -348,7 +348,7 @@ def produce_cross_tu_complete_target_resize_candidate(
     )
     changed_offsets = {
         index
-        for index, (left, right) in enumerate(zip(target_donor_bytes, normalized))
+        for index, (left, right) in enumerate(zip(target_donor_bytes, normalized, strict=True))
         if left != right
     }
     require(
@@ -659,9 +659,10 @@ def _produce_instruction_hybrid_resize_candidate_core(
             }
         )
     hybrid = bytes(hybrid)
+    # A range may resize the body; only the offsets both carry are compared here.
     changed_file_offsets = {
         offset
-        for offset, (before, after) in enumerate(zip(target_donor_bytes, hybrid))
+        for offset, (before, after) in enumerate(zip(target_donor_bytes, hybrid, strict=False))
         if before != after
     }
     allowed_file_offsets = {

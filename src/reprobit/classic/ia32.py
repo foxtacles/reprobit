@@ -673,7 +673,7 @@ def require_declared_relocation_semantics(
         "target_type",
         "target_storage",
     )
-    for index, (record, expected) in enumerate(zip(donor_rows, oracle)):
+    for index, (record, expected) in enumerate(zip(donor_rows, oracle, strict=True)):
         # `$L`/`$T`/`$done$` suffixes are compiler-local counters, not symbol
         # semantics.  The COFF composer already pairs these names by their
         # local kind; apply the same rule at this declarative boundary while

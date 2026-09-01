@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import unittest
 
+import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.scheduling as schedule_algorithms
 import reprobit.classic.scheduling_apply as scheduling_apply
 import reprobit.classic.scheduling_certificates as scheduling_certificates
@@ -67,7 +68,9 @@ def apply(windows=None, body=BODY, covered=COVERED, symbols=None):
         [window([[RELOCATION_OFFSET, RESEATED_OFFSET]])] if windows is None else windows,
         covered,
         "image",
-        SYMBOLS if symbols is None else symbols,
+        view=foundation_algorithms.RelocationView(
+            relocations=SYMBOLS if symbols is None else symbols
+        ),
     )
 
 

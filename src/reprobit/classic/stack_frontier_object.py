@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, cast
 
 from reprobit.binary import require
@@ -314,26 +315,64 @@ def _adjusted_body(
     return bytes(adjusted)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class DebugEvidence:
+    """The paired FPO and debug$S evidence a body-level proof may consume.
+
+    Every field defaults to ``None`` so a caller that carries no evidence
+    passes ``DebugEvidence()`` and the proof refuses with its own message.
+    """
+
+    fpo_body: bytes | None = None
+    debug_body: bytes | None = None
+    fpo_receipt_digest: str | None = None
+    debug_receipt_digest: str | None = None
+    function_owner: str | None = None
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class StackObjectQuery:
+    """One scheduled window and the whole-body facts its boundary proof reads.
+
+    ``body``, ``instructions``, ``successors``, ``relocations`` and
+    ``external_entries`` describe the whole function; ``start`` and ``end``
+    bound the window, ``target_order`` is its declared permutation,
+    ``stack_adjustments`` the measured ESP rebases inside it and
+    ``discharged`` the memory pairs the projection left for this proof.
+    """
+
+    body: bytes
+    instructions: list[dict[str, Any]]
+    successors: list[list[int]]
+    relocations: dict[int, dict[str, object]]
+    external_entries: frozenset[int]
+    start: int
+    end: int
+    target_order: list[int]
+    stack_adjustments: list[list[int]]
+    discharged: list[dict[str, Any]]
+
+
 def derive_private_stack_object_boundary(
-    body: bytes,
-    instructions: list[dict[str, Any]],
-    successors: list[list[int]],
-    relocations: dict[int, dict[str, object]],
-    external_entries: frozenset[int],
-    start: int,
-    end: int,
-    target_order: list[int],
-    stack_adjustments: list[list[int]],
-    discharged: list[dict[str, Any]],
-    fpo_body: bytes | None,
-    debug_body: bytes | None,
-    fpo_receipt_digest: str | None,
-    debug_receipt_digest: str | None,
-    function_owner: str | None,
-    context: str,
+    query: StackObjectQuery, evidence: DebugEvidence, context: str
 ) -> dict[str, object]:
     """Prove every projected memory pair separates private stack from ``this``."""
 
+    body = query.body
+    instructions = query.instructions
+    successors = query.successors
+    relocations = query.relocations
+    external_entries = query.external_entries
+    start = query.start
+    end = query.end
+    target_order = query.target_order
+    stack_adjustments = query.stack_adjustments
+    discharged = query.discharged
+    fpo_body = evidence.fpo_body
+    debug_body = evidence.debug_body
+    fpo_receipt_digest = evidence.fpo_receipt_digest
+    debug_receipt_digest = evidence.debug_receipt_digest
+    function_owner = evidence.function_owner
     require(
         1 <= len(instructions) <= MAX_INSTRUCTIONS,
         f"{context}: body exceeds the bounded private-stack analysis",
@@ -581,4 +620,4 @@ def derive_private_stack_object_boundary(
     }
 
 
-__all__ = ["derive_private_stack_object_boundary"]
+__all__ = ["DebugEvidence", "StackObjectQuery", "derive_private_stack_object_boundary"]

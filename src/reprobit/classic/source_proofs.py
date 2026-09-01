@@ -279,7 +279,7 @@ def require_same_tu_source_identity(
                 (instruction_donor_source, " instruction donor"),
             )
         ]
-    for role, data in zip(("seed", "target donor", "instruction donor"), selected):
+    for role, data in zip(("seed", "target donor", "instruction donor"), selected, strict=True):
         require_source_overlay_range_pin(data, proof["range_pin"], f"{context} {role} target range")
     require(
         selected[0] == selected[1] == selected[2],

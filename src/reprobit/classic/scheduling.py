@@ -24,6 +24,7 @@ from .composition import compose_equal_body_comdat
 from .composition_mosaic import instruction_mosaic_metadata_sha256
 from .composition_relocations import require_instruction_mosaic_semantic_relocations
 from .foundation import (
+    RelocationView,
     require_payload_free_declaration,
     sha256_bytes,
 )
@@ -183,6 +184,9 @@ def produce_web_recolour_candidate(
             "web-recolour in-body relocated target set changed",
         )
     code_length = spec.get("expected_code_length")
+    view = RelocationView(
+        relocations=relocation_symbols, code_length=code_length, internal_targets=internal_targets
+    )
     seed_external_entries = frozenset(
         relational_form_external_entries(seed, sp, "web-recolour seed funclet entries")
     )
@@ -203,11 +207,9 @@ def produce_web_recolour_candidate(
             windows,
             relocation_offsets,
             f"web-recolour {phase}",
-            relocation_symbols,
-            code_length,
-            internal_targets,
-            seed_external_entries,
-            compiler_identity,
+            view=view,
+            external_entries=seed_external_entries,
+            compiler_identity=compiler_identity,
         )
         require(
             not schedule_proof["relocation_reseat"], "web-recolour refuses to move a relocation"
@@ -243,11 +245,9 @@ def produce_web_recolour_candidate(
         spec["webs"],
         relocation_offsets,
         "web-recolour image",
-        relocation_symbols,
-        code_length,
-        internal_targets,
-        declared_fpo is not None,
-        seed_external_entries,
+        view=view,
+        frame_pointer_free=declared_fpo is not None,
+        entry_offsets=seed_external_entries,
     )
     require(
         proof["code_length"] == (code_length or len(seed_body)),
@@ -281,9 +281,7 @@ def produce_web_recolour_candidate(
         spec,
         mangled,
         "web-recolour debug fidelity",
-        relocation_symbols,
-        code_length,
-        internal_targets,
+        view=view,
     )
     debug_registers = require_web_recolour_debug_registers(
         coff_body(seed, _comdat_child(seed, sp, ".debug$S")),
@@ -512,11 +510,13 @@ def produce_instruction_schedule_candidate(
         spec["windows"],
         relocation_offsets,
         "instruction-schedule image",
-        relocation_symbols,
-        spec.get("expected_code_length"),
-        internal_targets,
-        donor_external_entries,
-        compiler_identity,
+        view=RelocationView(
+            relocations=relocation_symbols,
+            code_length=spec.get("expected_code_length"),
+            internal_targets=internal_targets,
+        ),
+        external_entries=donor_external_entries,
+        compiler_identity=compiler_identity,
     )
     require(
         proof["code_length"] == (spec.get("expected_code_length") or len(donor_body)),
@@ -572,9 +572,11 @@ def produce_instruction_schedule_candidate(
         spec,
         mangled,
         "instruction-schedule debug fidelity",
-        image_relocation_symbols,
-        spec.get("expected_code_length"),
-        internal_targets,
+        view=RelocationView(
+            relocations=image_relocation_symbols,
+            code_length=spec.get("expected_code_length"),
+            internal_targets=internal_targets,
+        ),
     )
     pinned_length = function["retail_oracle"]["length"]
     require(pinned_length == len(image), "instruction-schedule linked length changed")

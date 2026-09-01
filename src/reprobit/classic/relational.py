@@ -605,7 +605,7 @@ def apply_relational_form(
                 and left["length"] == right["length"]
                 and (left["flow"] == right["flow"])
                 and (left["target"] == right["target"])
-                for left, right in zip(items, image_items)
+                for left, right in zip(items, image_items, strict=True)
             )
         )
         and (image_successors == successors)
@@ -905,7 +905,8 @@ def produce_relational_form_candidate(
         "relational-form donor call/branch relocation targets differ from the seed",
     )
     installed_rows = [
-        {**left, "offset": right["offset"]} for left, right in zip(seed_rows, donor_rows)
+        {**left, "offset": right["offset"]}
+        for left, right in zip(seed_rows, donor_rows, strict=True)
     ]
     relocation_offsets = frozenset(
         row["offset"] + byte for row in installed_rows for byte in range(row["width"])

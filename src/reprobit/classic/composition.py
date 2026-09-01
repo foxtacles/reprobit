@@ -119,7 +119,9 @@ def measure_composition_pins(
         )
         measured["expected_body_length"] = seed_primary["raw_size"]
         measured["expected_changed_offsets"] = [
-            index for index, pair in enumerate(zip(seed_body, donor_body)) if pair[0] != pair[1]
+            index
+            for index, pair in enumerate(zip(seed_body, donor_body, strict=True))
+            if pair[0] != pair[1]
         ]
     if splice_class in ("equal_body_eh_structural_local", "equal_body_eh_reloc_layout"):
         closure = _comdat_child_closure(seed, seed_primary)
@@ -160,7 +162,7 @@ def measure_composition_pins(
             )
             measured["expected_relocation_moves"] = [
                 [a["offset"], b["offset"]]
-                for a, b in zip(left, right)
+                for a, b in zip(left, right, strict=True)
                 if a["offset"] != b["offset"]
             ]
     return {
@@ -237,7 +239,11 @@ def compose_equal_body_comdat(
         "donor body differs from its pinned compiler output",
     )
     seed_body = coff_body(seed, seed_primary)
-    changed = [index for index, pair in enumerate(zip(seed_body, donor_body)) if pair[0] != pair[1]]
+    changed = [
+        index
+        for index, pair in enumerate(zip(seed_body, donor_body, strict=True))
+        if pair[0] != pair[1]
+    ]
     require(changed == function["expected_changed_offsets"], "seed/donor body delta changed")
     closure = _comdat_child_closure(seed, seed_primary)
     require(
@@ -249,7 +255,7 @@ def compose_equal_body_comdat(
         left = detailed_relocations(seed, seed_primary)
         right = detailed_relocations(donor, donor_primary)
         require(len(left) == len(right), "reloc-layout splice: relocation counts differ")
-        for a, b in zip(left, right):
+        for a, b in zip(left, right, strict=True):
             require(
                 a["type"] == b["type"] and a["addend"] == b["addend"],
                 "reloc-layout splice: relocation type/addend differs",
@@ -385,7 +391,7 @@ def compose_equal_body_comdat(
             [(r["offset"], r["type"], r["addend"], r["symbol_index"]) for r in checked_relocations]
             == [
                 (d["offset"], d["type"], d["addend"], s["symbol_index"])
-                for d, s in zip(donor_relocations, seed_relocations)
+                for d, s in zip(donor_relocations, seed_relocations, strict=True)
             ],
             "composed relocations differ from the donor layout",
         )
@@ -394,7 +400,9 @@ def compose_equal_body_comdat(
             checked_relocations == seed_relocations, "composed relocations differ from the seed"
         )
     changed_offsets = [
-        index for index, pair in enumerate(zip(seed_bytes, composed)) if pair[0] != pair[1]
+        index
+        for index, pair in enumerate(zip(seed_bytes, composed, strict=True))
+        if pair[0] != pair[1]
     ]
     allowed = set(range(start, start + seed_primary["raw_size"]))
     if relocation_moves:

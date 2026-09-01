@@ -20,6 +20,7 @@ from .coff import (
 )
 from .debug import CODEVIEW_PROCEDURE_RECORD_TYPES, FPO_RECORD_KEYS, parse_codeview_symbol_stream
 from .foundation import (
+    RelocationView,
     exact_audit_keys,
     require_exact_int,
 )
@@ -46,9 +47,8 @@ def require_instruction_schedule_debug_fidelity(
     spec: dict[str, Any],
     mangled: str,
     context: str,
-    relocations: dict[int, Any] | None = None,
-    code_length: int | None = None,
-    internal_targets: frozenset[int] | None = None,
+    *,
+    view: RelocationView | None = None,
 ) -> dict[str, Any]:
     """Obligation 7: re-derive the line rows and the debug ranges.
 
@@ -59,6 +59,11 @@ def require_instruction_schedule_debug_fidelity(
     clear of every window interior, and no closure-child relocation may name
     a code symbol whose value falls inside one.
     """
+    if view is None:
+        view = RelocationView()
+    relocations = view.relocations
+    code_length = view.code_length
+    internal_targets = view.internal_targets
     spans, _ = ia32_schedule_body_walk(
         image, relocations, f"{context} image", code_length, internal_targets
     )
@@ -95,7 +100,7 @@ def require_instruction_schedule_debug_fidelity(
         len(windows) == len(declared_windows),
         f"{context}: the window list differs from its declaration",
     )
-    for window, declared in zip(windows, declared_windows):
+    for window, declared in zip(windows, declared_windows, strict=True):
         start, end = (window["start"], window["end"])
         order = list(window["target_order"])
         attribution = [

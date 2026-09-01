@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import struct
+from dataclasses import dataclass
 from typing import Any
 
 from reprobit.binary import require
@@ -64,7 +65,7 @@ def _pair_same_slot_relocations(
         return "external"
 
     pairs = []
-    for left, right in zip(seed_rows, donor_rows):
+    for left, right in zip(seed_rows, donor_rows, strict=True):
         require(
             left["type"] == right["type"] and left["addend"] == right["addend"],
             f"{context}: relocation type/addend differs",
@@ -216,17 +217,24 @@ def _append_undefined_external_symbols(data: bytes, symbols: list[tuple[str, int
     return bytes(output)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RelocSide:
+    """One object's primary relocation rows and the sections that classify them.
+
+    ``coff`` is the object the rows come from, ``rows`` its detailed
+    primary-section relocations, and ``primary`` and ``xdata`` the numbers
+    of its primary and xdata sections, which decide whether a row's target
+    is primary, xdata or external.
+    """
+
+    coff: CoffObject
+    rows: list[dict[str, Any]]
+    primary: int
+    xdata: int
+
+
 def _pair_reloc_divergent(
-    seed,
-    donor,
-    seed_rows,
-    donor_rows,
-    seed_primary,
-    donor_primary,
-    seed_xdata,
-    donor_xdata,
-    mapping,
-    context,
+    seed_side: RelocSide, donor_side: RelocSide, mapping: dict[int, int], context: str
 ):
     """Pair the primary table allowing a divergent EXTERNAL target set.
 
@@ -236,6 +244,14 @@ def _pair_reloc_divergent(
     seed's symbol table under B5/B6.  Returns (pairs, substitutions) where
     substitutions maps the ordinal index to the seed symbol index to write.
     """
+    seed = seed_side.coff
+    donor = donor_side.coff
+    seed_rows = seed_side.rows
+    donor_rows = donor_side.rows
+    seed_primary = seed_side.primary
+    donor_primary = donor_side.primary
+    seed_xdata = seed_side.xdata
+    donor_xdata = donor_side.xdata
     require(
         len(donor_rows) >= len(seed_rows),
         f"{context}: the donor carries FEWER relocations than the seed; the shrinking path is not implemented",
@@ -253,7 +269,7 @@ def _pair_reloc_divergent(
 
     pairs = []
     substitutions: dict[int, int] = {}
-    for ordinal, (left, right) in enumerate(zip(seed_rows, donor_rows)):
+    for ordinal, (left, right) in enumerate(zip(seed_rows, donor_rows, strict=True)):
         require(left["type"] == right["type"], f"{context}: relocation type differs")
         left_local = local_symbol_kind(left["target"]) is not None
         right_local = local_symbol_kind(right["target"]) is not None
@@ -640,14 +656,8 @@ def compose_same_slot_resize(
             )
         else:
             _, substitutions, appended_relocations = _pair_reloc_divergent(
-                seed,
-                donor,
-                spr,
-                dpr,
-                sp["number"],
-                dp["number"],
-                sx["number"],
-                dx["number"],
+                RelocSide(coff=seed, rows=spr, primary=sp["number"], xdata=sx["number"]),
+                RelocSide(coff=donor, rows=dpr, primary=dp["number"], xdata=dx["number"]),
                 mapping,
                 "primary",
             )
@@ -739,7 +749,8 @@ def compose_same_slot_resize(
         )
     if appended_relocations:
         grown = bytearray()
-        for index, (left, right) in enumerate(zip(spr, dpr)):
+        # dpr carries the appended rows beyond the seed's count; they are written below.
+        for index, (left, right) in enumerate(zip(spr, dpr, strict=False)):
             grown += right["offset"].to_bytes(4, "little")
             grown += substitutions.get(index, left["symbol_index"]).to_bytes(4, "little")
             grown += right["type"].to_bytes(2, "little")
@@ -782,7 +793,9 @@ def compose_same_slot_resize(
             if pointer != section[field]:
                 output[header + relative : header + relative + 4] = pointer.to_bytes(4, "little")
     primary_relocation_output = shifted(sp["relocation_offset"])
-    for index, (left, right) in enumerate([] if appended_relocations else zip(spr, dpr)):
+    for index, (left, right) in enumerate(
+        [] if appended_relocations else zip(spr, dpr, strict=True)
+    ):
         at = primary_relocation_output + index * 10
         symbol_index = substitutions.get(index, left["symbol_index"])
         output[at : at + 4] = right["offset"].to_bytes(4, "little")
@@ -920,7 +933,7 @@ def compose_same_slot_resize(
         _coff_table_bytes(checked, cd, "relocations") == _coff_table_bytes(seed, sd, "relocations"),
         "output debug$S relocation records changed",
     )
-    for before, after in zip(seed.sections, checked.sections):
+    for before, after in zip(seed.sections, checked.sections, strict=True):
         if before["number"] in allowed_sections:
             continue
         require(
@@ -941,7 +954,7 @@ def compose_same_slot_resize(
         require(
             len(composed_rows) == len(dpr), "composed relocation count differs from the donor's"
         )
-        for left, right in zip(composed_rows, dpr):
+        for left, right in zip(composed_rows, dpr, strict=True):
             if local_symbol_kind(right["target"]) is not None:
                 require(
                     local_symbol_kind(left["target"]) == local_symbol_kind(right["target"]),

@@ -736,7 +736,7 @@ class FramePointerFreeWebTests(unittest.TestCase):
             expected_rewritten_offsets=rewritten,
         )
         return scheduling_web_recolour.apply_web_recolour(
-            body, [web], frozenset(), "web", None, None, None, frame_pointer_free
+            body, [web], frozenset(), "web", frame_pointer_free=frame_pointer_free
         )
 
     def test_a_web_out_of_ebp_is_admitted_under_an_fpo_frame(self):

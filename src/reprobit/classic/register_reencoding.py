@@ -517,7 +517,7 @@ def apply_slot_bijection(
         and all(
             (
                 left["offset"] == right["offset"] and left["length"] == right["length"]
-                for left, right in zip(instructions, reencoded)
+                for left, right in zip(instructions, reencoded, strict=True)
             )
         ),
         f"{context}: the exchange changed the instruction grid",
@@ -791,7 +791,7 @@ def apply_register_bijection_reencoding(
         len(image_instructions) == len(instructions),
         f"{context}: the image has a different instruction count",
     )
-    for left, right, raw in zip(image_instructions, instructions, pieces):
+    for left, right, raw in zip(image_instructions, instructions, pieces, strict=True):
         require(
             left["offset"] == offset_map[right["offset"]] and left["length"] == len(raw),
             f"{context}: the image's instruction at {right['offset']} did not land where the layout says",

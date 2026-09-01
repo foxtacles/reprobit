@@ -9,6 +9,7 @@ Normal candidate producers must never import this module.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError, require
@@ -27,7 +28,7 @@ from .coff import (
 )
 from .composition_mosaic import instruction_mosaic_metadata_sha256
 from .composition_same_slot import compose_same_slot_resize
-from .foundation import sha256_bytes
+from .foundation import RelocationView, sha256_bytes
 from .register_candidates import _reencoded_donor_object
 from .register_reencoding import (
     REGISTER_BIJECTION_REENCODING_FIXPOINT_ROUNDS,
@@ -166,19 +167,32 @@ def _srr_entry_load_proof(
     raise AssertionError("unreachable")
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ElisionInput:
+    """The retail side of a simulated elision.
+
+    ``retail_body`` is the oracle body whose bytes replace each declared
+    region, ``image_relocations`` its relocation targets by offset,
+    ``branch_widenings`` the declared widenings of branches that cross a
+    resized region, and ``oracles`` the callee and vtable oracles the
+    simulator resolves calls through.
+    """
+
+    retail_body: bytes
+    image_relocations: dict[int, str] | None = None
+    branch_widenings: list[int] | None = None
+    oracles: dict[str, Any] | None = None
+
+
 def apply_simulated_elision(
     body: bytes,
     regions: list[dict[str, Any]],
     relocation_offsets: frozenset[int],
     context: str,
-    retail_body: bytes,
-    relocations: dict[int, Any] | None = None,
-    code_length: int | None = None,
+    retail: ElisionInput,
+    *,
+    view: RelocationView | None = None,
     external_entries: frozenset[int] | None = None,
-    internal_targets: frozenset[int] | None = None,
-    branch_widenings: list[int] | None = None,
-    image_relocations: dict[int, str] | None = None,
-    oracles: dict[str, Any] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Replace declared regions with the RETAIL ORACLE's own bytes, each
     replacement proved equivalent to the seed's region by symbolic execution.
@@ -196,6 +210,15 @@ def apply_simulated_elision(
     whose two versions compute different things cannot compose, whatever the
     oracle says.
     """
+    retail_body = retail.retail_body
+    image_relocations = retail.image_relocations
+    branch_widenings = retail.branch_widenings
+    oracles = retail.oracles
+    if view is None:
+        view = RelocationView()
+    relocations = view.relocations
+    code_length = view.code_length
+    internal_targets = view.internal_targets
     require(bool(isinstance(body, (bytes, bytearray)) and body), f"{context}: body is empty")
     body = bytes(body)
     require(
@@ -985,14 +1008,18 @@ def compose_retail_exact_simulated_elision(
         spec["regions"],
         relocation_offsets,
         "simulated-elision image",
-        bytes(retail_body),
-        relocation_symbols,
-        spec.get("expected_code_length"),
-        frozenset(external_entries),
-        internal_targets,
-        spec.get("branch_widenings") or [],
-        image_relocation_targets,
-        oracles,
+        ElisionInput(
+            retail_body=bytes(retail_body),
+            image_relocations=image_relocation_targets,
+            branch_widenings=spec.get("branch_widenings") or [],
+            oracles=oracles,
+        ),
+        view=RelocationView(
+            relocations=relocation_symbols,
+            code_length=spec.get("expected_code_length"),
+            internal_targets=internal_targets,
+        ),
+        external_entries=frozenset(external_entries),
     )
     require(
         proof["branch_repairs"] == spec["expected_branch_repairs"]

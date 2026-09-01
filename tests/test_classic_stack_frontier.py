@@ -10,6 +10,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
+import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.register_semantics as register_algorithms
 import reprobit.classic.scheduling_apply as scheduling_apply
 import reprobit.classic.scheduling_certificates as scheduling_certificates
@@ -113,14 +114,16 @@ def stack_frontier_window(body: bytes, order: list[int], *, theorem: str = STACK
         instructions, "w", body, False
     )
     edges, _receipt = scheduling_dependence._ia32_schedule_stack_frontier_projection(
-        instructions,
-        facts,
-        strict,
-        order,
-        theorem,
-        body,
+        scheduling_dependence.ScheduleTheoremContext(
+            instructions=instructions,
+            facts=facts,
+            strict_edges=strict,
+            order=order,
+            theorem=theorem,
+            body=body,
+            compiler_identity=COMPILER_IDENTITY,
+        ),
         False,
-        COMPILER_IDENTITY,
         "w",
     )
     return {
@@ -138,14 +141,16 @@ def full_stack_frontier_window(body: bytes, start: int, end: int, order: list[in
     inside = [item for item in decode(body) if start <= item["offset"] < end]
     facts, strict = scheduling_dependence.ia32_schedule_dependence_edges(inside, "w", body, False)
     edges, _receipt = scheduling_dependence._ia32_schedule_stack_frontier_projection(
-        inside,
-        facts,
-        strict,
-        order,
-        STACK_FRONTIER,
-        body,
+        scheduling_dependence.ScheduleTheoremContext(
+            instructions=inside,
+            facts=facts,
+            strict_edges=strict,
+            order=order,
+            theorem=STACK_FRONTIER,
+            body=body,
+            compiler_identity=COMPILER_IDENTITY,
+        ),
         False,
-        COMPILER_IDENTITY,
         "w",
     )
     return {
@@ -179,14 +184,16 @@ class StackFrontierProjectionTest(unittest.TestCase):
             instructions, "w", body
         )
         edges, _receipt = scheduling_dependence._ia32_schedule_stack_frontier_projection(
-            instructions,
-            facts,
-            strict,
-            [1, 0],
-            STACK_FRONTIER,
-            body,
+            scheduling_dependence.ScheduleTheoremContext(
+                instructions=instructions,
+                facts=facts,
+                strict_edges=strict,
+                order=[1, 0],
+                theorem=STACK_FRONTIER,
+                body=body,
+                compiler_identity=COMPILER_IDENTITY,
+            ),
             False,
-            COMPILER_IDENTITY,
             "w",
         )
         self.assertEqual(edges, [[0, 1, ["register_war"]]])
@@ -198,14 +205,16 @@ class StackFrontierProjectionTest(unittest.TestCase):
             instructions, "w", body
         )
         edges, _receipt = scheduling_dependence._ia32_schedule_stack_frontier_projection(
-            instructions,
-            facts,
-            strict,
-            [1, 0, 2],
-            STACK_FRONTIER,
-            body,
+            scheduling_dependence.ScheduleTheoremContext(
+                instructions=instructions,
+                facts=facts,
+                strict_edges=strict,
+                order=[1, 0, 2],
+                theorem=STACK_FRONTIER,
+                body=body,
+                compiler_identity=COMPILER_IDENTITY,
+            ),
             False,
-            COMPILER_IDENTITY,
             "w",
         )
         self.assertIn([1, 2, ["memory"]], edges)
@@ -439,7 +448,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
                 [window],
                 EXTERNAL_CALL_BYTES,
                 "s",
-                relocations=EXTERNAL_CALL,
+                view=foundation_algorithms.RelocationView(relocations=EXTERNAL_CALL),
                 compiler_identity=COMPILER_IDENTITY,
             )
         self.assertEqual(image, bytes.fromhex("83ec20e8000000008b4424188948045283c424c3"))
@@ -456,7 +465,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
             [window],
             EXTERNAL_CALL_BYTES,
             "s",
-            relocations=EXTERNAL_CALL,
+            view=foundation_algorithms.RelocationView(relocations=EXTERNAL_CALL),
             compiler_identity=COMPILER_IDENTITY,
         )
         self.assertEqual(image, bytes.fromhex("83ec20e8000000008d4424188948045283c424c3"))

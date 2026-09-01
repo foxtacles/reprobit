@@ -244,7 +244,11 @@ class CompositionTests(unittest.TestCase):
 
     def test_the_three_primitives_reach_retails_code_in_this_order(self):
         image, _ = scheduling_apply.apply_instruction_schedule(
-            BODY, [window_declaration()], frozenset(), "s", {}
+            BODY,
+            [window_declaration()],
+            frozenset(),
+            "s",
+            view=foundation_algorithms.RelocationView(relocations={}),
         )
         image, proof = register_algorithms.apply_register_bijection(
             image, {"ecx": "edx", "edx": "ecx"}, REGION, frozenset(), "b", {}
@@ -270,7 +274,11 @@ class CompositionTests(unittest.TestCase):
     def test_the_bijection_and_the_reversal_commute(self):
         """C1: their relative order is free; only the window must be first."""
         base, _ = scheduling_apply.apply_instruction_schedule(
-            BODY, [window_declaration()], frozenset(), "s", {}
+            BODY,
+            [window_declaration()],
+            frozenset(),
+            "s",
+            view=foundation_algorithms.RelocationView(relocations={}),
         )
         first, _ = relational_algorithms.apply_relational_form(
             base,

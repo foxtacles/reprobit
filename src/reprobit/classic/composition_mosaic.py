@@ -662,6 +662,7 @@ def _produce_instruction_mosaic_candidate_core(
                 zip(
                     sorted(contained[0], key=lambda o: seed_rows[o]["offset"]),
                     sorted(contained[1], key=lambda o: donor_rows[o]["offset"]),
+                    strict=True,
                 )
             )
         else:
@@ -859,7 +860,9 @@ def _produce_instruction_mosaic_candidate_core(
     output = _apply_replacements(seed_bytes, replacements)
     require(len(output) == len(seed_bytes), "instruction-mosaic object size changed")
     changed_file_offsets = {
-        index for index, (before, after) in enumerate(zip(seed_bytes, output)) if before != after
+        index
+        for index, (before, after) in enumerate(zip(seed_bytes, output, strict=True))
+        if before != after
     }
     allowed_file_offsets = {
         sp["raw_offset"] + offset for item in ranges for offset in range(item["start"], item["end"])

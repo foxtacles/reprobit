@@ -531,7 +531,7 @@ class WindowImageTests(unittest.TestCase):
             [window_declaration()] if windows is None else windows,
             relocations,
             "image",
-            symbols,
+            view=foundation_algorithms.RelocationView(relocations=symbols),
         )
 
     def test_the_window_is_reordered_and_nothing_else_moves(self):
@@ -858,7 +858,13 @@ class SwitchTableTailTests(unittest.TestCase):
         ]
         with self.assertRaises(ByteIdentityError) as caught:
             scheduling_apply.apply_instruction_schedule(
-                SWITCH_BODY, windows, frozenset(), "image", None, SWITCH_CODE_LENGTH, SWITCH_TARGETS
+                SWITCH_BODY,
+                windows,
+                frozenset(),
+                "image",
+                view=foundation_algorithms.RelocationView(
+                    code_length=SWITCH_CODE_LENGTH, internal_targets=SWITCH_TARGETS
+                ),
             )
         self.assertIn("reaches into the body's data tail", str(caught.exception))
 
@@ -869,9 +875,10 @@ class SwitchTableTailTests(unittest.TestCase):
                 [window_declaration()],
                 frozenset(),
                 "image",
-                None,
-                SWITCH_CODE_LENGTH,
-                frozenset({0, 8, SWITCH_CODE_LENGTH}),
+                view=foundation_algorithms.RelocationView(
+                    code_length=SWITCH_CODE_LENGTH,
+                    internal_targets=frozenset({0, 8, SWITCH_CODE_LENGTH}),
+                ),
             )
         self.assertIn("targets the window interior", str(caught.exception))
 
@@ -881,9 +888,9 @@ class SwitchTableTailTests(unittest.TestCase):
             [window_declaration()],
             frozenset(),
             "image",
-            None,
-            SWITCH_CODE_LENGTH,
-            SWITCH_TARGETS,
+            view=foundation_algorithms.RelocationView(
+                code_length=SWITCH_CODE_LENGTH, internal_targets=SWITCH_TARGETS
+            ),
         )
         self.assertEqual(image, SWITCH_IMAGE)
         self.assertEqual(image[SWITCH_CODE_LENGTH:], SWITCH_BODY[SWITCH_CODE_LENGTH:])

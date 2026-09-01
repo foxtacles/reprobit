@@ -35,7 +35,7 @@ def _normalized_relocation_renames(
     right = detailed_relocations(donor, donor_section)
     require(len(left) == len(right), f"{context}: relocation counts differ")
     renames = []
-    for a, b in zip(left, right):
+    for a, b in zip(left, right, strict=True):
         require(
             (a["offset"], a["type"], a["addend"]) == (b["offset"], b["type"], b["addend"]),
             f"{context}: relocation offset/type/addend differs",
@@ -95,7 +95,7 @@ def require_same_semantic_relocations(
     left = detailed_relocations(seed, seed_section)
     right = detailed_relocations(donor, donor_section)
     target_fields = ("target_section", "target_value", "target_type", "target_storage")
-    for index, (seed_row, donor_row) in enumerate(zip(left, right)):
+    for index, (seed_row, donor_row) in enumerate(zip(left, right, strict=True)):
         require(
             seed_row["width"] == donor_row["width"], f"{context}: relocation {index} width differs"
         )
@@ -265,7 +265,7 @@ def _require_reseat_instruction_mosaic_relocations(
     right = detailed_relocations(donor, donor_section)
     require(len(left) == len(right), f"{context}: relocation counts differ")
     renames = []
-    for index, (a, b) in enumerate(zip(left, right)):
+    for index, (a, b) in enumerate(zip(left, right, strict=True)):
         if a["offset"] != b["offset"]:
             window = next(
                 (
@@ -333,7 +333,7 @@ def require_instruction_mosaic_semantic_relocations(
     renames = _normalized_relocation_renames(seed, seed_section, donor, donor_section, context)
     left = detailed_relocations(seed, seed_section)
     right = detailed_relocations(donor, donor_section)
-    for index, (seed_row, donor_row) in enumerate(zip(left, right)):
+    for index, (seed_row, donor_row) in enumerate(zip(left, right, strict=True)):
         require(
             seed_row["width"] == donor_row["width"], f"{context}: relocation {index} width differs"
         )

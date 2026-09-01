@@ -8,6 +8,7 @@ from itertools import combinations, permutations
 from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError
+from reprobit.classic.foundation import RelocationView
 from reprobit.classic.register_bijection import apply_register_bijection
 from reprobit.classic.register_semantics import IA32_GENERAL_REGISTER_NAMES, ia32_register_atoms
 from reprobit.classic.scheduling_web_recolour import apply_web_recolour
@@ -566,7 +567,7 @@ def _prove_register_web_recolour(
                 list(candidate),
                 relocation_bytes,
                 "MSVC 4.20 compiler-state web recolour",
-                dict(source_records),
+                view=RelocationView(relocations=dict(source_records)),
                 frame_pointer_free=frame_pointer_free,
                 entry_offsets=frozenset(pair.external_entries),
             )

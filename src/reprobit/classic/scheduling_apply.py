@@ -9,6 +9,7 @@ from reprobit.ia32_decode import supported_ia32_instruction_length
 
 from .compiler_identity import MSVC420_WIN32_I386_TARGET, Msvc420CompilerIdentity
 from .foundation import (
+    RelocationView,
     require_payload_free_declaration,
 )
 from .register_semantics import (
@@ -21,6 +22,7 @@ from .scheduling_dependence import (
     _IA32_SCHEDULE_STACK_FRONTIER_THEOREMS,
     IA32_SCHEDULE_PRIVATE_STACK_OBJECT_THEOREM,
     IA32_SCHEDULE_STACK_FRONTIER_THEOREM,
+    ScheduleTheoremContext,
     _ia32_schedule_private_stack_object_projection,
     _ia32_schedule_stack_frontier_projection,
     ia32_esp_relative_displacement,
@@ -28,7 +30,11 @@ from .scheduling_dependence import (
     ia32_schedule_stack_adjustments,
 )
 from .scheduling_webs import ia32_web_control_flow
-from .stack_frontier_object import derive_private_stack_object_boundary
+from .stack_frontier_object import (
+    DebugEvidence,
+    StackObjectQuery,
+    derive_private_stack_object_boundary,
+)
 
 
 def require_topological_instruction_order(
@@ -150,25 +156,27 @@ def apply_instruction_schedule(
     windows: list[dict[str, Any]],
     relocation_offsets: frozenset[int],
     context: str,
-    relocations: dict[int, Any] | None = None,
-    code_length: int | None = None,
-    internal_targets: frozenset[int] | None = None,
+    *,
+    view: RelocationView | None = None,
     external_entries: frozenset[int] | None = None,
     compiler_identity: Msvc420CompilerIdentity | None = None,
-    fpo_evidence_body: bytes | None = None,
-    debug_evidence_body: bytes | None = None,
-    fpo_evidence_receipt: str | None = None,
-    debug_evidence_receipt: str | None = None,
-    function_owner: str | None = None,
+    debug_evidence: DebugEvidence | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Reorder each declared window under a proved dependence DAG.
 
     Obligations 2 through 6 are checked here, and the result is re-decoded to
     exhaustion so that every claim about the image is measured on the image.
 
-    `code_length` pins where a switch-table body's code ends; the tail is
-    never decoded, never inside a window and never rewritten.
+    `view.code_length` pins where a switch-table body's code ends; the tail
+    is never decoded, never inside a window and never rewritten.  A window
+    under the private-stack/object theorem consumes `debug_evidence`; without
+    it the boundary proof refuses.
     """
+    if view is None:
+        view = RelocationView()
+    relocations = view.relocations
+    code_length = view.code_length
+    internal_targets = view.internal_targets
     require_payload_free_declaration(windows, f"{context} instruction schedule declaration")
     frontier_markers = [
         window.get("stack_frontier_theorem")
@@ -344,52 +352,44 @@ def apply_instruction_schedule(
         stack_frontier = None
         if stack_frontier_theorem is None:
             edges = strict_edges
-        elif stack_frontier_theorem == IA32_SCHEDULE_STACK_FRONTIER_THEOREM:
-            edges, stack_frontier = _ia32_schedule_stack_frontier_projection(
-                inside,
-                facts,
-                strict_edges,
-                order,
-                stack_frontier_theorem,
-                body,
-                declared_stack is not None,
-                compiler_identity,
-                window_context,
-            )
         else:
-            edges, stack_frontier = _ia32_schedule_private_stack_object_projection(
-                inside,
-                facts,
-                strict_edges,
-                order,
-                stack_frontier_theorem,
-                body,
-                window_stack,
-                compiler_identity,
-                window_context,
+            theorem_context = ScheduleTheoremContext(
+                instructions=inside,
+                facts=facts,
+                strict_edges=strict_edges,
+                order=order,
+                theorem=stack_frontier_theorem,
+                body=body,
+                compiler_identity=compiler_identity,
             )
-            require(
-                frontier_instructions is not None and frontier_successors is not None,
-                f"{window_context}: private-stack/object body evidence is absent",
-            )
-            stack_frontier["boundary"] = derive_private_stack_object_boundary(
-                body,
-                frontier_instructions,
-                frontier_successors,
-                relocations or {},
-                frozenset(external_entries or ()),
-                start,
-                end,
-                order,
-                window_stack,
-                stack_frontier["discharged_memory_pairs"],
-                fpo_evidence_body,
-                debug_evidence_body,
-                fpo_evidence_receipt,
-                debug_evidence_receipt,
-                function_owner,
-                window_context,
-            )
+            if stack_frontier_theorem == IA32_SCHEDULE_STACK_FRONTIER_THEOREM:
+                edges, stack_frontier = _ia32_schedule_stack_frontier_projection(
+                    theorem_context, declared_stack is not None, window_context
+                )
+            else:
+                edges, stack_frontier = _ia32_schedule_private_stack_object_projection(
+                    theorem_context, window_stack, window_context
+                )
+                require(
+                    frontier_instructions is not None and frontier_successors is not None,
+                    f"{window_context}: private-stack/object body evidence is absent",
+                )
+                stack_frontier["boundary"] = derive_private_stack_object_boundary(
+                    StackObjectQuery(
+                        body=body,
+                        instructions=frontier_instructions,
+                        successors=frontier_successors,
+                        relocations=relocations or {},
+                        external_entries=frozenset(external_entries or ()),
+                        start=start,
+                        end=end,
+                        target_order=order,
+                        stack_adjustments=window_stack,
+                        discharged=stack_frontier["discharged_memory_pairs"],
+                    ),
+                    debug_evidence if debug_evidence is not None else DebugEvidence(),
+                    window_context,
+                )
         require(
             edges == window["expected_dependence_edges"],
             f"{window_context}: the measured dependence DAG differs from its declaration",
@@ -411,7 +411,7 @@ def apply_instruction_schedule(
             pieces[index][local : local + size] = new_value.to_bytes(size, "little", signed=True)
             adjusted_spans[index] = list(range(local, local + size))
         pieces = [bytes(piece) for piece in pieces]
-        for index, (before_piece, after_piece) in enumerate(zip(original, pieces)):
+        for index, (before_piece, after_piece) in enumerate(zip(original, pieces, strict=True)):
             changed_bytes = [
                 position
                 for position in range(len(before_piece))
@@ -499,7 +499,7 @@ def apply_instruction_schedule(
         ],
         f"{context}: the image moved an instruction boundary outside a declared window",
     )
-    for (start, end), item in zip(window_spans, detail):
+    for (start, end), item in zip(window_spans, detail, strict=True):
         before = item["adjusted_instructions"]
         after = sorted(
             image[position["offset"] : position["offset"] + position["length"]]

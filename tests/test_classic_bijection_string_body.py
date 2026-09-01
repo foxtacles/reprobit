@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import unittest
 
+import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.register_bijection as register_algorithms
 import reprobit.classic.register_semantics as register_semantics
 import reprobit.classic.scheduling_web_recolour as scheduling_web_recolour
@@ -73,7 +74,7 @@ class RepeatedStringBodyTests(unittest.TestCase):
                 ],
                 frozenset(),
                 "probe",
-                {},
+                view=foundation_algorithms.RelocationView(relocations={}),
             )
         self.assertIn("probe", str(raised.exception))
 

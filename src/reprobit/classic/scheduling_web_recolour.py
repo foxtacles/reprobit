@@ -8,6 +8,7 @@ from reprobit.binary import require
 
 from .debug import parse_codeview_symbol_stream
 from .foundation import (
+    RelocationView,
     require_payload_free_declaration,
 )
 from .register_bijection import (
@@ -39,9 +40,8 @@ def apply_web_recolour(
     webs: list[dict[str, Any]],
     relocation_offsets: frozenset[int],
     context: str,
-    relocations: dict[int, Any] | None = None,
-    code_length: int | None = None,
-    internal_targets: frozenset[int] | None = None,
+    *,
+    view: RelocationView | None = None,
     frame_pointer_free: bool = False,
     entry_offsets: frozenset[int] | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
@@ -51,6 +51,11 @@ def apply_web_recolour(
     previous ones produced, so a certificate that declares several is a
     composition of individually proved steps.
     """
+    if view is None:
+        view = RelocationView()
+    relocations = view.relocations
+    code_length = view.code_length
+    internal_targets = view.internal_targets
     require_payload_free_declaration(webs, f"{context} web-recolour declaration")
     body = bytes(body)
     image = bytes(body)
@@ -246,7 +251,7 @@ def apply_web_recolour(
             f"{web_context}: the image changed an instruction boundary",
         )
         mapping = {source: target}
-        for left, right in zip(image_instructions, instructions):
+        for left, right in zip(image_instructions, instructions, strict=True):
             form = _bijection_form_for(right["opcode"])
             opreg = form is not None and form["opreg"] is not None
             mask = 248 if opreg else 65535

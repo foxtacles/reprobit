@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from itertools import combinations
 from typing import Any, TypedDict, cast
 
@@ -285,17 +286,42 @@ def _is_topological(edges: Sequence[Sequence[object]], order: Sequence[int]) -> 
     return all(position[cast(int, edge[0])] < position[cast(int, edge[1])] for edge in edges)
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class PrologueWindow:
+    """The selected saved-prologue window as it lies on both bodies.
+
+    ``clean_body`` and ``effective_body`` are the whole bodies, the two
+    ``*_window`` sequences the instructions inside the window on each,
+    ``clean_to_effective_local`` the local index correspondence between
+    them, ``clean_window_indexes`` the window's positions in the clean
+    instruction list, ``clean_saves`` the register saves the prologue shape
+    found, ``order`` the declared target permutation and ``cycle`` the
+    register-web cycle the theorem admits.
+    """
+
+    clean_body: bytes
+    effective_body: bytes
+    clean_window: Sequence[_Instruction]
+    effective_window: Sequence[_Instruction]
+    clean_to_effective_local: Mapping[int, int]
+    clean_window_indexes: Sequence[int]
+    clean_saves: Sequence[tuple[str, int, int]]
+    order: Sequence[int]
+    cycle: Mapping[str, str]
+
+
 def _prove_window_stack_and_dag(
-    clean_body: bytes,
-    effective_body: bytes,
-    clean_window: Sequence[_Instruction],
-    effective_window: Sequence[_Instruction],
-    clean_to_effective_local: Mapping[int, int],
-    clean_window_indexes: Sequence[int],
-    clean_saves: Sequence[tuple[str, int, int]],
-    order: Sequence[int],
-    cycle: Mapping[str, str],
+    window: PrologueWindow,
 ) -> tuple[list[list[int]], dict[str, int], dict[int, int], dict[str, object]]:
+    clean_body = window.clean_body
+    effective_body = window.effective_body
+    clean_window = window.clean_window
+    effective_window = window.effective_window
+    clean_to_effective_local = window.clean_to_effective_local
+    clean_window_indexes = window.clean_window_indexes
+    clean_saves = window.clean_saves
+    order = window.order
+    cycle = window.cycle
     try:
         adjustments = cast(
             list[list[int]],

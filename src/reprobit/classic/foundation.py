@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 import reprobit.binary as binary
@@ -34,6 +35,22 @@ FORBIDDEN_DECLARATION_PAYLOAD_KEYS = frozenset(
         "target_payload",
     }
 )
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class RelocationView:
+    """What a function body is decoded under.
+
+    ``relocations`` are its relocation records keyed by body offset,
+    ``code_length`` is where its code ends when a data tail follows, and
+    ``internal_targets`` are the in-body offsets relocations reach.  Every
+    field defaults to ``None``, which reads the body as plain code with no
+    records, no tail and no relocated targets.
+    """
+
+    relocations: dict[int, Any] | None = None
+    code_length: int | None = None
+    internal_targets: frozenset[int] | None = None
 
 
 def local_symbol_kind(name: str) -> str | None:
@@ -117,7 +134,7 @@ def exact_json_equal(left: object, right: object) -> bool:
         )
     if isinstance(left, list):
         return len(left) == len(right) and all(
-            (exact_json_equal(a, b) for a, b in zip(left, right))
+            (exact_json_equal(a, b) for a, b in zip(left, right, strict=True))
         )
     return left == right
 

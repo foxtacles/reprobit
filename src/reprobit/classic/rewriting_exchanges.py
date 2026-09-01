@@ -202,7 +202,7 @@ def apply_esp_argument_exchange(
         == [(entry["offset"], entry["length"]) for entry in decoded],
         f"{item_context}: the exchange changed an instruction boundary",
     )
-    for left, right in zip(image_instructions, decoded):
+    for left, right in zip(image_instructions, decoded, strict=True):
         if (
             right["offset"] < prefix_end
             or right["offset"] in structural_pops
