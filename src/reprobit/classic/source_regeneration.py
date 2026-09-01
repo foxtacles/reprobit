@@ -175,6 +175,52 @@ def _render_single(
     return receipt.output_digest, receipt.output_size, result.outputs[receipt.path]
 
 
+def _render_or_rewitness(
+    context: _ClassicRegenerationContext,
+    declaration: dict[str, Any],
+    clean: bytes,
+    *,
+    label: str,
+    output: dict[str, Any],
+    name: str,
+) -> tuple[str, int, bytes]:
+    """Render strictly; on anchor drift, re-witness once and render again.
+
+    Anchor re-witnessing only rescues the two mechanical drifts admitted by
+    :mod:`reprobit.classic.anchor_rewitness` (blank lines at a recorded seat,
+    and a token move away from a seam whose literal seat pair still resolves
+    uniquely).  Anything else rejects with the original error.  A successful
+    rescue persists the updated operations into the reviewed document and
+    reports every changed witness digest.
+    """
+
+    from reprobit.classic.anchor_rewitness import rewitness_operations
+    from reprobit.classic.overlay_document import render_classic_overlay_proposal
+
+    try:
+        result = render_classic_overlay_proposal([declaration], {str(declaration["path"]): clean})
+    except ValueError as exc:
+        operations = declaration.get("ops")
+        rescued = (
+            rewitness_operations(operations, clean) if isinstance(operations, list) else None
+        )
+        if rescued is None:
+            context.reject(f"{label} cannot be re-rendered: {exc}", cause=exc)
+        updated_operations, witness_changes = rescued
+        declaration["ops"] = updated_operations
+        try:
+            result = render_classic_overlay_proposal(
+                [declaration], {str(declaration["path"]): clean}
+            )
+        except ValueError as retry_exc:
+            context.reject(f"{label} cannot be re-rendered: {retry_exc}", cause=retry_exc)
+        output["ops"] = updated_operations
+        for location, old_digest, new_digest in witness_changes:
+            context.record(name, f"{label} operation {location}", old_digest, new_digest)
+    receipt = result.receipts[0]
+    return receipt.output_digest, receipt.output_size, result.outputs[receipt.path]
+
+
 def _surviving_digest_binding(
     ancestors: tuple[dict[str, Any], ...],
     key: str | int,
@@ -343,9 +389,10 @@ def _refresh_source_overlays(context: _ClassicRegenerationContext) -> None:
                 declaration = dict(output)
                 declaration["clean"] = current_digest
                 declaration["size"] = len(current)
-                new_effective, new_size, rendered_bytes = _render_single(
-                    context, declaration, current, label=label
+                new_effective, new_size, rendered_bytes = _render_or_rewitness(
+                    context, declaration, current, label=label, output=output, name=name
                 )
+                context.canonical_operations_by_path[path] = tuple(output["ops"])
                 context.effective_bytes_by_path[path] = rendered_bytes
                 context.stale_paths[path] = str(output["clean"])
                 context.bind_stale(output.get("clean"), path)
@@ -613,6 +660,56 @@ def _refresh_declaration_carriers(context: _ClassicRegenerationContext) -> None:
                 _set_parameter(context, intervention, parameter_name, after_value)
 
 
+def _refresh_source_identities(context: _ClassicRegenerationContext) -> None:
+    """Re-pin same-function source identities on mechanically refreshed files.
+
+    A ``same_function_source_identity`` pins the clean and effective digests
+    of the file that carries the identified function alongside content-based
+    range and carrier witnesses.  When regeneration has already re-rendered
+    that file (an admitted mechanical edit), the two file-level digests are
+    stale by definition; the range, carrier, and rendered-source pins witness
+    content the edit did not touch and are still checked against actual bytes
+    by the verifying rebuild.
+    """
+
+    stale_by_digest = {old: path for path, old in context.stale_paths.items()}
+    for name, document in context.documents.items():
+        if not isinstance(document, dict) or name == context.plan_relative:
+            continue
+        for intervention in document.get("interventions", []) or []:
+            if not isinstance(intervention, dict):
+                continue
+            values = _parameter_map(intervention)
+            identity = values.get("same_function_source_identity")
+            if not isinstance(identity, dict):
+                continue
+            old_clean = identity.get("clean_source_sha256")
+            path = stale_by_digest.get(old_clean) if isinstance(old_clean, str) else None
+            if path is None:
+                continue
+            identifier = str(intervention.get("id"))
+            label = f"{name} intervention {identifier} same_function_source_identity"
+            current = context.reader.read(path, wanted_by=label)
+            new_effective = context.effective_by_path.get(path)
+            if new_effective is None:
+                context.reject(f"{label} refreshed file {path!r} has no effective rendering")
+            updated = dict(identity)
+            updated["clean_source_sha256"] = _digest(current)
+            updated["effective_source_sha256"] = new_effective
+            for field_name in ("clean_source_sha256", "effective_source_sha256"):
+                before_value = identity.get(field_name)
+                if before_value == updated[field_name]:
+                    continue
+                context.bind_stale(before_value, path)
+                context.record(
+                    name,
+                    f"{identifier} same_function_source_identity.{field_name}",
+                    str(before_value),
+                    str(updated[field_name]),
+                )
+            _set_parameter(context, intervention, "same_function_source_identity", updated)
+
+
 def _source_refactor_witness(
     context: _ClassicRegenerationContext,
     proof: dict[str, Any],
@@ -746,6 +843,7 @@ def _derive_classic_source_regeneration(
     _refresh_donor_overlays(context)
     _refresh_translation_units(context)
     _refresh_declaration_carriers(context)
+    _refresh_source_identities(context)
     _refresh_typed_witnesses(context)
     _require_complete(context)
     return _ClassicRegenerationResult(
