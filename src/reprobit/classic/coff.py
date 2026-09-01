@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 from collections import Counter
+from typing import Any
 
 from reprobit.binary import require
 from reprobit.coff_format import (
     CoffObject as _CoffObject,
+)
+from reprobit.coff_format import (
     coff_body as _coff_body,
+)
+from reprobit.coff_format import (
     section_definitions as _section_definitions,
 )
 
@@ -14,7 +19,7 @@ from .foundation import canonical_json_bytes, sha256_bytes
 """Classic compiler algorithms: coff."""
 
 
-def comdat_primary_section(coff: _CoffObject, name: str) -> dict:
+def comdat_primary_section(coff: _CoffObject, name: str) -> dict[str, Any]:
     """Return the unique COMDAT primary section defined by symbol ``name``.
 
     Unlike :meth:`reprobit.coff_format.CoffObject.function_section` this accepts any section kind
@@ -41,13 +46,15 @@ def comdat_primary_section(coff: _CoffObject, name: str) -> dict:
     return section
 
 
-def unique_symbol(coff: _CoffObject, predicate, description: str) -> tuple[int, dict]:
+def unique_symbol(coff: _CoffObject, predicate, description: str) -> tuple[int, dict[str, Any]]:
     matches = [(index, symbol) for index, symbol in coff.symbols.items() if predicate(symbol)]
     require(len(matches) == 1, f"expected one {description}, found {len(matches)}")
     return matches[0]
 
 
-def function_symbol(coff: _CoffObject, mangled: str, section_number: int) -> tuple[int, dict]:
+def function_symbol(
+    coff: _CoffObject, mangled: str, section_number: int
+) -> tuple[int, dict[str, Any]]:
     return unique_symbol(
         coff,
         lambda symbol: (
@@ -61,7 +68,7 @@ def function_symbol(coff: _CoffObject, mangled: str, section_number: int) -> tup
     )
 
 
-def section_symbol(coff: _CoffObject, section: dict) -> tuple[int, dict]:
+def section_symbol(coff: _CoffObject, section: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     return unique_symbol(
         coff,
         lambda symbol: (
@@ -74,48 +81,31 @@ def section_symbol(coff: _CoffObject, section: dict) -> tuple[int, dict]:
     )
 
 
-def marker_symbol(coff: _CoffObject, name: str, section_number: int) -> tuple[int, dict]:
-    return unique_symbol(
-        coff,
-        lambda symbol: (
-            symbol["name"] == name
-            and symbol["section"] == section_number
-            and (symbol["storage"] == 101)
-            and (symbol["aux_count"] >= 1)
-        ),
-        f"{name} symbol for section {section_number}",
-    )
-
-
 def associated_sections(
-    coff: _CoffObject, definitions: dict[int, dict], parent: int
+    coff: _CoffObject, definitions: dict[int, dict[str, Any]], parent: int
 ) -> tuple[tuple[int, str], ...]:
     return tuple(
-        (
-            (section["number"], section["name"])
-            for section in coff.sections
-            if definitions.get(section["number"], {}).get("selection") == 5
-            and definitions[section["number"]]["associated"] == parent
-        )
+        (section["number"], section["name"])
+        for section in coff.sections
+        if definitions.get(section["number"], {}).get("selection") == 5
+        and definitions[section["number"]]["associated"] == parent
     )
 
 
-def function_multiset(coff: _CoffObject) -> Counter:
+def function_multiset(coff: _CoffObject) -> Counter[str]:
     return Counter(
-        (
-            symbol["name"]
-            for symbol in coff.symbols.values()
-            if symbol["type"] == 32
-            and symbol["section"] > 0
-            and (symbol["value"] == 0)
-            and (symbol["storage"] in (2, 3))
-            and coff.sections[symbol["section"] - 1]["name"].startswith(".text")
-            and (coff.sections[symbol["section"] - 1]["raw_size"] > 0)
-        )
+        symbol["name"]
+        for symbol in coff.symbols.values()
+        if symbol["type"] == 32
+        and symbol["section"] > 0
+        and (symbol["value"] == 0)
+        and (symbol["storage"] in (2, 3))
+        and coff.sections[symbol["section"] - 1]["name"].startswith(".text")
+        and (coff.sections[symbol["section"] - 1]["raw_size"] > 0)
     )
 
 
-def comdat_primary_identity(coff: _CoffObject, section: dict) -> tuple:
+def comdat_primary_identity(coff: _CoffObject, section: dict[str, Any]) -> tuple[Any, ...]:
     """Return one non-associative COMDAT group's structural identity."""
     definitions = _section_definitions(coff)
     definition = definitions.get(section["number"])
@@ -147,7 +137,7 @@ def comdat_primary_identity(coff: _CoffObject, section: dict) -> tuple:
     )
 
 
-def comdat_primary_identity_multiset(coff: _CoffObject) -> Counter:
+def comdat_primary_identity_multiset(coff: _CoffObject) -> Counter[tuple[Any, ...]]:
     """Name every non-associative COMDAT group by its defining symbol.
 
     Raw sizes are intentionally absent: the target function is allowed to
@@ -177,7 +167,7 @@ def canonical_identity_receipt_sha256(value: object) -> str:
     return sha256_bytes(canonical_json_bytes(json_value(value)))
 
 
-def canonical_counter_receipt_sha256(value: Counter) -> str:
+def canonical_counter_receipt_sha256(value: Counter[Any]) -> str:
     """Hash every repeated Counter identity in deterministic repr order."""
     require(isinstance(value, Counter), "canonical identity receipt requires a Counter")
     return canonical_identity_receipt_sha256(sorted(value.elements(), key=repr))
@@ -191,8 +181,8 @@ def section_shape_receipt_sha256(coff: _CoffObject) -> str:
 
 
 def require_target_closure_extraction_topology(
-    seed: _CoffObject, donor: _CoffObject, function: dict, context: str
-) -> dict:
+    seed: _CoffObject, donor: _CoffObject, function: dict[str, Any], context: str
+) -> dict[str, Any]:
     """Replace whole-object equality with a pinned strict-subset proof.
 
     The donor is allowed to omit only the explicitly named definitions that
@@ -226,7 +216,7 @@ def require_target_closure_extraction_topology(
     require(not donor_comdats - seed_comdats, f"{context} donor adds or exchanges a COMDAT group")
     omitted_comdats = list((seed_comdats - donor_comdats).elements())
     require(
-        sorted((identity[0] for identity in omitted_comdats)) == seed_only,
+        sorted(identity[0] for identity in omitted_comdats) == seed_only,
         f"{context} omitted COMDAT groups differ from the declared seed-only functions",
     )
     return {
@@ -239,8 +229,8 @@ def require_target_closure_extraction_topology(
 
 
 def require_source_target_closure_topology(
-    seed: _CoffObject, donor: _CoffObject, function: dict, context: str
-) -> dict:
+    seed: _CoffObject, donor: _CoffObject, function: dict[str, Any], context: str
+) -> dict[str, Any]:
     """Pin one same-name target closure while ignoring donor-only COMDATs."""
     require(
         len(seed.sections) == function["expected_seed_section_count"]
@@ -301,24 +291,22 @@ def require_source_target_closure_topology(
     }
 
 
-def _comdat_child_closure(coff: _CoffObject, primary: dict) -> tuple:
+def _comdat_child_closure(coff: _CoffObject, primary: dict[str, Any]) -> tuple[Any, ...]:
     """Return (count, sorted child section names) of a COMDAT's selection-5
     associates."""
     definitions = _section_definitions(coff)
     children = tuple(
         sorted(
-            (
-                section["name"]
-                for section in coff.sections
-                if definitions.get(section["number"], {}).get("selection") == 5
-                and definitions[section["number"]]["associated"] == primary["number"]
-            )
+            section["name"]
+            for section in coff.sections
+            if definitions.get(section["number"], {}).get("selection") == 5
+            and definitions[section["number"]]["associated"] == primary["number"]
         )
     )
     return (len(children), children)
 
 
-def _comdat_child(coff: _CoffObject, primary: dict, name: str) -> dict:
+def _comdat_child(coff: _CoffObject, primary: dict[str, Any], name: str) -> dict[str, Any]:
     definitions = _section_definitions(coff)
     matches = [
         section
@@ -331,7 +319,7 @@ def _comdat_child(coff: _CoffObject, primary: dict, name: str) -> dict:
     return matches[0]
 
 
-def _coff_table_bytes(coff: _CoffObject, section: dict, kind: str) -> bytes:
+def _coff_table_bytes(coff: _CoffObject, section: dict[str, Any], kind: str) -> bytes:
     if kind == "relocations":
         start = section["relocation_offset"]
         size = section["relocation_count"] * 10
@@ -354,7 +342,7 @@ def _coff_marker(coff: _CoffObject, name: str, section_number: int):
     return matches[0]
 
 
-def _coff_section_symbol(coff: _CoffObject, section: dict):
+def _coff_section_symbol(coff: _CoffObject, section: dict[str, Any]):
     matches = [
         (index, symbol)
         for index, symbol in coff.symbols.items()

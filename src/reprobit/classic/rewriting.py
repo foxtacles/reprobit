@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import itertools
+from typing import Any
+
 from reprobit.binary import ByteIdentityError, require
 from reprobit.coff_format import CoffObject, coff_body, detailed_relocations, section_definitions
 from reprobit.ia32_decode import supported_ia32_instruction_length
@@ -12,12 +15,12 @@ from .coff import (
     function_multiset,
 )
 from .commutative import apply_commutative_operand_form
+from .compiler_identity import Msvc420CompilerIdentity
 from .composition import (
     compose_equal_body_comdat,
     compose_same_slot_resize,
     instruction_mosaic_metadata_sha256,
 )
-from .compiler_identity import Msvc420CompilerIdentity
 from .debug import parse_codeview_symbol_stream
 from .floating import apply_fp_sum_reassociation, apply_x87_squared_addend_exchange
 from .foundation import (
@@ -38,10 +41,10 @@ from .register_bijection import (
 )
 from .register_reencoding import apply_slot_bijection
 from .register_semantics import (
-    IA32_GENERAL_REGISTER_NAMES,
     _IA32_ATOMS_OF,
     _IA32_REGISTER_NUMBERS,
     _IA32_STRUCTURAL_REGISTERS,
+    IA32_GENERAL_REGISTER_NAMES,
     _register_bijection_live_sets,
     decode_ia32_bijection_body,
     decode_ia32_bijection_instruction,
@@ -81,7 +84,7 @@ def composed_rewriting_delegate(expected_closure: object) -> str:
 
 def _validate_commutative_operand_forms(
     value: object, context: str, body_length: int
-) -> tuple[list, list]:
+) -> tuple[list[Any], list[Any]]:
     """Validate the `commutative_operand_forms` list of a seam declaration.
 
     Shape only -- K1..K8 are discharged by `apply_commutative_operand_form`
@@ -113,10 +116,8 @@ def _validate_commutative_operand_forms(
             and offsets
             and (offsets == sorted(set(offsets)))
             and all(
-                (
-                    type(offset) is int and at <= offset < min(at + 12, body_length)
-                    for offset in offsets
-                )
+                type(offset) is int and at <= offset < min(at + 12, body_length)
+                for offset in offsets
             ),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
@@ -137,7 +138,7 @@ def _validate_commutative_operand_forms(
 
 def _validate_esp_argument_exchanges(
     value: object, context: str, body_length: int
-) -> tuple[list, list]:
+) -> tuple[list[Any], list[Any]]:
     """Validate the `esp_argument_exchanges` list of a seam declaration.
 
     Shape only -- E1..E8 are discharged by `apply_esp_argument_exchange`
@@ -172,7 +173,7 @@ def _validate_esp_argument_exchanges(
             isinstance(offsets, list)
             and len(offsets) >= 2
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and 0 <= offset < body_length for offset in offsets)),
+            and all(type(offset) is int and 0 <= offset < body_length for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         exchange_bytes.extend(offsets)
@@ -192,7 +193,7 @@ def _validate_esp_argument_exchanges(
 
 def validate_composed_rewriting(
     value: object, context: str, body_length: int, lone_statement_ok: bool = False
-) -> dict:
+) -> dict[str, Any]:
     """Validate one composed-rewriting certificate declaration."""
     require(isinstance(value, dict), f"{context} must be an object")
     exact_audit_keys(
@@ -245,7 +246,7 @@ def validate_composed_rewriting(
         require(
             isinstance(targets, list)
             and targets == sorted(set(targets))
-            and all((type(item) is int and 0 <= item < body_length for item in targets)),
+            and all(type(item) is int and 0 <= item < body_length for item in targets),
             f"{context}.expected_internal_relocation_targets is invalid",
         )
     normalized_windows = []
@@ -259,7 +260,7 @@ def validate_composed_rewriting(
             windows, context, body_length, code_length, targets
         )
         require(
-            not any((window.get("relocation_reseat") for window in normalized_windows)),
+            not any(window.get("relocation_reseat") for window in normalized_windows),
             f"{context}: this class refuses to move a relocation",
         )
     normalized_rotations = []
@@ -298,7 +299,7 @@ def validate_composed_rewriting(
             isinstance(offsets, list)
             and offsets
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and start <= offset < end for offset in offsets)),
+            and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         rotation_bytes.extend(offsets)
@@ -356,7 +357,7 @@ def validate_composed_rewriting(
             isinstance(offsets, list)
             and offsets
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and start <= offset < end for offset in offsets)),
+            and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         normalized_item = {
@@ -371,12 +372,10 @@ def validate_composed_rewriting(
                 isinstance(reseat, list)
                 and reseat
                 and all(
-                    (
-                        isinstance(pair, list)
-                        and len(pair) == 2
-                        and all((type(offset) is int and start <= offset < end for offset in pair))
-                        for pair in reseat
-                    )
+                    isinstance(pair, list)
+                    and len(pair) == 2
+                    and all(type(offset) is int and start <= offset < end for offset in pair)
+                    for pair in reseat
                 )
                 and (len({pair[0] for pair in reseat}) == len(reseat))
                 and (len({pair[1] for pair in reseat}) == len(reseat)),
@@ -438,7 +437,7 @@ def validate_composed_rewriting(
             isinstance(offsets, list)
             and offsets
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and start <= offset < end for offset in offsets)),
+            and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         region_rewrite_bytes.extend(offsets)
@@ -513,7 +512,7 @@ def validate_composed_rewriting(
             isinstance(offsets, list)
             and offsets
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and start <= offset < end for offset in offsets)),
+            and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         bijection_bytes.extend(offsets)
@@ -621,7 +620,7 @@ def validate_composed_rewriting(
         require(
             isinstance(dead, list)
             and dead == sorted(set(dead))
-            and all((name in _IA32_REGISTER_NUMBERS for name in dead))
+            and all(name in _IA32_REGISTER_NUMBERS for name in dead)
             and (not set(dead) & _IA32_STRUCTURAL_REGISTERS),
             f"{item_context}.dead_registers is invalid",
         )
@@ -629,19 +628,17 @@ def validate_composed_rewriting(
         require(
             isinstance(slots_dead, list)
             and slots_dead == sorted(set(slots_dead))
-            and all((type(d) is int and -body_length < d < 0 for d in slots_dead)),
+            and all(type(d) is int and -body_length < d < 0 for d in slots_dead),
             f"{item_context}.dead_slots is invalid",
         )
         reseat = item.get("relocation_reseat") or []
         require(
             isinstance(reseat, list)
             and all(
-                (
-                    isinstance(pair, list)
-                    and len(pair) == 2
-                    and all((type(x) is int and start <= x < end for x in pair))
-                    for pair in reseat
-                )
+                isinstance(pair, list)
+                and len(pair) == 2
+                and all(type(x) is int and start <= x < end for x in pair)
+                for pair in reseat
             ),
             f"{item_context}.relocation_reseat is invalid",
         )
@@ -650,7 +647,7 @@ def validate_composed_rewriting(
             isinstance(offsets, list)
             and offsets
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and start <= offset < end for offset in offsets)),
+            and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         rewrite_bytes.extend(offsets)
@@ -715,7 +712,7 @@ def validate_composed_rewriting(
             isinstance(offsets, list)
             and len(offsets) == 2
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and 0 <= offset < body_length for offset in offsets)),
+            and all(type(offset) is int and 0 <= offset < body_length for offset in offsets),
             f"{site_context}.expected_rewritten_offsets is invalid",
         )
         relational_bytes.extend(offsets)
@@ -817,7 +814,7 @@ def validate_composed_rewriting(
         isinstance(changed, list)
         and changed
         and (changed == sorted(set(changed)))
-        and all((type(offset) is int and 0 <= offset < body_length for offset in changed)),
+        and all(type(offset) is int and 0 <= offset < body_length for offset in changed),
         f"{context}.expected_changed_offsets is invalid",
     )
     slot_bytes = {
@@ -842,21 +839,19 @@ def validate_composed_rewriting(
     )
     require(
         all(
-            (
-                offset in window_bytes
-                or offset in rotation_regions
-                or offset in region_rewrite_regions
-                or (offset in slot_bytes)
-                or (offset in x87_regions)
-                or (
-                    offset
-                    in set(bijection_bytes)
-                    | set(relational_bytes)
-                    | set(form_bytes)
-                    | set(exchange_bytes)
-                )
-                for offset in changed
+            offset in window_bytes
+            or offset in rotation_regions
+            or offset in region_rewrite_regions
+            or (offset in slot_bytes)
+            or (offset in x87_regions)
+            or (
+                offset
+                in set(bijection_bytes)
+                | set(relational_bytes)
+                | set(form_bytes)
+                | set(exchange_bytes)
             )
+            for offset in changed
         ),
         f"{context}.expected_changed_offsets names a byte no declared certificate can move",
     )
@@ -864,7 +859,7 @@ def validate_composed_rewriting(
     require(
         isinstance(procedure, list)
         and len(procedure) == 3
-        and all((type(item) is int and item >= 0 for item in procedure))
+        and all(type(item) is int and item >= 0 for item in procedure)
         and (procedure[0] == body_length)
         and (procedure[1] <= procedure[2] <= body_length),
         f"{context}.expected_procedure_range is invalid",
@@ -873,15 +868,13 @@ def validate_composed_rewriting(
     require(
         isinstance(references, list)
         and all(
-            (
-                isinstance(item, list)
-                and len(item) == 3
-                and isinstance(item[0], str)
-                and isinstance(item[1], str)
-                and (type(item[2]) is int)
-                and (0 <= item[2] <= body_length)
-                for item in references
-            )
+            isinstance(item, list)
+            and len(item) == 3
+            and isinstance(item[0], str)
+            and isinstance(item[1], str)
+            and (type(item[2]) is int)
+            and (0 <= item[2] <= body_length)
+            for item in references
         ),
         f"{context}.expected_code_symbol_references is invalid",
     )
@@ -889,7 +882,7 @@ def validate_composed_rewriting(
     require(
         isinstance(external, list)
         and external == sorted(set(external))
-        and all((type(item) is int and 0 < item < body_length for item in external)),
+        and all(type(item) is int and 0 < item < body_length for item in external),
         f"{context}.expected_external_entries is invalid",
     )
     rationale = value.get("authenticity_rationale")
@@ -950,14 +943,14 @@ def validate_composed_rewriting(
             isinstance(offsets, list)
             and offsets
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and 0 <= offset < body_length for offset in offsets)),
+            and all(type(offset) is int and 0 <= offset < body_length for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         records = item.get("debug_s_bprel_offsets")
         require(
             isinstance(records, list)
             and records == sorted(set(records))
-            and all((type(offset) is int and offset >= 0 for offset in records)),
+            and all(type(offset) is int and offset >= 0 for offset in records),
             f"{item_context}.debug_s_bprel_offsets is invalid",
         )
         normalized_slots.append(
@@ -986,10 +979,10 @@ def validate_composed_rewriting(
 def produce_composed_rewriting_candidate(
     seed_bytes: bytes,
     donor_bytes: bytes,
-    function: dict,
+    function: dict[str, Any],
     *,
     compiler_identity: Msvc420CompilerIdentity | None = None,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Apply a reordering, then regional bijections, then reversed compares.
 
     See the class comment above.  Each primitive is the LANDED one, called
@@ -1083,13 +1076,13 @@ def produce_composed_rewriting_candidate(
     )
     seed_rows = detailed_relocations(seed, sp)
     relocation_offsets = frozenset(
-        (row["offset"] + byte for row in seed_rows for byte in range(row["width"]))
+        row["offset"] + byte for row in seed_rows for byte in range(row["width"])
     )
     relocation_symbols = {
         row["offset"]: {"width": row["width"], "target": row["target"]} for row in seed_rows
     }
     internal_targets = frozenset(
-        (row["target_value"] for row in seed_rows if row["target_section"] == sp["number"])
+        row["target_value"] for row in seed_rows if row["target_section"] == sp["number"]
     )
     declared_targets = spec.get("expected_internal_relocation_targets")
     if declared_targets is not None:
@@ -1314,11 +1307,9 @@ def produce_composed_rewriting_candidate(
         require(
             proof["rewritten_offsets"]
             == sorted(
-                (
-                    offset
-                    for item in spec["relational_sites"]
-                    for offset in item["expected_rewritten_offsets"]
-                )
+                offset
+                for item in spec["relational_sites"]
+                for offset in item["expected_rewritten_offsets"]
             ),
             "composed-rewriting relational rewrite set differs from its declaration",
         )
@@ -1331,7 +1322,7 @@ def produce_composed_rewriting_candidate(
         len(image_instructions) == spec["expected_instruction_count"],
         "composed-rewriting instruction count differs from its declaration",
     )
-    changed = sorted((index for index in range(len(seed_body)) if seed_body[index] != image[index]))
+    changed = sorted(index for index in range(len(seed_body)) if seed_body[index] != image[index])
     require(
         changed == spec["expected_changed_offsets"],
         "composed-rewriting image differs from its declaration",
@@ -1480,7 +1471,7 @@ def produce_composed_rewriting_candidate(
                 moved[position] = mapped[position]
         debug_image = bytes(moved)
         debug_maps.append(item["debug_s_register_map"])
-    for index, item in enumerate(spec.get("slot_bijections") or []):
+    for item in spec.get("slot_bijections") or []:
         slot_map = {int(key): value for key, value in item["mapping"].items()}
         declared = set(item["debug_s_bprel_offsets"])
         moved = bytearray(debug_image)
@@ -1584,7 +1575,7 @@ DONOR_REWRITING_CLASS = "retail_exact_donor_rewriting"
 DONOR_REWRITING_KIND = "donor_fp_bijection_rewriting_v1"
 
 
-def validate_donor_rewriting(value: object, context: str, body_length: int) -> dict:
+def validate_donor_rewriting(value: object, context: str, body_length: int) -> dict[str, Any]:
     """Validate one donor-rewriting certificate declaration."""
     require(isinstance(value, dict), f"{context} must be an object")
     exact_audit_keys(
@@ -1635,7 +1626,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         require(
             isinstance(targets, list)
             and targets == sorted(set(targets))
-            and all((type(item) is int and 0 <= item < body_length for item in targets)),
+            and all(type(item) is int and 0 <= item < body_length for item in targets),
             f"{context}.expected_internal_relocation_targets is invalid",
         )
     normalized_windows = []
@@ -1649,7 +1640,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             windows, context, body_length, code_length, targets
         )
         require(
-            not any((window.get("relocation_reseat") for window in normalized_windows)),
+            not any(window.get("relocation_reseat") for window in normalized_windows),
             f"{context}: this class refuses to move a relocation",
         )
     normalized_rotations = []
@@ -1688,7 +1679,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             isinstance(offsets, list)
             and offsets
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and start <= offset < end for offset in offsets)),
+            and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         rotation_bytes.extend(offsets)
@@ -1745,7 +1736,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             isinstance(offsets, list)
             and offsets
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and start <= offset < end for offset in offsets)),
+            and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         normalized_item = {
@@ -1760,12 +1751,10 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
                 isinstance(reseat, list)
                 and reseat
                 and all(
-                    (
-                        isinstance(pair, list)
-                        and len(pair) == 2
-                        and all((type(offset) is int and start <= offset < end for offset in pair))
-                        for pair in reseat
-                    )
+                    isinstance(pair, list)
+                    and len(pair) == 2
+                    and all(type(offset) is int and start <= offset < end for offset in pair)
+                    for pair in reseat
                 )
                 and (len({pair[0] for pair in reseat}) == len(reseat))
                 and (len({pair[1] for pair in reseat}) == len(reseat)),
@@ -1782,7 +1771,6 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
     rotation_regions |= x87_regions
     normalized_bijections = []
     bijection_bytes = []
-    previous_end = 0
     for index, item in enumerate(value.get("register_bijections") or []):
         item_context = f"{context}.register_bijections[{index}]"
         require(isinstance(item, dict), f"{item_context} must be an object")
@@ -1843,7 +1831,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             isinstance(offsets, list)
             and offsets
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and start <= offset < end for offset in offsets)),
+            and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         bijection_bytes.extend(offsets)
@@ -1895,7 +1883,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         require(
             isinstance(swap, list)
             and len(swap) == 2
-            and all((type(offset) is int for offset in swap))
+            and all(type(offset) is int for offset in swap)
             and (start <= swap[0] < swap[1] < end),
             f"{item_context}.swap_offsets is invalid",
         )
@@ -1903,7 +1891,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         require(
             isinstance(dead, list)
             and dead == sorted(set(dead))
-            and all((name in _IA32_REGISTER_NUMBERS for name in dead))
+            and all(name in _IA32_REGISTER_NUMBERS for name in dead)
             and (not set(dead) & _IA32_STRUCTURAL_REGISTERS),
             f"{item_context}.dead_registers is invalid",
         )
@@ -1912,7 +1900,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             isinstance(offsets, list)
             and offsets
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and start <= offset < end for offset in offsets)),
+            and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         exchange_bytes.extend(offsets)
@@ -1982,7 +1970,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         require(
             isinstance(dead, list)
             and dead == sorted(set(dead))
-            and all((name in _IA32_REGISTER_NUMBERS for name in dead))
+            and all(name in _IA32_REGISTER_NUMBERS for name in dead)
             and (not set(dead) & _IA32_STRUCTURAL_REGISTERS),
             f"{item_context}.dead_registers is invalid",
         )
@@ -1990,19 +1978,17 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         require(
             isinstance(slots_dead, list)
             and slots_dead == sorted(set(slots_dead))
-            and all((type(d) is int and -body_length < d < 0 for d in slots_dead)),
+            and all(type(d) is int and -body_length < d < 0 for d in slots_dead),
             f"{item_context}.dead_slots is invalid",
         )
         reseat = item.get("relocation_reseat") or []
         require(
             isinstance(reseat, list)
             and all(
-                (
-                    isinstance(pair, list)
-                    and len(pair) == 2
-                    and all((type(x) is int and start <= x < end for x in pair))
-                    for pair in reseat
-                )
+                isinstance(pair, list)
+                and len(pair) == 2
+                and all(type(x) is int and start <= x < end for x in pair)
+                for pair in reseat
             ),
             f"{item_context}.relocation_reseat is invalid",
         )
@@ -2011,7 +1997,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             isinstance(offsets, list)
             and offsets
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and start <= offset < end for offset in offsets)),
+            and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         rewrite_bytes.extend(offsets)
@@ -2076,7 +2062,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             isinstance(offsets, list)
             and len(offsets) == 2
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and 0 <= offset < body_length for offset in offsets)),
+            and all(type(offset) is int and 0 <= offset < body_length for offset in offsets),
             f"{site_context}.expected_rewritten_offsets is invalid",
         )
         relational_bytes.extend(offsets)
@@ -2125,14 +2111,14 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             isinstance(offsets, list)
             and offsets
             and (offsets == sorted(set(offsets)))
-            and all((type(offset) is int and 0 <= offset < body_length for offset in offsets)),
+            and all(type(offset) is int and 0 <= offset < body_length for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
         )
         records = item.get("debug_s_bprel_offsets")
         require(
             isinstance(records, list)
             and records == sorted(set(records))
-            and all((type(offset) is int and offset >= 0 for offset in records)),
+            and all(type(offset) is int and offset >= 0 for offset in records),
             f"{item_context}.debug_s_bprel_offsets is invalid",
         )
         normalized_slots.append(
@@ -2205,7 +2191,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         isinstance(changed, list)
         and changed
         and (changed == sorted(set(changed)))
-        and all((type(offset) is int and 0 <= offset < body_length for offset in changed)),
+        and all(type(offset) is int and 0 <= offset < body_length for offset in changed),
         f"{context}.expected_changed_offsets is invalid",
     )
     identity_relational = {
@@ -2230,20 +2216,18 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
     )
     require(
         all(
-            (
-                offset in rotation_regions
-                or offset in window_bytes
-                or offset in rewrite_regions
-                or (
-                    offset
-                    in set(bijection_bytes)
-                    | set(exchange_bytes)
-                    | set(relational_bytes)
-                    | set(form_bytes)
-                    | slot_bytes
-                )
-                for offset in changed
+            offset in rotation_regions
+            or offset in window_bytes
+            or offset in rewrite_regions
+            or (
+                offset
+                in set(bijection_bytes)
+                | set(exchange_bytes)
+                | set(relational_bytes)
+                | set(form_bytes)
+                | slot_bytes
             )
+            for offset in changed
         ),
         f"{context}.expected_changed_offsets names a byte no declared certificate can move",
     )
@@ -2251,7 +2235,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
     require(
         isinstance(procedure, list)
         and len(procedure) == 3
-        and all((type(item) is int and item >= 0 for item in procedure))
+        and all(type(item) is int and item >= 0 for item in procedure)
         and (procedure[0] == body_length)
         and (procedure[1] <= procedure[2] <= body_length),
         f"{context}.expected_procedure_range is invalid",
@@ -2260,15 +2244,13 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
     require(
         isinstance(references, list)
         and all(
-            (
-                isinstance(item, list)
-                and len(item) == 3
-                and isinstance(item[0], str)
-                and isinstance(item[1], str)
-                and (type(item[2]) is int)
-                and (0 <= item[2] <= body_length)
-                for item in references
-            )
+            isinstance(item, list)
+            and len(item) == 3
+            and isinstance(item[0], str)
+            and isinstance(item[1], str)
+            and (type(item[2]) is int)
+            and (0 <= item[2] <= body_length)
+            for item in references
         ),
         f"{context}.expected_code_symbol_references is invalid",
     )
@@ -2276,7 +2258,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
     require(
         isinstance(external, list)
         and external == sorted(set(external))
-        and all((type(item) is int and 0 < item < body_length for item in external)),
+        and all(type(item) is int and 0 < item < body_length for item in external),
         f"{context}.expected_external_entries is invalid",
     )
     rationale = value.get("authenticity_rationale")
@@ -2316,10 +2298,10 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
 def produce_donor_rewriting_candidate(
     seed_bytes: bytes,
     donor_bytes: bytes,
-    function: dict,
+    function: dict[str, Any],
     *,
     compiler_identity: Msvc420CompilerIdentity | None = None,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Produce REWRITE(donor body) from a fresh compiler artifact."""
     require_payload_free_declaration(function, "donor-rewriting declaration")
     require(
@@ -2432,7 +2414,7 @@ def produce_donor_rewriting_candidate(
     )
     donor_rows = detailed_relocations(donor, dp)
 
-    def _relocation_identity(row: dict) -> tuple:
+    def _relocation_identity(row: dict[str, Any]) -> tuple[Any, ...]:
         if row["target_storage"] in (3, 6) and row["target"].startswith("$"):
             return (
                 "static",
@@ -2465,7 +2447,7 @@ def produce_donor_rewriting_candidate(
 
     seed_rows_d1 = detailed_relocations(seed, sp)
     divergences = {
-        tuple(item[:1])[0]: (item[1], item[2])
+        item[0]: (item[1], item[2])
         for item in function.get("expected_relocation_divergences") or []
     }
     require(
@@ -2485,13 +2467,13 @@ def produce_donor_rewriting_candidate(
             f"donor-rewriting donor relocation target {ordinal} differs from the seed",
         )
     relocation_offsets = frozenset(
-        (row["offset"] + byte for row in donor_rows for byte in range(row["width"]))
+        row["offset"] + byte for row in donor_rows for byte in range(row["width"])
     )
     relocation_symbols = {
         row["offset"]: {"width": row["width"], "target": row["target"]} for row in donor_rows
     }
     internal_targets = frozenset(
-        (row["target_value"] for row in donor_rows if row["target_section"] == dp["number"])
+        row["target_value"] for row in donor_rows if row["target_section"] == dp["number"]
     )
     declared_targets = spec.get("expected_internal_relocation_targets")
     if declared_targets is not None:
@@ -2716,11 +2698,9 @@ def produce_donor_rewriting_candidate(
         require(
             proof["rewritten_offsets"]
             == sorted(
-                (
-                    offset
-                    for item in spec["relational_sites"]
-                    for offset in item["expected_rewritten_offsets"]
-                )
+                offset
+                for item in spec["relational_sites"]
+                for offset in item["expected_rewritten_offsets"]
             ),
             "donor-rewriting relational rewrite set differs from its declaration",
         )
@@ -2799,9 +2779,7 @@ def produce_donor_rewriting_candidate(
         code_length,
         internal_targets,
     )
-    changed = sorted(
-        (index for index in range(len(donor_body)) if donor_body[index] != image[index])
-    )
+    changed = sorted(index for index in range(len(donor_body)) if donor_body[index] != image[index])
     require(
         changed == spec["expected_changed_offsets"],
         "donor-rewriting image differs from its declaration",
@@ -2888,12 +2866,12 @@ def produce_donor_rewriting_candidate(
 
 def apply_esp_argument_exchange(
     body: bytes,
-    exchanges: list,
-    relocation_offsets: frozenset,
+    exchanges: list[Any],
+    relocation_offsets: frozenset[int],
     context: str,
-    relocations: dict | None = None,
+    relocations: dict[int, Any] | None = None,
     code_length: int | None = None,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Exchange two incoming pointer arguments' roles, or refuse.
 
     The certificate: two `mov r32, [esp+disp8]` argument loads in the
@@ -3081,13 +3059,13 @@ def apply_esp_argument_exchange(
                 f"{item_context}: an implicit use of an exchanged register at {right['offset']} cannot be renamed",
             )
             continue
-        expected_reads = frozenset((names.get(name, name) for name in right["reads"]))
-        expected_writes = frozenset((names.get(name, name) for name in right["writes"]))
+        expected_reads = frozenset(names.get(name, name) for name in right["reads"])
+        expected_writes = frozenset(names.get(name, name) for name in right["writes"])
         require(
             left["reads"] == expected_reads and left["writes"] == expected_writes,
             f"{item_context}: the rewrite at {right['offset']} is not the declared two-register exchange",
         )
-    rewritten = sorted(set((offset for offset in rewritten if image[offset] != body[offset])))
+    rewritten = sorted(set(offset for offset in rewritten if image[offset] != body[offset]))
     sites = [
         {
             "first_offset": first,
@@ -3103,170 +3081,6 @@ def apply_esp_argument_exchange(
 
 
 FP_POINTER_EXCHANGE_KIND = "fp_pointer_addend_exchange_v1"
-
-
-def apply_imul_operand_exchange(
-    body: bytes,
-    sites: list,
-    relocation_offsets: frozenset,
-    context: str,
-    relocations: dict | None = None,
-    code_length: int | None = None,
-    external_entries: frozenset | None = None,
-    internal_targets: frozenset | None = None,
-) -> tuple[bytes, dict]:
-    """Exchange each declared integer-multiply load form, or refuse."""
-    require_payload_free_declaration(sites, f"{context} IMUL operand declaration")
-    require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
-    body = bytes(body)
-    require(isinstance(sites, list) and sites, f"{context}: no site is declared")
-    items, successors, entries = ia32_relational_flow_walk(
-        body, relocations, context, code_length, external_entries
-    )
-    branch_targets = {item["target"] for item in items if item.get("target") is not None}
-    entry_offsets = {items[entry]["offset"] for entry in entries[1:]}
-    decoded = decode_ia32_bijection_body(body, f"{context} decode", relocations, code_length)
-    index_of = {item["offset"]: index for index, item in enumerate(decoded)}
-    number_of = {name: number for name, number in _IA32_REGISTER_NUMBERS.items()}
-    name_of = {number: name for name, number in number_of.items()}
-    image = bytearray(body)
-    proved = []
-    previous_end = 0
-    for ordinal, site in enumerate(sites):
-        site_context = f"{context} site {ordinal}"
-        mov_at = site["mov_offset"]
-        imul_at = site["imul_offset"]
-        require(
-            type(mov_at) is int
-            and type(imul_at) is int
-            and (mov_at in index_of)
-            and (imul_at in index_of)
-            and (mov_at < imul_at),
-            f"{site_context}: offsets are not ordered instruction boundaries",
-        )
-        require(previous_end <= mov_at, f"{site_context}: sites are unsorted or overlapping")
-        mov = decoded[index_of[mov_at]]
-        imul = decoded[index_of[imul_at]]
-        require(
-            mov["length"] == 2 and body[mov_at] == 139 and (body[mov_at + 1] >> 6 == 3),
-            f"{site_context}: the load is not mov r32, r32",
-        )
-        rt = body[mov_at + 1] >> 3 & 7
-        rs = body[mov_at + 1] & 7
-        require(rt != rs, f"{site_context}: the pair names one register")
-        require(
-            name_of[rt] != "esp" and name_of[rs] != "esp", f"{site_context}: the pair touches ESP"
-        )
-        require(
-            imul["length"] == 5
-            and body[imul_at] == 15
-            and (body[imul_at + 1] == 175)
-            and (body[imul_at + 2] >> 6 == 1)
-            and (body[imul_at + 2] & 7 == 4)
-            and (body[imul_at + 3] == 36),
-            f"{site_context}: the operator is not imul r32, [esp+disp8]",
-        )
-        require(
-            body[imul_at + 2] >> 3 & 7 == rt,
-            f"{site_context}: the operator does not name the load's target",
-        )
-        disp8 = body[imul_at + 4]
-        end = imul_at + 5
-        previous_end = end
-        between = [decoded[i] for i in range(index_of[mov_at] + 1, index_of[imul_at])]
-        require(
-            len(between) <= 2, f"{site_context}: more than two instructions lie between the pair"
-        )
-        rt_atoms = _IA32_ATOMS_OF[name_of[rt]]
-        rs_atoms = _IA32_ATOMS_OF[name_of[rs]]
-        esp_atoms = _IA32_ATOMS_OF["esp"]
-        for inner in between:
-            require(
-                inner["flow"] == "straight", f"{site_context}: an intervening instruction branches"
-            )
-            reads = frozenset(inner["read_atoms"])
-            writes = frozenset(inner["write_atoms"])
-            require(
-                not reads & rt_atoms and (not writes & rt_atoms),
-                f"{site_context}: an intervening instruction touches the load target",
-            )
-            require(
-                not writes & rs_atoms,
-                f"{site_context}: an intervening instruction writes the exchanged register",
-            )
-            require(
-                not reads & esp_atoms or not inner["memory_write"],
-                f"{site_context}: an intervening instruction writes through ESP",
-            )
-            require(
-                not inner["memory_write"],
-                f"{site_context}: an intervening instruction writes memory",
-            )
-            require(not writes & esp_atoms, f"{site_context}: an intervening instruction moves ESP")
-            require(
-                "flags" not in inner["read_atoms"]
-                and (not reads & frozenset({"eflags"}))
-                and (not inner.get("reads_flags")),
-                f"{site_context}: an intervening instruction reads flags",
-            )
-        require(
-            all((offset not in relocation_offsets for offset in range(mov_at, end))),
-            f"{site_context}: the site overlaps a relocation",
-        )
-        require(
-            not any((mov_at < target < end for target in branch_targets)),
-            f"{site_context}: a branch target lies inside the site",
-        )
-        require(
-            not any((mov_at < offset < end for offset in entry_offsets)),
-            f"{site_context}: an entry point lies inside the site",
-        )
-        require(
-            not any((mov_at < target < end for target in internal_targets or frozenset())),
-            f"{site_context}: an internal relocation target lies inside the site",
-        )
-        carried = b"".join(
-            (body[inner["offset"] : inner["offset"] + inner["length"]] for inner in between)
-        )
-        new_site = (
-            bytes([139, 64 | rt << 3 | 4, 36, disp8])
-            + carried
-            + bytes([15, 175, 192 | rt << 3 | rs])
-        )
-        require(
-            len(new_site) == end - mov_at, f"{site_context}: the exchange changed the site length"
-        )
-        image[mov_at:end] = new_site
-        rewritten = [offset for offset in range(mov_at, end) if image[offset] != body[offset]]
-        require(
-            rewritten == site["expected_rewritten_offsets"],
-            f"{site_context}: the exchange rewrote a different byte set from its declaration",
-        )
-        proved.append(
-            {
-                "mov_offset": mov_at,
-                "imul_offset": imul_at,
-                "target": name_of[rt],
-                "exchanged": name_of[rs],
-                "slot_displacement": disp8,
-                "rewritten_offsets": rewritten,
-            }
-        )
-    reencoded = decode_ia32_bijection_body(
-        bytes(image), f"{context} image", relocations, code_length
-    )
-    require(
-        len(reencoded) == len(decoded), f"{context}: the exchange changed the instruction count"
-    )
-    site_spans = [(site["mov_offset"], site["imul_offset"] + 5) for site in sites]
-    for left, right in zip(decoded, reencoded):
-        inside = any((start <= left["offset"] < stop for start, stop in site_spans))
-        if not inside:
-            require(
-                left["offset"] == right["offset"] and left["length"] == right["length"],
-                f"{context}: the exchange moved an instruction outside its sites",
-            )
-    return (bytes(image), {"sites": proved})
 
 
 _SIMULATOR_REGS = ("eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi")
@@ -3357,14 +3171,14 @@ def _fp_exchange_simulate(body: bytes, start: int, end: int, context: str):
 
 def apply_fp_pointer_exchange(
     body: bytes,
-    exchanges: list,
-    relocation_offsets: frozenset,
+    exchanges: list[Any],
+    relocation_offsets: frozenset[int],
     context: str,
-    relocations: dict | None = None,
+    relocations: dict[int, Any] | None = None,
     code_length: int | None = None,
-    external_entries: frozenset | None = None,
-    internal_targets: frozenset | None = None,
-) -> tuple[bytes, dict]:
+    external_entries: frozenset[int] | None = None,
+    internal_targets: frozenset[int] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
     """Exchange declared pointer-setup immediates, or refuse."""
     require_payload_free_declaration(exchanges, f"{context} FP pointer declaration")
     require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
@@ -3392,19 +3206,19 @@ def apply_fp_pointer_exchange(
         require(previous_end <= start, f"{item_context}: exchanges are unsorted or overlapping")
         previous_end = end
         require(
-            not any((start <= offset < end for offset in relocation_offsets)),
+            not any(start <= offset < end for offset in relocation_offsets),
             f"{item_context}: a relocation lies inside the region",
         )
         require(
-            not any((start < target < end for target in branch_targets)),
+            not any(start < target < end for target in branch_targets),
             f"{item_context}: a branch targets the region interior",
         )
         require(
-            not any((start < items[entry]["offset"] < end for entry in entries[1:])),
+            not any(start < items[entry]["offset"] < end for entry in entries[1:]),
             f"{item_context}: an external entry lies inside the region",
         )
         require(
-            not any((start < target < end for target in internal_targets or frozenset())),
+            not any(start < target < end for target in internal_targets or frozenset()),
             f"{item_context}: a relocated target lies inside the region",
         )
         first, second = item["swap_offsets"]
@@ -3443,9 +3257,7 @@ def apply_fp_pointer_exchange(
                 not live_flags,
                 f"{item_context}: the two versions leave different flag state and {sorted(live_flags)} is live at the exit",
             )
-        differing = sorted(
-            (name for name in _SIMULATOR_REGS if seed_regs[name] != image_regs[name])
-        )
+        differing = sorted(name for name in _SIMULATOR_REGS if seed_regs[name] != image_regs[name])
         declared_dead = item["dead_registers"]
         require(
             differing == sorted(declared_dead),
@@ -3471,7 +3283,7 @@ def apply_fp_pointer_exchange(
                 "immediate_width": width,
                 "dead_registers": sorted(declared_dead),
                 "rewritten_offsets": sorted(
-                    (offset for offset in range(start, end) if body[offset] != image[offset])
+                    offset for offset in range(start, end) if body[offset] != image[offset]
                 ),
             }
         )
@@ -3493,9 +3305,9 @@ def _srr_simulate(
     start: int,
     end: int,
     context: str,
-    relocations: dict | None = None,
-    oracles: dict | None = None,
-    entry_loads: dict | None = None,
+    relocations: dict[int, Any] | None = None,
+    oracles: dict[str, Any] | None = None,
+    entry_loads: dict[str, Any] | None = None,
 ):
     """Symbolically execute [start, end); return the end state.
 
@@ -3535,7 +3347,7 @@ def _srr_simulate(
             base, parts = (left[1], left[2])
         else:
             base, parts = (left, ())
-        return ("isub", base, tuple(sorted(parts + (right,), key=repr)))
+        return ("isub", base, tuple(sorted((*parts, right), key=repr)))
 
     def norm_iadd(left, right):
         parts = []
@@ -3578,8 +3390,8 @@ def _srr_simulate(
             require(
                 not frames, f"{context}: an inlined callee runs past its body without returning"
             )
-            intervals = sorted(((key, key + widths[key]) for key in slots if isinstance(key, int)))
-            for former, latter in zip(intervals, intervals[1:]):
+            intervals = sorted((key, key + widths[key]) for key in slots if isinstance(key, int))
+            for former, latter in itertools.pairwise(intervals):
                 require(
                     former[1] <= latter[0],
                     f"{context}: the frame stores at {former[0]:#x} and {latter[0]:#x} overlap; the slot map cannot represent their order",
@@ -3713,7 +3525,7 @@ def _srr_simulate(
             return None
 
         def resolve_pushed(addr):
-            base, extra = flatten_add(regs["esp"])
+            base, _extra = flatten_add(regs["esp"])
             if base != ("reg0", "esp") or addr[1] != ("reg0", "esp"):
                 return None
             if addr[2] >= 0 or addr[2] % 4 != 0:
@@ -3968,7 +3780,7 @@ def _srr_simulate(
             advanced = True
         elif op == 255 and mod != 3 and (reg_field == 2):
             operand = mem_operand(2)
-            base_probe, extra_probe = flatten_add(operand[1])
+            base_probe, _extra_probe = flatten_add(operand[1])
             covered = (
                 isinstance(base_probe, tuple)
                 and base_probe[0] == "sym"
@@ -4086,10 +3898,10 @@ def _srr_simulate(
 
 
 def _srr_slot_scratch_proof(
-    decoded: list,
-    items: list,
-    successors: list,
-    entries: list,
+    decoded: list[Any],
+    items: list[Any],
+    successors: list[Any],
+    entries: list[Any],
     exit_offset: int,
     disp: int,
     context: str,
@@ -4165,14 +3977,14 @@ def _srr_slot_scratch_proof(
 
 def apply_simulated_region_rewrite(
     body: bytes,
-    regions: list,
-    relocation_offsets: frozenset,
+    regions: list[Any],
+    relocation_offsets: frozenset[int],
     context: str,
-    relocations: dict | None = None,
+    relocations: dict[int, Any] | None = None,
     code_length: int | None = None,
-    external_entries: frozenset | None = None,
-    internal_targets: frozenset | None = None,
-) -> tuple[bytes, dict]:
+    external_entries: frozenset[int] | None = None,
+    internal_targets: frozenset[int] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
     """Apply declared permutation+field rewrites, proved by simulation."""
     require_payload_free_declaration(regions, f"{context} simulated-region declaration")
     require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
@@ -4205,15 +4017,15 @@ def apply_simulated_region_rewrite(
         require(previous_end <= start, f"{item_context}: regions are unsorted or overlapping")
         previous_end = end
         require(
-            not any((start < target < end for target in branch_targets)),
+            not any(start < target < end for target in branch_targets),
             f"{item_context}: a branch targets the region interior",
         )
         require(
-            not any((start < items[entry]["offset"] < end for entry in entries[1:])),
+            not any(start < items[entry]["offset"] < end for entry in entries[1:]),
             f"{item_context}: an external entry lies inside the region",
         )
         require(
-            not any((start < target < end for target in internal_targets or frozenset())),
+            not any(start < target < end for target in internal_targets or frozenset()),
             f"{item_context}: a relocated target lies inside the region",
         )
         pieces = []
@@ -4244,7 +4056,7 @@ def apply_simulated_region_rewrite(
         cursor = start
         moved_offsets = {}
         region_reseat = []
-        for position, source_index in enumerate(order):
+        for _position, source_index in enumerate(order):
             source_offset, encoded = pieces[source_index]
             carried = [
                 offs
@@ -4252,7 +4064,6 @@ def apply_simulated_region_rewrite(
                 if offs in relocation_offsets
             ]
             if carried and cursor != source_offset:
-                starts = sorted({offs - (offs - source_offset) % 1 for offs in carried})
                 heads = sorted({offs for offs in carried})
                 for offs in heads:
                     if offs - 1 in carried:
@@ -4294,14 +4105,14 @@ def apply_simulated_region_rewrite(
         seed_slots, image_slots = (seed_state[3], image_state[3])
         dead_slots = item.get("dead_slots") or []
         require(
-            isinstance(dead_slots, list) and all((type(d) is int for d in dead_slots)),
+            isinstance(dead_slots, list) and all(type(d) is int for d in dead_slots),
             f"{item_context}.dead_slots is invalid",
         )
         require(
             set(seed_slots) == set(image_slots),
             f"{item_context}: the two versions write different frame slots",
         )
-        differing_slots = sorted((d for d in seed_slots if seed_slots[d] != image_slots[d]))
+        differing_slots = sorted(d for d in seed_slots if seed_slots[d] != image_slots[d])
         require(
             differing_slots == sorted(dead_slots),
             f"{item_context}: the slots left differing {differing_slots} are not the declared dead set {sorted(dead_slots)}",
@@ -4313,7 +4124,7 @@ def apply_simulated_region_rewrite(
                 f"{item_context}: the two versions leave different flag state and a flag is live at the exit",
             )
         differing = sorted(
-            (name for name in _SIMULATOR_REGS if seed_state[0][name] != image_state[0][name])
+            name for name in _SIMULATOR_REGS if seed_state[0][name] != image_state[0][name]
         )
         declared_dead = item.get("dead_registers") or []
         require(
@@ -4359,7 +4170,7 @@ def apply_simulated_region_rewrite(
                     ([old, new] for old, new in moved_offsets.items() if old != new)
                 ),
                 "rewritten_offsets": sorted(
-                    (offs for offs in range(start, end) if body[offs] != image[offs])
+                    offs for offs in range(start, end) if body[offs] != image[offs]
                 ),
             }
         )
@@ -4376,7 +4187,7 @@ def apply_simulated_region_rewrite(
             "kind": SIMULATED_REGION_REWRITE_KIND,
             "regions": proved,
             "relocation_reseat": sorted(
-                (pair for region in proved for pair in region["relocation_reseat"])
+                pair for region in proved for pair in region["relocation_reseat"]
             ),
         },
     )

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from typing import Protocol
+from typing import Any, Protocol
 
 from reprobit.binary import require
 
@@ -58,7 +58,9 @@ def source_overlay_significant_sha256(data: bytes) -> str:
     return source_overlay_token_sha256([token for token, _, _ in source_overlay_tokens(data)])
 
 
-def require_source_overlay_range_pin(data: bytes, expected: dict, context: str) -> dict:
+def require_source_overlay_range_pin(
+    data: bytes, expected: dict[str, Any], context: str
+) -> dict[str, Any]:
     """Authenticate one already-resolved clean-input byte range."""
     actual = {
         "actual_removed_range_sha256": sha256_bytes(data),
@@ -82,9 +84,9 @@ def require_source_overlay_range_pin(data: bytes, expected: dict, context: str) 
 def require_target_source_range_identity(
     seed_source: bytes,
     donor_source: bytes,
-    proof: dict,
+    proof: dict[str, Any],
     context: str,
-) -> dict:
+) -> dict[str, Any]:
     """Prove that a target-only donor leaves the selected source unchanged.
 
     The caller supplies two independently rendered, content-pinned source
@@ -171,8 +173,8 @@ def require_declaration_carrier_seat_complement(
         index
         for index in range(len(rest) - len(head) + 1)
         if rest[index : index + len(head)] == head
-        and all((GENERATED_DECLARATION_LINE.match(line) for line in rest[:index]))
-        and all((GENERATED_DECLARATION_LINE.match(line) for line in rest[index + len(head) :]))
+        and all(GENERATED_DECLARATION_LINE.match(line) for line in rest[:index])
+        and all(GENERATED_DECLARATION_LINE.match(line) for line in rest[index + len(head) :])
     ]
     require(len(splits) == 1, f"{context} rendering is not the seed plus two carrier blocks")
     index = splits[0]
@@ -196,10 +198,10 @@ def require_forward_run_placement_complement(
     require(len(donor_lines) > len(seed_lines), f"{context} rendering carries no seated run")
     extra = len(donor_lines) - len(seed_lines)
     prefix_seated = donor_lines[extra:] == seed_lines and all(
-        (GENERATED_DECLARATION_LINE.match(line) for line in donor_lines[:extra])
+        GENERATED_DECLARATION_LINE.match(line) for line in donor_lines[:extra]
     )
     suffix_seated = donor_lines[: len(seed_lines)] == seed_lines and all(
-        (GENERATED_DECLARATION_LINE.match(line) for line in donor_lines[len(seed_lines) :])
+        GENERATED_DECLARATION_LINE.match(line) for line in donor_lines[len(seed_lines) :]
     )
     require(
         prefix_seated or suffix_seated, f"{context} rendering is not the seed plus one seated run"
@@ -207,7 +209,9 @@ def require_forward_run_placement_complement(
     return extra
 
 
-def select_same_tu_source_identity_window(data: bytes, proof: dict, context: str) -> bytes:
+def select_same_tu_source_identity_window(
+    data: bytes, proof: dict[str, Any], context: str
+) -> bytes:
     """Select one function through the LF terminating its closing-brace line."""
     marker = proof["start_marker"].encode("ascii")
     require(data.count(marker) == 1, f"{context} start marker is not unique")
@@ -237,16 +241,14 @@ def require_same_tu_source_identity(
     seed_source: bytes,
     target_donor_source: bytes,
     instruction_donor_source: bytes,
-    proof: dict,
+    proof: dict[str, Any],
     context: str,
-) -> dict:
+) -> dict[str, Any]:
     """Prove both declaration-carrier donors retain the target source."""
     require(
         all(
-            (
-                isinstance(item, bytes)
-                for item in (seed_source, target_donor_source, instruction_donor_source)
-            )
+            isinstance(item, bytes)
+            for item in (seed_source, target_donor_source, instruction_donor_source)
         ),
         f"{context} source renderings are missing",
     )
@@ -289,7 +291,7 @@ def require_same_tu_source_identity(
     }
 
 
-def select_source_permutation_window(data: bytes, proof: dict, context: str) -> bytes:
+def select_source_permutation_window(data: bytes, proof: dict[str, Any], context: str) -> bytes:
     """Select the complete source window authenticated by a proof."""
     start_marker = proof["start_marker"].encode("ascii")
     require(data.count(start_marker) == 1, f"{context} start marker is not unique")
@@ -334,8 +336,8 @@ def select_source_permutation_window(data: bytes, proof: dict, context: str) -> 
 
 
 def require_target_source_refactor_identity(
-    seed_source: bytes, donor_source: bytes, proof: dict, context: str
-) -> dict:
+    seed_source: bytes, donor_source: bytes, proof: dict[str, Any], context: str
+) -> dict[str, Any]:
     """Pin both complete target ranges before a refactor donor is composed."""
     require(
         isinstance(seed_source, bytes) and isinstance(donor_source, bytes),

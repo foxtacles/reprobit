@@ -113,6 +113,7 @@ def _seed_timestamp_normalization(project: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "nt", reason="native NMake import requires Windows")
+@pytest.mark.msvc42
 def test_fresh_project_imports_builds_grinds_and_verifies_with_nmake(
     tmp_path: Path,
 ) -> None:

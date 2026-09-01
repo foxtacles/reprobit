@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import itertools
 import struct
+from typing import Any
 
 import reprobit.declaration_shapes as entropy_generator
 from reprobit.binary import ByteIdentityError, require
@@ -8,7 +10,6 @@ from reprobit.coff_format import (
     CoffObject,
     coff_auxiliary,
     coff_body,
-    coff_table,
     coff_unpack,
     detailed_relocations,
     section_definitions,
@@ -20,30 +21,24 @@ from .coff import (
     _coff_table_bytes,
     _comdat_child,
     _comdat_child_closure,
-    associated_sections,
     canonical_counter_receipt_sha256,
     comdat_primary_identity,
     comdat_primary_identity_multiset,
     comdat_primary_section,
     function_multiset,
     function_symbol,
-    marker_symbol,
     require_source_target_closure_topology,
     require_target_closure_extraction_topology,
     section_shape_receipt_sha256,
-    section_symbol,
 )
 from .debug import (
     LOCAL_SET_DELTA_REFACTOR_KINDS,
     _apply_replacements,
     linker_payload_multiset,
-    normalized_donor_lines,
     parse_fpo_data,
-    relocation_compatibility,
     require_debug_symbol_representation_delta,
     require_removed_caller_locals_delta,
     shifted_pointer,
-    verify_non_emitting_donor,
 )
 from .foundation import (
     canonical_json_bytes,
@@ -81,11 +76,11 @@ from .source_proofs import (
 
 def _normalized_relocation_renames(
     seed: CoffObject,
-    seed_section: dict,
+    seed_section: dict[str, Any],
     donor: CoffObject,
-    donor_section: dict,
+    donor_section: dict[str, Any],
     context: str,
-    seat_map: dict | None = None,
+    seat_map: dict[str, Any] | None = None,
 ) -> list[tuple[int, str]]:
     """Require literal relocation equality except paired object-local $L/$T
     serial renames whose targets are structurally identical.
@@ -128,10 +123,8 @@ def _normalized_relocation_renames(
         require(
             a["target_section"] == donor_target_section
             and all(
-                (
-                    a["target_" + field] == b["target_" + field]
-                    for field in ("value", "type", "storage")
-                )
+                a["target_" + field] == b["target_" + field]
+                for field in ("value", "type", "storage")
             ),
             f"{context}: renamed local relocation target structure differs",
         )
@@ -140,7 +133,11 @@ def _normalized_relocation_renames(
 
 
 def require_same_semantic_relocations(
-    seed: CoffObject, seed_section: dict, donor: CoffObject, donor_section: dict, context: str
+    seed: CoffObject,
+    seed_section: dict[str, Any],
+    donor: CoffObject,
+    donor_section: dict[str, Any],
+    context: str,
 ) -> list[tuple[int, str]]:
     """Require identical resolved relocation semantics at identical offsets.
 
@@ -165,7 +162,7 @@ def require_same_semantic_relocations(
                 f"{context}: relocation {index} changes symbol identity",
             )
         require(
-            all((seed_row[field] == donor_row[field] for field in target_fields)),
+            all(seed_row[field] == donor_row[field] for field in target_fields),
             f"{context}: relocation {index} target structure differs",
         )
     return renames
@@ -175,7 +172,7 @@ MOSAIC_PERMUTED_RELOCATION_ORDER = "permuted_outside_ranges"
 
 
 def _mosaic_relocation_pair_rename(
-    seed: CoffObject, donor: CoffObject, a: dict, b: dict
+    seed: CoffObject, donor: CoffObject, a: dict[str, Any], b: dict[str, Any]
 ) -> tuple[bool, tuple[int, str] | None]:
     """Judge one same-offset seed/donor relocation pair under the strict
     instruction-mosaic rule (``require_instruction_mosaic_semantic_relocations``
@@ -191,9 +188,7 @@ def _mosaic_relocation_pair_rename(
     ):
         return (False, None)
     if a["target"] == b["target"]:
-        if any(
-            (a[field] != b[field] for field in ("target_value", "target_type", "target_storage"))
-        ):
+        if any(a[field] != b[field] for field in ("target_value", "target_type", "target_storage")):
             return (False, None)
         if a["target_section"] == b["target_section"]:
             return (True, None)
@@ -216,13 +211,13 @@ def _mosaic_relocation_pair_rename(
     if kind != local_symbol_kind(b["target"]):
         return (False, None)
     if a["target_section"] != b["target_section"] or any(
-        (a["target_" + field] != b["target_" + field] for field in ("value", "type", "storage"))
+        a["target_" + field] != b["target_" + field] for field in ("value", "type", "storage")
     ):
         return (False, None)
     return (True, (a["offset"], kind))
 
 
-def _permuted_relocation_key(row: dict) -> tuple:
+def _permuted_relocation_key(row: dict[str, Any]) -> tuple[Any, ...]:
     """Offset-free identity of one relocation record for the multiset rule.
 
     Compiler-local ``$L``/``$T`` serials are reduced to their kind; their
@@ -243,9 +238,9 @@ def _permuted_relocation_key(row: dict) -> tuple:
 
 def _require_permuted_instruction_mosaic_relocations(
     seed: CoffObject,
-    seed_section: dict,
+    seed_section: dict[str, Any],
     donor: CoffObject,
-    donor_section: dict,
+    donor_section: dict[str, Any],
     permuted_ranges: list[tuple[int, int]],
     context: str,
 ) -> list[tuple[int, str]]:
@@ -289,8 +284,8 @@ def _require_permuted_instruction_mosaic_relocations(
         f"{context}: relocation permutation is empty; the strict relocation order applies",
     )
     require(
-        sorted((_permuted_relocation_key(row) for row in unmatched_left))
-        == sorted((_permuted_relocation_key(row) for row in unmatched_right)),
+        sorted(_permuted_relocation_key(row) for row in unmatched_left)
+        == sorted(_permuted_relocation_key(row) for row in unmatched_right),
         f"{context}: relocations outside the imported ranges are not a permutation of the seed's",
     )
     for role, rows in (("seed", unmatched_left), ("donor", unmatched_right)):
@@ -308,9 +303,9 @@ def _require_permuted_instruction_mosaic_relocations(
 
 def _require_reseat_instruction_mosaic_relocations(
     seed: CoffObject,
-    seed_section: dict,
+    seed_section: dict[str, Any],
     donor: CoffObject,
-    donor_section: dict,
+    donor_section: dict[str, Any],
     reseat_windows: list[tuple[int, int]],
     context: str,
 ) -> list[tuple[int, str]]:
@@ -353,9 +348,9 @@ def _require_reseat_instruction_mosaic_relocations(
 
 def require_instruction_mosaic_semantic_relocations(
     seed: CoffObject,
-    seed_section: dict,
+    seed_section: dict[str, Any],
     donor: CoffObject,
-    donor_section: dict,
+    donor_section: dict[str, Any],
     context: str,
     *,
     permuted_ranges: list[tuple[int, int]] | None = None,
@@ -406,7 +401,7 @@ def require_instruction_mosaic_semantic_relocations(
         common_fields = ("target_value", "target_type", "target_storage")
         require(same_name or local, f"{context}: relocation {index} changes symbol identity")
         require(
-            all((seed_row[field] == donor_row[field] for field in common_fields)),
+            all(seed_row[field] == donor_row[field] for field in common_fields),
             f"{context}: relocation {index} target structure differs",
         )
         if seed_row["target_section"] == donor_row["target_section"]:
@@ -430,13 +425,13 @@ def require_instruction_mosaic_semantic_relocations(
 
 def require_ordinary_fpo_mosaic_identity(
     seed: CoffObject,
-    seed_primary: dict,
+    seed_primary: dict[str, Any],
     donor: CoffObject,
-    donor_primary: dict,
-    function: dict,
-    identity: dict,
+    donor_primary: dict[str, Any],
+    function: dict[str, Any],
+    identity: dict[str, Any],
     context: str,
-) -> list[tuple[dict, dict]]:
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """Authenticate one ordinary mosaic's exact FPO/CodeView closure."""
     mangled = function["mangled"]
     seed_definitions = section_definitions(seed)
@@ -571,8 +566,8 @@ def require_ordinary_fpo_mosaic_identity(
 
 
 def require_ordinary_fpo_self_permutation_receipts(
-    seed: CoffObject, donor: CoffObject, function: dict, context: str
-) -> dict:
+    seed: CoffObject, donor: CoffObject, function: dict[str, Any], context: str
+) -> dict[str, Any]:
     """Pin all object-wide identities for the isolated FPO permutation."""
     return require_self_permutation_receipts(
         seed, donor, function, ORDINARY_FPO_CLOSURE_CHILDREN, context
@@ -582,10 +577,10 @@ def require_ordinary_fpo_self_permutation_receipts(
 def require_self_permutation_receipts(
     seed: CoffObject,
     donor: CoffObject,
-    function: dict,
+    function: dict[str, Any],
     closure_children: tuple[str, ...],
     context: str,
-) -> dict:
+) -> dict[str, Any]:
     """Pin all object-wide identities for one isolated self-permutation.
 
     The permutation exchanges two of the seed's own complete instructions,
@@ -674,7 +669,7 @@ def require_self_permutation_receipts(
     leaked_symbols = [
         symbol["name"]
         for symbol in donor.symbols.values()
-        if any((identifier in symbol["name"] for identifier in identifiers))
+        if any(identifier in symbol["name"] for identifier in identifiers)
     ]
     leaked_bytes = [
         identifier for identifier in identifiers if identifier.encode("ascii") in donor.data
@@ -694,13 +689,13 @@ def require_self_permutation_receipts(
 
 def require_source_fpo_mosaic_identity(
     seed: CoffObject,
-    seed_primary: dict,
+    seed_primary: dict[str, Any],
     donor: CoffObject,
-    donor_primary: dict,
-    function: dict,
-    identity: dict,
+    donor_primary: dict[str, Any],
+    function: dict[str, Any],
+    identity: dict[str, Any],
     context: str,
-) -> list[tuple[dict, dict]]:
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """Authenticate one source-refactor mosaic's exact FPO closure.
 
     The seed and donor may have separately pinned CodeView payload sizes and
@@ -934,7 +929,9 @@ def _pair_same_slot_relocations(
     return pairs
 
 
-def _resolve_substituted_seed_symbol(seed: CoffObject, donor_record: dict, context: str) -> int:
+def _resolve_substituted_seed_symbol(
+    seed: CoffObject, donor_record: dict[str, Any], context: str
+) -> int:
     """B5/B6: map a donor relocation's EXTERNAL target onto the seed's own
     symbol table, by name, unambiguously, with matching class.
 
@@ -967,7 +964,7 @@ def _resolve_substituted_seed_symbol(seed: CoffObject, donor_record: dict, conte
 
 def _source_target_relocation_substitutions(
     seed: CoffObject,
-    donor_rows: list[dict],
+    donor_rows: list[dict[str, Any]],
     mapping: dict[int, int],
     expected_imports: list[str],
     section_map: dict[int, int],
@@ -1118,15 +1115,13 @@ def _pair_reloc_divergent(
                 right_definition = section_definitions(donor).get(right_section_number)
                 require(
                     all(
-                        (
-                            left_section[key] == right_section[key]
-                            for key in (
-                                "name",
-                                "raw_size",
-                                "relocation_count",
-                                "line_count",
-                                "characteristics",
-                            )
+                        left_section[key] == right_section[key]
+                        for key in (
+                            "name",
+                            "raw_size",
+                            "relocation_count",
+                            "line_count",
+                            "characteristics",
                         )
                     )
                     and coff_body(seed, left_section) == coff_body(donor, right_section)
@@ -1183,15 +1178,13 @@ def _pair_reloc_divergent(
                 right_section = donor.sections[right_section_number - 1]
                 require(
                     all(
-                        (
-                            left_section[key] == right_section[key]
-                            for key in (
-                                "name",
-                                "raw_size",
-                                "relocation_count",
-                                "line_count",
-                                "characteristics",
-                            )
+                        left_section[key] == right_section[key]
+                        for key in (
+                            "name",
+                            "raw_size",
+                            "relocation_count",
+                            "line_count",
+                            "characteristics",
                         )
                     )
                     and coff_body(seed, left_section) == coff_body(donor, right_section)
@@ -1214,7 +1207,7 @@ def _pair_reloc_divergent(
             else:
                 substitutions[ordinal] = _resolve_substituted_seed_symbol(seed, right, context)
         pairs.append((left, right))
-    appended: list[tuple[dict, int]] = []
+    appended: list[tuple[dict[str, Any], int]] = []
     for extra_index, record in enumerate(appended_rows):
         where = f"{context} appended relocation {extra_index}"
         require(
@@ -1228,13 +1221,13 @@ def _pair_reloc_divergent(
 def compose_same_slot_resize(
     seed_bytes: bytes,
     donor_bytes: bytes,
-    function: dict,
+    function: dict[str, Any],
     *,
     target_closure_extract: bool = False,
     source_target_extract: bool = False,
-    declared_donor_extras: list | None = None,
-    declared_seed_only: list | None = None,
-) -> tuple[bytes, dict]:
+    declared_donor_extras: list[Any] | None = None,
+    declared_seed_only: list[Any] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
     """Install a donor code body of a different size that occupies the same
     16-byte linked contribution slot, repairing every dependent COFF record.
 
@@ -1332,7 +1325,7 @@ def compose_same_slot_resize(
         require(len(seed.sections) == len(donor.sections), "global section count differs")
         require(function_multiset(seed) == function_multiset(donor), "donor function set differs")
     require(
-        all((sp[key] == dp[key] for key in ("name", "characteristics"))),
+        all(sp[key] == dp[key] for key in ("name", "characteristics")),
         "target header shape changed",
     )
     require(
@@ -1352,7 +1345,7 @@ def compose_same_slot_resize(
         seed_defs[sp["number"]]["selection"] == donor_defs[dp["number"]]["selection"],
         "target COMDAT selection changed",
     )
-    closure = _comdat_child_closure(seed, (seed_primary := sp))
+    closure = _comdat_child_closure(seed, sp)
     require(
         closure == _comdat_child_closure(donor, dp)
         and closure in ((2, (".debug$S", ".xdata$x")), (2, (".debug$F", ".debug$S"))),
@@ -1399,7 +1392,7 @@ def compose_same_slot_resize(
         ),
         (sd, dd, "debug$S", debug_shape_keys),
     ):
-        require(all((left[key] == right[key] for key in keys)), f"{name} section shape changed")
+        require(all(left[key] == right[key] for key in keys), f"{name} section shape changed")
     if local_set_delta is not None:
         local_set_detail, reduced_debug_raw = require_removed_caller_locals_delta(
             coff_body(seed, sd),
@@ -1437,7 +1430,7 @@ def compose_same_slot_resize(
     ddr = detailed_relocations(donor, dd)
     mapping: dict[int, int] = {}
     substitutions: dict[int, int] = {}
-    appended_relocations: list[tuple[dict, int]] = []
+    appended_relocations: list[tuple[dict[str, Any], int]] = []
     imported_symbols: list[tuple[str, int, int]] = []
     xdata_pairs = _pair_same_slot_relocations(
         sxr, dxr, sp["number"], dp["number"], sx["number"], dx["number"], mapping, "xdata"
@@ -1515,7 +1508,7 @@ def compose_same_slot_resize(
                 == (right["section"] - dp["number"], right["type"], right["storage"]),
                 "mapped local symbol class changed",
             )
-    seed_function_index, seed_function = function_symbol(seed, mangled, sp["number"])
+    seed_function_index, _seed_function = function_symbol(seed, mangled, sp["number"])
     donor_function_index, donor_function = function_symbol(donor, mangled, dp["number"])
     require(sp["line_count"] > 0 and dp["line_count"] > 0, "target COFF line count changed")
     seed_lines = _coff_table_bytes(seed, sp, "lines")
@@ -1683,7 +1676,7 @@ def compose_same_slot_resize(
         )
         at = new_symbol_offset + seed_lf_index * 18
         output[at + 8 : at + 12] = donor_lf_symbol["value"].to_bytes(4, "little")
-    seed_section_index, seed_section_sym = _coff_section_symbol(seed, sp)
+    seed_section_index, _seed_section_sym = _coff_section_symbol(seed, sp)
     donor_section_index, donor_section_sym = _coff_section_symbol(donor, dp)
     at = new_symbol_offset + (seed_section_index + 1) * 18
     output[at : at + 18] = coff_auxiliary(donor, donor_section_index, donor_section_sym)
@@ -1831,14 +1824,14 @@ DONOR_SOURCE_FORCE_INCLUDE_CARRIERS = {
 }
 
 
-def _donor_source_force_included_shape(kind: str, params: dict) -> bytes:
+def _donor_source_force_included_shape(kind: str, params: dict[str, Any]) -> bytes:
     """Render one force-included carrier's declaration-only shape."""
     _, generator_name, names = DONOR_SOURCE_FORCE_INCLUDE_CARRIERS[kind]
     generator = getattr(entropy_generator, generator_name)
     return generator(*(params[name] for name in names)).encode("ascii")
 
 
-def validate_donor_source_compiler_state_carrier(value: object, context: str) -> dict:
+def validate_donor_source_compiler_state_carrier(value: object, context: str) -> dict[str, Any]:
     """Validate one closed, declaration-only multi-seat source carrier.
 
     Two grammars are admitted, both already part of the mosaic carrier
@@ -1935,7 +1928,7 @@ def validate_donor_source_compiler_state_carrier(value: object, context: str) ->
     return normalized
 
 
-def instruction_mosaic_metadata_sha256(coff: CoffObject, primary: dict) -> str:
+def instruction_mosaic_metadata_sha256(coff: CoffObject, primary: dict[str, Any]) -> str:
     """Hash the target's seed-authoritative line/debug/EH metadata closure."""
     definitions = section_definitions(coff)
     closure = _comdat_child_closure(coff, primary)
@@ -1973,7 +1966,7 @@ def instruction_mosaic_metadata_sha256(coff: CoffObject, primary: dict) -> str:
 
 def _require_instruction_mosaic_metadata_pin(
     coff: CoffObject,
-    primary: dict,
+    primary: dict[str, Any],
     expected_sha256: str,
     context: str,
 ) -> None:
@@ -1988,8 +1981,11 @@ def _require_instruction_mosaic_metadata_pin(
 
 
 def produce_cross_tu_complete_target_resize_candidate(
-    seed_bytes: bytes, target_donor_bytes: bytes, complete_donor_bytes: bytes, function: dict
-) -> tuple[bytes, dict]:
+    seed_bytes: bytes,
+    target_donor_bytes: bytes,
+    complete_donor_bytes: bytes,
+    function: dict[str, Any],
+) -> tuple[bytes, dict[str, Any]]:
     """Normalize one complete cross-TU COMDAT into an owner-TU carrier.
 
     The complete donor supplies the entire code body, COFF line rows, FPO
@@ -2151,15 +2147,13 @@ def produce_cross_tu_complete_target_resize_candidate(
         complete_children[child_name] = complete_child
         require(
             all(
-                (
-                    target_child[field] == complete_child[field]
-                    for field in (
-                        "name",
-                        "raw_size",
-                        "relocation_count",
-                        "line_count",
-                        "characteristics",
-                    )
+                target_child[field] == complete_child[field]
+                for field in (
+                    "name",
+                    "raw_size",
+                    "relocation_count",
+                    "line_count",
+                    "characteristics",
                 )
             ),
             f"complete donor {child_name} geometry differs",
@@ -2357,13 +2351,13 @@ def produce_cross_tu_complete_target_resize_candidate(
 
 def _validate_instruction_mosaic_source_variant(
     seed: CoffObject,
-    seed_primary: dict,
+    seed_primary: dict[str, Any],
     donor_bytes: bytes,
-    function: dict,
-    variant: dict,
+    function: dict[str, Any],
+    variant: dict[str, Any],
     context: str,
     reseat_windows: list[tuple[int, int]] | None = None,
-) -> tuple[CoffObject, dict, bytes]:
+) -> tuple[CoffObject, dict[str, Any], bytes]:
     """Authenticate one independently compiled same-COMDAT donor variant."""
     donor = CoffObject(donor_bytes)
     primary = donor.function_section(function["mangled"])
@@ -2382,10 +2376,8 @@ def _validate_instruction_mosaic_source_variant(
     )
     require(
         all(
-            (
-                seed_primary[field] == primary[field]
-                for field in ("name", "relocation_count", "characteristics")
-            )
+            seed_primary[field] == primary[field]
+            for field in ("name", "relocation_count", "characteristics")
         ),
         f"{context} target section header changed",
     )
@@ -2413,7 +2405,7 @@ def _validate_instruction_mosaic_source_variant(
         right = _comdat_child(donor, primary, child_name)
         require(
             left["number"] == right["number"]
-            and all((left[field] == right[field] for field in ("name", "characteristics"))),
+            and all(left[field] == right[field] for field in ("name", "characteristics")),
             f"{context} {child_name} seat/header changed",
         )
         require_same_semantic_relocations(seed, left, donor, right, f"{context} {child_name}")
@@ -2448,10 +2440,10 @@ def _compose_instruction_mosaic_variant_object(
     seed_bytes: bytes,
     main_donor_bytes: bytes,
     additional_donor_bytes: dict[str, bytes],
-    function: dict,
+    function: dict[str, Any],
     *,
     primary_donor_id: str,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Build one provenance-checked donor view from same-COMDAT variants.
 
     The returned object is an internal view only.  Every copied instruction
@@ -2538,7 +2530,7 @@ def _compose_instruction_mosaic_variant_object(
     )
 
 
-def _instruction_mosaic_range_donor_label(item: dict, primary_donor_id: str) -> str:
+def _instruction_mosaic_range_donor_label(item: dict[str, Any], primary_donor_id: str) -> str:
     """Name a range's donor from current typed intervention authority."""
     return item.get("donor", primary_donor_id)
 
@@ -2546,11 +2538,11 @@ def _instruction_mosaic_range_donor_label(item: dict, primary_donor_id: str) -> 
 def _produce_instruction_mosaic_candidate_core(
     seed_bytes: bytes,
     donor_bytes: bytes,
-    function: dict,
+    function: dict[str, Any],
     *,
     source_permutation: bool,
     primary_donor_id: str,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Import pinned complete instructions into an otherwise canonical COMDAT.
 
     Both objects are fresh compiler outputs of the same checked-in source;
@@ -2616,7 +2608,7 @@ def _produce_instruction_mosaic_candidate_core(
     )
     declared_donor_ids = {primary_donor_id, *variant_ids}
     require(
-        all((item.get("donor", primary_donor_id) in declared_donor_ids for item in ranges)),
+        all(item.get("donor", primary_donor_id) in declared_donor_ids for item in ranges),
         "instruction-mosaic range names an undeclared donor",
     )
     reseat_windows = [
@@ -2640,10 +2632,8 @@ def _produce_instruction_mosaic_candidate_core(
     if ordinary_fpo or source_fpo or self_permutation:
         require(
             all(
-                (
-                    item["kind"] == "same_offset_complete_x86_instruction_sequence_v1"
-                    for item in ranges
-                )
+                item["kind"] == "same_offset_complete_x86_instruction_sequence_v1"
+                for item in ranges
             ),
             "FPO and self-permutation instruction mosaics require exact sequence partitions",
         )
@@ -2670,12 +2660,12 @@ def _produce_instruction_mosaic_candidate_core(
     )
     common_header_fields = ("name", "relocation_count", "characteristics")
     require(
-        all((sp[field] == dp[field] for field in common_header_fields)),
+        all(sp[field] == dp[field] for field in common_header_fields),
         "instruction-mosaic target section header changed",
     )
     if not source_permutation:
         require(
-            all((sp[field] == dp[field] for field in ("raw_size", "line_count"))),
+            all(sp[field] == dp[field] for field in ("raw_size", "line_count")),
             "instruction-mosaic target size/line header changed",
         )
     require(
@@ -2756,7 +2746,7 @@ def _produce_instruction_mosaic_candidate_core(
         right = _comdat_child(donor, dp, child_name)
         require(left["number"] == right["number"], f"instruction-mosaic {child_name} seat changed")
         require(
-            all((left[field] == right[field] for field in ("name", "characteristics"))),
+            all(left[field] == right[field] for field in ("name", "characteristics")),
             f"instruction-mosaic {child_name} header changed",
         )
         closure_relocation_renames[child_name] = require_same_semantic_relocations(
@@ -2805,11 +2795,9 @@ def _produce_instruction_mosaic_candidate_core(
         )
         require(
             all(
-                (
-                    item["end"] <= permutation["target_start"]
-                    or item["start"] >= permutation["target_end"]
-                    for item in ranges
-                )
+                item["end"] <= permutation["target_start"]
+                or item["start"] >= permutation["target_end"]
+                for item in ranges
             ),
             "instruction mosaic same-offset ranges overlap the self-permutation window",
         )
@@ -2841,9 +2829,9 @@ def _produce_instruction_mosaic_candidate_core(
         )
     if self_permutation:
         window = (permutation["target_start"], permutation["target_end"])
-        for role, coff, section, line_bytes in (
-            ("seed", seed, sp, seed_lines),
-            ("donor", donor, dp, donor_lines),
+        for role, section, line_bytes in (
+            ("seed", sp, seed_lines),
+            ("donor", dp, donor_lines),
         ):
             for index in range(1, section["line_count"]):
                 offset, line = coff_unpack(
@@ -2892,7 +2880,10 @@ def _produce_instruction_mosaic_candidate_core(
             f"instruction-mosaic donor instruction {index} drifted",
         )
         contained = []
-        for role, rows, body in (("seed", seed_rows, seed_body), ("donor", donor_rows, donor_body)):
+        for role, rows, _body in (
+            ("seed", seed_rows, seed_body),
+            ("donor", donor_rows, donor_body),
+        ):
             ordinals = []
             for ordinal, row in enumerate(rows):
                 operand_start = row["offset"]
@@ -2959,9 +2950,9 @@ def _produce_instruction_mosaic_candidate_core(
                         left["target"].rstrip("0123456789") == right["target"].rstrip("0123456789")
                     )
                 ):
-                    strict_fields = tuple((field for field in strict_fields if field != "target"))
+                    strict_fields = tuple(field for field in strict_fields if field != "target")
             require(
-                all((left[field] == right[field] for field in strict_fields)),
+                all(left[field] == right[field] for field in strict_fields),
                 f"instruction-mosaic range {index} contains a changed relocation",
             )
             if reseat:
@@ -3003,9 +2994,7 @@ def _produce_instruction_mosaic_candidate_core(
             ("donor source", donor_rows, source_start, source_end),
         ):
             require(
-                all(
-                    (end <= row["offset"] or start >= row["offset"] + row["width"] for row in rows)
-                ),
+                all(end <= row["offset"] or start >= row["offset"] + row["width"] for row in rows),
                 f"instruction self-permutation intersects a {role} relocation operand",
             )
         for index, move in enumerate(permutation["moves"]):
@@ -3074,7 +3063,7 @@ def _produce_instruction_mosaic_candidate_core(
             all(
                 (
                     a["offset"] + a["width"] <= b["offset"]
-                    for a, b in zip(output_rows, output_rows[1:])
+                    for a, b in itertools.pairwise(output_rows)
                 )
             ),
             "reseated relocation table is not in ascending operand order",
@@ -3095,13 +3084,11 @@ def _produce_instruction_mosaic_candidate_core(
     if self_permutation:
         replacements.extend(
             (
-                (
-                    sp["raw_offset"] + item["target_start"],
-                    sp["raw_offset"] + item["target_end"],
-                    donor_body[item["donor_start"] : item["donor_end"]],
-                )
-                for item in permutation["moves"]
+                sp["raw_offset"] + item["target_start"],
+                sp["raw_offset"] + item["target_end"],
+                donor_body[item["donor_start"] : item["donor_end"]],
             )
+            for item in permutation["moves"]
         )
         replacements.sort(key=lambda item: item[0])
     reseat_file_offsets = set()
@@ -3122,11 +3109,9 @@ def _produce_instruction_mosaic_candidate_core(
     }
     if self_permutation:
         allowed_file_offsets.update(
-            (
-                sp["raw_offset"] + offset
-                for item in permutation["moves"]
-                for offset in range(item["target_start"], item["target_end"])
-            )
+            sp["raw_offset"] + offset
+            for item in permutation["moves"]
+            for offset in range(item["target_start"], item["target_end"])
         )
     allowed_file_offsets |= reseat_file_offsets
     require(
@@ -3134,9 +3119,7 @@ def _produce_instruction_mosaic_candidate_core(
         "instruction mosaic changed a non-target byte",
     )
     if self_permutation:
-        changed_body_offsets = sorted(
-            (offset - sp["raw_offset"] for offset in changed_file_offsets)
-        )
+        changed_body_offsets = sorted(offset - sp["raw_offset"] for offset in changed_file_offsets)
         require(
             changed_body_offsets == permutation["expected_changed_offsets"],
             "instruction self-permutation changed-offset set differs",
@@ -3197,7 +3180,7 @@ def _produce_instruction_mosaic_candidate_core(
             "instruction_ranges": range_detail,
             "instruction_self_permutation": permutation_detail,
             "body_changed_offsets": sorted(
-                (offset - sp["raw_offset"] for offset in changed_file_offsets - reseat_file_offsets)
+                offset - sp["raw_offset"] for offset in changed_file_offsets - reseat_file_offsets
             ),
             "relocations": len(seed_rows),
             "relocation_reseats": reseat_detail,
@@ -3219,11 +3202,11 @@ def _produce_instruction_mosaic_candidate_core(
 def produce_instruction_mosaic_candidate(
     seed_bytes: bytes,
     donor_bytes: bytes,
-    function: dict,
+    function: dict[str, Any],
     additional_donor_bytes: dict[str, bytes] | None = None,
     *,
     primary_donor_id: str,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Compose a declaration-carrier instruction mosaic.
 
     With ``donor_variants`` the mosaic may draw its same-offset complete
@@ -3288,13 +3271,13 @@ def produce_instruction_mosaic_candidate(
 def produce_source_instruction_mosaic_candidate(
     seed_bytes: bytes,
     donor_bytes: bytes,
-    function: dict,
+    function: dict[str, Any],
     seed_source: bytes,
     donor_source: bytes,
     additional_donor_bytes: dict[str, bytes] | None = None,
     *,
     primary_donor_id: str,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Compose a mosaic from one authenticated source permutation."""
     require_payload_free_declaration(function, "source instruction-mosaic declaration")
     require(
@@ -3341,11 +3324,11 @@ def _produce_instruction_hybrid_resize_candidate_core(
     seed_bytes: bytes,
     target_donor_bytes: bytes,
     instruction_donor_bytes: bytes,
-    function: dict,
+    function: dict[str, Any],
     *,
     source_aware: bool,
     same_tu_source_identical: bool = False,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Import complete same-mangled instructions, then resize normally.
 
     The target donor supplies the complete resize closure.  A second freshly
@@ -3409,10 +3392,8 @@ def _produce_instruction_hybrid_resize_candidate_core(
     )
     require(
         all(
-            (
-                target_primary[field] == instruction_primary[field]
-                for field in ("name", "characteristics")
-            )
+            target_primary[field] == instruction_primary[field]
+            for field in ("name", "characteristics")
         ),
         "same-mangled donor COMDAT header class changed",
     )
@@ -3462,13 +3443,11 @@ def _produce_instruction_hybrid_resize_candidate_core(
         expected_closure = (len(closure), closure)
         require(
             all(
-                (
-                    value == expected_closure
-                    for value in (
-                        _comdat_child_closure(seed, seed_primary),
-                        _comdat_child_closure(target, target_primary),
-                        _comdat_child_closure(instruction_donor, instruction_primary),
-                    )
+                value == expected_closure
+                for value in (
+                    _comdat_child_closure(seed, seed_primary),
+                    _comdat_child_closure(target, target_primary),
+                    _comdat_child_closure(instruction_donor, instruction_primary),
                 )
             ),
             "source hybrid donor closure changed",
@@ -3567,9 +3546,7 @@ def _produce_instruction_hybrid_resize_candidate_core(
             ("instruction donor", instruction_relocations, source_start, source_end),
         ):
             require(
-                all(
-                    (end <= row["offset"] or start >= row["offset"] + row["width"] for row in rows)
-                ),
+                all(end <= row["offset"] or start >= row["offset"] + row["width"] for row in rows),
                 f"cross-TU range {index} overlaps a {role} relocation operand",
             )
         at = target_primary["raw_offset"] + target_start
@@ -3647,61 +3624,15 @@ def _produce_instruction_hybrid_resize_candidate_core(
     )
 
 
-def produce_cross_tu_instruction_hybrid_resize_candidate(
-    seed_bytes: bytes, target_donor_bytes: bytes, instruction_donor_bytes: bytes, function: dict
-) -> tuple[bytes, dict]:
-    """Compose the existing clean-current-source cross-TU hybrid class."""
-    require_payload_free_declaration(function, "cross-TU instruction-hybrid declaration")
-    require(
-        "instruction_donor_source_refactor" not in function,
-        "clean cross-TU hybrid may not carry a source-refactor proof",
-    )
-    return _produce_instruction_hybrid_resize_candidate_core(
-        seed_bytes, target_donor_bytes, instruction_donor_bytes, function, source_aware=False
-    )
-
-
-def produce_source_instruction_hybrid_resize_candidate(
-    seed_bytes: bytes,
-    target_donor_bytes: bytes,
-    instruction_donor_bytes: bytes,
-    function: dict,
-    seed_source: bytes,
-    instruction_donor_source: bytes,
-) -> tuple[bytes, dict]:
-    """Authenticate one source permutation before importing instructions."""
-    require_payload_free_declaration(function, "source instruction-hybrid declaration")
-    require(
-        function.get("splice_class") == SOURCE_INSTRUCTION_HYBRID_RESIZE_CLASS
-        and "instruction_donor_source_refactor" in function,
-        "source instruction-hybrid contract is missing",
-    )
-    proof = function["instruction_donor_source_refactor"]
-    require(
-        proof.get("source_owner_mangled") == function.get("mangled"),
-        "source instruction-hybrid owner differs",
-    )
-    owner = proof["source_owner_mangled"]
-    CoffObject(target_donor_bytes).function_section(owner)
-    CoffObject(instruction_donor_bytes).function_section(owner)
-    source_detail = require_target_source_refactor_identity(
-        seed_source, instruction_donor_source, proof, "source instruction-hybrid source proof"
-    )
-    composed, detail = _produce_instruction_hybrid_resize_candidate_core(
-        seed_bytes, target_donor_bytes, instruction_donor_bytes, function, source_aware=True
-    )
-    return (composed, {**detail, **source_detail})
-
-
 def produce_same_tu_instruction_hybrid_resize_candidate(
     seed_bytes: bytes,
     target_donor_bytes: bytes,
     instruction_donor_bytes: bytes,
-    function: dict,
+    function: dict[str, Any],
     seed_source: bytes,
     target_donor_source: bytes,
     instruction_donor_source: bytes,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Compose two source-identical, declaration-carrier same-TU donors."""
     require_payload_free_declaration(function, "same-TU instruction-hybrid declaration")
     require(
@@ -3737,8 +3668,8 @@ def produce_same_tu_instruction_hybrid_resize_candidate(
 
 
 def produce_reloc_divergent_candidate(
-    seed_bytes: bytes, donor_bytes: bytes, function: dict
-) -> tuple[bytes, dict]:
+    seed_bytes: bytes, donor_bytes: bytes, function: dict[str, Any]
+) -> tuple[bytes, dict[str, Any]]:
     """Splice a donor body whose EXTERNAL relocation target set diverges.
 
     Every `same_slot_resize` check applies except relocation-target equality.
@@ -3765,8 +3696,12 @@ def produce_reloc_divergent_candidate(
 
 
 def produce_source_refactor_candidate(
-    seed_bytes: bytes, donor_bytes: bytes, function: dict, seed_source: bytes, donor_source: bytes
-) -> tuple[bytes, dict]:
+    seed_bytes: bytes,
+    donor_bytes: bytes,
+    function: dict[str, Any],
+    seed_source: bytes,
+    donor_source: bytes,
+) -> tuple[bytes, dict[str, Any]]:
     """Install one relocation-divergent body from a proved source refactor.
 
     The source proof is deliberately inseparable from this entry point.  The
@@ -3799,10 +3734,10 @@ def produce_source_refactor_candidate(
 def produce_source_target_closure_candidate(
     seed_bytes: bytes,
     donor_bytes: bytes,
-    function: dict,
+    function: dict[str, Any],
     seed_source: bytes,
     donor_source: bytes,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Extract one compiler-produced target from a source-closed donor.
 
     The producer receives no reference-image body.  The donor body is pinned
@@ -3835,7 +3770,9 @@ def produce_source_target_closure_candidate(
     return composed, {**detail, **source_detail}
 
 
-def compose_swap_comdat_group_order(seed_bytes: bytes, specification: dict) -> tuple[bytes, dict]:
+def compose_swap_comdat_group_order(
+    seed_bytes: bytes, specification: dict[str, Any]
+) -> tuple[bytes, dict[str, Any]]:
     """Swap the link-visible order of two complete compiler-produced COMDAT
     groups (primary + associated children) inside one object, renumbering
     section ordinals and associations only.
@@ -3851,7 +3788,7 @@ def compose_swap_comdat_group_order(seed_bytes: bytes, specification: dict) -> t
     second = seed.function_section(specification["second"])
     definitions = section_definitions(seed)
 
-    def group(primary: dict) -> list[int]:
+    def group(primary: dict[str, Any]) -> list[int]:
         children = [
             section["number"]
             for section in seed.sections
@@ -3924,7 +3861,7 @@ def compose_swap_comdat_group_order(seed_bytes: bytes, specification: dict) -> t
     for section in seed.sections:
         peer = checked.sections[mapped(section["number"]) - 1]
         require(
-            all((section[field] == peer[field] for field in section_fields)),
+            all(section[field] == peer[field] for field in section_fields),
             f"semantic section changed: old {section['number']}",
         )
     require(seed.symbols.keys() == checked.symbols.keys(), "symbol index set changed")
@@ -3932,10 +3869,8 @@ def compose_swap_comdat_group_order(seed_bytes: bytes, specification: dict) -> t
         peer = checked.symbols[index]
         require(
             all(
-                (
-                    symbol[field] == peer[field]
-                    for field in ("name", "value", "type", "storage", "aux_count")
-                )
+                symbol[field] == peer[field]
+                for field in ("name", "value", "type", "storage", "aux_count")
             )
             and peer["section"] == mapped(symbol["section"]),
             f"symbol identity changed at {index}",
@@ -3980,8 +3915,8 @@ def compose_swap_comdat_group_order(seed_bytes: bytes, specification: dict) -> t
 
 
 def compose_restore_comdat_group_order(
-    seed_bytes: bytes, specification: dict
-) -> tuple[bytes, dict]:
+    seed_bytes: bytes, specification: dict[str, Any]
+) -> tuple[bytes, dict[str, Any]]:
     """Restore the link-visible order of several complete compiler-produced
     `.text` COMDAT groups (primary + associated children) inside one object.
 
@@ -4005,13 +3940,13 @@ def compose_restore_comdat_group_order(
         "group_order must be a list of 2..512 distinct names",
     )
     require(
-        all((isinstance(name, str) and name for name in order)),
+        all(isinstance(name, str) and name for name in order),
         "group_order names must be non-empty strings",
     )
     seed = CoffObject(seed_bytes)
     definitions = section_definitions(seed)
 
-    def group(primary: dict) -> list[int]:
+    def group(primary: dict[str, Any]) -> list[int]:
         children = [
             section["number"]
             for section in seed.sections
@@ -4105,7 +4040,7 @@ def compose_restore_comdat_group_order(
     for section in seed.sections:
         peer = checked.sections[mapped(section["number"]) - 1]
         require(
-            all((section[field] == peer[field] for field in section_fields)),
+            all(section[field] == peer[field] for field in section_fields),
             f"semantic section changed: old {section['number']}",
         )
     require(seed.symbols.keys() == checked.symbols.keys(), "symbol index set changed")
@@ -4113,10 +4048,8 @@ def compose_restore_comdat_group_order(
         peer = checked.symbols[index]
         require(
             all(
-                (
-                    symbol[field] == peer[field]
-                    for field in ("name", "value", "type", "storage", "aux_count")
-                )
+                symbol[field] == peer[field]
+                for field in ("name", "value", "type", "storage", "aux_count")
             )
             and peer["section"] == mapped(symbol["section"]),
             f"symbol identity changed at {index}",
@@ -4160,131 +4093,6 @@ def compose_restore_comdat_group_order(
             "unlisted_reseated": len(unlisted),
             "symbol_section_writes": symbol_writes,
             "association_writes": association_writes,
-        },
-    )
-
-
-def produce_comdat_selection_override_candidate(
-    seed_bytes: bytes, donor_bytes: bytes, function: dict
-) -> tuple[bytes, dict]:
-    """Class C: install another object's copy of a multiply-defined COMDAT.
-
-    Some template instantiations are emitted by several objects in one link.
-    The linker keeps whichever comes first and discards the rest, so the
-    copies are interchangeable *to the linker* and the choice is pure link
-    order.  This installs a copy the linker itself could have chosen -- it
-    selects among genuine compiler outputs and invents nothing.
-
-    The donor is a DIFFERENT translation unit, so the whole-object
-    equivalences every other class relies on (section count, function
-    multiset, section seat) do not apply and are deliberately not required.
-    What replaces them is a complete declarative pin plus an exact structural
-    match of the COMDAT and its closure.  The sealed final-image verifier owns
-    literal reference comparison.
-    """
-    require_payload_free_declaration(function, "COMDAT selection declaration")
-    seed = CoffObject(seed_bytes)
-    donor = CoffObject(donor_bytes)
-    mangled = function["mangled"]
-    sp = seed.function_section(mangled)
-    dp = donor.function_section(mangled)
-    require(
-        section_definitions(seed)[sp["number"]]["selection"]
-        == section_definitions(donor)[dp["number"]]["selection"],
-        "COMDAT selection differs between the two copies",
-    )
-    require(
-        all(
-            (
-                sp[key] == dp[key]
-                for key in ("name", "raw_size", "relocation_count", "line_count", "characteristics")
-            )
-        ),
-        "the two COMDAT copies differ in shape",
-    )
-    require(
-        sp["raw_size"] == function["expected_seed_length"]
-        and dp["raw_size"] == function["expected_donor_length"],
-        "target body lengths changed",
-    )
-    donor_code = coff_body(donor, dp)
-    require(
-        sha256_bytes(donor_code) == function["expected_body_sha256"],
-        "donor body differs from its pinned compiler output",
-    )
-    pinned_length = function["retail_oracle"]["length"]
-    require(len(donor_code) == pinned_length, "candidate length differs from its linked-length pin")
-    spr = detailed_relocations(seed, sp)
-    dpr = detailed_relocations(donor, dp)
-    require(len(spr) == len(dpr), "relocation counts differ")
-    for index, (left, right) in enumerate(zip(spr, dpr)):
-        require(
-            (left["offset"], left["type"], left["addend"])
-            == (right["offset"], right["type"], right["addend"]),
-            f"relocation {index}: offset/type/addend differs",
-        )
-        require(
-            local_symbol_kind(right["target"]) is None,
-            f"relocation {index}: compiler-local target {right['target']!r} cannot cross objects",
-        )
-        require(
-            left["target"] == right["target"],
-            f"relocation {index}: target name differs ({left['target']!r} vs {right['target']!r})",
-        )
-    seed_lines = _coff_table_bytes(seed, sp, "lines")
-    donor_lines = _coff_table_bytes(donor, dp, "lines")
-    require(
-        len(seed_lines) == len(donor_lines) and seed_lines[4:] == donor_lines[4:],
-        "COFF line rows differ between the two copies",
-    )
-    closure = _comdat_child_closure(seed, sp)
-    require(
-        closure == _comdat_child_closure(donor, dp)
-        and closure in ((2, (".debug$S", ".xdata$x")), (2, (".debug$F", ".debug$S"))),
-        "target closure is not an EH or FPO debug pair",
-    )
-    fpo = closure == (2, (".debug$F", ".debug$S"))
-    child = ".debug$F" if fpo else ".xdata$x"
-    sx = _comdat_child(seed, sp, child)
-    dx = _comdat_child(donor, dp, child)
-    require(
-        coff_body(seed, sx) == coff_body(donor, dx), f"{child} bytes differ between the two copies"
-    )
-    sd = _comdat_child(seed, sp, ".debug$S")
-    dd = _comdat_child(donor, dp, ".debug$S")
-    seed_debug = coff_body(seed, sd)
-    donor_debug = coff_body(donor, dd)
-    require(
-        len(seed_debug) >= 28
-        and seed_debug[2:4] == b"\x05\x02"
-        and (donor_debug[2:4] == b"\x05\x02"),
-        "debug$S is not an S_*PROC32 record",
-    )
-    require(
-        seed_debug[16:28] == donor_debug[16:28],
-        "debug$S procedure range differs between the two copies",
-    )
-    old_end = sp["raw_offset"] + sp["raw_size"]
-    output = _apply_replacements(seed_bytes, [(sp["raw_offset"], old_end, donor_code)])
-    checked = CoffObject(output)
-    cp = checked.function_section(mangled)
-    require(coff_body(checked, cp) == donor_code, "composed body is not the donor body")
-    require(
-        _coff_table_bytes(checked, cp, "relocations") == _coff_table_bytes(seed, sp, "relocations"),
-        "composed relocation table changed",
-    )
-    require(len(output) == len(seed_bytes), "composed object size changed")
-    return (
-        output,
-        {
-            "splice_class": "comdat_selection_override",
-            "mangled": mangled,
-            "seed_section": sp["number"],
-            "donor_section": dp["number"],
-            "body_length": len(donor_code),
-            "relocations": len(dpr),
-            "candidate_only": True,
-            "oracle_payload_bytes_read": 0,
         },
     )
 
@@ -4334,8 +4142,8 @@ REPINNABLE_PIN_KEYS = {
 
 
 def measure_composition_pins(
-    seed_bytes: bytes, donor_bytes: bytes, function: dict, context: str
-) -> dict:
+    seed_bytes: bytes, donor_bytes: bytes, function: dict[str, Any], context: str
+) -> dict[str, Any]:
     """Measure, from the two objects, every pin this entry states about them.
 
     Returns only keys the entry ALREADY carries.  Raises for a splice class
@@ -4421,8 +4229,8 @@ def measure_composition_pins(
 
 
 def repin_composition_function(
-    seed_bytes: bytes, donor_bytes: bytes, function: dict, context: str
-) -> tuple[dict, list[str]]:
+    seed_bytes: bytes, donor_bytes: bytes, function: dict[str, Any], context: str
+) -> tuple[dict[str, Any], list[str]]:
     """Refresh one composition entry's measured pins.
 
     Returns the refreshed entry and the names of the pins that moved.  The
@@ -4437,8 +4245,8 @@ def repin_composition_function(
 
 
 def compose_equal_body_comdat(
-    seed_bytes: bytes, donor_bytes: bytes, function: dict
-) -> tuple[bytes, dict]:
+    seed_bytes: bytes, donor_bytes: bytes, function: dict[str, Any]
+) -> tuple[bytes, dict[str, Any]]:
     """Copy one equal-size compiler-produced COMDAT code body from a donor
     object into the seed object, retaining every seed relocation, xdata,
     debug, and symbol byte.
@@ -4476,10 +4284,8 @@ def compose_equal_body_comdat(
     )
     require(
         all(
-            (
-                seed_definition[field] == donor_definition[field]
-                for field in ("selection", "associated", "length", "relocations")
-            )
+            seed_definition[field] == donor_definition[field]
+            for field in ("selection", "associated", "length", "relocations")
         ),
         "target COMDAT definition record differs",
     )
@@ -4524,10 +4330,8 @@ def compose_equal_body_comdat(
                     require(
                         kind == local_symbol_kind(b["target"])
                         and all(
-                            (
-                                a["target_" + field] == b["target_" + field]
-                                for field in ("section", "value", "type", "storage")
-                            )
+                            a["target_" + field] == b["target_" + field]
+                            for field in ("section", "value", "type", "storage")
                         ),
                         "reloc-layout splice: non-local relocation rename",
                     )
@@ -4605,7 +4409,7 @@ def compose_equal_body_comdat(
                 for byte in range(record["width"])
             }
             require(
-                all((offset not in relocation_mask for offset in changed)),
+                all(offset not in relocation_mask for offset in changed),
                 "donor changes a relocated operand",
             )
             detail = {
@@ -4672,8 +4476,12 @@ def compose_equal_body_comdat(
 
 
 def produce_source_equal_body_candidate(
-    seed_bytes: bytes, donor_bytes: bytes, function: dict, seed_source: bytes, donor_source: bytes
-) -> tuple[bytes, dict]:
+    seed_bytes: bytes,
+    donor_bytes: bytes,
+    function: dict[str, Any],
+    seed_source: bytes,
+    donor_source: bytes,
+) -> tuple[bytes, dict[str, Any]]:
     """Install one complete equal-size body from a closed source refactor.
 
     This is deliberately a separate wrapper around the ordinary equal-body
@@ -4777,15 +4585,13 @@ def produce_source_equal_body_candidate(
             require(
                 left["number"] == right["number"]
                 and all(
-                    (
-                        left[field] == right[field]
-                        for field in (
-                            "name",
-                            "raw_size",
-                            "relocation_count",
-                            "line_count",
-                            "characteristics",
-                        )
+                    left[field] == right[field]
+                    for field in (
+                        "name",
+                        "raw_size",
+                        "relocation_count",
+                        "line_count",
+                        "characteristics",
                     )
                 ),
                 f"source equal-body {child_name} closure geometry changed",
@@ -4891,469 +4697,5 @@ def produce_source_equal_body_candidate(
             "candidate_only": True,
             **semantic_detail,
             **source_detail,
-        },
-    )
-
-
-def compose_equal_linked_span_fpo(
-    seed_bytes: bytes, donor_bytes: bytes, function: dict, shape_identifiers: set[str]
-) -> tuple[bytes, dict]:
-    """Compose one compiler-produced FPO COMDAT and prove its full closure."""
-    require_payload_free_declaration(function, "equal-linked-span FPO declaration")
-    seed = CoffObject(seed_bytes)
-    donor = CoffObject(donor_bytes)
-    mangled = function["mangled"]
-    seed_primary = seed.function_section(mangled)
-    donor_primary = donor.function_section(mangled)
-    require(
-        seed_primary["number"] == donor_primary["number"] == function["expected_section_number"],
-        "target COMDAT section seat changed",
-    )
-    require(
-        seed_primary["raw_size"] == function["expected_seed_length"], "seed target length changed"
-    )
-    require(
-        donor_primary["raw_size"] == function["expected_donor_length"],
-        "donor target length changed",
-    )
-    require(
-        (seed_primary["raw_size"] + 15) // 16 * 16
-        == function["expected_linked_span"]
-        == (donor_primary["raw_size"] + 15) // 16 * 16,
-        "target 16-byte linked contribution span changed",
-    )
-    require(
-        seed_primary["name"] == donor_primary["name"]
-        and seed_primary["characteristics"]
-        == donor_primary["characteristics"]
-        == function["expected_characteristics"],
-        "target section kind or characteristics changed",
-    )
-    require(
-        seed_primary["characteristics"] & 15728640 == 5242880,
-        "target COMDAT does not declare 16-byte section alignment",
-    )
-    require(
-        seed_primary["relocation_count"]
-        == donor_primary["relocation_count"]
-        == function["expected_relocation_count"],
-        "target relocation count changed",
-    )
-    require(
-        seed_primary["line_count"] == function["expected_seed_line_count"]
-        and donor_primary["line_count"] == function["expected_donor_line_count"],
-        "target COFF line count changed",
-    )
-    seed_definitions = section_definitions(seed)
-    donor_definitions = section_definitions(donor)
-    require(
-        seed_primary["number"] in seed_definitions and donor_primary["number"] in donor_definitions,
-        "target Section Definition auxiliary record is absent",
-    )
-    require(
-        seed_definitions[seed_primary["number"]]["selection"]
-        == donor_definitions[donor_primary["number"]]["selection"]
-        == function["expected_selection"],
-        "target COMDAT selection changed",
-    )
-    seed_associated = associated_sections(seed, seed_definitions, seed_primary["number"])
-    donor_associated = associated_sections(donor, donor_definitions, donor_primary["number"])
-    require(seed_associated == donor_associated, "target associative-section seats changed")
-    require(
-        tuple(sorted((name for _, name in seed_associated))) == (".debug$F", ".debug$S"),
-        "target closure is not exactly .debug$S + .debug$F; xdata is unsupported",
-    )
-    provenance = verify_non_emitting_donor(seed, donor, shape_identifiers)
-    seed_closure = {name: seed.sections[number - 1] for number, name in seed_associated}
-    donor_closure = {name: donor.sections[number - 1] for number, name in donor_associated}
-    for name in (".debug$S", ".debug$F"):
-        left = seed_closure[name]
-        right = donor_closure[name]
-        require(
-            left["number"] == right["number"]
-            and left["raw_size"] == right["raw_size"]
-            and (left["relocation_count"] == right["relocation_count"])
-            and (left["line_count"] == right["line_count"] == 0)
-            and (left["characteristics"] == right["characteristics"]),
-            f"{name} closure geometry changed",
-        )
-        left_rows = detailed_relocations(seed, left)
-        right_rows = detailed_relocations(donor, right)
-        require(
-            [
-                (
-                    row["offset"],
-                    row["type"],
-                    row["addend"],
-                    row["target"],
-                    row["target_section"],
-                    row["target_value"],
-                    row["target_type"],
-                    row["target_storage"],
-                )
-                for row in left_rows
-            ]
-            == [
-                (
-                    row["offset"],
-                    row["type"],
-                    row["addend"],
-                    row["target"],
-                    row["target_section"],
-                    row["target_value"],
-                    row["target_type"],
-                    row["target_storage"],
-                )
-                for row in right_rows
-            ],
-            f"{name} relocation target/type/addend closure changed",
-        )
-    seed_relocations = detailed_relocations(seed, seed_primary)
-    donor_relocations = detailed_relocations(donor, donor_primary)
-    compatibility = relocation_compatibility(
-        seed_relocations, donor_relocations, seed_primary["number"], donor_primary["number"]
-    )
-    require(compatibility is not None, "primary relocation target/type/addend semantics changed")
-    require(
-        len(compatibility["local_updates"]) == function["expected_local_symbol_updates"],
-        "primary local-symbol update count changed",
-    )
-    donor_body = coff_body(donor, donor_primary)
-    require(
-        sha256_bytes(donor_body) == function["compiler_output_body_sha256"],
-        "compiler donor body hash differs from the retail-approved oracle pin",
-    )
-    seed_function_index, seed_function = function_symbol(seed, mangled, seed_primary["number"])
-    donor_function_index, donor_function = function_symbol(donor, mangled, donor_primary["number"])
-    donor_lines = normalized_donor_lines(
-        seed, donor, seed_primary, donor_primary, seed_function_index, donor_function_index
-    )
-    replacements = [
-        (
-            seed_primary["raw_offset"],
-            seed_primary["raw_offset"] + seed_primary["raw_size"],
-            donor_body,
-        ),
-        (
-            seed_primary["line_offset"],
-            seed_primary["line_offset"] + seed_primary["line_count"] * 6,
-            donor_lines,
-        ),
-    ]
-    output = bytearray(_apply_replacements(seed_bytes, replacements))
-    total_delta = sum(
-        (len(replacement) - (end - start) for start, end, replacement in replacements)
-    )
-    new_symbol_offset = shifted_pointer(seed.symbol_offset, replacements)
-    struct.pack_into("<I", output, 8, new_symbol_offset)
-    expected_headers = bytearray(seed.data[20 : 20 + seed.section_count * 40])
-    for section in seed.sections:
-        relative_header = (section["number"] - 1) * 40
-        if section["number"] == seed_primary["number"]:
-            struct.pack_into(
-                "<I", expected_headers, relative_header + 16, donor_primary["raw_size"]
-            )
-            struct.pack_into(
-                "<H", expected_headers, relative_header + 34, donor_primary["line_count"]
-            )
-        for field, relative in (("raw_offset", 20), ("relocation_offset", 24), ("line_offset", 28)):
-            struct.pack_into(
-                "<I",
-                expected_headers,
-                relative_header + relative,
-                shifted_pointer(section[field], replacements),
-            )
-    output[20 : 20 + len(expected_headers)] = expected_headers
-    new_primary_relocation_offset = shifted_pointer(seed_primary["relocation_offset"], replacements)
-    for ordinal, (seed_row, donor_row) in enumerate(zip(seed_relocations, donor_relocations)):
-        struct.pack_into(
-            "<IIH",
-            output,
-            new_primary_relocation_offset + ordinal * 10,
-            donor_row["offset"],
-            seed_row["symbol_index"],
-            donor_row["type"],
-        )
-    expected_symbols = bytearray(
-        seed.data[seed.symbol_offset : seed.symbol_offset + seed.symbol_count * 18]
-    )
-    shifted_function_line_pointers = 0
-    for symbol_index, symbol in seed.symbols.items():
-        if symbol["type"] != 32 or symbol["aux_count"] < 1:
-            continue
-        auxiliary_offset = (symbol_index + 1) * 18
-        (line_pointer,) = struct.unpack_from("<I", expected_symbols, auxiliary_offset + 8)
-        mapped = shifted_pointer(line_pointer, replacements)
-        if mapped != line_pointer:
-            struct.pack_into("<I", expected_symbols, auxiliary_offset + 8, mapped)
-            shifted_function_line_pointers += 1
-    for symbol_index, donor_value in compatibility["local_updates"].items():
-        struct.pack_into("<I", expected_symbols, symbol_index * 18 + 8, donor_value)
-    donor_function_auxiliary = coff_auxiliary(donor, donor_function_index, donor_function)
-    seed_function_auxiliary = coff_auxiliary(seed, seed_function_index, seed_function)
-    require(
-        seed_function["type"] == donor_function["type"]
-        and seed_function["storage"] == donor_function["storage"]
-        and (seed_function["aux_count"] == donor_function["aux_count"] == 1)
-        and (seed_function_auxiliary[:4] == donor_function_auxiliary[:4])
-        and (seed_function_auxiliary[12:] == donor_function_auxiliary[12:]),
-        "Function Definition tag/next-function auxiliary metadata changed",
-    )
-    seed_total_size, seed_line_pointer = struct.unpack_from("<II", seed_function_auxiliary, 4)
-    donor_total_size, donor_line_pointer = struct.unpack_from("<II", donor_function_auxiliary, 4)
-    require(
-        seed_total_size == seed_primary["raw_size"]
-        and seed_line_pointer == seed_primary["line_offset"],
-        "seed Function Definition size/line pointer is stale",
-    )
-    require(
-        donor_total_size == donor_primary["raw_size"]
-        and donor_line_pointer == donor_primary["line_offset"],
-        "donor Function Definition size/line pointer is stale",
-    )
-    struct.pack_into("<I", expected_symbols, (seed_function_index + 1) * 18 + 4, donor_total_size)
-    seed_begin_index, seed_begin = marker_symbol(seed, ".bf", seed_primary["number"])
-    donor_begin_index, donor_begin = marker_symbol(donor, ".bf", donor_primary["number"])
-    seed_begin_auxiliary = coff_auxiliary(seed, seed_begin_index, seed_begin)
-    donor_begin_auxiliary = coff_auxiliary(donor, donor_begin_index, donor_begin)
-    require(
-        seed_begin["aux_count"] == donor_begin["aux_count"] == 1
-        and seed_begin["value"] == donor_begin["value"]
-        and (seed_begin["type"] == donor_begin["type"])
-        and (seed_begin["storage"] == donor_begin["storage"])
-        and (seed_begin_auxiliary[:4] == donor_begin_auxiliary[:4])
-        and (seed_begin_auxiliary[6:] == donor_begin_auxiliary[6:]),
-        ".bf tag/next-function auxiliary metadata changed",
-    )
-    expected_symbols[(seed_begin_index + 1) * 18 + 4 : (seed_begin_index + 1) * 18 + 6] = (
-        donor_begin_auxiliary[4:6]
-    )
-    seed_end_index, seed_end = marker_symbol(seed, ".ef", seed_primary["number"])
-    donor_end_index, donor_end = marker_symbol(donor, ".ef", donor_primary["number"])
-    require(seed_end["value"] == seed_primary["raw_size"], "seed .ef value is stale")
-    require(donor_end["value"] == donor_primary["raw_size"], "donor .ef value is stale")
-    seed_end_auxiliary = coff_auxiliary(seed, seed_end_index, seed_end)
-    donor_end_auxiliary = coff_auxiliary(donor, donor_end_index, donor_end)
-    require(
-        seed_end["aux_count"] == donor_end["aux_count"] == 1
-        and seed_end["type"] == donor_end["type"]
-        and (seed_end["storage"] == donor_end["storage"])
-        and (seed_end_auxiliary[:4] == donor_end_auxiliary[:4])
-        and (seed_end_auxiliary[6:] == donor_end_auxiliary[6:]),
-        ".ef tag/next-function auxiliary metadata changed",
-    )
-    struct.pack_into("<I", expected_symbols, seed_end_index * 18 + 8, donor_end["value"])
-    expected_symbols[(seed_end_index + 1) * 18 + 4 : (seed_end_index + 1) * 18 + 6] = (
-        donor_end_auxiliary[4:6]
-    )
-    seed_section_index, seed_section_symbol = section_symbol(seed, seed_primary)
-    donor_section_index, donor_section_symbol = section_symbol(donor, donor_primary)
-    donor_section_auxiliary = coff_auxiliary(donor, donor_section_index, donor_section_symbol)
-    seed_section_auxiliary = coff_auxiliary(seed, seed_section_index, seed_section_symbol)
-    require(
-        seed_section_symbol["aux_count"] == donor_section_symbol["aux_count"] == 1
-        and seed_section_symbol["type"] == donor_section_symbol["type"]
-        and (seed_section_symbol["storage"] == donor_section_symbol["storage"])
-        and (seed_section_auxiliary[12:] == donor_section_auxiliary[12:])
-        and (int.from_bytes(seed_section_auxiliary[0:4], "little") == seed_primary["raw_size"])
-        and (
-            int.from_bytes(seed_section_auxiliary[4:6], "little")
-            == seed_primary["relocation_count"]
-        )
-        and (int.from_bytes(seed_section_auxiliary[6:8], "little") == seed_primary["line_count"])
-        and (int.from_bytes(donor_section_auxiliary[0:4], "little") == donor_primary["raw_size"])
-        and (
-            int.from_bytes(donor_section_auxiliary[4:6], "little")
-            == donor_primary["relocation_count"]
-        )
-        and (int.from_bytes(donor_section_auxiliary[6:8], "little") == donor_primary["line_count"])
-        and (donor_section_auxiliary[14] == function["expected_selection"]),
-        "donor Section Definition auxiliary record is stale",
-    )
-    expected_symbols[(seed_section_index + 1) * 18 : (seed_section_index + 2) * 18] = (
-        donor_section_auxiliary
-    )
-    output[new_symbol_offset : new_symbol_offset + len(expected_symbols)] = expected_symbols
-    seed_debug_s_raw = coff_body(seed, seed_closure[".debug$S"])
-    donor_debug_s_raw = coff_body(donor, donor_closure[".debug$S"])
-    require(
-        len(seed_debug_s_raw) == len(donor_debug_s_raw) >= 28,
-        "CodeView procedure record size changed or is truncated",
-    )
-    require(
-        seed_debug_s_raw[2:4] == donor_debug_s_raw[2:4] == b"\x05\x02",
-        "associated CodeView record is not S_*PROC32",
-    )
-    donor_cbproc, donor_dbgstart, donor_dbgend = struct.unpack_from("<III", donor_debug_s_raw, 16)
-    require(
-        donor_cbproc == donor_primary["raw_size"]
-        and 0 <= donor_dbgstart <= donor_dbgend < donor_cbproc,
-        "donor CodeView procedure range is invalid",
-    )
-    expected_debug_s = bytearray(seed_debug_s_raw)
-    expected_debug_s[16:28] = donor_debug_s_raw[16:28]
-    debug_s_offset = shifted_pointer(seed_closure[".debug$S"]["raw_offset"], replacements)
-    output[debug_s_offset : debug_s_offset + len(expected_debug_s)] = expected_debug_s
-    seed_debug_f_raw = coff_body(seed, seed_closure[".debug$F"])
-    donor_debug_f_raw = coff_body(donor, donor_closure[".debug$F"])
-    seed_fpo = parse_fpo_data(seed_debug_f_raw, expected_proc_size=seed_primary["raw_size"])
-    donor_fpo = parse_fpo_data(donor_debug_f_raw, expected_proc_size=donor_primary["raw_size"])
-    require(
-        exact_json_equal(donor_fpo, function["expected_donor_fpo"]),
-        "compiler donor FPO record differs from the manifest pin",
-    )
-    require(
-        donor_fpo["cbProcSize"] == donor_cbproc, "donor FPO and CodeView procedure sizes differ"
-    )
-    debug_f_offset = shifted_pointer(seed_closure[".debug$F"]["raw_offset"], replacements)
-    output[debug_f_offset : debug_f_offset + 16] = donor_debug_f_raw
-    output_bytes = bytes(output)
-    checked = CoffObject(output_bytes)
-    checked_primary = checked.function_section(mangled)
-    require(
-        len(output_bytes) == len(seed_bytes) + total_delta,
-        "composed COFF file length delta is wrong",
-    )
-    require(
-        function_multiset(checked) == function_multiset(seed),
-        "composed COFF function multiset changed",
-    )
-    require(
-        coff_body(checked, checked_primary) == donor_body,
-        "composed target body differs from compiler donor",
-    )
-    require(
-        coff_table(checked, checked_primary, "lines") == donor_lines,
-        "composed COFF line table differs from normalized donor",
-    )
-    checked_relocations = detailed_relocations(checked, checked_primary)
-    require(
-        [
-            (row["offset"], row["symbol_index"], row["type"], row["addend"])
-            for row in checked_relocations
-        ]
-        == [
-            (donor_row["offset"], seed_row["symbol_index"], donor_row["type"], donor_row["addend"])
-            for seed_row, donor_row in zip(seed_relocations, donor_relocations)
-        ],
-        "composed primary relocation table is incoherent",
-    )
-    checked_definitions = section_definitions(checked)
-    checked_associated = associated_sections(
-        checked, checked_definitions, checked_primary["number"]
-    )
-    require(checked_associated == seed_associated, "composed associative closure changed")
-    expected_closure_raw = {
-        seed_closure[".debug$S"]["number"]: bytes(expected_debug_s),
-        seed_closure[".debug$F"]["number"]: donor_debug_f_raw,
-    }
-    for before, after in zip(seed.sections, checked.sections):
-        require(
-            before["number"] == after["number"]
-            and before["name"] == after["name"]
-            and (before["characteristics"] == after["characteristics"]),
-            "composed section order/characteristics changed",
-        )
-        number = before["number"]
-        if number in expected_closure_raw:
-            require(
-                coff_body(checked, after) == expected_closure_raw[number],
-                f"composed debug closure raw bytes differ: section {number}",
-            )
-            require(
-                coff_table(seed, before, "relocations")
-                == coff_table(checked, after, "relocations"),
-                f"composed debug closure relocations changed: section {number}",
-            )
-        elif number != seed_primary["number"]:
-            require(
-                coff_body(seed, before) == coff_body(checked, after),
-                f"non-target raw section changed: section {number}",
-            )
-            require(
-                coff_table(seed, before, "relocations")
-                == coff_table(checked, after, "relocations"),
-                f"non-target relocation table changed: section {number}",
-            )
-        if number != seed_primary["number"]:
-            require(
-                coff_table(seed, before, "lines") == coff_table(checked, after, "lines"),
-                f"non-target COFF line table changed: section {number}",
-            )
-    require(
-        checked.data[checked.symbol_offset : checked.symbol_offset + checked.symbol_count * 18]
-        == bytes(expected_symbols),
-        "composed symbol/auxiliary table differs from the proven reconstruction",
-    )
-    checked_function_index, checked_function = function_symbol(
-        checked, mangled, checked_primary["number"]
-    )
-    checked_function_auxiliary = coff_auxiliary(checked, checked_function_index, checked_function)
-    require(
-        struct.unpack_from("<I", checked_function_auxiliary, 4)[0] == donor_primary["raw_size"]
-        and struct.unpack_from("<I", checked_function_auxiliary, 8)[0]
-        == checked_primary["line_offset"],
-        "composed Function Definition auxiliary record is stale",
-    )
-    checked_begin_index, checked_begin = marker_symbol(checked, ".bf", checked_primary["number"])
-    require(
-        coff_auxiliary(checked, checked_begin_index, checked_begin)[4:6]
-        == donor_begin_auxiliary[4:6],
-        "composed .bf line is stale",
-    )
-    checked_end_index, checked_end = marker_symbol(checked, ".ef", checked_primary["number"])
-    require(
-        checked_end["value"] == donor_primary["raw_size"]
-        and coff_auxiliary(checked, checked_end_index, checked_end)
-        == coff_auxiliary(donor, donor_end_index, donor_end),
-        "composed .ef metadata differs from donor",
-    )
-    checked_section_index, checked_section_symbol = section_symbol(checked, checked_primary)
-    require(
-        coff_auxiliary(checked, checked_section_index, checked_section_symbol)
-        == donor_section_auxiliary,
-        "composed Section Definition auxiliary record differs from donor",
-    )
-    require(
-        not any((identifier.encode("ascii") in output_bytes for identifier in shape_identifiers)),
-        "declaration-shape identifiers leaked into the composed object",
-    )
-    return (
-        output_bytes,
-        {
-            "mangled": mangled,
-            "address": function["retail_oracle"]["address"],
-            "retail_oracle": dict(function["retail_oracle"]),
-            "retail_payload_bytes_read": 0,
-            "section_number": checked_primary["number"],
-            "seed_length": seed_primary["raw_size"],
-            "donor_length": donor_primary["raw_size"],
-            "linked_span": function["expected_linked_span"],
-            "file_size_delta": total_delta,
-            "relocation_count": len(checked_relocations),
-            "relocation_offsets_moved": sum(
-                (
-                    left["offset"] != right["offset"]
-                    for left, right in zip(seed_relocations, donor_relocations)
-                )
-            ),
-            "local_symbols_updated": len(compatibility["local_updates"]),
-            "function_line_pointers_shifted": shifted_function_line_pointers,
-            "coff_line_policy": "whole_donor_normalized_function_index",
-            "coff_line_rows": donor_primary["line_count"],
-            "codeview_policy": "seed_types_names_locals_with_donor_cbProc_DbgStart_DbgEnd",
-            "codeview_range": {
-                "cbProc": donor_cbproc,
-                "DbgStart": donor_dbgstart,
-                "DbgEnd": donor_dbgend,
-            },
-            "fpo_policy": "whole_donor_debug_F_record",
-            "seed_fpo": seed_fpo,
-            "donor_fpo": donor_fpo,
-            "target_body_sha256": sha256_bytes(donor_body),
-            "input_sha256": sha256_bytes(seed_bytes),
-            "donor_sha256": sha256_bytes(donor_bytes),
-            "output_sha256": sha256_bytes(output_bytes),
-            "provenance": provenance,
         },
     )

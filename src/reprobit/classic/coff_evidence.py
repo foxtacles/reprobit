@@ -694,28 +694,6 @@ def _external_references(coff: _CoffObject) -> set[str]:
     }
 
 
-def _canonical_runtime_section(section: _CoffSection) -> object:
-    return {
-        "name": section.name,
-        "body": section.body.hex(),
-        "characteristics": section.characteristics,
-        "selection": section.comdat_selection,
-        "associated": section.comdat_associated,
-        "relocations": [
-            {
-                "offset": item.offset,
-                "type": item.relocation_type,
-                "target": item.target,
-                "target_value": item.target_value,
-                "target_type": item.target_type,
-                "target_storage": item.target_storage,
-                "addend": item.addend.hex(),
-            }
-            for item in section.relocations
-        ],
-    }
-
-
 def _default_libraries_for_ordinary(coff: _CoffObject) -> set[str]:
     return {item.casefold() for item in _coff_directive_receipt(coff).default_libraries}
 

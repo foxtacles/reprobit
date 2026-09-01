@@ -1,26 +1,22 @@
 from __future__ import annotations
 
-from collections import Counter
 import struct
+from collections import Counter
+from typing import Any
 
 from reprobit.binary import require
 from reprobit.coff_format import (
     CoffObject,
-    RELOCATION_WIDTHS,
     coff_body,
-    coff_table,
     detailed_relocations,
 )
 
-from .coff import function_multiset
 from .foundation import (
     exact_audit_keys,
     local_symbol_kind,
     require_exact_int,
-    require_sha,
     sha256_bytes,
 )
-from .ia32 import ORDINARY_FPO_MOSAIC_IDENTITY_KIND, SOURCE_FPO_MOSAIC_IDENTITY_KIND
 
 """Classic compiler algorithms: debug."""
 LOCAL_SET_DELTA_REFACTOR_KINDS = frozenset({"constructor_allocation_lift_v1"})
@@ -28,7 +24,7 @@ CODEVIEW_SYMBOL_NAME_OFFSETS = {2: 4, 6: None, 512: 6, 513: 8, 516: 33, 517: 33,
 CODEVIEW_END_RECORD_TYPE = 6
 
 
-def parse_codeview_symbol_stream(data: bytes, context: str) -> list[dict]:
+def parse_codeview_symbol_stream(data: bytes, context: str) -> list[dict[str, Any]]:
     """Parse one object-file `.debug$S` symbol-record stream to exhaustion.
 
     Every record is `reclen:u16, rectyp:u16, payload[reclen-2]`, and every
@@ -70,7 +66,7 @@ def parse_codeview_symbol_stream(data: bytes, context: str) -> list[dict]:
     return records
 
 
-def codeview_symbol_identity(record: dict) -> tuple[int, str]:
+def codeview_symbol_identity(record: dict[str, Any]) -> tuple[int, str]:
     """A record's (type, name) with compiler-local serials collapsed.
 
     `$L`/`$T` serials are per-compile counters, exactly as they are for
@@ -89,7 +85,9 @@ DEBUG_REPRESENTATION_DELTA_KINDS = frozenset(
 CODEVIEW_LOCAL_LOCATION_RECORD_TYPES = frozenset({2, 512})
 
 
-def _codeview_local_location(record_type: int, payload: bytes, context: str) -> tuple[int, dict]:
+def _codeview_local_location(
+    record_type: int, payload: bytes, context: str
+) -> tuple[int, dict[str, Any]]:
     """One admitted local record's (type index, location encoding)."""
     if record_type == 2:
         return (
@@ -103,7 +101,7 @@ def _codeview_local_location(record_type: int, payload: bytes, context: str) -> 
     )
 
 
-def validate_debug_representation_delta(value: object, context: str) -> list[dict]:
+def validate_debug_representation_delta(value: object, context: str) -> list[dict[str, Any]]:
     """Validate one pinned seed<->donor `.debug$S` representation delta."""
     require(
         isinstance(value, list) and 1 <= len(value) <= 32,
@@ -215,11 +213,11 @@ def validate_debug_representation_delta(value: object, context: str) -> list[dic
 def require_debug_symbol_representation_delta(
     seed_stream: bytes,
     donor_stream: bytes,
-    declared: list[dict],
+    declared: list[dict[str, Any]],
     expected_seed_length: int,
     expected_donor_length: int,
     context: str,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Prove the seed and donor `.debug$S` streams describe the SAME function.
 
     This replaces the raw-size equality proxy of D1 with something strictly
@@ -250,7 +248,7 @@ def require_debug_symbol_representation_delta(
         max(declared_by_index, default=-1) < len(donor_records),
         f"{context}: a declared record index is out of range",
     )
-    inserted = sum((1 for item in declared if item["kind"] == "inserted_donor_local"))
+    inserted = sum(1 for item in declared if item["kind"] == "inserted_donor_local")
     require(
         len(donor_records) == len(seed_records) + inserted,
         f"{context}: record counts differ from the declared insertions",
@@ -383,9 +381,9 @@ def require_removed_caller_locals_delta(
     seed_stream: bytes,
     donor_stream: bytes,
     relocation_offsets: list[int],
-    delta: dict,
+    delta: dict[str, Any],
     context: str,
-) -> tuple[dict, bytes]:
+) -> tuple[dict[str, Any], bytes]:
     """D1: prove a `.debug$S` size change is exactly a pinned local removal.
 
     The equality this replaces was a same-function sanity proxy, not an
@@ -412,7 +410,7 @@ def require_removed_caller_locals_delta(
         f"{context}: debug$S sizes differ from their local-set pins",
     )
     require(
-        len(seed_stream) - len(donor_stream) == sum((item["size"] for item in removed)),
+        len(seed_stream) - len(donor_stream) == sum(item["size"] for item in removed),
         f"{context}: the pinned local-set delta does not account for the whole debug$S size change",
     )
     guard = max(relocation_offsets, default=-4) + 4
@@ -439,11 +437,11 @@ def require_removed_caller_locals_delta(
     )
     removed_identifiers = {item["identifier"] for item in removed}
     require(
-        not removed_identifiers.intersection((record["name"] for record in donor_records)),
+        not removed_identifiers.intersection(record["name"] for record in donor_records),
         f"{context}: a pinned removed local still exists in the donor's symbol stream",
     )
     reduced = b"".join(
-        (seed_stream[record["offset"] : record["offset"] + record["size"]] for record in surviving)
+        seed_stream[record["offset"] : record["offset"] + record["size"]] for record in surviving
     )
     require(
         len(reduced) == len(donor_stream),
@@ -459,63 +457,7 @@ def require_removed_caller_locals_delta(
     )
 
 
-def relocation_compatibility(
-    seed_rows: list[dict], donor_rows: list[dict], seed_primary: int, donor_primary: int
-) -> dict | None:
-    """Pair primary relocations by semantic target/type/addend, not file offset."""
-    if len(seed_rows) != len(donor_rows):
-        return None
-    local_updates = {}
-    pairs = []
-    for seed, donor in zip(seed_rows, donor_rows):
-        if not (
-            seed["type"] == donor["type"]
-            and seed["width"] == donor["width"]
-            and (seed["addend"] == donor["addend"])
-            and (seed["target_type"] == donor["target_type"])
-            and (seed["target_storage"] == donor["target_storage"])
-        ):
-            return None
-        seed_internal = seed["target_section"] == seed_primary
-        donor_internal = donor["target_section"] == donor_primary
-        if seed_internal != donor_internal:
-            return None
-        seed_kind = local_symbol_kind(seed["target"])
-        donor_kind = local_symbol_kind(donor["target"])
-        if seed_kind or donor_kind:
-            if not (seed_internal and donor_internal and (seed_kind == donor_kind)):
-                return None
-            previous = local_updates.setdefault(seed["symbol_index"], donor["target_value"])
-            if previous != donor["target_value"]:
-                return None
-        elif not (
-            seed["target"] == donor["target"]
-            and (
-                seed_internal
-                and seed["target_value"] == donor["target_value"]
-                or (
-                    not seed_internal
-                    and seed["target_section"] == donor["target_section"]
-                    and (seed["target_value"] == donor["target_value"])
-                )
-            )
-        ):
-            return None
-        pairs.append(
-            {
-                "ordinal": seed["ordinal"],
-                "seed_offset": seed["offset"],
-                "donor_offset": donor["offset"],
-                "type": donor["type"],
-                "addend": donor["addend"],
-                "seed_target": seed["target"],
-                "donor_target": donor["target"],
-            }
-        )
-    return {"pairs": pairs, "local_updates": local_updates}
-
-
-def linker_payload_multiset(coff: CoffObject) -> Counter:
+def linker_payload_multiset(coff: CoffObject) -> Counter[Any]:
     """Fingerprint every non-code, non-CodeView linker contribution.
 
     This intentionally includes `.drectve`, `.xdata`, import/CRT/tls families,
@@ -532,18 +474,16 @@ def linker_payload_multiset(coff: CoffObject) -> Counter:
             continue
         relocations = tuple(
             (
-                (
-                    item["offset"],
-                    item["type"],
-                    item["addend"],
-                    local_symbol_kind(item["target"]) or item["target"],
-                    item["target_section"],
-                    item["target_value"],
-                    item["target_type"],
-                    item["target_storage"],
-                )
-                for item in detailed_relocations(coff, section)
+                item["offset"],
+                item["type"],
+                item["addend"],
+                local_symbol_kind(item["target"]) or item["target"],
+                item["target_section"],
+                item["target_value"],
+                item["target_type"],
+                item["target_storage"],
             )
+            for item in detailed_relocations(coff, section)
         )
         result[
             section["name"],
@@ -553,95 +493,6 @@ def linker_payload_multiset(coff: CoffObject) -> Counter:
             relocations,
         ] += 1
     return result
-
-
-def verify_non_emitting_donor(seed: CoffObject, donor: CoffObject, identifiers: set[str]) -> dict:
-    require(
-        function_multiset(seed) == function_multiset(donor),
-        "declaration shape changed the complete function multiset",
-    )
-    require(
-        len(seed.sections) == len(donor.sections), "declaration shape changed the section count"
-    )
-    require(
-        all(
-            (
-                left["name"] == right["name"]
-                and left["characteristics"] == right["characteristics"]
-                for left, right in zip(seed.sections, donor.sections)
-            )
-        ),
-        "declaration shape changed section order or characteristics",
-    )
-    leaked_symbols = sorted(
-        (
-            symbol["name"]
-            for symbol in donor.symbols.values()
-            if any((identifier in symbol["name"] for identifier in identifiers))
-        )
-    )
-    require(not leaked_symbols, f"declaration shape emitted COFF symbols: {leaked_symbols[:5]}")
-    require(
-        linker_payload_multiset(seed) == linker_payload_multiset(donor),
-        "declaration shape added or altered non-code/directive/import/CRT linker payload",
-    )
-    debug_type_ranges = [
-        (section["raw_offset"], section["raw_offset"] + section["raw_size"])
-        for section in donor.sections
-        if section["name"] in (".debug$S", ".debug$T") and section["raw_size"]
-    ]
-    for identifier in identifiers:
-        needle = identifier.encode("ascii")
-        start = 0
-        while True:
-            occurrence = donor.data.find(needle, start)
-            if occurrence < 0:
-                break
-            require(
-                any((left <= occurrence < right for left, right in debug_type_ranges)),
-                f"declaration identifier escaped CodeView types: {identifier}",
-            )
-            start = occurrence + 1
-    return {
-        "function_count": sum(function_multiset(seed).values()),
-        "section_count": len(seed.sections),
-        "defined_or_undefined_shape_symbols": [],
-        "noncode_directive_import_crt_payload_identical": True,
-    }
-
-
-def normalized_donor_lines(
-    seed: CoffObject,
-    donor: CoffObject,
-    seed_section: dict,
-    donor_section: dict,
-    seed_function_index: int,
-    donor_function_index: int,
-) -> bytes:
-    require(
-        seed_section["line_count"] > 0 and donor_section["line_count"] > 0,
-        "FPO composer requires COFF line tables",
-    )
-    seed_lines = coff_table(seed, seed_section, "lines")
-    donor_lines = bytearray(coff_table(donor, donor_section, "lines"))
-    require(
-        struct.unpack_from("<IH", seed_lines, 0) == (seed_function_index, 0),
-        "seed COFF line sentinel is invalid",
-    )
-    require(
-        struct.unpack_from("<IH", donor_lines, 0) == (donor_function_index, 0),
-        "donor COFF line sentinel is invalid",
-    )
-    struct.pack_into("<I", donor_lines, 0, seed_function_index)
-    previous = -1
-    for index in range(1, donor_section["line_count"]):
-        offset, line = struct.unpack_from("<IH", donor_lines, index * 6)
-        require(
-            line != 0 and previous <= offset < donor_section["raw_size"],
-            f"donor COFF line row {index} is outside or nonmonotonic",
-        )
-        previous = offset
-    return bytes(donor_lines)
 
 
 def _apply_replacements(data: bytes, replacements: list[tuple[int, int, bytes]]) -> bytes:
@@ -685,7 +536,7 @@ FPO_RECORD_KEYS = {
 }
 
 
-def parse_fpo_data(raw: bytes, *, expected_proc_size: int | None = None) -> dict:
+def parse_fpo_data(raw: bytes, *, expected_proc_size: int | None = None) -> dict[str, Any]:
     """Decode and structurally validate one classic 16-byte FPO_DATA row."""
     require(
         isinstance(raw, bytes) and len(raw) == 16, "associated FPO record is not exactly 16 bytes"
@@ -722,34 +573,6 @@ def parse_fpo_data(raw: bytes, *, expected_proc_size: int | None = None) -> dict
     return result
 
 
-def validate_manifest_fpo_record(value: object, context: str) -> dict:
-    require(isinstance(value, dict), f"{context} must be an object")
-    exact_audit_keys(value, FPO_RECORD_KEYS, context)
-    integer_ranges = {
-        "ulOffStart": (0, 4294967295),
-        "cbProcSize": (1, 4294967295),
-        "cdwLocals": (0, 1073741823),
-        "cdwParams": (0, 32767),
-        "cbProlog": (0, 255),
-        "cbRegs": (0, 7),
-        "fHasSEH": (0, 1),
-        "fUseBP": (0, 1),
-        "reserved": (0, 0),
-        "cbFrame": (0, 3),
-    }
-    normalized = {}
-    for name, (minimum, maximum) in integer_ranges.items():
-        item = value.get(name)
-        require(type(item) is int and minimum <= item <= maximum, f"{context}.{name} is invalid")
-        normalized[name] = item
-    normalized["raw_sha256"] = require_sha(value.get("raw_sha256"), f"{context}.raw_sha256")
-    require(
-        normalized["ulOffStart"] == 0 and normalized["cbProlog"] <= normalized["cbProcSize"],
-        f"{context} is structurally invalid",
-    )
-    return normalized
-
-
 ORDINARY_FPO_CHILD_IDENTITY_KEYS = {
     "section_number",
     "raw_size",
@@ -763,130 +586,6 @@ ORDINARY_FPO_CHILD_IDENTITY_KEYS = {
     "expected_seed_relocation_sha256",
     "expected_donor_relocation_sha256",
 }
-
-
-def validate_ordinary_fpo_mosaic_identity(
-    value: object, context: str, primary_section: int, body_length: int
-) -> dict:
-    """Validate the narrow seed-authoritative FPO mosaic identity schema."""
-    require(isinstance(value, dict), f"{context} must be an object")
-    exact_audit_keys(
-        value,
-        {
-            "kind",
-            "expected_primary_characteristics",
-            "expected_primary_selection",
-            "expected_function_count",
-            "expected_comdat_count",
-            "expected_seed_line_sha256",
-            "expected_donor_line_sha256",
-            "debug_f",
-            "debug_s",
-        },
-        context,
-    )
-    require(value.get("kind") == ORDINARY_FPO_MOSAIC_IDENTITY_KIND, f"{context}.kind differs")
-    normalized = {"kind": value["kind"]}
-    for name, minimum, maximum in (
-        ("expected_primary_characteristics", 1, 4294967295),
-        ("expected_primary_selection", 1, 7),
-        ("expected_function_count", 1, 2147483647),
-        ("expected_comdat_count", 1, 2147483647),
-    ):
-        normalized[name] = require_exact_int(
-            value.get(name), f"{context}.{name}", minimum=minimum, maximum=maximum
-        )
-    for name in ("expected_seed_line_sha256", "expected_donor_line_sha256"):
-        normalized[name] = require_sha(value.get(name), f"{context}.{name}")
-    children = {}
-    for key, section_name in (("debug_f", ".debug$F"), ("debug_s", ".debug$S")):
-        child_context = f"{context}.{key}"
-        child = value.get(key)
-        require(isinstance(child, dict), f"{child_context} must be an object")
-        extra_keys = (
-            {"expected_record"}
-            if key == "debug_f"
-            else {
-                "expected_common_prefix_sha256",
-                "expected_record_kind",
-                "expected_cb_proc",
-                "expected_dbg_start",
-                "expected_dbg_end",
-            }
-        )
-        exact_audit_keys(child, ORDINARY_FPO_CHILD_IDENTITY_KEYS | extra_keys, child_context)
-        normalized_child = {}
-        for name, minimum, maximum in (
-            ("section_number", 1, 32767),
-            ("raw_size", 1, 4294967295),
-            ("relocation_count", 0, 65535),
-            ("line_count", 0, 65535),
-            ("characteristics", 1, 4294967295),
-            ("selection", 1, 7),
-            ("associated", 1, 32767),
-        ):
-            normalized_child[name] = require_exact_int(
-                child.get(name), f"{child_context}.{name}", minimum=minimum, maximum=maximum
-            )
-        require(
-            normalized_child["associated"] == primary_section
-            and normalized_child["selection"] == 5
-            and (normalized_child["line_count"] == 0),
-            f"{child_context} is not an associative debug child",
-        )
-        for name in (
-            "expected_seed_body_sha256",
-            "expected_donor_body_sha256",
-            "expected_seed_relocation_sha256",
-            "expected_donor_relocation_sha256",
-        ):
-            normalized_child[name] = require_sha(child.get(name), f"{child_context}.{name}")
-        if key == "debug_f":
-            require(
-                normalized_child["raw_size"] == 16 and normalized_child["relocation_count"] == 1,
-                f"{child_context} is not one classic FPO record",
-            )
-            record = validate_manifest_fpo_record(
-                child.get("expected_record"), f"{child_context}.expected_record"
-            )
-            require(
-                record["cbProcSize"] == body_length,
-                f"{child_context} FPO size differs from the function",
-            )
-            normalized_child["expected_record"] = record
-        else:
-            require(
-                normalized_child["raw_size"] >= 28 and normalized_child["relocation_count"] == 2,
-                f"{child_context} is not one CodeView procedure record",
-            )
-            normalized_child["expected_common_prefix_sha256"] = require_sha(
-                child.get("expected_common_prefix_sha256"),
-                f"{child_context}.expected_common_prefix_sha256",
-            )
-            require(
-                child.get("expected_record_kind") == "0502",
-                f"{child_context}.expected_record_kind differs",
-            )
-            normalized_child["expected_record_kind"] = "0502"
-            for name in ("expected_cb_proc", "expected_dbg_start", "expected_dbg_end"):
-                normalized_child[name] = require_exact_int(
-                    child.get(name), f"{child_context}.{name}", minimum=0, maximum=body_length
-                )
-            require(
-                normalized_child["expected_cb_proc"] == body_length
-                and 0
-                <= normalized_child["expected_dbg_start"]
-                <= normalized_child["expected_dbg_end"]
-                < body_length,
-                f"{child_context} CodeView procedure range differs",
-            )
-        children[key] = normalized_child
-    normalized.update(children)
-    require(
-        children["debug_f"]["section_number"] != children["debug_s"]["section_number"],
-        f"{context} child seats are not distinct",
-    )
-    return normalized
 
 
 SOURCE_FPO_CHILD_IDENTITY_KEYS = {
@@ -914,208 +613,6 @@ SOURCE_FPO_EXTRA_RELOCATION_KEYS = {
     "target_type",
     "target_storage",
 }
-
-
-def validate_source_fpo_mosaic_identity(
-    value: object, context: str, primary_section: int, body_length: int
-) -> dict:
-    """Validate the isolated source-refactor FPO/CodeView identity."""
-    require(isinstance(value, dict), f"{context} must be an object")
-    exact_audit_keys(
-        value,
-        {
-            "kind",
-            "expected_primary_characteristics",
-            "expected_primary_selection",
-            "expected_function_count",
-            "expected_comdat_count",
-            "expected_seed_line_sha256",
-            "expected_donor_line_sha256",
-            "debug_f",
-            "debug_s",
-        },
-        context,
-    )
-    require(value.get("kind") == SOURCE_FPO_MOSAIC_IDENTITY_KIND, f"{context}.kind differs")
-    normalized = {"kind": value["kind"]}
-    for name, minimum, maximum in (
-        ("expected_primary_characteristics", 1, 4294967295),
-        ("expected_primary_selection", 1, 7),
-        ("expected_function_count", 1, 2147483647),
-        ("expected_comdat_count", 1, 2147483647),
-    ):
-        normalized[name] = require_exact_int(
-            value.get(name), f"{context}.{name}", minimum=minimum, maximum=maximum
-        )
-    for name in ("expected_seed_line_sha256", "expected_donor_line_sha256"):
-        normalized[name] = require_sha(value.get(name), f"{context}.{name}")
-    children = {}
-    for key in ("debug_f", "debug_s"):
-        child_context = f"{context}.{key}"
-        child = value.get(key)
-        require(isinstance(child, dict), f"{child_context} must be an object")
-        extras = (
-            {"expected_record"}
-            if key == "debug_f"
-            else {
-                "expected_common_prefix_sha256",
-                "expected_record_kind",
-                "expected_cb_proc",
-                "expected_dbg_start",
-                "expected_dbg_end",
-                "expected_seed_tail_sha256",
-                "expected_donor_tail_sha256",
-            }
-        )
-        optional = {"expected_extra_relocations"} if key == "debug_s" else set()
-        exact_audit_keys(
-            child,
-            SOURCE_FPO_CHILD_IDENTITY_KEYS | extras | optional,
-            child_context,
-            optional=optional,
-        )
-        normalized_child = {}
-        for name, minimum, maximum in (
-            ("section_number", 1, 32767),
-            ("expected_seed_raw_size", 1, 4294967295),
-            ("expected_donor_raw_size", 1, 4294967295),
-            ("relocation_count", 0, 65535),
-            ("line_count", 0, 65535),
-            ("characteristics", 1, 4294967295),
-            ("selection", 1, 7),
-            ("associated", 1, 32767),
-        ):
-            normalized_child[name] = require_exact_int(
-                child.get(name), f"{child_context}.{name}", minimum=minimum, maximum=maximum
-            )
-        require(
-            normalized_child["associated"] == primary_section
-            and normalized_child["selection"] == 5
-            and (normalized_child["line_count"] == 0),
-            f"{child_context} is not an associative debug child",
-        )
-        for name in (
-            "expected_seed_body_sha256",
-            "expected_donor_body_sha256",
-            "expected_seed_relocation_sha256",
-            "expected_donor_relocation_sha256",
-        ):
-            normalized_child[name] = require_sha(child.get(name), f"{child_context}.{name}")
-        if key == "debug_f":
-            require(
-                normalized_child["expected_seed_raw_size"] == 16
-                and normalized_child["expected_donor_raw_size"] == 16
-                and (normalized_child["relocation_count"] == 1),
-                f"{child_context} is not one classic FPO record",
-            )
-            record = validate_manifest_fpo_record(
-                child.get("expected_record"), f"{child_context}.expected_record"
-            )
-            require(
-                record["cbProcSize"] == body_length,
-                f"{child_context} FPO size differs from the function",
-            )
-            normalized_child["expected_record"] = record
-        else:
-            extra_relocations = child.get("expected_extra_relocations", [])
-            require(
-                isinstance(extra_relocations, list),
-                f"{child_context}.expected_extra_relocations must be an array",
-            )
-            normalized_extra_relocations = []
-            for index, relocation in enumerate(extra_relocations):
-                relocation_context = f"{child_context}.expected_extra_relocations[{index}]"
-                require(isinstance(relocation, dict), f"{relocation_context} must be an object")
-                exact_audit_keys(relocation, SOURCE_FPO_EXTRA_RELOCATION_KEYS, relocation_context)
-                normalized_relocation = {}
-                for name, minimum, maximum in (
-                    ("offset", 34, 4294967295),
-                    ("width", 1, 4),
-                    ("type", 0, 65535),
-                    ("addend", 0, 4294967295),
-                    ("target_section", 1, 32767),
-                    ("target_value", 0, body_length - 1),
-                    ("target_type", 0, 65535),
-                    ("target_storage", 0, 255),
-                ):
-                    normalized_relocation[name] = require_exact_int(
-                        relocation.get(name),
-                        f"{relocation_context}.{name}",
-                        minimum=minimum,
-                        maximum=maximum,
-                    )
-                target = relocation.get("target")
-                require(
-                    isinstance(target, str) and target, f"{relocation_context}.target is invalid"
-                )
-                normalized_relocation["target"] = target
-                require(
-                    RELOCATION_WIDTHS.get(normalized_relocation["type"])
-                    == normalized_relocation["width"]
-                    and normalized_relocation["target_section"] == primary_section
-                    and (
-                        normalized_relocation["offset"] + normalized_relocation["width"]
-                        <= min(
-                            normalized_child["expected_seed_raw_size"],
-                            normalized_child["expected_donor_raw_size"],
-                        )
-                    ),
-                    f"{relocation_context} shape or target seat differs",
-                )
-                normalized_extra_relocations.append(normalized_relocation)
-            require(
-                all(
-                    (
-                        left["offset"] + left["width"] <= right["offset"]
-                        for left, right in zip(
-                            normalized_extra_relocations, normalized_extra_relocations[1:]
-                        )
-                    )
-                ),
-                f"{child_context}.expected_extra_relocations overlap or are not ordered",
-            )
-            require(
-                normalized_child["expected_seed_raw_size"] >= 28
-                and normalized_child["expected_donor_raw_size"] >= 28
-                and (normalized_child["relocation_count"] == 2 + len(normalized_extra_relocations)),
-                f"{child_context} is not a CodeView procedure record",
-            )
-            if "expected_extra_relocations" in child:
-                require(
-                    normalized_extra_relocations,
-                    f"{child_context}.expected_extra_relocations is empty",
-                )
-                normalized_child["expected_extra_relocations"] = normalized_extra_relocations
-            for name in (
-                "expected_common_prefix_sha256",
-                "expected_seed_tail_sha256",
-                "expected_donor_tail_sha256",
-            ):
-                normalized_child[name] = require_sha(child.get(name), f"{child_context}.{name}")
-            require(
-                child.get("expected_record_kind") == "0502",
-                f"{child_context}.expected_record_kind differs",
-            )
-            normalized_child["expected_record_kind"] = "0502"
-            for name in ("expected_cb_proc", "expected_dbg_start", "expected_dbg_end"):
-                normalized_child[name] = require_exact_int(
-                    child.get(name), f"{child_context}.{name}", minimum=0, maximum=body_length
-                )
-            require(
-                normalized_child["expected_cb_proc"] == body_length
-                and 0
-                <= normalized_child["expected_dbg_start"]
-                <= normalized_child["expected_dbg_end"]
-                < body_length,
-                f"{child_context} CodeView procedure range differs",
-            )
-        children[key] = normalized_child
-    normalized.update(children)
-    require(
-        children["debug_f"]["section_number"] != children["debug_s"]["section_number"],
-        f"{context} child seats are not distinct",
-    )
-    return normalized
 
 
 CODEVIEW_PROCEDURE_RECORD_TYPES = (517, 516)

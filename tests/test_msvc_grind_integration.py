@@ -26,10 +26,13 @@ PROGRESS_SAMPLE = ROOT / "examples" / "grind-progress"
 REFERENCE_BODY_SHA256 = "0592ba1107856e319c261ed45129ab9b518486acbde960ada58b2ace9435ccfb"
 REFERENCE_IMAGE_SHA256 = "9c78bd9cfe3c8ded8a9a587165237d2a394719b48be34021a3cb09aff8220aab"
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("REPROBIT_MSVC_4_2_ROOT"),
-    reason="requires an authenticated MSVC 4.2 installation",
-)
+pytestmark = [
+    pytest.mark.msvc42,
+    pytest.mark.skipif(
+        not os.environ.get("REPROBIT_MSVC_4_2_ROOT"),
+        reason="requires an authenticated MSVC 4.2 installation",
+    ),
+]
 
 
 def _rbit() -> Path:

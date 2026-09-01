@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from reprobit.binary import ByteIdentityError, require
 from reprobit.ia32_decode import IA32_PREFIXES, supported_ia32_instruction_length
 
@@ -20,24 +22,24 @@ def _bijection_form(
     reg_write: bool = False,
     rm_read: bool = False,
     rm_write: bool = False,
-    ext_no_write: frozenset = frozenset(),
-    ext_write: frozenset = frozenset(),
-    ext_allowed: frozenset | None = None,
-    ext_implicit: dict | None = None,
-    ext_flow: dict | None = None,
-    implicit_frozen: frozenset = frozenset(),
+    ext_no_write: frozenset[int] = frozenset(),
+    ext_write: frozenset[int] = frozenset(),
+    ext_allowed: frozenset[int] | None = None,
+    ext_implicit: dict[int, Any] | None = None,
+    ext_flow: dict[int, str] | None = None,
+    implicit_frozen: frozenset[str] = frozenset(),
     opreg: str | None = None,
-    reads: frozenset = frozenset(),
-    writes: frozenset = frozenset(),
+    reads: frozenset[str] = frozenset(),
+    writes: frozenset[str] = frozenset(),
     flow: str = "fall",
     displacement: int = 0,
     width: int = 32,
     rm_width: int | None = None,
     x87: bool = False,
     size16_ok: bool = False,
-    size16_ext: frozenset | None = None,
-    string_memory: dict | None = None,
-) -> dict:
+    size16_ext: frozenset[int] | None = None,
+    string_memory: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     return {
         "modrm": modrm,
         "reg": reg,
@@ -65,7 +67,7 @@ def _bijection_form(
     }
 
 
-def _ia32_bijection_table() -> dict:
+def _ia32_bijection_table() -> dict[int, Any]:
     """The closed semantic table this class will rewrite.
 
     An opcode is admitted only when its register fields and its *complete*
@@ -202,7 +204,7 @@ def _ia32_bijection_table() -> dict:
 _IA32_SHIFT_DIGITS = frozenset({0, 1, 4, 5, 7})
 
 
-def _ia32_bijection_table_widening(table: dict) -> dict:
+def _ia32_bijection_table_widening(table: dict[int, Any]) -> dict[int, Any]:
     """The forms this compiler emits that the first hundred did not name.
 
     Every entry here was measured before it was written: `$W/BF-probe`
@@ -293,7 +295,7 @@ def _ia32_bijection_table_widening(table: dict) -> dict:
     return table
 
 
-def _ia32_bijection_two_byte_table() -> dict:
+def _ia32_bijection_two_byte_table() -> dict[int, Any]:
     """The admitted 0F forms: near Jcc, SETcc, MOVZX/MOVSX, and DWORD IMUL.
 
     `0F B7`/`0F BF` widen a 16-bit source into a 32-bit destination.  Both
@@ -336,7 +338,7 @@ _IA32_OPERAND_SIZE_PREFIX = 102
 _IA32_REPEAT_PREFIXES = frozenset({242, 243})
 
 
-def _ia32_string_form(reads, writes, *, memory_read, memory_write) -> dict:
+def _ia32_string_form(reads, writes, *, memory_read, memory_write) -> dict[str, Any]:
     """One repeated string operation, with its COMPLETE implicit operand set.
 
     Every general register such a form touches -- the count in ECX, the
@@ -399,7 +401,7 @@ _IA32_EXTERNAL_TRANSFER_LIVE = frozenset(IA32_GENERAL_REGISTER_NAMES)
 _IA32_BYTE_ADDRESSABLE = ("eax", "ecx", "edx", "ebx")
 
 
-def _ia32_register_atoms(name: str) -> tuple:
+def _ia32_register_atoms(name: str) -> tuple[str, ...]:
     """Every liveness atom of one general register."""
     if name in _IA32_BYTE_ADDRESSABLE:
         return (name + ".l", name + ".h", name + ".u")
@@ -411,17 +413,17 @@ _IA32_ATOMS_OF = {
 }
 
 
-def ia32_register_atoms(names) -> frozenset:
+def ia32_register_atoms(names) -> frozenset[str]:
     """The atom set of a collection of whole general registers."""
     return frozenset().union(*[_IA32_ATOMS_OF[name] for name in names]) if names else frozenset()
 
 
-def _ia32_atom_registers(atoms) -> list:
+def _ia32_atom_registers(atoms) -> list[str]:
     """The register names an atom set touches, for a refusal message."""
     return sorted({atom.split(".")[0] for atom in atoms})
 
 
-def _bijection_form_for(opcode: int) -> dict | None:
+def _bijection_form_for(opcode: int) -> dict[str, Any] | None:
     """Look one decoded opcode key up in the closed table."""
     if opcode & 65280 == 3840:
         return IA32_BIJECTION_TWO_BYTE_FORMS.get(opcode & 255)
@@ -447,7 +449,7 @@ _MSVC_CALL_ARGUMENT_REGISTERS = {
 }
 
 
-def msvc_call_argument_registers(symbol: object) -> frozenset | None:
+def msvc_call_argument_registers(symbol: object) -> frozenset[str] | None:
     """Which general registers a callee reads as arguments, or None.
 
     Closed decode of an MSVC 4.2 decorated name.  Every `@@` in the name is
@@ -502,8 +504,8 @@ def msvc_call_argument_registers(symbol: object) -> frozenset | None:
 
 
 def decode_ia32_bijection_instruction(
-    body: bytes, offset: int, context: str, relocations: dict | None = None
-) -> dict:
+    body: bytes, offset: int, context: str, relocations: dict[int, Any] | None = None
+) -> dict[str, Any]:
     """Decode one instruction into register fields, operands and control flow.
 
     Returns the encoding's general-register fields as `(byte, shift)` pairs so
@@ -797,13 +799,18 @@ def decode_ia32_bijection_instruction(
             "write": form["string_memory"]["write"],
             "unknown": True,
         }
-    if opcode in (49, 51) and form["modrm"] and (width == 32):
-        if modrm_byte >> 6 == 3 and modrm_byte & 7 == modrm_byte >> 3 & 7:
-            zeroed = names[modrm_byte & 7]
-            reads.discard(zeroed)
-            writes.add(zeroed)
-            read_atoms -= _IA32_ATOMS_OF[zeroed]
-            write_atoms |= _IA32_ATOMS_OF[zeroed]
+    if (
+        opcode in (49, 51)
+        and form["modrm"]
+        and (width == 32)
+        and modrm_byte >> 6 == 3
+        and modrm_byte & 7 == modrm_byte >> 3 & 7
+    ):
+        zeroed = names[modrm_byte & 7]
+        reads.discard(zeroed)
+        writes.add(zeroed)
+        read_atoms -= _IA32_ATOMS_OF[zeroed]
+        write_atoms |= _IA32_ATOMS_OF[zeroed]
     return {
         "offset": offset,
         "length": length,
@@ -823,8 +830,11 @@ def decode_ia32_bijection_instruction(
 
 
 def decode_ia32_bijection_body(
-    body: bytes, context: str, relocations: dict | None = None, code_length: int | None = None
-) -> list[dict]:
+    body: bytes,
+    context: str,
+    relocations: dict[int, Any] | None = None,
+    code_length: int | None = None,
+) -> list[dict[str, Any]]:
     """Decode a COMDAT body to exhaustion with the closed table.
 
     `code_length`, when given, is the pinned extent of the body's CODE: a
@@ -868,8 +878,11 @@ def decode_ia32_bijection_body(
 
 
 def _ia32_backward_liveness(
-    instructions: list[dict], successors: list[list[int]], context: str, blind: dict | None = None
-) -> list[frozenset]:
+    instructions: list[dict[str, Any]],
+    successors: list[list[int]],
+    context: str,
+    blind: dict[int, frozenset[str]] | None = None,
+) -> list[frozenset[str]]:
     """Backward atom liveness over a supplied control-flow graph.
 
     The lattice is the sub-register ATOM set, so a partial definition
@@ -903,7 +916,9 @@ def _ia32_backward_liveness(
     return live
 
 
-def _ia32_live_out(live: list[frozenset], successors: list[list[int]], index: int) -> frozenset:
+def _ia32_live_out(
+    live: list[frozenset[str]], successors: list[list[int]], index: int
+) -> frozenset[str]:
     """The union of the live sets on an instruction's outgoing edges."""
     return (
         frozenset().union(*[live[edge] for edge in successors[index]])
@@ -912,7 +927,9 @@ def _ia32_live_out(live: list[frozenset], successors: list[list[int]], index: in
     )
 
 
-def _register_bijection_live_sets(instructions: list[dict], context: str) -> list[frozenset]:
+def _register_bijection_live_sets(
+    instructions: list[dict[str, Any]], context: str
+) -> list[frozenset[str]]:
     """Backward liveness over the body's own control-flow graph.
 
     Successors are the fall-through and the decoded branch target; `ret` has

@@ -25,10 +25,13 @@ ROOT = Path(__file__).parents[1]
 SAMPLE = ROOT / "examples" / "repair"
 REFERENCE_IMAGE_SHA256 = "eef3d6d69f7b8db8666973ec6533a849fe5230e03b2d6c4a91053dc897a31f62"
 
-pytestmark = pytest.mark.skipif(
-    not os.environ.get("REPROBIT_MSVC_4_2_ROOT"),
-    reason="requires an authenticated MSVC 4.2 CI lane",
-)
+pytestmark = [
+    pytest.mark.msvc42,
+    pytest.mark.skipif(
+        not os.environ.get("REPROBIT_MSVC_4_2_ROOT"),
+        reason="requires an authenticated MSVC 4.2 CI lane",
+    ),
+]
 
 
 def _rbit() -> Path:

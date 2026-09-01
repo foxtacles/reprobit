@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from reprobit.binary import require
 from reprobit.coff_format import (
     CoffObject,
@@ -18,12 +20,12 @@ from .coff import (
     function_multiset,
     function_symbol,
 )
+from .compiler_identity import MSVC420_WIN32_I386_TARGET, Msvc420CompilerIdentity
 from .composition import (
     compose_equal_body_comdat,
     instruction_mosaic_metadata_sha256,
     require_instruction_mosaic_semantic_relocations,
 )
-from .compiler_identity import MSVC420_WIN32_I386_TARGET, Msvc420CompilerIdentity
 from .debug import CODEVIEW_PROCEDURE_RECORD_TYPES, FPO_RECORD_KEYS, parse_codeview_symbol_stream
 from .foundation import (
     exact_audit_keys,
@@ -40,11 +42,11 @@ from .register_bijection import (
 )
 from .register_reencoding import FPO_FRAME_KIND_FPO, require_frame_pointer_free_frame
 from .register_semantics import (
-    IA32_GENERAL_REGISTER_NAMES,
     _IA32_INERT_SEGMENT_PREFIXES,
     _IA32_OPERAND_SIZE_PREFIX,
     _IA32_REGISTER_NUMBERS,
     _IA32_STRUCTURAL_REGISTERS,
+    IA32_GENERAL_REGISTER_NAMES,
     _bijection_form_for,
     _ia32_atom_registers,
     _ia32_backward_liveness,
@@ -85,7 +87,7 @@ def instruction_schedule_delegate(
     return "equal_body_eh_structural_local"
 
 
-def _ia32_schedule_flag_table() -> dict:
+def _ia32_schedule_flag_table() -> dict[int, tuple[bool, bool]]:
     table = {}
     for opcode in (136, 137, 138, 139, 141, 198, 199):
         table[opcode] = (False, False)
@@ -119,7 +121,7 @@ _IA32_SCHEDULE_STACK_FRONTIER_THEOREMS = frozenset(
 )
 
 
-def ia32_schedule_stack_delta(body: bytes, item: dict, context: str) -> int | None:
+def ia32_schedule_stack_delta(body: bytes, item: dict[str, Any], context: str) -> int | None:
     """Return one closed schedule-safe ESP delta, or ``None``.
 
     The schedule theorem admits only the compiler spellings it can re-encode
@@ -142,7 +144,7 @@ def ia32_schedule_stack_delta(body: bytes, item: dict, context: str) -> int | No
     return None
 
 
-def ia32_esp_relative_displacement(body: bytes, item: dict) -> tuple | None:
+def ia32_esp_relative_displacement(body: bytes, item: dict[str, Any]) -> tuple[Any, ...] | None:
     """(byte offset, size, signed value) of an ESP-relative displacement.
 
     ESP can only be a memory base through a SIB whose base field is 4, so this
@@ -172,7 +174,7 @@ def ia32_esp_relative_displacement(body: bytes, item: dict) -> tuple | None:
     return (at, size, int.from_bytes(body[at : at + size], "little", signed=True))
 
 
-def ia32_esp_used_only_as_a_base(body: bytes, item: dict) -> bool:
+def ia32_esp_used_only_as_a_base(body: bytes, item: dict[str, Any]) -> bool:
     """Does this instruction touch ESP ONLY through an adjusted address?
 
     True when the instruction has a real ESP-relative displacement AND ESP
@@ -203,12 +205,12 @@ def ia32_esp_used_only_as_a_base(body: bytes, item: dict) -> bool:
 
 def ia32_schedule_stack_adjustments(
     body: bytes,
-    inside: list[dict],
+    inside: list[dict[str, Any]],
     order: list[int],
     context: str,
     *,
     private_stack_object: bool = False,
-) -> list[list]:
+) -> list[list[Any]]:
     """Obligation 6c: rebase direct ESP operands across exact stack updates.
 
     An ESP-relative operand moved across a closed stack update must change its
@@ -260,7 +262,7 @@ def ia32_schedule_stack_adjustments(
     return sorted(adjustments)
 
 
-def ia32_schedule_instruction_facts(instruction: dict, context: str) -> dict:
+def ia32_schedule_instruction_facts(instruction: dict[str, Any], context: str) -> dict[str, Any]:
     """Flag effect and memory operand of one window instruction, or refuse."""
     opcode = instruction["opcode"]
     effect = IA32_SCHEDULE_FLAG_EFFECTS.get(opcode)
@@ -318,7 +320,7 @@ def ia32_schedule_instruction_facts(instruction: dict, context: str) -> dict:
     }
 
 
-def ia32_memory_provably_disjoint(left: dict, right: dict) -> bool:
+def ia32_memory_provably_disjoint(left: dict[str, Any], right: dict[str, Any]) -> bool:
     """Two memory cells that provably cannot alias.
 
     The ONLY admitted proof: the same base register, no index on either side,
@@ -338,7 +340,7 @@ def ia32_memory_provably_disjoint(left: dict, right: dict) -> bool:
     )
 
 
-def _ia32_schedule_has_segment_override(body: bytes, instruction: dict) -> bool:
+def _ia32_schedule_has_segment_override(body: bytes, instruction: dict[str, Any]) -> bool:
     start = int(instruction["offset"])
     raw = body[start : start + int(instruction["length"])]
     for byte in raw:
@@ -352,8 +354,8 @@ def _ia32_schedule_has_segment_override(body: bytes, instruction: dict) -> bool:
 
 def _require_ia32_schedule_stack_frontier(
     theorem: object,
-    instructions: list[dict],
-    facts: list[dict],
+    instructions: list[dict[str, Any]],
+    facts: list[dict[str, Any]],
     body: bytes | None,
     stack_adjusted: bool,
     context: str,
@@ -418,7 +420,7 @@ def _require_ia32_schedule_stack_frontier(
 
 
 def _require_ia32_schedule_stack_frontier_taint(
-    instructions: list[dict], facts: list[dict], order: list[int], context: str
+    instructions: list[dict[str, Any]], facts: list[dict[str, Any]], order: list[int], context: str
 ) -> None:
     """Refuse an ESP-derived value that becomes an explicit memory address.
 
@@ -450,7 +452,7 @@ def _require_ia32_schedule_stack_frontier_taint(
 
 
 def _ia32_schedule_stack_frontier_pair(
-    left: int, right: int, facts: list[dict]
+    left: int, right: int, facts: list[dict[str, Any]]
 ) -> tuple[int, int] | None:
     """Return (PUSH, explicit-memory instruction), if that is this pair."""
     left_push = facts[left]["opcode"] in _IA32_SCHEDULE_STACK_PUSH_OPCODES
@@ -463,16 +465,16 @@ def _ia32_schedule_stack_frontier_pair(
 
 
 def _ia32_schedule_stack_frontier_projection(
-    instructions: list[dict],
-    facts: list[dict],
-    strict_edges: list[list],
+    instructions: list[dict[str, Any]],
+    facts: list[dict[str, Any]],
+    strict_edges: list[list[Any]],
     order: list[int],
     theorem: object,
     body: bytes,
     stack_adjusted: bool,
     compiler_identity: Msvc420CompilerIdentity | None,
     context: str,
-) -> tuple[list[list], dict]:
+) -> tuple[list[list[Any]], dict[str, Any]]:
     """Project only crossed PUSH/non-ESP memory edges from one strict DAG."""
     require(
         type(compiler_identity) is Msvc420CompilerIdentity
@@ -531,16 +533,16 @@ def _ia32_schedule_stack_frontier_projection(
 
 
 def _ia32_schedule_private_stack_object_projection(
-    instructions: list[dict],
-    facts: list[dict],
-    strict_edges: list[list],
+    instructions: list[dict[str, Any]],
+    facts: list[dict[str, Any]],
+    strict_edges: list[list[Any]],
     order: list[int],
     theorem: object,
     body: bytes,
     stack_adjustments: list[list[int]],
     compiler_identity: Msvc420CompilerIdentity | None,
     context: str,
-) -> tuple[list[list], dict]:
+) -> tuple[list[list[Any]], dict[str, Any]]:
     """Project crossed private-stack/object memory edges for one compiler.
 
     This phase is deliberately only a candidate projection.  The full-body
@@ -570,7 +572,7 @@ def _ia32_schedule_private_stack_object_projection(
             )
 
     position = {source: target for target, source in enumerate(order)}
-    projected: list[list] = []
+    projected: list[list[Any]] = []
     discharged: list[dict[str, object]] = []
     for left, right, strict_reasons in strict_edges:
         crossed = (left < right) != (position[left] < position[right])
@@ -648,14 +650,14 @@ def _ia32_schedule_private_stack_object_projection(
 
 
 def ia32_schedule_dependence_edges(
-    instructions: list[dict],
+    instructions: list[dict[str, Any]],
     context: str,
     body: bytes | None = None,
     stack_adjusted: bool = False,
     *,
     private_stack_object: bool = False,
     adjusted_instructions: frozenset[int] | None = None,
-) -> tuple[list[dict], list[list]]:
+) -> tuple[list[dict[str, Any]], list[list[Any]]]:
     """The window's dependence DAG (obligation 4).
 
     Every ordered pair carries an edge unless it is proved independent on
@@ -687,15 +689,13 @@ def ia32_schedule_dependence_edges(
             f"{context}: an explicit memory instruction has a segment override at "
             f"{segment_overrides[:1]}",
         )
-    if any((item["opcode"] in _IA32_SCHEDULE_STACK_PUSH_OPCODES for item in facts)):
+    if any(item["opcode"] in _IA32_SCHEDULE_STACK_PUSH_OPCODES for item in facts):
         offending = sorted(
-            (
-                item["offset"]
-                for item in facts
-                if item["opcode"] not in _IA32_SCHEDULE_STACK_PUSH_OPCODES
-                and item["memory"] is not None
-                and item["memory"]["base"] == "esp"
-            )
+            item["offset"]
+            for item in facts
+            if item["opcode"] not in _IA32_SCHEDULE_STACK_PUSH_OPCODES
+            and item["memory"] is not None
+            and item["memory"]["base"] == "esp"
         )
         require(
             not offending or stack_adjusted,
@@ -742,8 +742,7 @@ def ia32_schedule_dependence_edges(
             reasons = []
             discharged = (
                 frozenset({"esp"})
-                if is_stack_operation[left]
-                and esp_compensated[right]
+                if (is_stack_operation[left] and esp_compensated[right])
                 or (is_stack_operation[right] and esp_compensated[left])
                 else frozenset()
             )
@@ -772,30 +771,26 @@ def ia32_schedule_dependence_edges(
                     and body is not None
                     and (one["base"] == "esp" == two["base"])
                     and all(
-                        (
-                            facts[k]["opcode"]
-                            in (
-                                _IA32_SCHEDULE_STACK_PUSH_OPCODES
-                                if private_stack_object
-                                else _IA32_SCHEDULE_REGISTER_PUSH_OPCODES
-                            )
-                            or "esp" not in facts[k]["writes"]
-                            for k in range(len(facts))
+                        facts[k]["opcode"]
+                        in (
+                            _IA32_SCHEDULE_STACK_PUSH_OPCODES
+                            if private_stack_object
+                            else _IA32_SCHEDULE_REGISTER_PUSH_OPCODES
                         )
+                        or "esp" not in facts[k]["writes"]
+                        for k in range(len(facts))
                     )
                 ):
 
                     def _canonical(mem, index):
                         depth = sum(
-                            (
-                                1
-                                for k in range(index)
-                                if facts[k]["opcode"]
-                                in (
-                                    _IA32_SCHEDULE_STACK_PUSH_OPCODES
-                                    if private_stack_object
-                                    else _IA32_SCHEDULE_REGISTER_PUSH_OPCODES
-                                )
+                            1
+                            for k in range(index)
+                            if facts[k]["opcode"]
+                            in (
+                                _IA32_SCHEDULE_STACK_PUSH_OPCODES
+                                if private_stack_object
+                                else _IA32_SCHEDULE_REGISTER_PUSH_OPCODES
                             )
                         )
                         adjusted = dict(mem)
@@ -815,7 +810,7 @@ def ia32_schedule_dependence_edges(
 
 
 def require_topological_instruction_order(
-    count: int, edges: list[list], order: list[int], context: str
+    count: int, edges: list[list[Any]], order: list[int], context: str
 ) -> None:
     """The declared order must respect every edge of the DAG."""
     require(
@@ -841,11 +836,11 @@ _IA32_SCHEDULE_TERMINAL_OPCODES = frozenset({194, 195, 202, 203, 233, 235})
 
 def ia32_schedule_body_walk(
     body: bytes,
-    relocations: dict | None,
+    relocations: dict[int, Any] | None,
     context: str,
     code_length: int | None = None,
-    internal_targets: frozenset | None = None,
-) -> tuple[list[tuple[int, int]], set]:
+    internal_targets: frozenset[int] | None = None,
+) -> tuple[list[tuple[int, int]], set[Any]]:
     """Boundaries and interior branch targets of a whole COMDAT body."""
     require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
     body = bytes(body)
@@ -873,9 +868,9 @@ def ia32_schedule_body_walk(
         width = 0
         if opcode in range(112, 128) or opcode in (235, 224, 225, 226, 227):
             width = 1
-        elif opcode in (233, 232):
-            width = 4
-        elif opcode == 15 and cursor + 1 < offset + length and (128 <= code[cursor + 1] <= 143):
+        elif opcode in (233, 232) or (
+            opcode == 15 and cursor + 1 < offset + length and (128 <= code[cursor + 1] <= 143)
+        ):
             width = 4
         elif opcode == 255:
             require(cursor + 1 < offset + length, f"{context}: FF form at {offset} lacks its ModRM")
@@ -903,7 +898,7 @@ def ia32_schedule_body_walk(
             f"{context}: a branch targets {target}, which is not an instruction boundary of this body",
         )
     if limit < len(body):
-        last_at, last_length = spans[-1]
+        last_at, _last_length = spans[-1]
         cursor = last_at
         while code[cursor] in _IA32_SCHEDULE_INTERIOR_PREFIXES:
             cursor += 1
@@ -918,7 +913,7 @@ def ia32_schedule_body_walk(
             f"{context}: a computed jump at {computed[0]} makes the window's entry set unknowable without the relocated in-body target set",
         )
         stray = sorted(
-            (target for target in internal_targets if target < limit and target not in starts)
+            target for target in internal_targets if target < limit and target not in starts
         )
         require(
             not stray,
@@ -930,20 +925,20 @@ def ia32_schedule_body_walk(
 
 def apply_instruction_schedule(
     body: bytes,
-    windows: list[dict],
-    relocation_offsets: frozenset,
+    windows: list[dict[str, Any]],
+    relocation_offsets: frozenset[int],
     context: str,
-    relocations: dict | None = None,
+    relocations: dict[int, Any] | None = None,
     code_length: int | None = None,
-    internal_targets: frozenset | None = None,
-    external_entries: frozenset | None = None,
+    internal_targets: frozenset[int] | None = None,
+    external_entries: frozenset[int] | None = None,
     compiler_identity: Msvc420CompilerIdentity | None = None,
     fpo_evidence_body: bytes | None = None,
     debug_evidence_body: bytes | None = None,
     fpo_evidence_receipt: str | None = None,
     debug_evidence_receipt: str | None = None,
     function_owner: str | None = None,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Reorder each declared window under a proved dependence DAG.
 
     Obligations 2 through 6 are checked here, and the result is re-decoded to
@@ -1020,20 +1015,18 @@ def apply_instruction_schedule(
             [item["offset"] + item["length"] for item in inside][-1] == end,
             f"{window_context}: the decoded window does not end on the window boundary",
         )
-        crossing = sorted((target for target in targets if start < target < end))
+        crossing = sorted(target for target in targets if start < target < end)
         require(
             not crossing, f"{window_context}: a branch targets the window interior at {crossing}"
         )
         external_crossing = sorted(
-            (target for target in (external_entries or ()) if start < target < end)
+            target for target in (external_entries or ()) if start < target < end
         )
         require(
             not external_crossing,
             f"{window_context}: a derived external entry targets the window interior at {external_crossing}",
         )
-        overlapping = sorted(
-            (offset for offset in range(start, end) if offset in relocation_offsets)
-        )
+        overlapping = sorted(offset for offset in range(start, end) if offset in relocation_offsets)
         declared_reseat = window.get("relocation_reseat")
         window_reseat = []
         if declared_reseat is None:
@@ -1206,7 +1199,7 @@ def apply_instruction_schedule(
                 changed_bytes == adjusted_spans.get(index, []),
                 f"{window_context}: the instruction at {inside[index]['offset']} changed outside its declared ESP displacement",
             )
-        reordered = b"".join((pieces[source] for source in order))
+        reordered = b"".join(pieces[source] for source in order)
         require(
             sorted(pieces)
             == sorted(
@@ -1287,19 +1280,17 @@ def apply_instruction_schedule(
     for (start, end), item in zip(window_spans, detail):
         before = item["adjusted_instructions"]
         after = sorted(
-            (
-                image[position["offset"] : position["offset"] + position["length"]]
-                for position in image_instructions
-                if start <= position["offset"] < end
-            )
+            image[position["offset"] : position["offset"] + position["length"]]
+            for position in image_instructions
+            if start <= position["offset"] < end
         )
         require(
             before == after,
             f"{context}: window {start:#x} is not the same instruction multiset in the image",
         )
-    changed = sorted((index for index in range(len(body)) if body[index] != image[index]))
+    changed = sorted(index for index in range(len(body)) if body[index] != image[index])
     require(
-        all((_in_window(offset) for offset in changed)),
+        all(_in_window(offset) for offset in changed),
         f"{context}: the image changed a byte outside a declared window",
     )
     for item in detail:
@@ -1326,17 +1317,17 @@ def _instruction_spans(order: list[int], pieces: list[bytes]):
 
 
 def require_instruction_schedule_debug_fidelity(
-    coff: "CoffObject",
-    section: dict,
+    coff: CoffObject,
+    section: dict[str, Any],
     image: bytes,
-    windows: list[dict],
-    spec: dict,
+    windows: list[dict[str, Any]],
+    spec: dict[str, Any],
     mangled: str,
     context: str,
-    relocations: dict | None = None,
+    relocations: dict[int, Any] | None = None,
     code_length: int | None = None,
-    internal_targets: frozenset | None = None,
-) -> dict:
+    internal_targets: frozenset[int] | None = None,
+) -> dict[str, Any]:
     """Obligation 7: re-derive the line rows and the debug ranges.
 
     Every COFF line row is checked against the IMAGE's own instruction
@@ -1461,12 +1452,12 @@ def require_instruction_schedule_debug_fidelity(
 
 
 def _validate_schedule_windows(
-    windows: list,
+    windows: list[Any],
     context: str,
     body_length: int,
     code_length: int | None = None,
-    targets: list | None = None,
-) -> list[dict]:
+    targets: list[Any] | None = None,
+) -> list[dict[str, Any]]:
     """Normalise a list of reordering windows.
 
     Shared by the instruction-schedule certificate and the web-recolour
@@ -1509,7 +1500,7 @@ def _validate_schedule_windows(
             f"{window_context}: the window reaches past the declared code length",
         )
         require(
-            targets is None or not any((start < item < end for item in targets)),
+            targets is None or not any(start < item < end for item in targets),
             f"{window_context}: a relocated in-body target enters the window's interior",
         )
         previous_end = end
@@ -1517,7 +1508,7 @@ def _validate_schedule_windows(
         require(
             isinstance(lengths, list)
             and 2 <= len(lengths) <= 64
-            and all((type(item) is int and 1 <= item <= 15 for item in lengths))
+            and all(type(item) is int and 1 <= item <= 15 for item in lengths)
             and (sum(lengths) == end - start),
             f"{window_context}.source_instruction_lengths differs",
         )
@@ -1532,34 +1523,30 @@ def _validate_schedule_windows(
         require(
             isinstance(edges, list)
             and all(
-                (
-                    isinstance(edge, list)
-                    and len(edge) == 3
-                    and (type(edge[0]) is int)
-                    and (type(edge[1]) is int)
-                    and (0 <= edge[0] < edge[1] < len(lengths))
-                    and isinstance(edge[2], list)
-                    and edge[2]
-                    and (edge[2] == sorted(set(edge[2])))
-                    and all((reason in INSTRUCTION_SCHEDULE_EDGE_REASONS for reason in edge[2]))
-                    for edge in edges
-                )
+                isinstance(edge, list)
+                and len(edge) == 3
+                and (type(edge[0]) is int)
+                and (type(edge[1]) is int)
+                and (0 <= edge[0] < edge[1] < len(lengths))
+                and isinstance(edge[2], list)
+                and edge[2]
+                and (edge[2] == sorted(set(edge[2])))
+                and all(reason in INSTRUCTION_SCHEDULE_EDGE_REASONS for reason in edge[2])
+                for edge in edges
             )
-            and ([edge[:2] for edge in edges] == sorted((edge[:2] for edge in edges))),
+            and ([edge[:2] for edge in edges] == sorted(edge[:2] for edge in edges)),
             f"{window_context}.expected_dependence_edges is invalid",
         )
         line_rows = window.get("expected_line_rows")
         require(
             isinstance(line_rows, list)
             and all(
-                (
-                    isinstance(row, list)
-                    and len(row) == 3
-                    and all((type(item) is int for item in row))
-                    and (start <= row[0] < end)
-                    and (0 <= row[2] < len(lengths))
-                    for row in line_rows
-                )
+                isinstance(row, list)
+                and len(row) == 3
+                and all(type(item) is int for item in row)
+                and (start <= row[0] < end)
+                and (0 <= row[2] < len(lengths))
+                for row in line_rows
             )
             and ([row[0] for row in line_rows] == sorted({row[0] for row in line_rows})),
             f"{window_context}.expected_line_rows is invalid",
@@ -1571,16 +1558,14 @@ def _validate_schedule_windows(
                 isinstance(stack, list)
                 and 1 <= len(stack) <= 64
                 and all(
-                    (
-                        isinstance(row, list)
-                        and len(row) == 4
-                        and all((type(value) is int for value in row))
-                        and (0 <= row[0] < len(lengths))
-                        and (start <= row[1] < end)
-                        and (row[2] != row[3])
-                        and (abs(row[3] - row[2]) % 4 == 0)
-                        for row in stack
-                    )
+                    isinstance(row, list)
+                    and len(row) == 4
+                    and all(type(value) is int for value in row)
+                    and (0 <= row[0] < len(lengths))
+                    and (start <= row[1] < end)
+                    and (row[2] != row[3])
+                    and (abs(row[3] - row[2]) % 4 == 0)
+                    for row in stack
                 )
                 and (stack == sorted(stack))
                 and (len({row[1] for row in stack}) == len(stack)),
@@ -1601,18 +1586,16 @@ def _validate_schedule_windows(
                 isinstance(reseat, list)
                 and 1 <= len(reseat) <= 64
                 and all(
-                    (
-                        isinstance(pair, list)
-                        and len(pair) == 2
-                        and all((type(item) is int for item in pair))
-                        and (start <= pair[0] < end)
-                        and (start <= pair[1] < end)
-                        for pair in reseat
-                    )
+                    isinstance(pair, list)
+                    and len(pair) == 2
+                    and all(type(item) is int for item in pair)
+                    and (start <= pair[0] < end)
+                    and (start <= pair[1] < end)
+                    for pair in reseat
                 )
                 and ([pair[0] for pair in reseat] == sorted({pair[0] for pair in reseat}))
                 and (len({pair[1] for pair in reseat}) == len(reseat))
-                and any((pair[0] != pair[1] for pair in reseat)),
+                and any(pair[0] != pair[1] for pair in reseat),
                 f"{window_context}.relocation_reseat is invalid",
             )
             normalized_reseat = [list(pair) for pair in reseat]
@@ -1634,7 +1617,7 @@ def _validate_schedule_windows(
     return normalized_windows
 
 
-def validate_web_recolour(value: object, context: str, body_length: int) -> dict:
+def validate_web_recolour(value: object, context: str, body_length: int) -> dict[str, Any]:
     """Validate one web-recolour certificate declaration."""
     require(isinstance(value, dict), f"{context} must be an object")
     exact_audit_keys(
@@ -1674,7 +1657,7 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
         require(
             isinstance(targets, list)
             and targets == sorted(set(targets))
-            and all((type(item) is int and 0 <= item < body_length for item in targets)),
+            and all(type(item) is int and 0 <= item < body_length for item in targets),
             f"{context}.expected_internal_relocation_targets is invalid",
         )
 
@@ -1751,7 +1734,7 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
             offsets, scopes = _ia32_web_membership(web, role, web_context)
             require(
                 offsets == sorted(set(offsets))
-                and all((0 <= offset < (code_length or body_length) for offset in offsets)),
+                and all(0 <= offset < (code_length or body_length) for offset in offsets),
                 f"{web_context}.{role} is invalid",
             )
             for offset, ordinal in scopes.items():
@@ -1770,7 +1753,7 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
             and (offsets == sorted(set(offsets)))
             and (len(offsets) == len(role_offsets["definitions"]) + len(role_offsets["uses"]))
             and all(
-                (type(item) is int and 0 <= item < (code_length or body_length) for item in offsets)
+                type(item) is int and 0 <= item < (code_length or body_length) for item in offsets
             ),
             f"{web_context}.expected_rewritten_offsets is invalid",
         )
@@ -1791,19 +1774,15 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
         and changed
         and (changed == sorted(set(changed)))
         and all(
-            (
-                type(offset) is int
-                and (
-                    offset in rewritten
-                    or any(
-                        (
-                            item["start"] <= offset < item["end"]
-                            for item in normalized_windows + normalized_trailing
-                        )
-                    )
+            type(offset) is int
+            and (
+                offset in rewritten
+                or any(
+                    item["start"] <= offset < item["end"]
+                    for item in normalized_windows + normalized_trailing
                 )
-                for offset in changed
             )
+            for offset in changed
         ),
         f"{context}.expected_changed_offsets is invalid",
     )
@@ -1815,7 +1794,7 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
     require(
         isinstance(procedure, list)
         and len(procedure) == 3
-        and all((type(item) is int and item >= 0 for item in procedure))
+        and all(type(item) is int and item >= 0 for item in procedure)
         and (procedure[0] == body_length)
         and (procedure[1] <= procedure[2] <= body_length),
         f"{context}.expected_procedure_range is invalid",
@@ -1824,15 +1803,13 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
     require(
         isinstance(references, list)
         and all(
-            (
-                isinstance(item, list)
-                and len(item) == 3
-                and isinstance(item[0], str)
-                and isinstance(item[1], str)
-                and (type(item[2]) is int)
-                and (0 <= item[2] <= body_length)
-                for item in references
-            )
+            isinstance(item, list)
+            and len(item) == 3
+            and isinstance(item[0], str)
+            and isinstance(item[1], str)
+            and (type(item[2]) is int)
+            and (0 <= item[2] <= body_length)
+            for item in references
         ),
         f"{context}.expected_code_symbol_references is invalid",
     )
@@ -1840,15 +1817,13 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
     require(
         isinstance(registers, list)
         and all(
-            (
-                isinstance(item, list)
-                and len(item) == 3
-                and isinstance(item[0], str)
-                and (type(item[1]) is int)
-                and (item[1] >= 0)
-                and (item[2] in CODEVIEW_X86_REGISTER_NUMBERS)
-                for item in registers
-            )
+            isinstance(item, list)
+            and len(item) == 3
+            and isinstance(item[0], str)
+            and (type(item[1]) is int)
+            and (item[1] >= 0)
+            and (item[2] in CODEVIEW_X86_REGISTER_NUMBERS)
+            for item in registers
         ),
         f"{context}.expected_debug_s_registers is invalid",
     )
@@ -1885,10 +1860,10 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
 def produce_web_recolour_candidate(
     seed_bytes: bytes,
     donor_bytes: bytes,
-    function: dict,
+    function: dict[str, Any],
     *,
     compiler_identity: Msvc420CompilerIdentity | None = None,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Produce a recoloured def-use web from compiler output.
 
     See the class comment above.  The pre-image is the SEED's own
@@ -1986,13 +1961,13 @@ def produce_web_recolour_candidate(
     require(donor_body == seed_body, "web-recolour donor does not reproduce the seed's body")
     seed_rows = detailed_relocations(seed, sp)
     relocation_offsets = frozenset(
-        (row["offset"] + byte for row in seed_rows for byte in range(row["width"]))
+        row["offset"] + byte for row in seed_rows for byte in range(row["width"])
     )
     relocation_symbols = {
         row["offset"]: {"width": row["width"], "target": row["target"]} for row in seed_rows
     }
     internal_targets = frozenset(
-        (row["target_value"] for row in seed_rows if row["target_section"] == sp["number"])
+        row["target_value"] for row in seed_rows if row["target_section"] == sp["number"]
     )
     declared_targets = spec.get("expected_internal_relocation_targets")
     if declared_targets is not None:
@@ -2036,7 +2011,7 @@ def produce_web_recolour_candidate(
     schedule_detail = _schedule(spec.get("windows") or [], "schedule")
     declared_fpo = spec.get("expected_fpo_record")
     names_ebp = any(
-        ("ebp" in {web.get("source_register"), web.get("image_register")} for web in spec["webs"])
+        "ebp" in {web.get("source_register"), web.get("image_register")} for web in spec["webs"]
     )
     require(
         declared_fpo is not None or not names_ebp,
@@ -2078,7 +2053,7 @@ def produce_web_recolour_candidate(
     schedule_detail = schedule_detail + _schedule(
         spec.get("trailing_windows") or [], "trailing schedule"
     )
-    changed = sorted((index for index in range(len(seed_body)) if seed_body[index] != image[index]))
+    changed = sorted(index for index in range(len(seed_body)) if seed_body[index] != image[index])
     require(
         changed == spec["expected_changed_offsets"],
         "web-recolour image differs from its declaration",
@@ -2167,7 +2142,7 @@ def produce_web_recolour_candidate(
     )
 
 
-def validate_instruction_schedule(value: object, context: str, body_length: int) -> dict:
+def validate_instruction_schedule(value: object, context: str, body_length: int) -> dict[str, Any]:
     """Validate one instruction-schedule certificate declaration."""
     require(isinstance(value, dict), f"{context} must be an object")
     exact_audit_keys(
@@ -2197,7 +2172,7 @@ def validate_instruction_schedule(value: object, context: str, body_length: int)
         require(
             isinstance(targets, list)
             and targets == sorted(set(targets))
-            and all((type(item) is int and 0 <= item < body_length for item in targets)),
+            and all(type(item) is int and 0 <= item < body_length for item in targets),
             f"{context}.expected_internal_relocation_targets is invalid",
         )
     windows = value.get("windows")
@@ -2214,11 +2189,9 @@ def validate_instruction_schedule(value: object, context: str, body_length: int)
         and changed
         and (changed == sorted(set(changed)))
         and all(
-            (
-                type(offset) is int
-                and any((item["start"] <= offset < item["end"] for item in normalized_windows))
-                for offset in changed
-            )
+            type(offset) is int
+            and any(item["start"] <= offset < item["end"] for item in normalized_windows)
+            for offset in changed
         ),
         f"{context}.expected_changed_offsets is invalid",
     )
@@ -2226,7 +2199,7 @@ def validate_instruction_schedule(value: object, context: str, body_length: int)
     require(
         isinstance(procedure, list)
         and len(procedure) == 3
-        and all((type(item) is int and item >= 0 for item in procedure))
+        and all(type(item) is int and item >= 0 for item in procedure)
         and (procedure[0] == body_length)
         and (procedure[1] <= procedure[2] <= body_length),
         f"{context}.expected_procedure_range is invalid",
@@ -2235,15 +2208,13 @@ def validate_instruction_schedule(value: object, context: str, body_length: int)
     require(
         isinstance(references, list)
         and all(
-            (
-                isinstance(item, list)
-                and len(item) == 3
-                and isinstance(item[0], str)
-                and isinstance(item[1], str)
-                and (type(item[2]) is int)
-                and (0 <= item[2] <= body_length)
-                for item in references
-            )
+            isinstance(item, list)
+            and len(item) == 3
+            and isinstance(item[0], str)
+            and isinstance(item[1], str)
+            and (type(item[2]) is int)
+            and (0 <= item[2] <= body_length)
+            for item in references
         ),
         f"{context}.expected_code_symbol_references is invalid",
     )
@@ -2277,10 +2248,10 @@ WEB_RECOLOUR_KIND = "web_recolour_v1"
 
 
 def ia32_web_control_flow(
-    instructions: list[dict],
+    instructions: list[dict[str, Any]],
     context: str,
-    internal_targets: frozenset | None = None,
-    entry_offsets: frozenset | None = None,
+    internal_targets: frozenset[int] | None = None,
+    entry_offsets: frozenset[int] | None = None,
 ) -> list[list[int]]:
     """The body's complete control-flow graph, or a refusal.
 
@@ -2311,13 +2282,13 @@ def ia32_web_control_flow(
                 f"{context}: a computed jump at {item['offset']} requires the relocated in-body target set",
             )
             edges.extend(
-                (index_of[target] for target in sorted(internal_targets) if target in index_of)
+                index_of[target] for target in sorted(internal_targets) if target in index_of
             )
         successors.append(sorted(set(edges)))
     seen = set()
     stack = [0]
     if entry_offsets:
-        stack.extend((index_of[offset] for offset in sorted(entry_offsets) if offset in index_of))
+        stack.extend(index_of[offset] for offset in sorted(entry_offsets) if offset in index_of)
     while stack:
         index = stack.pop()
         if index in seen:
@@ -2325,7 +2296,7 @@ def ia32_web_control_flow(
         seen.add(index)
         stack.extend(successors[index])
     unreachable = sorted(
-        (instructions[index]["offset"] for index in range(len(instructions)) if index not in seen)
+        instructions[index]["offset"] for index in range(len(instructions)) if index not in seen
     )
     require(
         not unreachable,
@@ -2343,12 +2314,12 @@ def _ia32_web_predecessors(successors: list[list[int]]) -> list[list[int]]:
 
 
 def _ia32_web_reached_uses(
-    instructions: list[dict],
+    instructions: list[dict[str, Any]],
     successors: list[list[int]],
     definitions: list[int],
-    atoms: frozenset,
+    atoms: frozenset[str],
     context: str,
-) -> tuple[set, set]:
+) -> tuple[set[Any], set[Any]]:
     """Every reader of `atoms` a definition reaches, and the range between.
 
     Traversal stops at a full redefinition.  A PARTIAL redefinition inside the
@@ -2378,12 +2349,12 @@ def _ia32_web_reached_uses(
 
 
 def _ia32_web_reaching_definitions(
-    instructions: list[dict],
+    instructions: list[dict[str, Any]],
     predecessors: list[list[int]],
     uses: list[int],
-    atoms: frozenset,
+    atoms: frozenset[str],
     context: str,
-) -> tuple[set, set]:
+) -> tuple[set[Any], set[Any]]:
     """Every definition of `atoms` that reaches one of `uses`.
 
     Also returns the backward cone -- every instruction that can reach a use
@@ -2419,7 +2390,7 @@ def _ia32_web_reaching_definitions(
     return (reaching, seen)
 
 
-def _ia32_web_membership(web: dict, role: str, context: str) -> tuple:
+def _ia32_web_membership(web: dict[str, Any], role: str, context: str) -> tuple[Any, ...]:
     """Split a web's membership list into offsets and their field scopes.
 
     An entry is an instruction offset, or a two-element `[offset, ordinal]`
@@ -2462,15 +2433,15 @@ def _ia32_web_membership(web: dict, role: str, context: str) -> tuple:
 
 def apply_web_recolour(
     body: bytes,
-    webs: list[dict],
-    relocation_offsets: frozenset,
+    webs: list[dict[str, Any]],
+    relocation_offsets: frozenset[int],
     context: str,
-    relocations: dict | None = None,
+    relocations: dict[int, Any] | None = None,
     code_length: int | None = None,
-    internal_targets: frozenset | None = None,
+    internal_targets: frozenset[int] | None = None,
     frame_pointer_free: bool = False,
-    entry_offsets: frozenset | None = None,
-) -> tuple[bytes, dict]:
+    entry_offsets: frozenset[int] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
     """Recolour each declared web, proving W1..W7 on the body it is given.
 
     Webs are applied in order and each one's proof is measured on the body the
@@ -2571,14 +2542,14 @@ def apply_web_recolour(
         )
         require(
             reached == set(uses),
-            f"{web_context}: the definitions reach the uses at {sorted((instructions[index]['offset'] for index in reached))}, which is not the declared use set",
+            f"{web_context}: the definitions reach the uses at {sorted(instructions[index]['offset'] for index in reached)}, which is not the declared use set",
         )
         reaching, backward = _ia32_web_reaching_definitions(
             instructions, predecessors, uses, source_atoms, web_context
         )
         require(
             reaching == set(definitions),
-            f"{web_context}: the uses are reached by the definitions at {sorted((instructions[index]['offset'] for index in reaching))}, which is not the declared definition set",
+            f"{web_context}: the uses are reached by the definitions at {sorted(instructions[index]['offset'] for index in reaching)}, which is not the declared definition set",
         )
         interior = forward & backward | set(uses)
         live = _ia32_backward_liveness(instructions, successors, web_context)
@@ -2689,10 +2660,10 @@ def apply_web_recolour(
             rename_reads = recoloured and (not (scoped and is_definition))
             rename_writes = recoloured and (not (scoped and (not is_definition)))
             expected_reads = frozenset(
-                (mapping.get(name, name) if rename_reads else name for name in right["reads"])
+                mapping.get(name, name) if rename_reads else name for name in right["reads"]
             )
             expected_writes = frozenset(
-                (mapping.get(name, name) if rename_writes else name for name in right["writes"])
+                mapping.get(name, name) if rename_writes else name for name in right["writes"]
             )
             require(
                 left["reads"] == expected_reads and left["writes"] == expected_writes,
@@ -2712,7 +2683,7 @@ def apply_web_recolour(
             "image_register": target,
             "definitions": list(definition_offsets),
             "uses": list(use_offsets),
-            "live_range": sorted((instructions[index]["offset"] for index in interior)),
+            "live_range": sorted(instructions[index]["offset"] for index in interior),
             "rewritten_offsets": changed,
         }
         if field_scopes:
@@ -2734,7 +2705,9 @@ def apply_web_recolour(
     )
 
 
-def require_web_recolour_debug_registers(stream: bytes, declared: list, context: str) -> list:
+def require_web_recolour_debug_registers(
+    stream: bytes, declared: list[Any], context: str
+) -> list[Any]:
     """W8.  Pin the `.debug$S` S_REGISTER record list.
 
     The recolour leaves the stream alone.  That is sound rather than
@@ -2776,10 +2749,10 @@ INSTRUCTION_SCHEDULE_EDGE_REASONS = frozenset(
 def produce_instruction_schedule_candidate(
     seed_bytes: bytes,
     donor_bytes: bytes,
-    function: dict,
+    function: dict[str, Any],
     *,
     compiler_identity: Msvc420CompilerIdentity | None = None,
-) -> tuple[bytes, dict]:
+) -> tuple[bytes, dict[str, Any]]:
     """Produce a topological reordering from compiler output.
 
     See the class comment above: this is a certificate.  The pre-image is an
@@ -2857,7 +2830,7 @@ def produce_instruction_schedule_candidate(
         in (INSTRUCTION_SCHEDULE_FPO_CLOSURE, INSTRUCTION_SCHEDULE_EH_CLOSURE),
         "instruction-schedule closure pin names no installation delegate",
     )
-    reseat_declared = any((window.get("relocation_reseat") for window in spec["windows"]))
+    reseat_declared = any(window.get("relocation_reseat") for window in spec["windows"])
     delegate = instruction_schedule_delegate(
         function["expected_closure"], function["expected_code_renames"], reseat_declared
     )
@@ -2904,13 +2877,13 @@ def produce_instruction_schedule_candidate(
         "instruction-schedule donor call/branch relocation targets differ from the seed",
     )
     relocation_offsets = frozenset(
-        (row["offset"] + byte for row in seed_rows for byte in range(row["width"]))
+        row["offset"] + byte for row in seed_rows for byte in range(row["width"])
     )
     relocation_symbols = {
         row["offset"]: {"width": row["width"], "target": row["target"]} for row in seed_rows
     }
     internal_targets = frozenset(
-        (row["target_value"] for row in donor_rows if row["target_section"] == dp["number"])
+        row["target_value"] for row in donor_rows if row["target_section"] == dp["number"]
     )
     declared_targets = spec.get("expected_internal_relocation_targets")
     if declared_targets is not None:
@@ -2975,7 +2948,7 @@ def produce_instruction_schedule_candidate(
             row["offset"] = moved[row["offset"]]
         image_rows.append(row)
     require(
-        [row["offset"] for row in image_rows] == sorted((row["offset"] for row in image_rows)),
+        [row["offset"] for row in image_rows] == sorted(row["offset"] for row in image_rows),
         "instruction-schedule reseat breaks the relocation table's ascending offset order",
     )
     image_relocation_symbols = {

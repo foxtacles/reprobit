@@ -286,10 +286,6 @@ def _file_output_receipt(name: str, path: Path) -> CacheOutput:
     )
 
 
-def _atomic_bytes(path: Path, payload: bytes) -> None:
-    _publish_immutable(path, payload)
-
-
 def _replace_bytes(path: Path, payload: bytes) -> None:
     """Atomically replace a non-authoritative bounded lookup index."""
 

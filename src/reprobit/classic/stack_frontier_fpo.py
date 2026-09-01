@@ -21,19 +21,6 @@ def _join_affines(left: Affine, right: Affine, context: str) -> Affine:
     return {value: left.get(value, frozenset()) | right.get(value, frozenset()) for value in values}
 
 
-def _join_states(left: AffineState, right: AffineState, context: str) -> AffineState:
-    return AffineState(
-        {
-            name: _join_affines(left.registers[name], right.registers[name], context)
-            for name in left.registers.keys() & right.registers.keys()
-        },
-        {
-            slot: _join_affines(left.slots[slot], right.slots[slot], context)
-            for slot in left.slots.keys() & right.slots.keys()
-        },
-    )
-
-
 def _register_affine(state: AffineState, register: str | None, depth: int) -> Affine | None:
     if register == "esp":
         return {depth: frozenset()}
@@ -150,36 +137,3 @@ def transfer_affines(
             if slot < new_depth:
                 slots.pop(slot, None)
     return AffineState(registers, slots)
-
-
-def derive_affine_states(
-    body: bytes,
-    instructions: list[dict[str, Any]],
-    successors: list[list[int]],
-    ancestor_set: set[int],
-    depths: list[int | None],
-    context: str,
-) -> list[AffineState | None]:
-    states: list[AffineState | None] = [None] * len(instructions)
-    states[0] = AffineState({}, {})
-    work = [0]
-    rounds = 0
-    while work:
-        rounds += 1
-        require(rounds <= len(instructions) * 32, f"{context}: affine dataflow does not converge")
-        index = work.pop()
-        if index not in ancestor_set:
-            continue
-        state, depth = states[index], depths[index]
-        require(state is not None and depth is not None, f"{context}: missing affine entry state")
-        assert state is not None and depth is not None
-        outgoing = transfer_affines(body, instructions[index], state, depth, context)
-        for target in successors[index]:
-            if target not in ancestor_set:
-                continue
-            previous = states[target]
-            updated = outgoing if previous is None else _join_states(previous, outgoing, context)
-            if updated != previous:
-                states[target] = updated
-                work.append(target)
-    return states

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from reprobit.binary import ByteIdentityError, require
 from reprobit.coff_format import coff_unpack as _coff_unpack
 from reprobit.ia32_decode import (
@@ -9,7 +11,6 @@ from reprobit.model import is_identifier
 
 from .coff import _coff_table_bytes, function_symbol
 from .foundation import (
-    ADDRESS_RE,
     exact_audit_keys,
     local_symbol_kind,
     require_exact_int,
@@ -29,78 +30,6 @@ RETAIL_RELOCATION_ORACLE_KEYS = {
     "target_storage",
     "retail_target",
 }
-
-
-def validate_retail_relocation_oracle(
-    value: object, context: str, body_length: int, *, allow_empty: bool = False
-) -> list[dict]:
-    """Validate an ordered COFF-to-retail semantic relocation oracle."""
-    require(
-        isinstance(value, list) and (value or allow_empty),
-        f"{context} must be {('an array' if allow_empty else 'a non-empty array')}",
-    )
-    normalized = []
-    previous_end = 0
-    for index, item in enumerate(value):
-        item_context = f"{context}[{index}]"
-        require(isinstance(item, dict), f"{item_context} must be an object")
-        exact_audit_keys(item, RETAIL_RELOCATION_ORACLE_KEYS, item_context)
-        offset = require_exact_int(
-            item.get("offset"), item_context + ".offset", minimum=0, maximum=body_length - 4
-        )
-        require(offset >= previous_end, f"{context} relocation operands overlap or are unordered")
-        previous_end = offset + 4
-        relocation_type = require_exact_int(
-            item.get("type"), item_context + ".type", minimum=0, maximum=65535
-        )
-        require(relocation_type in (6, 20), f"{item_context}.type is not DIR32 or REL32")
-        target = item.get("target")
-        require(
-            isinstance(target, str)
-            and target
-            and target.isascii()
-            and (len(target) <= 4096)
-            and ("\x00" not in target),
-            f"{item_context}.target is invalid",
-        )
-        retail_target = item.get("retail_target")
-        require(
-            isinstance(retail_target, str) and ADDRESS_RE.fullmatch(retail_target) is not None,
-            f"{item_context}.retail_target is invalid",
-        )
-        normalized.append(
-            {
-                "offset": offset,
-                "type": relocation_type,
-                "addend": require_exact_int(
-                    item.get("addend"), item_context + ".addend", minimum=0, maximum=4294967295
-                ),
-                "target": target,
-                "target_section": require_exact_int(
-                    item.get("target_section"),
-                    item_context + ".target_section",
-                    minimum=0,
-                    maximum=32767,
-                ),
-                "target_value": require_exact_int(
-                    item.get("target_value"),
-                    item_context + ".target_value",
-                    minimum=0,
-                    maximum=4294967295,
-                ),
-                "target_type": require_exact_int(
-                    item.get("target_type"), item_context + ".target_type", minimum=0, maximum=65535
-                ),
-                "target_storage": require_exact_int(
-                    item.get("target_storage"),
-                    item_context + ".target_storage",
-                    minimum=0,
-                    maximum=255,
-                ),
-                "retail_target": retail_target,
-            }
-        )
-    return normalized
 
 
 INSTRUCTION_MOSAIC_RANGE_KEYS = {
@@ -160,7 +89,13 @@ def require_supported_complete_ia32_instruction(encoded: bytes, context: str) ->
 
 
 def require_coff_line_certified_ia32_boundaries(
-    coff, section: dict, body: bytes, ranges: list[dict], role: str, mangled: str, context: str
+    coff,
+    section: dict[str, Any],
+    body: bytes,
+    ranges: list[dict[str, Any]],
+    role: str,
+    mangled: str,
+    context: str,
 ) -> int:
     """Decode from the nearest compiler COFF line boundary through each span."""
     require(
@@ -232,7 +167,7 @@ def validate_cross_tu_instruction_hybrid_ranges(
     *,
     range_kind: str = "cross_tu_same_mangled_complete_x86_instruction_v1",
     require_same_offsets: bool = False,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Validate payload-free ranges in two independent compiler artifacts.
 
     Only geometry and digest commitments may enter through the declaration.
@@ -318,7 +253,7 @@ _IA32_GENERAL_REGISTERS = ("eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi
 _IA32_COMMUTABLE_OPCODES = {139: ("mov_r32_rm32", False, False), 51: ("xor_r32_rm32", True, True)}
 
 
-def decode_commutable_ia32_instruction(encoded: bytes, context: str) -> dict:
+def decode_commutable_ia32_instruction(encoded: bytes, context: str) -> dict[str, Any]:
     """Decode one instruction of the closed commutable subset.
 
     Returns its exact register read set, register write set, and whether it
@@ -372,7 +307,9 @@ def decode_commutable_ia32_instruction(encoded: bytes, context: str) -> dict:
     return {"reads": reads, "writes": writes, "reads_memory": reads_memory, "writes_memory": False}
 
 
-def require_commuting_ia32_instruction_pair(first: bytes, second: bytes, context: str) -> dict:
+def require_commuting_ia32_instruction_pair(
+    first: bytes, second: bytes, context: str
+) -> dict[str, Any]:
     """Prove two adjacent instructions may be exchanged without effect.
 
     Both must decode inside the closed subset, neither may write memory, and
@@ -386,7 +323,7 @@ def require_commuting_ia32_instruction_pair(first: bytes, second: bytes, context
         decode_commutable_ia32_instruction(second, f"{context} second"),
     ]
     require(
-        not any((item["writes_memory"] for item in decoded)),
+        not any(item["writes_memory"] for item in decoded),
         f"{context}: a commuting instruction writes memory",
     )
     require(
@@ -406,7 +343,9 @@ def require_commuting_ia32_instruction_pair(first: bytes, second: bytes, context
     }
 
 
-def validate_instruction_self_permutation(value: object, context: str, body: bytes) -> dict:
+def validate_instruction_self_permutation(
+    value: object, context: str, body: bytes
+) -> dict[str, Any]:
     """Validate a payload-free bijective commute from a fresh donor body."""
     require(isinstance(body, bytes) and body, f"{context}: donor body is missing")
     body_length = len(body)
@@ -453,7 +392,7 @@ def validate_instruction_self_permutation(value: object, context: str, body: byt
         require(
             isinstance(lengths, list)
             and len(lengths) == 2
-            and all((type(length) is int and 1 <= length <= 15 for length in lengths))
+            and all(type(length) is int and 1 <= length <= 15 for length in lengths)
             and (sum(lengths) == width),
             f"{context}.{role}_instruction_lengths differs",
         )
@@ -594,7 +533,7 @@ def validate_instruction_self_permutation(value: object, context: str, body: byt
         isinstance(changed_offsets, list)
         and changed_offsets
         and (changed_offsets == sorted(set(changed_offsets)))
-        and all((type(offset) is int and 0 <= offset < body_length for offset in changed_offsets)),
+        and all(type(offset) is int and 0 <= offset < body_length for offset in changed_offsets),
         f"{context}.expected_changed_offsets differs",
     )
     normalized["expected_changed_offsets"] = list(changed_offsets)
@@ -608,7 +547,9 @@ def validate_instruction_self_permutation(value: object, context: str, body: byt
     return normalized
 
 
-def validate_instruction_mosaic_ranges(value: object, context: str, body_length: int) -> list[dict]:
+def validate_instruction_mosaic_ranges(
+    value: object, context: str, body_length: int
+) -> list[dict[str, Any]]:
     """Validate payload-free same-offset instruction range declarations.
 
     The declaration closes geometry, digests, and partitions.  Both byte
@@ -680,7 +621,7 @@ def validate_instruction_mosaic_ranges(value: object, context: str, body_length:
                 require(
                     isinstance(values, list)
                     and 1 <= len(values) <= 16
-                    and all((type(v) is int and start <= v and (v + 4 <= end) for v in values))
+                    and all(type(v) is int and start <= v and (v + 4 <= end) for v in values)
                     and (values == sorted(set(values))),
                     f"{item_context}.{role}_relocation_offsets differ",
                 )
@@ -700,7 +641,7 @@ def validate_instruction_mosaic_ranges(value: object, context: str, body_length:
                     isinstance(lengths, list)
                     and lengths
                     and (len(lengths) <= 64)
-                    and all((type(length) is int and 1 <= length <= 15 for length in lengths))
+                    and all(type(length) is int and 1 <= length <= 15 for length in lengths)
                     and (sum(lengths) == end - start),
                     f"{item_context}.{role}_instruction_lengths differ",
                 )
@@ -710,8 +651,8 @@ def validate_instruction_mosaic_ranges(value: object, context: str, body_length:
 
 
 def require_declared_relocation_semantics(
-    donor_rows: list[dict], oracle: list[dict], context: str
-) -> dict:
+    donor_rows: list[dict[str, Any]], oracle: list[dict[str, Any]], context: str
+) -> dict[str, Any]:
     """Bind candidate relocations to declarative symbol semantics.
 
     The producer receives only relocation records re-derived from a fresh

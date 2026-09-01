@@ -584,15 +584,7 @@ def test_reloc_layout_dispatch_uses_equal_body_composer(
         captured.update(values)
         return seed, {"accepted": True}
 
-    def wrong_composer(*_args: object, **_kwargs: object) -> tuple[bytes, dict[str, object]]:
-        raise AssertionError("relocation-layout dispatch reached equal-linked-span FPO")
-
     monkeypatch.setattr(classic_composition, "compose_equal_body_comdat", compose)
-    monkeypatch.setattr(
-        classic_composition,
-        "compose_equal_linked_span_fpo",
-        wrong_composer,
-    )
 
     result = ClassicFamilyDispatcher().dispatch(
         intervention,

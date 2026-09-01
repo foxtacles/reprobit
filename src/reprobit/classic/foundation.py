@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from typing import Any
 
 import reprobit.binary as binary
 
@@ -82,34 +83,6 @@ def require_payload_free_declaration(value: object, context: str) -> None:
             pending.extend((item, f"{path}[{index}]") for index, item in enumerate(current))
 
 
-def unique_json_object(pairs: list[tuple[str, object]]) -> dict:
-    result = {}
-    for key, value in pairs:
-        binary.require(key not in result, f"JSON object contains duplicate key: {key}")
-        result[key] = value
-    return result
-
-
-class PreservedJsonObject(list):
-    """A JSON object whose ordered pairs remain available after a strict failure."""
-
-
-def preserved_json_object(pairs: list[tuple[str, object]]) -> PreservedJsonObject:
-    return PreservedJsonObject(pairs)
-
-
-def reject_json_constant(value: str) -> object:
-    raise binary.ByteIdentityError(f"JSON non-finite constant is forbidden: {value}")
-
-
-def strict_json_loads(data: str | bytes, *, preserve_pairs: bool = False) -> object:
-    return json.loads(
-        data,
-        object_pairs_hook=preserved_json_object if preserve_pairs else unique_json_object,
-        parse_constant=reject_json_constant,
-    )
-
-
 def sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -118,13 +91,13 @@ def canonical_json_bytes(value: object) -> bytes:
     return (json.dumps(value, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
 
 
-def exact_keys(value: dict, allowed: set[str], context: str) -> None:
+def exact_keys(value: dict[str, Any], allowed: set[str], context: str) -> None:
     unknown = set(value) - allowed
     binary.require(not unknown, f"{context} has unknown keys: {sorted(unknown)}")
 
 
 def exact_audit_keys(
-    value: dict, expected: set[str], context: str, optional: set[str] | None = None
+    value: dict[str, Any], expected: set[str], context: str, optional: set[str] | None = None
 ) -> None:
     unknown = set(value) - expected
     missing = expected - set(value) - (optional or set())
@@ -140,7 +113,7 @@ def exact_json_equal(left: object, right: object) -> bool:
         return False
     if isinstance(left, dict):
         return left.keys() == right.keys() and all(
-            (exact_json_equal(left[key], right[key]) for key in left)
+            exact_json_equal(left[key], right[key]) for key in left
         )
     if isinstance(left, list):
         return len(left) == len(right) and all(

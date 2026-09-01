@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from reprobit.binary import ByteIdentityError, require
 from reprobit.coff_format import (
     CoffObject,
@@ -49,8 +51,8 @@ from .register_semantics import decode_ia32_bijection_body
 
 
 def produce_register_bijection_candidate(
-    seed_bytes: bytes, donor_bytes: bytes, function: dict
-) -> tuple[bytes, dict]:
+    seed_bytes: bytes, donor_bytes: bytes, function: dict[str, Any]
+) -> tuple[bytes, dict[str, Any]]:
     """Produce sigma(donor body) from a fresh compiler artifact.
 
     See the class comment above: this is a certificate.  The donor is an
@@ -175,10 +177,8 @@ def produce_register_bijection_candidate(
                 kind is not None
                 and kind == local_symbol_kind(right["target"])
                 and all(
-                    (
-                        left["target_" + field] == right["target_" + field]
-                        for field in ("section", "value", "type", "storage")
-                    )
+                    left["target_" + field] == right["target_" + field]
+                    for field in ("section", "value", "type", "storage")
                 ),
                 "register-bijection donor renames a non-local relocation",
             )
@@ -225,13 +225,13 @@ def produce_register_bijection_candidate(
         {**left, "offset": right["offset"]} for left, right in zip(seed_rows, donor_rows)
     ]
     relocation_offsets = frozenset(
-        (row["offset"] + byte for row in installed_rows for byte in range(row["width"]))
+        row["offset"] + byte for row in installed_rows for byte in range(row["width"])
     )
     relocation_symbols = {
         row["offset"]: {"width": row["width"], "target": row["target"]} for row in installed_rows
     }
     internal_targets = frozenset(
-        (row["target_value"] for row in donor_rows if row["target_section"] == dp["number"])
+        row["target_value"] for row in donor_rows if row["target_section"] == dp["number"]
     )
     declared_targets = spec.get("expected_internal_relocation_targets")
     if declared_targets is not None:
@@ -266,7 +266,7 @@ def produce_register_bijection_candidate(
     )
     require(
         sorted(
-            (offset for offset in proof["rewritten_offsets"] if seed_body[offset] == image[offset])
+            offset for offset in proof["rewritten_offsets"] if seed_body[offset] == image[offset]
         )
         == (spec.get("expected_rewritten_offsets_restoring_seed") or []),
         "register-bijection seed-restoring rewrite set changed",
@@ -388,7 +388,7 @@ def _reencoded_donor_object(
     donor_bytes: bytes,
     mangled: str,
     image: bytes,
-    proof: dict,
+    proof: dict[str, Any],
     context: str,
     fpo_required: bool = True,
 ) -> bytes:
@@ -623,8 +623,8 @@ def _reencoded_donor_object(
 
 
 def produce_register_bijection_reencoding_candidate(
-    seed_bytes: bytes, donor_bytes: bytes, function: dict
-) -> tuple[bytes, dict]:
+    seed_bytes: bytes, donor_bytes: bytes, function: dict[str, Any]
+) -> tuple[bytes, dict[str, Any]]:
     """Produce a resized sigma(donor body) from compiler output.
 
     The parent class with EBP admitted: see the class comment above for the
@@ -723,13 +723,13 @@ def produce_register_bijection_reencoding_candidate(
         "re-encoding donor relocation targets differ from the seed",
     )
     relocation_offsets = frozenset(
-        (row["offset"] + byte for row in donor_rows for byte in range(row["width"]))
+        row["offset"] + byte for row in donor_rows for byte in range(row["width"])
     )
     relocation_symbols = {
         row["offset"]: {"width": row["width"], "target": row["target"]} for row in donor_rows
     }
     internal_targets = frozenset(
-        (row["target_value"] for row in donor_rows if row["target_section"] == dp["number"])
+        row["target_value"] for row in donor_rows if row["target_section"] == dp["number"]
     )
     declared_targets = spec.get("expected_internal_relocation_targets")
     if declared_targets is not None:

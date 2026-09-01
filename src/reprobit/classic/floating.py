@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any, TypeAlias
+
 from reprobit.binary import require
 from reprobit.ia32_decode import supported_ia32_instruction_length
 
@@ -8,9 +10,11 @@ from .relational import ia32_relational_flow_walk
 
 """Classic compiler algorithms: floating."""
 FP_SUM_REASSOCIATION_KIND = "fp_sum_reassociation_v1"
+# A unit index, or a fold of two subtrees (next operand, accumulated top).
+FoldTree: TypeAlias = "int | tuple[FoldTree, FoldTree]"
 
 
-def _fp_sum_parse_chain(body: bytes, start: int, end: int, context: str) -> list[dict]:
+def _fp_sum_parse_chain(body: bytes, start: int, end: int, context: str) -> list[dict[str, Any]]:
     """Parse [start, end) into PAIR / FADDP slots, or refuse."""
     slots = []
     offset = start
@@ -49,8 +53,8 @@ def _fp_sum_parse_chain(body: bytes, start: int, end: int, context: str) -> list
     require(offset == end, f"{context}: the chain does not end on an instruction boundary")
     require(pending_fld is None, f"{context}: the chain ends inside a product pair")
     require(
-        sum((1 for slot in slots if slot["kind"] == "pair")) >= 2
-        and any((slot["kind"] == "faddp" for slot in slots)),
+        sum(1 for slot in slots if slot["kind"] == "pair") >= 2
+        and any(slot["kind"] == "faddp" for slot in slots),
         f"{context}: a chain is at least two product pairs and one faddp",
     )
     return slots
@@ -58,14 +62,14 @@ def _fp_sum_parse_chain(body: bytes, start: int, end: int, context: str) -> list
 
 def apply_x87_squared_addend_exchange(
     body: bytes,
-    chains: list,
-    relocation_offsets: frozenset,
+    chains: list[Any],
+    relocation_offsets: frozenset[int],
     context: str,
-    relocations: dict | None = None,
+    relocations: dict[int, Any] | None = None,
     code_length: int | None = None,
-    external_entries: frozenset | None = None,
-    internal_targets: frozenset | None = None,
-) -> tuple[bytes, dict]:
+    external_entries: frozenset[int] | None = None,
+    internal_targets: frozenset[int] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
     """Permute `fld m32 / fsub m32` addend units whose values provably enter
     the result only as SQUARES inside one commutative x87 sum, or refuse.
 
@@ -90,7 +94,7 @@ def apply_x87_squared_addend_exchange(
     require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
     body = bytes(body)
     require(isinstance(chains, list) and chains, f"{context}: no chain is declared")
-    items, successors, entries = ia32_relational_flow_walk(
+    items, _successors, entries = ia32_relational_flow_walk(
         body, relocations, context, code_length, external_entries
     )
     branch_targets = {item["target"] for item in items if item.get("target") is not None}
@@ -107,17 +111,20 @@ def apply_x87_squared_addend_exchange(
         )
         require(previous_end <= start, f"{chain_context}: chains are unsorted or overlapping")
         previous_end = end
-        inside = lambda target: start < target < end
+
+        def inside(target):
+            return start < target < end
+
         require(
-            not any((inside(target) for target in branch_targets)),
+            not any(inside(target) for target in branch_targets),
             f"{chain_context}: a branch targets the chain interior",
         )
         require(
-            not any((inside(items[entry]["offset"]) for entry in entries[1:])),
+            not any(inside(items[entry]["offset"]) for entry in entries[1:]),
             f"{chain_context}: an external entry lies inside the chain",
         )
         require(
-            not any((inside(target) for target in internal_targets or frozenset())),
+            not any(inside(target) for target in internal_targets or frozenset()),
             f"{chain_context}: a relocated target lies inside the chain",
         )
         require(
@@ -182,7 +189,7 @@ def apply_x87_squared_addend_exchange(
             f"{chain_context}: a relocated record straddles a unit boundary",
         )
         squared = [False] * len(units)
-        stack = list(range(len(units) - 1, -1, -1))
+        stack: list[FoldTree] = list(range(len(units) - 1, -1, -1))
         scan = end
         walk_at = {item["offset"]: item for item in items}
         while True:
@@ -219,7 +226,7 @@ def apply_x87_squared_addend_exchange(
                         require(
                             squared[slot], f"{chain_context}: a unit is summed before it is squared"
                         )
-                stack = [(nxt, top)] + stack[2:]
+                stack = [(nxt, top), *stack[2:]]
                 scan += 2
             else:
                 break
@@ -250,7 +257,7 @@ def apply_x87_squared_addend_exchange(
             f"{chain_context}: the order is not commutativity-exact for the fold tree",
         )
         blocks = [body[offset : offset + length] for offset, length, _ in units]
-        rebuilt = b"".join((blocks[index] for index in order))
+        rebuilt = b"".join(blocks[index] for index in order)
         require(len(rebuilt) == end - start, f"{chain_context}: the permutation changed the length")
         image[start:end] = rebuilt
         chain_reseat = []
@@ -307,20 +314,20 @@ def _x87_m32_length(body: bytes, offset: int, context: str) -> int:
 
 def apply_fp_sum_reassociation(
     body: bytes,
-    chains: list,
-    relocation_offsets: frozenset,
+    chains: list[Any],
+    relocation_offsets: frozenset[int],
     context: str,
-    relocations: dict | None = None,
+    relocations: dict[int, Any] | None = None,
     code_length: int | None = None,
-    external_entries: frozenset | None = None,
-    internal_targets: frozenset | None = None,
-) -> tuple[bytes, dict]:
+    external_entries: frozenset[int] | None = None,
+    internal_targets: frozenset[int] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
     """Permute product pairs within declared faddp chains, or refuse."""
     require_payload_free_declaration(chains, f"{context} FP reassociation declaration")
     require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
     body = bytes(body)
     require(isinstance(chains, list) and chains, f"{context}: no chain is declared")
-    items, successors, entries = ia32_relational_flow_walk(
+    items, _successors, entries = ia32_relational_flow_walk(
         body, relocations, context, code_length, external_entries
     )
     branch_targets = {item["target"] for item in items if item.get("target") is not None}
@@ -338,20 +345,23 @@ def apply_fp_sum_reassociation(
         require(previous_end <= start, f"{chain_context}: chains are unsorted or overlapping")
         previous_end = end
         require(
-            not any((start <= offset < end for offset in relocation_offsets)),
+            not any(start <= offset < end for offset in relocation_offsets),
             f"{chain_context}: a relocation lies inside the chain",
         )
-        inside = lambda target: start < target < end
+
+        def inside(target):
+            return start < target < end
+
         require(
-            not any((inside(target) for target in branch_targets)),
+            not any(inside(target) for target in branch_targets),
             f"{chain_context}: a branch targets the chain interior",
         )
         require(
-            not any((inside(items[entry]["offset"]) for entry in entries[1:])),
+            not any(inside(items[entry]["offset"]) for entry in entries[1:]),
             f"{chain_context}: an external entry lies inside the chain",
         )
         require(
-            not any((inside(target) for target in internal_targets or frozenset())),
+            not any(inside(target) for target in internal_targets or frozenset()),
             f"{chain_context}: a relocated target lies inside the chain",
         )
         slots = _fp_sum_parse_chain(body, start, end, chain_context)
@@ -379,11 +389,9 @@ def apply_fp_sum_reassociation(
             f"{chain_context}: the image slot skeleton differs",
         )
         image_pairs = sorted(
-            (
-                bytes(image[slot["offset"] : slot["offset"] + slot["length"]])
-                for slot in image_slots
-                if slot["kind"] == "pair"
-            )
+            bytes(image[slot["offset"] : slot["offset"] + slot["length"]])
+            for slot in image_slots
+            if slot["kind"] == "pair"
         )
         require(image_pairs == sorted(pairs), f"{chain_context}: the image pair multiset differs")
         proved.append(
@@ -392,9 +400,9 @@ def apply_fp_sum_reassociation(
                 "chain_end": end,
                 "order": list(order),
                 "pair_count": len(pair_slots),
-                "faddp_count": sum((1 for slot in slots if slot["kind"] == "faddp")),
+                "faddp_count": sum(1 for slot in slots if slot["kind"] == "faddp"),
                 "rewritten_offsets": sorted(
-                    (offset for offset in range(start, end) if body[offset] != image[offset])
+                    offset for offset in range(start, end) if body[offset] != image[offset]
                 ),
             }
         )
@@ -403,7 +411,7 @@ def apply_fp_sum_reassociation(
     changed = {offset for offset in range(len(body)) if body[offset] != image[offset]}
     declared = {offset for chain in proved for offset in chain["rewritten_offsets"]}
     require(changed <= declared, f"{context}: the image changed a byte outside the declared chains")
-    image_items, image_successors, image_entries = ia32_relational_flow_walk(
+    image_items, _image_successors, image_entries = ia32_relational_flow_walk(
         image, relocations, f"{context} image", code_length, external_entries
     )
     require(

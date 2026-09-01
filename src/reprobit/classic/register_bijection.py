@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from reprobit.binary import ByteIdentityError, require
 
 from .debug import CODEVIEW_SYMBOL_NAME_OFFSETS, parse_codeview_symbol_stream
@@ -73,14 +75,14 @@ CODEVIEW_REGISTER_RECORD_TYPE = 2
 
 def apply_register_bijection(
     body: bytes,
-    mapping: dict,
+    mapping: dict[str, Any],
     region: tuple[int, int],
-    relocation_offsets: frozenset,
+    relocation_offsets: frozenset[int],
     context: str,
-    relocations: dict | None = None,
+    relocations: dict[int, Any] | None = None,
     code_length: int | None = None,
-    internal_targets: frozenset | None = None,
-) -> tuple[bytes, dict]:
+    internal_targets: frozenset[int] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
     """Rewrite one region's general-register fields under a proved bijection.
 
     Every obligation this class rests on is checked here: total decode, closed
@@ -96,12 +98,12 @@ def apply_register_bijection(
     boundaries = {item["offset"] for item in instructions}
     boundaries.add(limit)
     require(end <= limit, f"{context}: region reaches past the body's code")
-    if any((item["indirect"] for item in instructions)):
+    if any(item["indirect"] for item in instructions):
         require(
             internal_targets is not None,
             f"{context}: a computed jump requires the relocated in-body target set",
         )
-        entered = sorted((target for target in internal_targets if start < target < end))
+        entered = sorted(target for target in internal_targets if start < target < end)
         require(
             not entered,
             f"{context}: a relocated in-body target at {entered[:1]} enters the region other than at its first instruction",
@@ -227,16 +229,12 @@ def apply_register_bijection(
         )
     for left, right in zip(image_instructions, instructions):
         expected_reads = frozenset(
-            (
-                mapping.get(name, name) if start <= right["offset"] < end else name
-                for name in right["reads"]
-            )
+            mapping.get(name, name) if start <= right["offset"] < end else name
+            for name in right["reads"]
         )
         expected_writes = frozenset(
-            (
-                mapping.get(name, name) if start <= right["offset"] < end else name
-                for name in right["writes"]
-            )
+            mapping.get(name, name) if start <= right["offset"] < end else name
+            for name in right["writes"]
         )
         require(
             left["reads"] == expected_reads and left["writes"] == expected_writes,
@@ -258,7 +256,7 @@ def apply_register_bijection(
     )
 
 
-def _codeview_register_field(record: dict, context: str) -> int:
+def _codeview_register_field(record: dict[str, Any], context: str) -> int:
     """The offset of one S_REGISTER record's two-byte register field."""
     field_at = record["offset"] + 4 + 2
     require(
@@ -279,8 +277,8 @@ def _codeview_register_name(stream: bytes, field_at: int, context: str) -> str:
 
 def apply_codeview_register_bijection(
     stream: bytes,
-    mapping: dict,
-    declared: list[dict],
+    mapping: dict[str, Any],
+    declared: list[dict[str, Any]],
     context: str,
     donor_stream: bytes | None = None,
 ) -> bytes:
@@ -408,7 +406,7 @@ def apply_codeview_register_bijection(
     return image
 
 
-def validate_register_bijection(value: object, context: str, body_length: int) -> dict:
+def validate_register_bijection(value: object, context: str, body_length: int) -> dict[str, Any]:
     """Validate one register-bijection certificate declaration."""
     require(isinstance(value, dict), f"{context} must be an object")
     exact_audit_keys(
@@ -484,7 +482,7 @@ def validate_register_bijection(value: object, context: str, body_length: int) -
         isinstance(offsets, list)
         and offsets
         and (offsets == sorted(set(offsets)))
-        and all((type(offset) is int and start <= offset < end for offset in offsets)),
+        and all(type(offset) is int and start <= offset < end for offset in offsets),
         f"{context}.expected_rewritten_offsets is invalid",
     )
     declared = value.get("debug_s_register_map")
@@ -541,11 +539,11 @@ def validate_register_bijection(value: object, context: str, body_length: int) -
         require(
             isinstance(targets, list)
             and targets == sorted(set(targets))
-            and all((type(item) is int and 0 <= item < body_length for item in targets)),
+            and all(type(item) is int and 0 <= item < body_length for item in targets),
             f"{context}.expected_internal_relocation_targets is invalid",
         )
         require(
-            not any((start < item < end for item in targets)),
+            not any(start < item < end for item in targets),
             f"{context}: a relocated in-body target enters the region",
         )
     normalized = {

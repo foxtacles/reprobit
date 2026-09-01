@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import struct
+from typing import Any
 
 from reprobit.binary import require
 from reprobit.coff_format import (
@@ -99,7 +100,7 @@ _IA32_RELATIONAL_STRING_COMPARE = frozenset({166, 167, 174, 175})
 _IA32_RELATIONAL_REFUSED_OPCODES = frozenset({154, 234, 204, 205, 206, 207, 240, 241, 244})
 
 
-def _ia32_relational_flag_table() -> dict:
+def _ia32_relational_flag_table() -> dict[int, Any]:
     """Flag effect by opcode for the forms whose effect is opcode-determined.
 
     Everything absent falls back to the fail-closed default (reads every
@@ -188,7 +189,7 @@ def _ia32_relational_flag_table() -> dict:
 IA32_RELATIONAL_FLAG_EFFECTS = _ia32_relational_flag_table()
 
 
-def _ia32_relational_group_table() -> dict:
+def _ia32_relational_group_table() -> dict[int, Any]:
     """Flag effect by (opcode, ModRM extension digit).
 
     Reading the digit off the encoding makes these forms EXACT.  An
@@ -257,11 +258,11 @@ def relational_form_delegate(expected_closure: object, expected_code_renames: ob
 
 def ia32_relational_flow_walk(
     body: bytes,
-    relocations: dict | None,
+    relocations: dict[int, Any] | None,
     context: str,
     code_length: int | None = None,
-    external_entries: frozenset | None = None,
-) -> tuple[list[dict], list[list[int]], list[int]]:
+    external_entries: frozenset[int] | None = None,
+) -> tuple[list[dict[str, Any]], list[list[int]], list[int]]:
     """Tier A: boundaries, closed flow classification, CFG and flag facts.
 
     Obligation 2.  Returns `(items, successors, entry_indices)`.  Every item
@@ -419,15 +420,11 @@ def ia32_relational_flow_walk(
             edges.append(index_of[item["target"]])
         if item["flow"] == "computed":
             edges.extend(
-                (
-                    index_of[target]
-                    for target in sorted(external_entries or ())
-                    if target in index_of
-                )
+                index_of[target] for target in sorted(external_entries or ()) if target in index_of
             )
         successors.append(sorted(set(edges)))
     code_end = items[-1]["offset"] + items[-1]["length"] if items else 0
-    external = sorted((target for target in external_entries or () if target < code_end))
+    external = sorted(target for target in external_entries or () if target < code_end)
     for target in external:
         require(
             target in index_of,
@@ -441,9 +438,7 @@ def ia32_relational_flow_walk(
             continue
         seen.add(index)
         stack.extend(successors[index])
-    unreachable = sorted(
-        (items[index]["offset"] for index in range(len(items)) if index not in seen)
-    )
+    unreachable = sorted(items[index]["offset"] for index in range(len(items)) if index not in seen)
     require(
         not unreachable,
         f"{context}: the instruction at {unreachable[:1]} is reachable neither from the entry nor from a declared external entry, so the control-flow graph is incomplete",
@@ -452,8 +447,8 @@ def ia32_relational_flow_walk(
 
 
 def ia32_relational_flag_liveness(
-    items: list[dict], successors: list[list[int]], context: str
-) -> list[frozenset]:
+    items: list[dict[str, Any]], successors: list[list[int]], context: str
+) -> list[frozenset[str]]:
     """Backward per-flag liveness, on the SAME fixpoint the register and web
     certificates use -- the flags are simply its atoms."""
     shim = [
@@ -464,13 +459,13 @@ def ia32_relational_flag_liveness(
 
 def apply_relational_form(
     body: bytes,
-    sites: list,
-    relocation_offsets: frozenset,
+    sites: list[Any],
+    relocation_offsets: frozenset[int],
     context: str,
-    relocations: dict | None = None,
+    relocations: dict[int, Any] | None = None,
     code_length: int | None = None,
-    external_entries: frozenset | None = None,
-) -> tuple[bytes, dict]:
+    external_entries: frozenset[int] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
     """Reverse each declared compare and mirror its branch, or refuse.
 
     Obligations 2 through 7 are discharged here; the composer adds
@@ -661,7 +656,9 @@ def apply_relational_form(
     )
 
 
-def relational_form_external_entries(obj: "CoffObject", section: dict, context: str) -> frozenset:
+def relational_form_external_entries(
+    obj: CoffObject, section: dict[str, Any], context: str
+) -> frozenset[int]:
     """Every in-body offset a relocation of this COMDAT or of its closure
     children names.
 
@@ -689,7 +686,7 @@ def relational_form_external_entries(obj: "CoffObject", section: dict, context: 
     return frozenset(entries)
 
 
-def validate_relational_form(value: object, context: str, body_length: int) -> dict:
+def validate_relational_form(value: object, context: str, body_length: int) -> dict[str, Any]:
     """Validate one relational-form certificate declaration."""
     require(isinstance(value, dict), f"{context} must be an object")
     exact_audit_keys(
@@ -757,14 +754,14 @@ def validate_relational_form(value: object, context: str, body_length: int) -> d
         isinstance(offsets, list)
         and len(offsets) == 2 * len(normalized_sites)
         and (offsets == sorted(set(offsets)))
-        and all((type(offset) is int and 0 <= offset < body_length for offset in offsets)),
+        and all(type(offset) is int and 0 <= offset < body_length for offset in offsets),
         f"{context}.expected_rewritten_offsets is invalid",
     )
     external = value.get("expected_external_entries")
     require(
         isinstance(external, list)
         and external == sorted(set(external))
-        and all((type(item) is int and 0 < item < body_length for item in external)),
+        and all(type(item) is int and 0 < item < body_length for item in external),
         f"{context}.expected_external_entries is invalid",
     )
     rationale = value.get("authenticity_rationale")
@@ -796,8 +793,8 @@ def validate_relational_form(value: object, context: str, body_length: int) -> d
 
 
 def produce_relational_form_candidate(
-    seed_bytes: bytes, donor_bytes: bytes, function: dict
-) -> tuple[bytes, dict]:
+    seed_bytes: bytes, donor_bytes: bytes, function: dict[str, Any]
+) -> tuple[bytes, dict[str, Any]]:
     """Produce reversed compares from a fresh compiler artifact.
 
     See the class comment: this is a certificate.  The pre-image is an
@@ -913,7 +910,7 @@ def produce_relational_form_candidate(
         {**left, "offset": right["offset"]} for left, right in zip(seed_rows, donor_rows)
     ]
     relocation_offsets = frozenset(
-        (row["offset"] + byte for row in installed_rows for byte in range(row["width"]))
+        row["offset"] + byte for row in installed_rows for byte in range(row["width"])
     )
     relocation_symbols = {
         row["offset"]: {"width": row["width"], "target": row["target"]} for row in installed_rows

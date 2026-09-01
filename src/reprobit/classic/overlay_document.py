@@ -340,14 +340,6 @@ def _parse_document(value: object) -> _ValidatedOverlay:
     return _ValidatedOverlay(outputs, generated)
 
 
-def validate_classic_overlay(
-    document: Mapping[str, object],
-) -> None:
-    """Validate a complete generic schema-v2 overlay document fail-closed."""
-
-    _parse_document(document)
-
-
 def _apply_edits(data: bytes, operations: Sequence[_ResolvedOperation], context: str) -> bytes:
     grouped: dict[tuple[int, int], list[_ResolvedOperation]] = defaultdict(list)
     for operation in operations:

@@ -19,6 +19,7 @@ from reprobit.model import Digest
 TARGET = "_transform"
 
 
+@pytest.mark.msvc42
 def test_msvc42_discovery_cold_resume_and_one_cell_extension(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

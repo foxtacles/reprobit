@@ -37,6 +37,9 @@ packages = ["src/reprobit"]
 [tool.pytest.ini_options]
 addopts = "-ra --strict-config --strict-markers"
 testpaths = ["tests"]
+markers = [
+    "msvc42: needs an authenticated MSVC 4.2 installation (REPROBIT_MSVC_4_2_ROOT)",
+]
 
 [tool.ruff]
 line-length = 100
@@ -49,34 +52,20 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 # Keep its grandfathered diagnostics explicit by module and rule instead of
 # hiding all present and future diagnostics with file-wide noqa directives.
 [tool.ruff.lint.per-file-ignores]
-"src/reprobit/classic/arguments.py" = ["E501", "I001", "SIM102", "UP034"]
-"src/reprobit/classic/coff.py" = ["E501", "I001", "UP034"]
-"src/reprobit/classic/composition.py" = [
-  "B007", "B905", "E501", "F841", "I001", "RUF007", "RUF059", "UP034",
-]
-"src/reprobit/classic/debug.py" = [
-  "B007", "B905", "E501", "I001", "RUF007", "RUF021", "UP034",
-]
-"src/reprobit/classic/floating.py" = [
-  "B023", "E501", "E731", "RUF005", "RUF059", "UP034",
-]
-"src/reprobit/classic/foundation.py" = ["B905", "E501", "UP034"]
-"src/reprobit/classic/ia32.py" = ["B905", "E501", "I001", "UP034"]
-"src/reprobit/classic/register_bijection.py" = ["B905", "E501", "UP034"]
-"src/reprobit/classic/register_candidates.py" = ["B905", "E501", "I001", "UP034"]
-"src/reprobit/classic/register_reencoding.py" = [
-  "B905", "E501", "F841", "I001", "RUF007", "UP034", "UP037",
-]
-"src/reprobit/classic/register_semantics.py" = ["E501", "SIM102"]
-"src/reprobit/classic/relational.py" = ["B905", "E501", "I001", "UP034", "UP037"]
-"src/reprobit/classic/rewriting.py" = [
-  "B007", "B023", "B905", "E501", "F841", "I001", "RUF005", "RUF007",
-  "RUF015", "RUF059", "UP034",
-]
-"src/reprobit/classic/scheduling.py" = [
-  "B905", "E501", "I001", "RUF021", "RUF059", "SIM114", "UP034", "UP037",
-]
-"src/reprobit/classic/source_proofs.py" = ["B905", "E501", "I001", "UP034"]
+"src/reprobit/classic/arguments.py" = ["E501"]
+"src/reprobit/classic/composition.py" = ["B905", "E501"]
+"src/reprobit/classic/debug.py" = ["E501"]
+"src/reprobit/classic/floating.py" = ["B023", "E501"]
+"src/reprobit/classic/foundation.py" = ["B905"]
+"src/reprobit/classic/ia32.py" = ["B905", "E501"]
+"src/reprobit/classic/register_bijection.py" = ["B905", "E501"]
+"src/reprobit/classic/register_candidates.py" = ["B905", "E501"]
+"src/reprobit/classic/register_reencoding.py" = ["B905", "E501"]
+"src/reprobit/classic/register_semantics.py" = ["E501"]
+"src/reprobit/classic/relational.py" = ["B905", "E501"]
+"src/reprobit/classic/rewriting.py" = ["B023", "B905", "E501"]
+"src/reprobit/classic/scheduling.py" = ["B905", "E501"]
+"src/reprobit/classic/source_proofs.py" = ["B905", "E501"]
 
 [tool.mypy]
 python_version = "3.11"
@@ -87,93 +76,82 @@ packages = ["reprobit"]
 # extracted classic core. Mypy still analyzes every module and rejects any new
 # diagnostic category, unlike a file-wide ignore-errors pragma.
 [[tool.mypy.overrides]]
-module = "reprobit.classic.arguments"
-disable_error_code = ["type-arg"]
-
-[[tool.mypy.overrides]]
 module = "reprobit.classic.coff"
-disable_error_code = [
-  "arg-type", "index", "no-any-return", "no-untyped-call", "no-untyped-def", "type-arg",
-]
+disable_error_code = ["arg-type", "index", "no-any-return", "no-untyped-call", "no-untyped-def"]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.composition"
 disable_error_code = [
   "arg-type", "assignment", "attr-defined", "index", "no-any-return", "no-untyped-call",
-  "no-untyped-def", "return-value", "type-arg", "union-attr", "var-annotated",
+  "no-untyped-def", "return-value", "union-attr", "var-annotated",
 ]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.debug"
-disable_error_code = [
-  "arg-type", "assignment", "attr-defined", "index", "type-arg", "var-annotated",
-]
+disable_error_code = ["arg-type", "var-annotated"]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.floating"
 disable_error_code = [
   "arg-type", "assignment", "index", "no-untyped-call", "no-untyped-def", "return-value",
-  "type-arg",
 ]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.foundation"
 disable_error_code = [
-  "arg-type", "attr-defined", "call-overload", "index", "operator", "return-value", "type-arg",
+  "arg-type", "attr-defined", "call-overload", "index", "operator", "return-value",
 ]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.ia32"
 disable_error_code = [
   "arg-type", "assignment", "attr-defined", "index", "misc", "no-untyped-def", "operator",
-  "return-value", "type-arg", "union-attr", "var-annotated",
+  "return-value", "var-annotated",
 ]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.register_bijection"
 disable_error_code = [
   "arg-type", "assignment", "attr-defined", "call-overload", "index", "no-any-return",
-  "return-value", "type-arg", "union-attr", "var-annotated",
+  "return-value", "union-attr", "var-annotated",
 ]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.register_candidates"
-disable_error_code = ["arg-type", "assignment", "index", "return-value", "type-arg"]
+disable_error_code = ["arg-type", "assignment", "index", "return-value"]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.register_reencoding"
 disable_error_code = [
   "arg-type", "assignment", "attr-defined", "dict-item", "index", "no-any-return",
-  "no-untyped-def", "operator", "type-arg", "union-attr", "var-annotated",
+  "no-untyped-def", "operator", "union-attr", "var-annotated",
 ]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.register_semantics"
-disable_error_code = [
-  "arg-type", "index", "no-untyped-def", "return-value", "type-arg", "var-annotated",
-]
+disable_error_code = ["arg-type", "index", "no-untyped-def", "return-value", "var-annotated"]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.relational"
 disable_error_code = [
   "arg-type", "assignment", "attr-defined", "call-overload", "operator", "return-value",
-  "type-arg", "type-var", "var-annotated",
+  "type-var", "var-annotated",
 ]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.rewriting"
 disable_error_code = [
-  "arg-type", "assignment", "attr-defined", "call-overload", "index", "misc",
-  "no-untyped-call", "no-untyped-def", "operator", "return-value", "type-arg", "var-annotated",
+  "arg-type", "assignment", "attr-defined", "call-overload", "index", "misc", "no-untyped-call",
+  "no-untyped-def", "operator", "return-value", "var-annotated",
 ]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.scheduling"
 disable_error_code = [
   "arg-type", "assignment", "attr-defined", "call-overload", "index", "misc", "no-any-return",
-  "no-untyped-call", "no-untyped-def", "return-value", "type-arg", "union-attr", "var-annotated",
+  "no-untyped-call", "no-untyped-def", "return-value", "union-attr", "var-annotated",
 ]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.source_proofs"
-disable_error_code = ["arg-type", "assignment", "operator", "type-arg"]
+disable_error_code = ["arg-type", "assignment", "operator"]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from reprobit.binary import require
 
@@ -82,7 +83,7 @@ def _admitted_warning_option(token: str) -> bool:
     return re.fullmatch("[/-](?:W[0-4]|WX|w[devo]?[0-9]+)", token) is not None
 
 
-def lex_compile_arguments(arguments: list[str]) -> dict:
+def lex_compile_arguments(arguments: list[str]) -> dict[str, Any]:
     """Classify every token before the attested final source by role.
 
     Only `/D`, `/U`, and `/I` intentionally admit a separate operand.  The
@@ -229,11 +230,9 @@ def lex_compile_arguments(arguments: list[str]) -> dict:
         elif folded in ("/zi", "-zi"):
             errors.append("debug format must use exact /Zi or -Zi")
         elif any(
-            (
-                folded.startswith((sigil + option).casefold())
-                for option in ("FI", "Fd", "Fo")
-                for sigil in ("/", "-")
-            )
+            folded.startswith((sigil + option).casefold())
+            for option in ("FI", "Fd", "Fo")
+            for sigil in ("/", "-")
         ):
             errors.append(f"compiler option collides with exact output grammar: {token}")
         elif folded.startswith(("/y", "-y")):
@@ -322,17 +321,21 @@ def lex_compile_arguments(arguments: list[str]) -> dict:
         errors.append(f"expected one exact /Zi or -Zi, found {len(debug_format)}")
     if len(language_modes) > 1:
         errors.append(f"expected at most one exact /TC or /TP, found {len(language_modes)}")
-    if len(valued["Fo"]) == 1 and len(valued["Fd"]) == 1 and (len(compile_only_indices) == 1):
-        if (
+    if (
+        len(valued["Fo"]) == 1
+        and len(valued["Fd"]) == 1
+        and (len(compile_only_indices) == 1)
+        and (
             valued["Fo"][0][0] != len(arguments) - 4
             or valued["Fo"][0][2]
             or valued["Fd"][0][0] != len(arguments) - 3
             or valued["Fd"][0][2]
             or (compile_only_indices[0] != len(arguments) - 2)
-        ):
-            errors.append(
-                "compiler command must end with attached /Fo, attached /Fd, exact -c, and the configured source"
-            )
+        )
+    ):
+        errors.append(
+            "compiler command must end with attached /Fo, attached /Fd, exact -c, and the configured source"
+        )
     return {
         "valued": valued,
         "role_operands": role_operands,
@@ -353,7 +356,7 @@ def lex_compile_arguments(arguments: list[str]) -> dict:
     }
 
 
-def validate_compile_arguments(arguments: list[str]) -> dict:
+def validate_compile_arguments(arguments: list[str]) -> dict[str, Any]:
     """Enforce the closed, case-aware VC4.2 compiler argv grammar."""
     parsed = lex_compile_arguments(arguments)
     require(not parsed["errors"], "; ".join(parsed["errors"]))
