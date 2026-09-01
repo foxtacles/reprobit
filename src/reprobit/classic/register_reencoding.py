@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import itertools
-from typing import Any
+from collections.abc import Iterable, Mapping
+from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError, require
 from reprobit.coff_format import CoffObject, coff_body
@@ -40,8 +41,9 @@ def validate_register_bijection_reencoding(
     and pinning them is what makes a silent change to the primitive visible.
     """
     require(isinstance(value, dict), f"{context} must be an object")
+    document = cast(dict[str, Any], value)
     exact_audit_keys(
-        value,
+        document,
         {
             "kind",
             "regions",
@@ -62,10 +64,11 @@ def validate_register_bijection_reencoding(
         context,
         optional={"expected_code_length", "expected_internal_relocation_targets"},
     )
-    require(value.get("kind") == REGISTER_BIJECTION_REENCODING_KIND, f"{context}.kind differs")
-    regions = value.get("regions")
+    require(document.get("kind") == REGISTER_BIJECTION_REENCODING_KIND, f"{context}.kind differs")
+    regions = document.get("regions")
     require(isinstance(regions, list) and 1 <= len(regions) <= 8, f"{context}.regions is invalid")
-    normalized = []
+    regions = cast(list[Any], regions)
+    normalized: list[dict[str, Any]] = []
     previous_end = 0
     names_ebp = False
     for index, item in enumerate(regions):
@@ -114,19 +117,20 @@ def validate_register_bijection_reencoding(
         names_ebp,
         f"{context}: no region names EBP, so this is an ordinary {REGISTER_BIJECTION_CLASS} and must be declared as one",
     )
-    record = value.get("expected_fpo_record")
+    record = document.get("expected_fpo_record")
     require(
         isinstance(record, dict) and set(record) == FPO_RECORD_KEYS - {"raw_sha256"},
         f"{context}.expected_fpo_record is invalid",
     )
+    record = cast(dict[str, Any], record)
     require(
         record.get("cbFrame") == FPO_FRAME_KIND_FPO and record.get("fHasSEH") == 0,
         f"{context}.expected_fpo_record does not declare a frame-pointer-free, SEH-free frame",
     )
-    growth = value.get("expected_growth")
+    growth = document.get("expected_growth")
     require(
         isinstance(growth, list)
-        and growth
+        and bool(growth)
         and (len(growth) <= 64)
         and all(
             isinstance(row, list)
@@ -142,11 +146,12 @@ def validate_register_bijection_reencoding(
         and ([row[0] for row in growth] == sorted({row[0] for row in growth})),
         f"{context}.expected_growth is invalid",
     )
+    growth = cast(list[Any], growth)
     require(
         image_length - preimage_length == sum(row[3] - row[2] for row in growth),
         f"{context}.expected_growth does not account for the image's length change",
     )
-    repairs = value.get("expected_branch_repairs")
+    repairs = document.get("expected_branch_repairs")
     require(
         isinstance(repairs, list)
         and len(repairs) <= 256
@@ -154,7 +159,7 @@ def validate_register_bijection_reencoding(
         and all(type(entry) is int and 0 <= entry < image_length for entry in repairs),
         f"{context}.expected_branch_repairs is invalid",
     )
-    reseat = value.get("expected_relocation_reseat")
+    reseat = document.get("expected_relocation_reseat")
     require(
         isinstance(reseat, list)
         and len(reseat) <= 256
@@ -171,10 +176,10 @@ def validate_register_bijection_reencoding(
         and (len({pair[1] for pair in reseat}) == len(reseat)),
         f"{context}.expected_relocation_reseat is invalid",
     )
-    fields = value.get("expected_rewritten_field_offsets")
+    fields = document.get("expected_rewritten_field_offsets")
     require(
         isinstance(fields, list)
-        and fields
+        and bool(fields)
         and (fields == sorted(set(fields)))
         and all(
             type(entry) is int and any(item["start"] <= entry < item["end"] for item in normalized)
@@ -182,9 +187,11 @@ def validate_register_bijection_reencoding(
         ),
         f"{context}.expected_rewritten_field_offsets is invalid",
     )
-    counts = value.get("expected_region_instruction_counts")
+    counts = document.get("expected_region_instruction_counts")
     total = require_exact_int(
-        value.get("expected_instruction_count"), f"{context}.expected_instruction_count", minimum=2
+        document.get("expected_instruction_count"),
+        f"{context}.expected_instruction_count",
+        minimum=2,
     )
     require(
         isinstance(counts, list)
@@ -195,14 +202,14 @@ def validate_register_bijection_reencoding(
     )
     require(
         require_exact_int(
-            value.get("expected_image_code_length"),
+            document.get("expected_image_code_length"),
             f"{context}.expected_image_code_length",
             minimum=1,
         )
         <= image_length,
         f"{context}.expected_image_code_length exceeds the image",
     )
-    procedure = value.get("expected_procedure_range")
+    procedure = document.get("expected_procedure_range")
     require(
         isinstance(procedure, list)
         and len(procedure) == 3
@@ -211,7 +218,7 @@ def validate_register_bijection_reencoding(
         and (0 <= procedure[1] <= procedure[2] < image_length),
         f"{context}.expected_procedure_range is invalid",
     )
-    carried = value.get("expected_carried_code_symbols")
+    carried = document.get("expected_carried_code_symbols")
     require(
         isinstance(carried, list)
         and len(carried) <= 64
@@ -228,7 +235,7 @@ def validate_register_bijection_reencoding(
         ),
         f"{context}.expected_carried_code_symbols is invalid",
     )
-    targets = value.get("expected_internal_relocation_targets")
+    targets = document.get("expected_internal_relocation_targets")
     if targets is not None:
         require(
             isinstance(targets, list)
@@ -236,13 +243,13 @@ def validate_register_bijection_reencoding(
             and all(type(entry) is int and 0 <= entry < preimage_length for entry in targets),
             f"{context}.expected_internal_relocation_targets is invalid",
         )
-    code_length = value.get("expected_code_length")
+    code_length = document.get("expected_code_length")
     if code_length is not None:
         require_exact_int(
             code_length, f"{context}.expected_code_length", minimum=1, maximum=preimage_length
         )
     normalized_value = {
-        **value,
+        **document,
         "regions": normalized,
         "expected_fpo_record": dict(sorted(record.items())),
     }
@@ -254,7 +261,9 @@ REGISTER_BIJECTION_REENCODING_KIND = "frame_pointer_free_register_bijection_v1"
 FPO_FRAME_KIND_FPO = 0
 
 
-def require_no_ebp_frame_derivation(body: bytes, instructions, context: str) -> None:
+def require_no_ebp_frame_derivation(
+    body: bytes, instructions: Iterable[Mapping[str, Any]], context: str
+) -> None:
     """Prove that decoded instructions never establish EBP from ESP."""
     for item in instructions:
         if "ebp" not in item["writes"]:
@@ -463,7 +472,7 @@ def apply_slot_bijection(
         require(right - left >= 4, f"{context}: mapped slots overlap")
     instructions = decode_ia32_bijection_body(body, context, relocations, code_length)
     image = bytearray(body)
-    rewritten = []
+    rewritten: list[int] = []
     for item in instructions:
         memory = item.get("memory")
         if not memory or memory.get("absolute"):
@@ -490,6 +499,8 @@ def apply_slot_bijection(
                 at is not None and size in (1, 4),
                 f"{context}: the instruction at {item['offset']} has no rewritable displacement field",
             )
+            at = cast(int, at)
+            size = cast(int, size)
             require(
                 not any(at + k in relocation_offsets for k in range(size)),
                 f"{context}: the displacement at {item['offset']} is relocated",
@@ -508,7 +519,7 @@ def apply_slot_bijection(
                     displacement + width <= slot or slot + 4 <= displacement,
                     f"{context}: the access at {item['offset']} partially overlaps a mapped slot",
                 )
-    require(rewritten, f"{context}: the slot bijection rewrites nothing")
+    require(bool(rewritten), f"{context}: the slot bijection rewrites nothing")
     reencoded = decode_ia32_bijection_body(
         bytes(image), f"{context} image", relocations, code_length
     )
@@ -552,7 +563,7 @@ def apply_register_bijection_reencoding(
     boundaries = {item["offset"] for item in instructions}
     boundaries.add(limit)
     index_of = {item["offset"]: index for index, item in enumerate(instructions)}
-    require(regions, f"{context}: no region is declared")
+    require(bool(regions), f"{context}: no region is declared")
     previous_end = 0
     for position, region in enumerate(regions):
         region_context = f"{context} region {position}"
@@ -594,7 +605,9 @@ def apply_register_bijection_reencoding(
         )
         for position, region in enumerate(regions):
             entered = sorted(
-                target for target in internal_targets if region["start"] < target < region["end"]
+                target
+                for target in cast(frozenset[int], internal_targets)
+                if region["start"] < target < region["end"]
             )
             require(
                 not entered,
@@ -607,7 +620,7 @@ def apply_register_bijection_reencoding(
         mapping = region["mapping"]
         support = set(mapping) | set(mapping.values())
         inside = [item for item in instructions if start <= item["offset"] < end]
-        require(inside, f"{region_context}: region contains no instruction")
+        require(bool(inside), f"{region_context}: region contains no instruction")
         require(
             inside[-1]["offset"] + inside[-1]["length"] == end,
             f"{region_context}: region does not end on an instruction boundary",
@@ -656,8 +669,8 @@ def apply_register_bijection_reencoding(
     classes = []
     rewritten_fields = []
     for item in instructions:
-        region = _reencoding_region_for(regions, item["offset"])
-        if region is None:
+        owning_region = _reencoding_region_for(regions, item["offset"])
+        if owning_region is None:
             pieces.append(body[item["offset"] : item["offset"] + item["length"]])
             classes.append("unchanged")
             continue
@@ -695,18 +708,18 @@ def apply_register_bijection_reencoding(
         for index, item in enumerate(instructions):
             if item["flow"] not in ("jcc", "jmp") or item["target"] is None:
                 continue
-            raw = bytearray(pieces[index])
-            width = _reencoding_branch_width(item, raw, context)
+            patched = bytearray(pieces[index])
+            width = _reencoding_branch_width(item, bytes(patched), context)
             destination = starts[index_of[item["target"]]]
-            delta = destination - (starts[index] + len(raw))
+            delta = destination - (starts[index] + len(patched))
             require(
                 -(1 << 8 * width - 1) <= delta < 1 << 8 * width - 1,
                 f"{context}: the branch at {item['offset']} no longer reaches its target in {width} displacement byte(s); widening it would be a code change, not a renaming",
             )
             encoded = delta.to_bytes(width, "little", signed=True)
-            if bytes(raw[len(raw) - width :]) != encoded:
-                raw[len(raw) - width :] = encoded
-                pieces[index] = bytes(raw)
+            if bytes(patched[len(patched) - width :]) != encoded:
+                patched[len(patched) - width :] = encoded
+                pieces[index] = bytes(patched)
                 repaired.add(item["offset"])
                 changed = True
         if not changed:
@@ -743,10 +756,11 @@ def apply_register_bijection_reencoding(
             owner is not None,
             f"{context}: the relocation at {offset} does not lie wholly inside one decoded instruction",
         )
-        item = instructions[owner]
-        growth = len(pieces[owner]) - item["length"]
+        owner_index = cast(int, owner)
+        item = instructions[owner_index]
+        growth = len(pieces[owner_index]) - item["length"]
         from_end = item["offset"] + item["length"] - offset
-        new_offset = starts[owner] + len(pieces[owner]) - from_end
+        new_offset = starts[owner_index] + len(pieces[owner_index]) - from_end
         if growth:
             encoding = item["encoding"]
             require(
@@ -761,12 +775,12 @@ def apply_register_bijection_reencoding(
                 f"{context}: the relocation at {offset} overlaps the ModRM/SIB bytes the re-encoding changed",
             )
             require(
-                new_offset == offset + (starts[owner] - item["offset"]) + growth,
+                new_offset == offset + (starts[owner_index] - item["offset"]) + growth,
                 f"{context}: the reseat of {offset} is inconsistent",
             )
         require(
-            starts[owner] <= new_offset
-            and new_offset + width <= starts[owner] + len(pieces[owner]),
+            starts[owner_index] <= new_offset
+            and new_offset + width <= starts[owner_index] + len(pieces[owner_index]),
             f"{context}: the reseat of {offset} leaves its instruction",
         )
         reseat.append([offset, new_offset])
@@ -807,8 +821,8 @@ def apply_register_bijection_reencoding(
             left["target"] == (None if right["target"] is None else offset_map[right["target"]]),
             f"{context}: the image changed a branch target at {right['offset']}",
         )
-        region = _reencoding_region_for(regions, right["offset"])
-        mapping = {} if region is None else region["mapping"]
+        image_region = _reencoding_region_for(regions, right["offset"])
+        mapping = {} if image_region is None else image_region["mapping"]
         require(
             left["reads"] == frozenset(mapping.get(name, name) for name in right["reads"])
             and left["writes"] == frozenset(mapping.get(name, name) for name in right["writes"]),
@@ -821,8 +835,8 @@ def apply_register_bijection_reencoding(
         if len(pieces[index]) != item["length"]
     ]
     rewritten = sorted(set(rewritten_fields))
-    require(rewritten, f"{context}: the bijection rewrites no register field")
-    require(image != body or growth_detail, f"{context}: the bijection moves nothing")
+    require(bool(rewritten), f"{context}: the bijection rewrites no register field")
+    require(bool(image != body or growth_detail), f"{context}: the bijection moves nothing")
     return (
         image,
         {
@@ -857,4 +871,5 @@ def _reencoding_branch_width(item: dict[str, Any], raw: bytes, context: str) -> 
         len(raw) == item["length"],
         f"{context}: the branch at {item['offset']} changed its own encoding length",
     )
-    return form["displacement"]
+    displacement: int = cast(dict[str, Any], form)["displacement"]
+    return displacement

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from collections import Counter
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 from reprobit.binary import require
 from reprobit.coff_format import (
@@ -36,7 +37,7 @@ def comdat_primary_section(coff: _CoffObject, name: str) -> dict[str, Any]:
         and (symbol["storage"] in (2, 3))
     ]
     require(len(matches) == 1, f"expected one definition of {name!r}, found {len(matches)}")
-    section = coff.sections[matches[0]["section"] - 1]
+    section: dict[str, Any] = coff.sections[matches[0]["section"] - 1]
     require(section["characteristics"] & 4096, f"{name!r} is not in a COMDAT section")
     definition = _section_definitions(coff).get(section["number"])
     require(
@@ -46,7 +47,9 @@ def comdat_primary_section(coff: _CoffObject, name: str) -> dict[str, Any]:
     return section
 
 
-def unique_symbol(coff: _CoffObject, predicate, description: str) -> tuple[int, dict[str, Any]]:
+def unique_symbol(
+    coff: _CoffObject, predicate: Callable[[dict[str, Any]], bool], description: str
+) -> tuple[int, dict[str, Any]]:
     matches = [(index, symbol) for index, symbol in coff.symbols.items() if predicate(symbol)]
     require(len(matches) == 1, f"expected one {description}, found {len(matches)}")
     return matches[0]
@@ -113,6 +116,7 @@ def comdat_primary_identity(coff: _CoffObject, section: dict[str, Any]) -> tuple
         definition is not None and definition["selection"] not in (0, 5),
         f"section {section['number']} is not a primary COMDAT",
     )
+    primary_definition = cast(dict[str, Any], definition)
     owners = [
         symbol
         for symbol in coff.symbols.values()
@@ -130,7 +134,7 @@ def comdat_primary_identity(coff: _CoffObject, section: dict[str, Any]) -> tuple
         owner["type"],
         owner["storage"],
         section["name"],
-        definition["selection"],
+        primary_definition["selection"],
         tuple(
             sorted((name for _, name in associated_sections(coff, definitions, section["number"])))
         ),
@@ -157,7 +161,7 @@ def comdat_primary_identity_multiset(coff: _CoffObject) -> Counter[tuple[Any, ..
 def canonical_identity_receipt_sha256(value: object) -> str:
     """Hash a structural identity using the manifest's canonical JSON form."""
 
-    def json_value(item):
+    def json_value(item: object) -> object:
         if isinstance(item, (tuple, list)):
             return [json_value(child) for child in item]
         if isinstance(item, dict):
@@ -210,7 +214,7 @@ def require_target_closure_extraction_topology(
         seed_only == function["expected_seed_only_functions"],
         f"{context} seed-only function set differs",
     )
-    require(seed_only, f"{context} target-closure extraction declares no omitted function")
+    require(bool(seed_only), f"{context} target-closure extraction declares no omitted function")
     seed_comdats = comdat_primary_identity_multiset(seed)
     donor_comdats = comdat_primary_identity_multiset(donor)
     require(not donor_comdats - seed_comdats, f"{context} donor adds or exchanges a COMDAT group")
@@ -329,7 +333,7 @@ def _coff_table_bytes(coff: _CoffObject, section: dict[str, Any], kind: str) -> 
     return coff.data[start : start + size] if size else b""
 
 
-def _coff_marker(coff: _CoffObject, name: str, section_number: int):
+def _coff_marker(coff: _CoffObject, name: str, section_number: int) -> tuple[int, dict[str, Any]]:
     matches = [
         (index, symbol)
         for index, symbol in coff.symbols.items()
@@ -342,7 +346,7 @@ def _coff_marker(coff: _CoffObject, name: str, section_number: int):
     return matches[0]
 
 
-def _coff_section_symbol(coff: _CoffObject, section: dict[str, Any]):
+def _coff_section_symbol(coff: _CoffObject, section: dict[str, Any]) -> tuple[int, dict[str, Any]]:
     matches = [
         (index, symbol)
         for index, symbol in coff.symbols.items()

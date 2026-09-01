@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import struct
-from typing import Any
+from collections.abc import Callable
+from typing import Any, cast
 
 import reprobit.declaration_shapes as entropy_generator
 from reprobit.binary import ByteIdentityError, require
@@ -444,7 +445,7 @@ DONOR_SOURCE_FORCE_INCLUDE_CARRIERS = {
 def _donor_source_force_included_shape(kind: str, params: dict[str, Any]) -> bytes:
     """Render one force-included carrier's declaration-only shape."""
     _, generator_name, names = DONOR_SOURCE_FORCE_INCLUDE_CARRIERS[kind]
-    generator = getattr(entropy_generator, generator_name)
+    generator: Callable[..., str] = getattr(entropy_generator, generator_name)
     return generator(*(params[name] for name in names)).encode("ascii")
 
 
@@ -460,15 +461,18 @@ def validate_donor_source_compiler_state_carrier(value: object, context: str) ->
     exact generated-declaration digest -- applies to both.
     """
     require(isinstance(value, dict), f"{context} must be an object")
-    kind = value.get("kind")
+    document = cast(dict[str, Any], value)
+    kind = document.get("kind")
     if kind in DONOR_SOURCE_FORCE_INCLUDE_CARRIERS:
         placement, _, names = DONOR_SOURCE_FORCE_INCLUDE_CARRIERS[kind]
         exact_audit_keys(
-            value, {"kind", "placement", "generated_declarations_sha256", *names}, context
+            document, {"kind", "placement", "generated_declarations_sha256", *names}, context
         )
-        require(value.get("placement") == placement, f"{context} kind or placement differs")
+        require(document.get("placement") == placement, f"{context} kind or placement differs")
         params = {
-            name: require_exact_int(value.get(name), f"{context}.{name}", minimum=1, maximum=4096)
+            name: require_exact_int(
+                document.get(name), f"{context}.{name}", minimum=1, maximum=4096
+            )
             for name in names
         }
         try:
@@ -477,7 +481,7 @@ def validate_donor_source_compiler_state_carrier(value: object, context: str) ->
             raise ByteIdentityError(f"{context} declaration shape is invalid: {error}") from error
         require(
             require_sha(
-                value.get("generated_declarations_sha256"),
+                document.get("generated_declarations_sha256"),
                 context + ".generated_declarations_sha256",
             )
             == sha256_bytes(generated),
@@ -490,13 +494,13 @@ def validate_donor_source_compiler_state_carrier(value: object, context: str) ->
             "generated_declarations_sha256": sha256_bytes(generated),
         }
     require(kind in DONOR_SOURCE_CARRIER_SEATS, f"{context} kind or placement differs")
-    placement, roles = DONOR_SOURCE_CARRIER_SEATS[kind]
+    placement, roles = DONOR_SOURCE_CARRIER_SEATS[cast(str, kind)]
     keys = {"kind", "placement", "width", "generated_declarations_sha256"}
     for role in roles:
         keys |= {f"{role}_prefix", f"{role}_count"}
-    exact_audit_keys(value, keys, context)
-    require(value.get("placement") == placement, f"{context} kind or placement differs")
-    width = require_exact_int(value.get("width"), context + ".width", minimum=1, maximum=3)
+    exact_audit_keys(document, keys, context)
+    require(document.get("placement") == placement, f"{context} kind or placement differs")
+    width = require_exact_int(document.get("width"), context + ".width", minimum=1, maximum=3)
     generator = (
         entropy_generator.generate_extern_run
         if kind == "extern_run_pair_v1"
@@ -504,31 +508,32 @@ def validate_donor_source_compiler_state_carrier(value: object, context: str) ->
     )
     counts = {}
     payloads = []
-    identities = set()
+    identities: set[str] = set()
     for role in roles:
-        prefix = value.get(f"{role}_prefix")
+        prefix = document.get(f"{role}_prefix")
         count = require_exact_int(
-            value.get(f"{role}_count"), context + f".{role}_count", minimum=1, maximum=999
+            document.get(f"{role}_count"), context + f".{role}_count", minimum=1, maximum=999
         )
         require(isinstance(prefix, str), f"{context}.{role}_prefix differs")
         try:
-            payload = generator(prefix, count, width).encode("ascii")
+            payload = generator(cast(str, prefix), count, width).encode("ascii")
         except ValueError as error:
             raise ByteIdentityError(
                 f"{context}.{role} declaration run is invalid: {error}"
             ) from error
-        names = {f"{prefix}{index:0{width}d}" for index in range(count)}
+        run_names = {f"{prefix}{index:0{width}d}" for index in range(count)}
         require(
-            len(names) == count and (not identities.intersection(names)),
+            len(run_names) == count and (not identities.intersection(run_names)),
             f"{context} declaration identities collide",
         )
-        identities.update(names)
+        identities.update(run_names)
         payloads.append(payload)
         counts[role] = (prefix, count)
     generated = b"".join(payloads)
     require(
         require_sha(
-            value.get("generated_declarations_sha256"), context + ".generated_declarations_sha256"
+            document.get("generated_declarations_sha256"),
+            context + ".generated_declarations_sha256",
         )
         == sha256_bytes(generated),
         f"{context} generated declarations differ from their pin",

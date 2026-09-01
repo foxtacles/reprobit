@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, TypeAlias
+from typing import Any, TypeAlias, cast
 
 from reprobit.binary import require
 from reprobit.ia32_decode import supported_ia32_instruction_length
@@ -37,9 +37,8 @@ def _fp_sum_parse_chain(body: bytes, start: int, end: int, context: str) -> list
             opcode == 220 and length >= 2 and (encoded[1] >> 6 != 3) and (encoded[1] >> 3 & 7 == 1)
         ):
             require(pending_fld is not None, f"{context}: fmul without its fld at {offset}")
-            slots.append(
-                {"kind": "pair", "offset": pending_fld[0], "length": pending_fld[1] + length}
-            )
+            fld = cast(tuple[int, int], pending_fld)
+            slots.append({"kind": "pair", "offset": fld[0], "length": fld[1] + length})
             pending_fld = None
         elif encoded == b"\xde\xc1":
             require(pending_fld is None, f"{context}: faddp splits a product pair at {offset}")
@@ -91,9 +90,9 @@ def apply_x87_squared_addend_exchange(
           declared `expected_rewritten_offsets`.
     """
     require_payload_free_declaration(chains, f"{context} x87 exchange declaration")
-    require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
+    require(isinstance(body, (bytes, bytearray)) and bool(body), f"{context}: body is empty")
     body = bytes(body)
-    require(isinstance(chains, list) and chains, f"{context}: no chain is declared")
+    require(isinstance(chains, list) and bool(chains), f"{context}: no chain is declared")
     items, _successors, entries = ia32_relational_flow_walk(
         body, relocations, context, code_length, external_entries
     )
@@ -112,7 +111,7 @@ def apply_x87_squared_addend_exchange(
         require(previous_end <= start, f"{chain_context}: chains are unsorted or overlapping")
         previous_end = end
 
-        def inside(target):
+        def inside(target: int, *, start: int = start, end: int = end) -> bool:
             return start < target < end
 
         require(
@@ -203,7 +202,7 @@ def apply_x87_squared_addend_exchange(
                     item is not None and item["flow"] == "fall",
                     f"{chain_context}: a non-x87 instruction at {scan} in the consumption region is not straight-line",
                 )
-                scan += item["length"]
+                scan += cast(dict[str, Any], item)["length"]
                 continue
             if op == 217 and 200 <= modrm <= 207:
                 k = modrm - 200
@@ -216,7 +215,7 @@ def apply_x87_squared_addend_exchange(
                     isinstance(unit, int) and (not squared[unit]),
                     f"{chain_context}: a unit is multiplied twice or a folded slot is squared",
                 )
-                squared[unit] = True
+                squared[cast(int, unit)] = True
                 scan += 2
             elif op == 222 and modrm == 193:
                 require(len(stack) >= 2, f"{chain_context}: faddp folds below the unit stack")
@@ -244,7 +243,7 @@ def apply_x87_squared_addend_exchange(
         )
         require(order != list(range(len(units))), f"{chain_context}: the order is the identity")
 
-        def canonical(node, labels):
+        def canonical(node: FoldTree, labels: list[int]) -> tuple[Any, ...]:
             if isinstance(node, int):
                 return ("L", labels[node])
             left = canonical(node[0], labels)
@@ -324,9 +323,9 @@ def apply_fp_sum_reassociation(
 ) -> tuple[bytes, dict[str, Any]]:
     """Permute product pairs within declared faddp chains, or refuse."""
     require_payload_free_declaration(chains, f"{context} FP reassociation declaration")
-    require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
+    require(isinstance(body, (bytes, bytearray)) and bool(body), f"{context}: body is empty")
     body = bytes(body)
-    require(isinstance(chains, list) and chains, f"{context}: no chain is declared")
+    require(isinstance(chains, list) and bool(chains), f"{context}: no chain is declared")
     items, _successors, entries = ia32_relational_flow_walk(
         body, relocations, context, code_length, external_entries
     )
@@ -349,7 +348,7 @@ def apply_fp_sum_reassociation(
             f"{chain_context}: a relocation lies inside the chain",
         )
 
-        def inside(target):
+        def inside(target: int, *, start: int = start, end: int = end) -> bool:
             return start < target < end
 
         require(
@@ -380,9 +379,9 @@ def apply_fp_sum_reassociation(
                 pair_cursor += 1
             else:
                 rebuilt.append(body[slot["offset"] : slot["offset"] + slot["length"]])
-        rebuilt = b"".join(rebuilt)
-        require(len(rebuilt) == end - start, f"{chain_context}: the permuted chain changed length")
-        image[start:end] = rebuilt
+        permuted = b"".join(rebuilt)
+        require(len(permuted) == end - start, f"{chain_context}: the permuted chain changed length")
+        image[start:end] = permuted
         image_slots = _fp_sum_parse_chain(bytes(image), start, end, f"{chain_context} image")
         require(
             [slot["kind"] for slot in image_slots] == [slot["kind"] for slot in slots],
@@ -406,21 +405,23 @@ def apply_fp_sum_reassociation(
                 ),
             }
         )
-    image = bytes(image)
-    require(image != body, f"{context}: the image does not move the body")
-    changed = {offset for offset in range(len(body)) if body[offset] != image[offset]}
+    output = bytes(image)
+    require(output != body, f"{context}: the output does not move the body")
+    changed = {offset for offset in range(len(body)) if body[offset] != output[offset]}
     declared = {offset for chain in proved for offset in chain["rewritten_offsets"]}
-    require(changed <= declared, f"{context}: the image changed a byte outside the declared chains")
+    require(
+        changed <= declared, f"{context}: the output changed a byte outside the declared chains"
+    )
     image_items, _image_successors, image_entries = ia32_relational_flow_walk(
-        image, relocations, f"{context} image", code_length, external_entries
+        output, relocations, f"{context} output", code_length, external_entries
     )
     require(
         {item["target"] for item in image_items if item.get("target") is not None} == branch_targets
         and image_entries == entries,
-        f"{context}: the image changed a branch target or an entry",
+        f"{context}: the output changed a branch target or an entry",
     )
     return (
-        image,
+        output,
         {
             "kind": FP_SUM_REASSOCIATION_KIND,
             "chains": proved,

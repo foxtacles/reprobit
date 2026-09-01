@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import itertools
-from typing import Any
+from typing import Any, cast
 
 from reprobit.binary import require
 from reprobit.coff_format import (
@@ -249,7 +249,7 @@ def _compose_instruction_mosaic_variant_object(
             reseat_windows=reseat_windows,
         )
     main = parsed[primary_donor_id]
-    hybrid = bytearray(main_donor_bytes)
+    hybrid_buffer = bytearray(main_donor_bytes)
     used = set()
     for index, item in enumerate(ranges):
         donor_id = item.get("donor", primary_donor_id)
@@ -263,14 +263,16 @@ def _compose_instruction_mosaic_variant_object(
             f"instruction-mosaic range {index} donor provenance differs",
         )
         at = main[1]["raw_offset"] + start
-        hybrid[at : at + end - start] = body[start:end]
+        hybrid_buffer[at : at + end - start] = body[start:end]
         if item.get("relocation_reseat") and donor_id != primary_donor_id:
             for row in detailed_relocations(variant_coff, primary):
                 if start <= row["offset"] and row["offset"] + row["width"] <= end:
                     record_offset = main[1]["relocation_offset"] + 10 * row["ordinal"]
-                    hybrid[record_offset : record_offset + 4] = row["offset"].to_bytes(4, "little")
+                    hybrid_buffer[record_offset : record_offset + 4] = row["offset"].to_bytes(
+                        4, "little"
+                    )
     require(used == set(records), "instruction-mosaic donor variant is unused")
-    hybrid = bytes(hybrid)
+    hybrid = bytes(hybrid_buffer)
     hybrid_coff = CoffObject(hybrid)
     hybrid_primary = hybrid_coff.function_section(function["mangled"])
     hybrid_body = coff_body(hybrid_coff, hybrid_primary)
@@ -289,7 +291,7 @@ def _compose_instruction_mosaic_variant_object(
 
 def _instruction_mosaic_range_donor_label(item: dict[str, Any], primary_donor_id: str) -> str:
     """Name a range's donor from current typed intervention authority."""
-    return item.get("donor", primary_donor_id)
+    return cast(str, item.get("donor", primary_donor_id))
 
 
 def _produce_instruction_mosaic_candidate_core(
@@ -547,13 +549,14 @@ def _produce_instruction_mosaic_candidate_core(
         "instruction-mosaic donor body differs from its pin",
     )
     if self_permutation:
+        permutation_record = cast(dict[str, Any], permutation)
         permutation = validate_instruction_self_permutation(
             function["instruction_self_permutation"], "instruction self-permutation", donor_body
         )
         require(
             all(
-                item["end"] <= permutation["target_start"]
-                or item["start"] >= permutation["target_end"]
+                item["end"] <= permutation_record["target_start"]
+                or item["start"] >= permutation_record["target_end"]
                 for item in ranges
             ),
             "instruction mosaic same-offset ranges overlap the self-permutation window",
@@ -585,7 +588,8 @@ def _produce_instruction_mosaic_candidate_core(
             f"instruction-mosaic {role} line marker changed identity",
         )
     if self_permutation:
-        window = (permutation["target_start"], permutation["target_end"])
+        permutation_record = cast(dict[str, Any], permutation)
+        window = (permutation_record["target_start"], permutation_record["target_end"])
         for role, section, line_bytes in (
             ("seed", sp, seed_lines),
             ("donor", dp, donor_lines),
@@ -619,7 +623,7 @@ def _produce_instruction_mosaic_candidate_core(
         else None,
         reseat_windows=reseat_windows if reseated else None,
     )
-    mosaic = bytearray(seed_body)
+    mosaic_buffer = bytearray(seed_body)
     range_detail = []
     output_rows = [dict(row) for row in seed_rows]
     reseat_detail = []
@@ -686,7 +690,7 @@ def _produce_instruction_mosaic_candidate_core(
             )
         for seed_ordinal, donor_ordinal in pairs:
             left, right = (seed_rows[seed_ordinal], donor_rows[donor_ordinal])
-            strict_fields = (
+            strict_fields: tuple[str, ...] = (
                 "offset",
                 "width",
                 "type",
@@ -731,7 +735,7 @@ def _produce_instruction_mosaic_candidate_core(
                 == donor_body[operand_start : operand_start + width],
                 f"instruction-mosaic range {index} relocation operand bytes differ",
             )
-        mosaic[start:end] = donor_instruction
+        mosaic_buffer[start:end] = donor_instruction
         range_detail.append(
             {
                 "start": start,
@@ -743,10 +747,11 @@ def _produce_instruction_mosaic_candidate_core(
         )
     permutation_detail = []
     if self_permutation:
-        source_start = permutation["source_start"]
-        source_end = permutation["source_end"]
-        target_start = permutation["target_start"]
-        target_end = permutation["target_end"]
+        permutation_record = cast(dict[str, Any], permutation)
+        source_start = permutation_record["source_start"]
+        source_end = permutation_record["source_end"]
+        target_start = permutation_record["target_start"]
+        target_end = permutation_record["target_end"]
         for role, rows, start, end in (
             ("seed target", seed_rows, target_start, target_end),
             ("donor source", donor_rows, source_start, source_end),
@@ -755,7 +760,7 @@ def _produce_instruction_mosaic_candidate_core(
                 all(end <= row["offset"] or start >= row["offset"] + row["width"] for row in rows),
                 f"instruction self-permutation intersects a {role} relocation operand",
             )
-        for index, move in enumerate(permutation["moves"]):
+        for index, move in enumerate(permutation_record["moves"]):
             donor_instruction = donor_body[move["donor_start"] : move["donor_end"]]
             require(
                 sha256_bytes(donor_instruction) == move["donor_sha256"],
@@ -765,7 +770,7 @@ def _produce_instruction_mosaic_candidate_core(
                 sha256_bytes(donor_instruction) == move["target_sha256"],
                 f"instruction self-permutation target instruction {index} differs from its donor",
             )
-            mosaic[move["target_start"] : move["target_end"]] = donor_instruction
+            mosaic_buffer[move["target_start"] : move["target_end"]] = donor_instruction
             permutation_detail.append(
                 {
                     "target_start": move["target_start"],
@@ -775,20 +780,21 @@ def _produce_instruction_mosaic_candidate_core(
                     "sha256": move["donor_sha256"],
                 }
             )
-    mosaic = bytes(mosaic)
+    mosaic = bytes(mosaic_buffer)
     if self_permutation:
+        permutation_record = cast(dict[str, Any], permutation)
         source_certificate = [
             {
-                "start": permutation["source_start"],
-                "end": permutation["source_end"],
-                "donor_instruction_lengths": permutation["source_instruction_lengths"],
+                "start": permutation_record["source_start"],
+                "end": permutation_record["source_end"],
+                "donor_instruction_lengths": permutation_record["source_instruction_lengths"],
             }
         ]
         target_certificate = [
             {
-                "start": permutation["target_start"],
-                "end": permutation["target_end"],
-                "seed_instruction_lengths": permutation["target_instruction_lengths"],
+                "start": permutation_record["target_start"],
+                "end": permutation_record["target_end"],
+                "seed_instruction_lengths": permutation_record["target_instruction_lengths"],
             }
         ]
         require_coff_line_certified_ia32_boundaries(
@@ -816,7 +822,7 @@ def _produce_instruction_mosaic_candidate_core(
     pinned_length = function["retail_oracle"]["length"]
     require(pinned_length == expected_length, "instruction-mosaic linked length changed")
     if reseated:
-        require(reseat_detail, "relocation reseat ranges reseat no relocation")
+        require(bool(reseat_detail), "relocation reseat ranges reseat no relocation")
         require(
             all(
                 (
@@ -840,16 +846,17 @@ def _produce_instruction_mosaic_candidate_core(
         for item in ranges
     ]
     if self_permutation:
+        permutation_record = cast(dict[str, Any], permutation)
         replacements.extend(
             (
                 sp["raw_offset"] + item["target_start"],
                 sp["raw_offset"] + item["target_end"],
                 donor_body[item["donor_start"] : item["donor_end"]],
             )
-            for item in permutation["moves"]
+            for item in permutation_record["moves"]
         )
         replacements.sort(key=lambda item: item[0])
-    reseat_file_offsets = set()
+    reseat_file_offsets: set[int] = set()
     for entry in reseat_detail:
         record_offset = sp["relocation_offset"] + 10 * entry["ordinal"]
         replacements.append(
@@ -868,20 +875,22 @@ def _produce_instruction_mosaic_candidate_core(
         sp["raw_offset"] + offset for item in ranges for offset in range(item["start"], item["end"])
     }
     if self_permutation:
+        permutation_record = cast(dict[str, Any], permutation)
         allowed_file_offsets.update(
             sp["raw_offset"] + offset
-            for item in permutation["moves"]
+            for item in permutation_record["moves"]
             for offset in range(item["target_start"], item["target_end"])
         )
     allowed_file_offsets |= reseat_file_offsets
     require(
-        changed_file_offsets and changed_file_offsets <= allowed_file_offsets,
+        bool(changed_file_offsets) and changed_file_offsets <= allowed_file_offsets,
         "instruction mosaic changed a non-target byte",
     )
     if self_permutation:
+        permutation_record = cast(dict[str, Any], permutation)
         changed_body_offsets = sorted(offset - sp["raw_offset"] for offset in changed_file_offsets)
         require(
-            changed_body_offsets == permutation["expected_changed_offsets"],
+            changed_body_offsets == permutation_record["expected_changed_offsets"],
             "instruction self-permutation changed-offset set differs",
         )
     checked = CoffObject(output)
@@ -982,7 +991,7 @@ def produce_instruction_mosaic_candidate(
         "target_source_refactor" not in function,
         "source-permutation mosaic requires its source-proof composer",
     )
-    variant_detail = {}
+    variant_detail: dict[str, Any] = {}
     effective_donor = donor_bytes
     effective_function = function
     if function.get("donor_variants"):
@@ -1055,7 +1064,7 @@ def produce_source_instruction_mosaic_candidate(
         function["target_source_refactor"],
         "retail-exact instruction-mosaic source proof",
     )
-    variant_detail = {}
+    variant_detail: dict[str, Any] = {}
     effective_donor = donor_bytes
     effective_function = function
     if function.get("donor_variants"):

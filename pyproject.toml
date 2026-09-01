@@ -59,7 +59,7 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 "src/reprobit/classic/composition_relocations.py" = ["E501"]
 "src/reprobit/classic/composition_same_slot.py" = ["E501"]
 "src/reprobit/classic/debug.py" = ["E501"]
-"src/reprobit/classic/floating.py" = ["B023", "E501"]
+"src/reprobit/classic/floating.py" = ["E501"]
 "src/reprobit/classic/ia32.py" = ["E501"]
 "src/reprobit/classic/register_bijection.py" = ["E501"]
 "src/reprobit/classic/register_candidates.py" = ["E501"]
@@ -67,8 +67,8 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 "src/reprobit/classic/register_semantics.py" = ["E501"]
 "src/reprobit/classic/relational.py" = ["E501"]
 "src/reprobit/classic/rewriting.py" = ["E501"]
-"src/reprobit/classic/rewriting_exchanges.py" = ["B023", "E501"]
-"src/reprobit/classic/rewriting_region_simulation.py" = ["B023", "E501"]
+"src/reprobit/classic/rewriting_exchanges.py" = ["E501"]
+"src/reprobit/classic/rewriting_region_simulation.py" = ["E501"]
 "src/reprobit/classic/scheduling_apply.py" = ["E501"]
 "src/reprobit/classic/scheduling_certificates.py" = ["E501"]
 "src/reprobit/classic/scheduling_dependence.py" = ["E501"]
@@ -85,86 +85,8 @@ files = ["src/reprobit", "scripts"]
 # extracted classic core. Mypy still analyzes every module and rejects any new
 # diagnostic category, unlike a file-wide ignore-errors pragma.
 [[tool.mypy.overrides]]
-module = "reprobit.classic.coff"
-disable_error_code = ["arg-type", "index", "no-any-return", "no-untyped-call", "no-untyped-def"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.composition"
-disable_error_code = ["arg-type", "assignment", "index", "return-value", "var-annotated"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.composition_comdat_order"
-disable_error_code = ["assignment", "var-annotated"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.composition_fpo_identity"
-disable_error_code = ["arg-type", "assignment", "attr-defined", "no-any-return", "var-annotated"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.composition_hybrid_resize"
-disable_error_code = ["arg-type", "assignment", "no-untyped-call", "no-untyped-def"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.composition_mosaic"
-disable_error_code = [
-  "arg-type", "assignment", "index", "no-any-return", "return-value", "var-annotated",
-]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.composition_relocations"
-disable_error_code = ["arg-type", "assignment"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.composition_same_slot"
-disable_error_code = [
-  "arg-type", "assignment", "index", "no-untyped-call", "no-untyped-def", "union-attr",
-  "var-annotated",
-]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.debug"
-disable_error_code = ["arg-type", "var-annotated"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.floating"
-disable_error_code = [
-  "arg-type", "assignment", "index", "no-untyped-call", "no-untyped-def", "return-value",
-]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.foundation"
-disable_error_code = [
-  "arg-type", "attr-defined", "call-overload", "index", "operator", "return-value",
-]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.ia32"
-disable_error_code = [
-  "arg-type", "assignment", "attr-defined", "index", "misc", "no-untyped-def", "operator",
-  "return-value", "var-annotated",
-]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.register_bijection"
-disable_error_code = [
-  "arg-type", "assignment", "attr-defined", "call-overload", "index", "no-any-return",
-  "return-value", "union-attr", "var-annotated",
-]
-
-[[tool.mypy.overrides]]
 module = "reprobit.classic.register_candidates"
 disable_error_code = ["arg-type", "assignment", "index", "return-value"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.register_reencoding"
-disable_error_code = [
-  "arg-type", "assignment", "attr-defined", "dict-item", "index", "no-any-return",
-  "no-untyped-def", "operator", "union-attr", "var-annotated",
-]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.register_semantics"
-disable_error_code = ["arg-type", "index", "no-untyped-def", "return-value", "var-annotated"]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.relational"
@@ -176,25 +98,6 @@ disable_error_code = [
 [[tool.mypy.overrides]]
 module = "reprobit.classic.rewriting"
 disable_error_code = ["arg-type", "assignment", "call-overload", "index", "var-annotated"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.rewriting_certificates"
-disable_error_code = [
-  "arg-type", "attr-defined", "call-overload", "index", "operator", "var-annotated",
-]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.rewriting_exchanges"
-disable_error_code = [
-  "arg-type", "assignment", "index", "no-untyped-call", "no-untyped-def", "return-value",
-]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.rewriting_region_simulation"
-disable_error_code = [
-  "arg-type", "assignment", "index", "misc", "no-untyped-call", "no-untyped-def", "operator",
-  "return-value", "var-annotated",
-]
 
 [[tool.mypy.overrides]]
 module = "reprobit.classic.scheduling"
@@ -210,23 +113,5 @@ disable_error_code = [
 ]
 
 [[tool.mypy.overrides]]
-module = "reprobit.classic.scheduling_certificates"
-disable_error_code = ["arg-type", "attr-defined", "index", "no-untyped-call", "no-untyped-def"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.scheduling_dependence"
-disable_error_code = [
-  "arg-type", "index", "no-any-return", "no-untyped-call", "no-untyped-def", "union-attr",
-]
-
-[[tool.mypy.overrides]]
 module = "reprobit.classic.scheduling_web_recolour"
 disable_error_code = ["arg-type"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.scheduling_webs"
-disable_error_code = ["arg-type", "union-attr", "var-annotated"]
-
-[[tool.mypy.overrides]]
-module = "reprobit.classic.source_proofs"
-disable_error_code = ["arg-type", "assignment", "operator"]

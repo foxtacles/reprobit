@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from reprobit.binary import require
 from reprobit.coff_format import (
@@ -347,8 +347,9 @@ def _validate_schedule_windows(
 def validate_web_recolour(value: object, context: str, body_length: int) -> dict[str, Any]:
     """Validate one web-recolour certificate declaration."""
     require(isinstance(value, dict), f"{context} must be an object")
+    document = cast(dict[str, Any], value)
     exact_audit_keys(
-        value,
+        document,
         {
             "kind",
             "windows",
@@ -373,13 +374,13 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
             "expected_fpo_record",
         },
     )
-    require(value.get("kind") == WEB_RECOLOUR_KIND, f"{context}.kind differs")
-    code_length = value.get("expected_code_length")
+    require(document.get("kind") == WEB_RECOLOUR_KIND, f"{context}.kind differs")
+    code_length = document.get("expected_code_length")
     if code_length is not None:
         code_length = require_exact_int(
             code_length, f"{context}.expected_code_length", minimum=2, maximum=body_length
         )
-    targets = value.get("expected_internal_relocation_targets")
+    targets = document.get("expected_internal_relocation_targets")
     if targets is not None:
         require(
             isinstance(targets, list)
@@ -388,10 +389,10 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
             f"{context}.expected_internal_relocation_targets is invalid",
         )
 
-    def _windows(key):
-        if value.get(key) is None:
+    def _windows(key: str) -> list[dict[str, Any]]:
+        if document.get(key) is None:
             return []
-        windows = value[key]
+        windows = document[key]
         require(
             isinstance(windows, list) and 1 <= len(windows) <= 32,
             f"{context}.{key} must contain 1..32 windows",
@@ -412,7 +413,7 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
                 leading["end"] <= trailing["start"] or trailing["end"] <= leading["start"],
                 f"{context}: a trailing window overlaps a leading one",
             )
-    fpo_record = value.get("expected_fpo_record")
+    fpo_record = document.get("expected_fpo_record")
     if fpo_record is not None:
         require(
             isinstance(fpo_record, dict) and set(fpo_record) == FPO_RECORD_KEYS - {"raw_sha256"},
@@ -423,13 +424,13 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
             f"{context}.expected_fpo_record does not declare a frame-pointer-free, SEH-free frame",
         )
     structural = {"esp"} if fpo_record is not None else _IA32_STRUCTURAL_REGISTERS
-    webs = value.get("webs")
+    webs = document.get("webs")
     require(
         isinstance(webs, list) and 1 <= len(webs) <= 32, f"{context}.webs must contain 1..32 webs"
     )
     normalized_webs = []
     rewritten = []
-    for index, web in enumerate(webs):
+    for index, web in enumerate(cast(list[Any], webs)):
         web_context = f"{context}.webs[{index}]"
         require(isinstance(web, dict), f"{web_context} must be an object")
         exact_audit_keys(
@@ -476,7 +477,7 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
         offsets = web.get("expected_rewritten_offsets")
         require(
             isinstance(offsets, list)
-            and offsets
+            and bool(offsets)
             and (offsets == sorted(set(offsets)))
             and (len(offsets) == len(role_offsets["definitions"]) + len(role_offsets["uses"]))
             and all(
@@ -495,10 +496,10 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
                 "expected_rewritten_offsets": list(offsets),
             }
         )
-    changed = value.get("expected_changed_offsets")
+    changed = document.get("expected_changed_offsets")
     require(
         isinstance(changed, list)
-        and changed
+        and bool(changed)
         and (changed == sorted(set(changed)))
         and all(
             type(offset) is int
@@ -514,10 +515,10 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
         f"{context}.expected_changed_offsets is invalid",
     )
     require(
-        set(rewritten) <= set(changed),
+        set(rewritten) <= set(cast(list[Any], changed)),
         f"{context}.expected_changed_offsets omits a recoloured byte",
     )
-    procedure = value.get("expected_procedure_range")
+    procedure = document.get("expected_procedure_range")
     require(
         isinstance(procedure, list)
         and len(procedure) == 3
@@ -526,7 +527,7 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
         and (procedure[1] <= procedure[2] <= body_length),
         f"{context}.expected_procedure_range is invalid",
     )
-    references = value.get("expected_code_symbol_references")
+    references = document.get("expected_code_symbol_references")
     require(
         isinstance(references, list)
         and all(
@@ -540,7 +541,7 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
         ),
         f"{context}.expected_code_symbol_references is invalid",
     )
-    registers = value.get("expected_debug_s_registers")
+    registers = document.get("expected_debug_s_registers")
     require(
         isinstance(registers, list)
         and all(
@@ -554,7 +555,7 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
         ),
         f"{context}.expected_debug_s_registers is invalid",
     )
-    rationale = value.get("authenticity_rationale")
+    rationale = document.get("authenticity_rationale")
     require(
         isinstance(rationale, str) and len(rationale) >= 40,
         f"{context}.authenticity_rationale is missing",
@@ -563,14 +564,14 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
         "kind": WEB_RECOLOUR_KIND,
         "webs": normalized_webs,
         "expected_instruction_count": require_exact_int(
-            value.get("expected_instruction_count"),
+            document.get("expected_instruction_count"),
             f"{context}.expected_instruction_count",
             minimum=2,
         ),
-        "expected_changed_offsets": list(changed),
-        "expected_procedure_range": list(procedure),
-        "expected_code_symbol_references": [list(item) for item in references],
-        "expected_debug_s_registers": [list(item) for item in registers],
+        "expected_changed_offsets": list(cast(list[Any], changed)),
+        "expected_procedure_range": list(cast(list[Any], procedure)),
+        "expected_code_symbol_references": [list(item) for item in cast(list[Any], references)],
+        "expected_debug_s_registers": [list(item) for item in cast(list[Any], registers)],
         "authenticity_rationale": rationale,
     }
     if normalized_windows:
@@ -587,8 +588,9 @@ def validate_web_recolour(value: object, context: str, body_length: int) -> dict
 def validate_instruction_schedule(value: object, context: str, body_length: int) -> dict[str, Any]:
     """Validate one instruction-schedule certificate declaration."""
     require(isinstance(value, dict), f"{context} must be an object")
+    document = cast(dict[str, Any], value)
     exact_audit_keys(
-        value,
+        document,
         {
             "kind",
             "windows",
@@ -603,13 +605,13 @@ def validate_instruction_schedule(value: object, context: str, body_length: int)
         context,
         optional={"expected_code_length", "expected_internal_relocation_targets"},
     )
-    require(value.get("kind") == INSTRUCTION_SCHEDULE_KIND, f"{context}.kind differs")
-    code_length = value.get("expected_code_length")
+    require(document.get("kind") == INSTRUCTION_SCHEDULE_KIND, f"{context}.kind differs")
+    code_length = document.get("expected_code_length")
     if code_length is not None:
         code_length = require_exact_int(
             code_length, f"{context}.expected_code_length", minimum=2, maximum=body_length
         )
-    targets = value.get("expected_internal_relocation_targets")
+    targets = document.get("expected_internal_relocation_targets")
     if targets is not None:
         require(
             isinstance(targets, list)
@@ -617,18 +619,18 @@ def validate_instruction_schedule(value: object, context: str, body_length: int)
             and all(type(item) is int and 0 <= item < body_length for item in targets),
             f"{context}.expected_internal_relocation_targets is invalid",
         )
-    windows = value.get("windows")
+    windows = document.get("windows")
     require(
         isinstance(windows, list) and 1 <= len(windows) <= 32,
         f"{context}.windows must contain 1..32 windows",
     )
     normalized_windows = _validate_schedule_windows(
-        windows, context, body_length, code_length, targets
+        cast(list[Any], windows), context, body_length, code_length, targets
     )
-    changed = value.get("expected_changed_offsets")
+    changed = document.get("expected_changed_offsets")
     require(
         isinstance(changed, list)
-        and changed
+        and bool(changed)
         and (changed == sorted(set(changed)))
         and all(
             type(offset) is int
@@ -637,7 +639,7 @@ def validate_instruction_schedule(value: object, context: str, body_length: int)
         ),
         f"{context}.expected_changed_offsets is invalid",
     )
-    procedure = value.get("expected_procedure_range")
+    procedure = document.get("expected_procedure_range")
     require(
         isinstance(procedure, list)
         and len(procedure) == 3
@@ -646,7 +648,7 @@ def validate_instruction_schedule(value: object, context: str, body_length: int)
         and (procedure[1] <= procedure[2] <= body_length),
         f"{context}.expected_procedure_range is invalid",
     )
-    references = value.get("expected_code_symbol_references")
+    references = document.get("expected_code_symbol_references")
     require(
         isinstance(references, list)
         and all(
@@ -660,7 +662,7 @@ def validate_instruction_schedule(value: object, context: str, body_length: int)
         ),
         f"{context}.expected_code_symbol_references is invalid",
     )
-    rationale = value.get("authenticity_rationale")
+    rationale = document.get("authenticity_rationale")
     require(
         isinstance(rationale, str) and len(rationale) >= 40,
         f"{context}.authenticity_rationale is missing",
@@ -669,13 +671,13 @@ def validate_instruction_schedule(value: object, context: str, body_length: int)
         "kind": INSTRUCTION_SCHEDULE_KIND,
         "windows": normalized_windows,
         "expected_instruction_count": require_exact_int(
-            value.get("expected_instruction_count"),
+            document.get("expected_instruction_count"),
             f"{context}.expected_instruction_count",
             minimum=2,
         ),
-        "expected_changed_offsets": list(changed),
-        "expected_procedure_range": list(procedure),
-        "expected_code_symbol_references": [list(item) for item in references],
+        "expected_changed_offsets": list(cast(list[Any], changed)),
+        "expected_procedure_range": list(cast(list[Any], procedure)),
+        "expected_code_symbol_references": [list(item) for item in cast(list[Any], references)],
         "authenticity_rationale": rationale,
     }
     if code_length is not None:

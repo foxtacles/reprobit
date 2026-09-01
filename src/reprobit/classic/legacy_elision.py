@@ -246,10 +246,7 @@ def apply_simulated_elision(
         if entry["flow"] == "call" and entry["opcode"] == 0xFF:
             entry = {**entry, "read_atoms": frozenset(entry["read_atoms"]) - _IA32_ATOMS_OF["eax"]}
         refined.append(entry)
-    live, _succ = cast(
-        tuple[list[frozenset[str]], list[list[int]]],
-        _register_bijection_live_sets(refined, f"{context} liveness"),
-    )
+    live, _succ = _register_bijection_live_sets(refined, f"{context} liveness")
 
     previous_end = 0
     delta = 0

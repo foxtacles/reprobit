@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import struct
 from collections import Counter
-from typing import Any
+from typing import Any, cast
 
 from reprobit.binary import require
 from reprobit.coff_format import (
@@ -109,7 +109,7 @@ def validate_debug_representation_delta(value: object, context: str) -> list[dic
     )
     normalized = []
     previous = -1
-    for index, item in enumerate(value):
+    for index, item in enumerate(cast(list[Any], value)):
         item_context = f"{context}[{index}]"
         require(isinstance(item, dict), f"{item_context} must be an object")
         kind = item.get("kind")
@@ -136,7 +136,7 @@ def validate_debug_representation_delta(value: object, context: str) -> list[dic
         if kind == "local_location":
             name = item.get("name")
             require(
-                isinstance(name, str) and name and (local_symbol_kind(name) is None),
+                isinstance(name, str) and name != "" and (local_symbol_kind(name) is None),
                 f"{item_context}.name is not a source-named local",
             )
             normalized_item["name"] = name
@@ -180,7 +180,7 @@ def validate_debug_representation_delta(value: object, context: str) -> list[dic
         elif kind == "inserted_donor_local":
             name = item.get("name")
             require(
-                isinstance(name, str) and name and (local_symbol_kind(name) is None),
+                isinstance(name, str) and name != "" and (local_symbol_kind(name) is None),
                 f"{item_context}.name is not a source-named local",
             )
             normalized_item["name"] = name
@@ -398,7 +398,7 @@ def require_removed_caller_locals_delta(
     donor_records = parse_codeview_symbol_stream(donor_stream, context + " donor")
     for records, role in ((seed_records, "seed"), (donor_records, "donor")):
         require(
-            records
+            bool(records)
             and records[0]["type"] in CODEVIEW_PROCEDURE_RECORD_TYPES
             and (records[-1]["type"] == CODEVIEW_END_RECORD_TYPE),
             f"{context}: {role} symbol stream is not one bounded procedure record",
@@ -468,7 +468,7 @@ def linker_payload_multiset(coff: CoffObject) -> Counter[Any]:
     below retains offset, type, addend, target identity, section, value, type,
     and storage while the section-body digest retains the relocated operands.
     """
-    result = Counter()
+    result: Counter[tuple[Any, ...]] = Counter()
     for section in coff.sections:
         if section["name"].startswith(".text") or section["name"].startswith(".debug"):
             continue
@@ -498,7 +498,7 @@ def linker_payload_multiset(coff: CoffObject) -> Counter[Any]:
 def _apply_replacements(data: bytes, replacements: list[tuple[int, int, bytes]]) -> bytes:
     ordered = sorted(replacements, key=lambda item: item[0])
     cursor = 0
-    chunks = []
+    chunks: list[bytes] = []
     for start, end, replacement in ordered:
         require(cursor <= start <= end <= len(data), "COFF replacement ranges overlap")
         chunks.extend((data[cursor:start], replacement))

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError, require
 
@@ -55,7 +56,8 @@ def register_bijection_delegate(
     """
     if expected_relocation_moves:
         return "equal_body_eh_reloc_layout"
-    if list(expected_closure) == REGISTER_BIJECTION_FPO_CLOSURE and (not expected_code_renames):
+    closure = list(cast(Iterable[Any], expected_closure))
+    if closure == REGISTER_BIJECTION_FPO_CLOSURE and (not expected_code_renames):
         return "equal_body_strict"
     return "equal_body_eh_structural_local"
 
@@ -103,7 +105,9 @@ def apply_register_bijection(
             internal_targets is not None,
             f"{context}: a computed jump requires the relocated in-body target set",
         )
-        entered = sorted(target for target in internal_targets if start < target < end)
+        entered = sorted(
+            target for target in cast(frozenset[int], internal_targets) if start < target < end
+        )
         require(
             not entered,
             f"{context}: a relocated in-body target at {entered[:1]} enters the region other than at its first instruction",
@@ -134,7 +138,7 @@ def apply_register_bijection(
     )
     live, successors = _register_bijection_live_sets(instructions, context)
     inside = [item for item in instructions if start <= item["offset"] < end]
-    require(inside, f"{context}: region contains no instruction")
+    require(bool(inside), f"{context}: region contains no instruction")
     require(
         inside[-1]["offset"] + inside[-1]["length"] == end,
         f"{context}: region does not end on an instruction boundary",
@@ -206,16 +210,16 @@ def apply_register_bijection(
             )
             image[byte_index] = (image[byte_index] & ~(7 << shift) | numbers[value] << shift) & 255
             rewritten.append(byte_index)
-    require(rewritten, f"{context}: the bijection rewrites nothing")
-    image = bytes(image)
+    require(bool(rewritten), f"{context}: the bijection rewrites nothing")
+    output = bytes(image)
     require(len(image) == len(body), f"{context}: the image changed the body length")
     image_instructions = decode_ia32_bijection_body(
-        image, f"{context} image", relocations, code_length
+        output, f"{context} output", relocations, code_length
     )
     require(
         [(item["offset"], item["length"]) for item in image_instructions]
         == [(item["offset"], item["length"]) for item in instructions],
-        f"{context}: the image changed an instruction boundary",
+        f"{context}: the output changed an instruction boundary",
     )
     for left, right in zip(image_instructions, instructions, strict=True):
         form = _bijection_form_for(right["opcode"])
@@ -225,7 +229,7 @@ def apply_register_bijection(
             left["opcode"] & mask == right["opcode"] & mask
             and left["flow"] == right["flow"]
             and (left["target"] == right["target"]),
-            f"{context}: the image changed an opcode or a branch",
+            f"{context}: the output changed an opcode or a branch",
         )
     for left, right in zip(image_instructions, instructions, strict=True):
         expected_reads = frozenset(
@@ -238,15 +242,15 @@ def apply_register_bijection(
         )
         require(
             left["reads"] == expected_reads and left["writes"] == expected_writes,
-            f"{context}: the image's operand set at {right['offset']} is not the bijection's image",
+            f"{context}: the output's operand set at {right['offset']} is not the bijection's output",
         )
-    changed = sorted({index for index in range(len(body)) if body[index] != image[index]})
+    changed = sorted({index for index in range(len(body)) if body[index] != output[index]})
     require(
         changed == sorted(set(rewritten)),
-        f"{context}: the image changed a byte the bijection did not name",
+        f"{context}: the output changed a byte the bijection did not name",
     )
     return (
-        image,
+        output,
         {
             "rewritten_offsets": changed,
             "region_instruction_count": len(inside),
@@ -258,7 +262,7 @@ def apply_register_bijection(
 
 def _codeview_register_field(record: dict[str, Any], context: str) -> int:
     """The offset of one S_REGISTER record's two-byte register field."""
-    field_at = record["offset"] + 4 + 2
+    field_at: int = record["offset"] + 4 + 2
     require(
         field_at + 2 <= record["offset"] + record["size"],
         f"{context}: S_REGISTER record has no register field",
@@ -266,13 +270,13 @@ def _codeview_register_field(record: dict[str, Any], context: str) -> int:
     return field_at
 
 
-def _codeview_register_name(stream: bytes, field_at: int, context: str) -> str:
+def _codeview_register_name(stream: bytes | bytearray, field_at: int, context: str) -> str:
     number = int.from_bytes(stream[field_at : field_at + 2], "little")
     name = next(
         (key for key, value in CODEVIEW_X86_REGISTER_NUMBERS.items() if value == number), None
     )
     require(name is not None, f"{context}: S_REGISTER names a non-general register")
-    return name
+    return cast(str, name)
 
 
 def apply_codeview_register_bijection(
@@ -339,7 +343,7 @@ def apply_codeview_register_bijection(
             == [(item["offset"], item["size"], item["type"]) for item in records],
             f"{context}: the donor's debug$S record list differs from the seed's",
         )
-        movable = set()
+        movable: set[int] = set()
         for seed_record, donor_record in zip(records, donor_records, strict=True):
             if seed_record["type"] == CODEVIEW_REGISTER_RECORD_TYPE:
                 field_at = _codeview_register_field(seed_record, context)
@@ -378,14 +382,14 @@ def apply_codeview_register_bijection(
         )
         by_offset = {item["offset"]: item for item in records}
         for item in declared:
-            record = by_offset.get(item["record_offset"])
+            declared_record = by_offset.get(item["record_offset"])
             require(
-                record is not None
-                and record["type"] == CODEVIEW_REGISTER_RECORD_TYPE
-                and (record["name"] == item["name"]),
+                declared_record is not None
+                and declared_record["type"] == CODEVIEW_REGISTER_RECORD_TYPE
+                and (declared_record["name"] == item["name"]),
                 f"{context}: the S_REGISTER map names no such record",
             )
-            field_at = _codeview_register_field(record, context)
+            field_at = _codeview_register_field(cast(dict[str, Any], declared_record), context)
             name = _codeview_register_name(donor_stream, field_at, context)
             require(
                 name == item["donor_register"] and mapping.get(name) == item["image_register"],
@@ -394,23 +398,24 @@ def apply_codeview_register_bijection(
             image[field_at : field_at + 2] = CODEVIEW_X86_REGISTER_NUMBERS[
                 item["image_register"]
             ].to_bytes(2, "little")
-    image = bytes(image)
+    output = bytes(image)
     require(
         [
             (item["offset"], item["size"], item["type"], item["name"])
-            for item in parse_codeview_symbol_stream(image, f"{context} image")
+            for item in parse_codeview_symbol_stream(output, f"{context} output")
         ]
         == [(item["offset"], item["size"], item["type"], item["name"]) for item in records],
         f"{context}: the mapped stream is not the same record list",
     )
-    return image
+    return output
 
 
 def validate_register_bijection(value: object, context: str, body_length: int) -> dict[str, Any]:
     """Validate one register-bijection certificate declaration."""
     require(isinstance(value, dict), f"{context} must be an object")
+    document = cast(dict[str, Any], value)
     exact_audit_keys(
-        value,
+        document,
         {
             "kind",
             "mapping",
@@ -434,8 +439,8 @@ def validate_register_bijection(value: object, context: str, body_length: int) -
             "expected_rewritten_offsets_restoring_seed",
         },
     )
-    require(value.get("kind") == REGISTER_BIJECTION_KIND, f"{context}.kind differs")
-    mapping = value.get("mapping")
+    require(document.get("kind") == REGISTER_BIJECTION_KIND, f"{context}.kind differs")
+    mapping = document.get("mapping")
     require(
         isinstance(mapping, dict)
         and 2 <= len(mapping) <= 8
@@ -450,6 +455,7 @@ def validate_register_bijection(value: object, context: str, body_length: int) -
         ),
         f"{context}.mapping is invalid",
     )
+    mapping = cast(dict[str, str], mapping)
     require(
         set(mapping) == set(mapping.values())
         and len(set(mapping.values())) == len(mapping)
@@ -458,38 +464,40 @@ def validate_register_bijection(value: object, context: str, body_length: int) -
     )
     require(not set(mapping) & _IA32_STRUCTURAL_REGISTERS, f"{context}.mapping touches ESP or EBP")
     start = require_exact_int(
-        value.get("region_start"), f"{context}.region_start", minimum=1, maximum=body_length - 1
+        document.get("region_start"), f"{context}.region_start", minimum=1, maximum=body_length - 1
     )
     end = require_exact_int(
-        value.get("region_end"), f"{context}.region_end", minimum=2, maximum=body_length - 1
+        document.get("region_end"), f"{context}.region_end", minimum=2, maximum=body_length - 1
     )
     require(start < end, f"{context}: region is empty")
     require(
         require_exact_int(
-            value.get("expected_region_instruction_count"),
+            document.get("expected_region_instruction_count"),
             f"{context}.expected_region_instruction_count",
             minimum=1,
         )
         <= require_exact_int(
-            value.get("expected_instruction_count"),
+            document.get("expected_instruction_count"),
             f"{context}.expected_instruction_count",
             minimum=2,
         ),
         f"{context}: region instruction count exceeds the body's",
     )
-    offsets = value.get("expected_rewritten_offsets")
+    offsets = document.get("expected_rewritten_offsets")
     require(
         isinstance(offsets, list)
-        and offsets
+        and bool(offsets)
         and (offsets == sorted(set(offsets)))
         and all(type(offset) is int and start <= offset < end for offset in offsets),
         f"{context}.expected_rewritten_offsets is invalid",
     )
-    declared = value.get("debug_s_register_map")
+    offsets = cast(list[int], offsets)
+    declared = document.get("debug_s_register_map")
     require(
         isinstance(declared, list) and len(declared) <= 8,
         f"{context}.debug_s_register_map is invalid",
     )
+    declared = cast(list[Any], declared)
     normalized_map = []
     for index, item in enumerate(declared):
         item_context = f"{context}.debug_s_register_map[{index}]"
@@ -515,18 +523,18 @@ def validate_register_bijection(value: object, context: str, body_length: int) -
                 "image_register": item["image_register"],
             }
         )
-    rationale = value.get("authenticity_rationale")
+    rationale = document.get("authenticity_rationale")
     require(
         isinstance(rationale, str) and len(rationale) >= 40,
         f"{context}.authenticity_rationale is missing",
     )
-    code_length = value.get("expected_code_length")
+    code_length = document.get("expected_code_length")
     if code_length is not None:
         code_length = require_exact_int(
             code_length, f"{context}.expected_code_length", minimum=2, maximum=body_length
         )
         require(end <= code_length, f"{context}: region reaches past the declared code length")
-    restoring = value.get("expected_rewritten_offsets_restoring_seed")
+    restoring = document.get("expected_rewritten_offsets_restoring_seed")
     if restoring is not None:
         require(
             isinstance(restoring, list)
@@ -534,7 +542,7 @@ def validate_register_bijection(value: object, context: str, body_length: int) -
             and (set(restoring) <= set(offsets)),
             f"{context}.expected_rewritten_offsets_restoring_seed is invalid",
         )
-    targets = value.get("expected_internal_relocation_targets")
+    targets = document.get("expected_internal_relocation_targets")
     if targets is not None:
         require(
             isinstance(targets, list)
@@ -551,15 +559,16 @@ def validate_register_bijection(value: object, context: str, body_length: int) -
         "mapping": dict(sorted(mapping.items())),
         "region_start": start,
         "region_end": end,
-        "expected_region_instruction_count": value["expected_region_instruction_count"],
-        "expected_instruction_count": value["expected_instruction_count"],
+        "expected_region_instruction_count": document["expected_region_instruction_count"],
+        "expected_instruction_count": document["expected_instruction_count"],
         "expected_rewritten_offsets": list(offsets),
         "debug_s_register_map": normalized_map,
         "expected_seed_debug_s_sha256": require_sha(
-            value.get("expected_seed_debug_s_sha256"), f"{context}.expected_seed_debug_s_sha256"
+            document.get("expected_seed_debug_s_sha256"), f"{context}.expected_seed_debug_s_sha256"
         ),
         "expected_image_debug_s_sha256": require_sha(
-            value.get("expected_image_debug_s_sha256"), f"{context}.expected_image_debug_s_sha256"
+            document.get("expected_image_debug_s_sha256"),
+            f"{context}.expected_image_debug_s_sha256",
         ),
         "authenticity_rationale": rationale,
     }

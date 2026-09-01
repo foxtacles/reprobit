@@ -50,21 +50,28 @@ from .source_proofs import (
 
 
 def _pair_same_slot_relocations(
-    seed_rows, donor_rows, seed_primary, donor_primary, seed_xdata, donor_xdata, mapping, context
-):
+    seed_rows: list[dict[str, Any]],
+    donor_rows: list[dict[str, Any]],
+    seed_primary: int,
+    donor_primary: int,
+    seed_xdata: int,
+    donor_xdata: int,
+    mapping: dict[int, int],
+    context: str,
+) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """Pair ordinal relocation semantics allowing offset movement and
     consistently mapped object-local symbols inside the target closure."""
     require(len(seed_rows) == len(donor_rows), f"{context}: relocation counts differ")
     reverse = {right: left for left, right in mapping.items()}
 
-    def role(section_number, primary, xdata):
+    def role(section_number: int, primary: int, xdata: int) -> str:
         if section_number == primary:
             return "primary"
         if section_number == xdata:
             return "xdata"
         return "external"
 
-    pairs = []
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
     for left, right in zip(seed_rows, donor_rows, strict=True):
         require(
             left["type"] == right["type"] and left["addend"] == right["addend"],
@@ -128,7 +135,7 @@ def _resolve_substituted_seed_symbol(
     )
     matches = [(index, symbol) for index, symbol in seed.symbols.items() if symbol["name"] == name]
     require(
-        matches,
+        bool(matches),
         f"{context}: donor relocation target {name!r} is not declared or defined by the seed object",
     )
     require(
@@ -154,8 +161,8 @@ def _source_target_relocation_substitutions(
 ) -> tuple[dict[int, int], list[tuple[str, int, int]]]:
     """Resolve a whole donor target table into seed locals/externals."""
     reverse = {donor_index: seed_index for seed_index, donor_index in mapping.items()}
-    imports = {}
-    substitutions = {}
+    imports: dict[str, tuple[str, int, int]] = {}
+    substitutions: dict[int, int] = {}
     for ordinal, record in enumerate(donor_rows):
         if local_symbol_kind(record["target"]) is not None:
             if record["symbol_index"] not in reverse:
@@ -235,7 +242,11 @@ class RelocSide:
 
 def _pair_reloc_divergent(
     seed_side: RelocSide, donor_side: RelocSide, mapping: dict[int, int], context: str
-):
+) -> tuple[
+    list[tuple[dict[str, Any], dict[str, Any]]],
+    dict[int, int],
+    list[tuple[dict[str, Any], int]],
+]:
     """Pair the primary table allowing a divergent EXTERNAL target set.
 
     Identical to `_pair_same_slot_relocations` except that where both sides
@@ -260,14 +271,14 @@ def _pair_reloc_divergent(
     donor_rows = donor_rows[: len(seed_rows)]
     reverse = {right: left for left, right in mapping.items()}
 
-    def role(section_number, primary, xdata):
+    def role(section_number: int, primary: int, xdata: int) -> str:
         if section_number == primary:
             return "primary"
         if section_number == xdata:
             return "xdata"
         return "external"
 
-    pairs = []
+    pairs: list[tuple[dict[str, Any], dict[str, Any]]] = []
     substitutions: dict[int, int] = {}
     for ordinal, (left, right) in enumerate(zip(seed_rows, donor_rows, strict=True)):
         require(left["type"] == right["type"], f"{context}: relocation type differs")
@@ -498,13 +509,13 @@ def compose_same_slot_resize(
         measured_extra = []
         measured_only = []
         for name in set(seed_fns) | set(donor_fns):
-            left, right = (seed_fns.get(name, 0), donor_fns.get(name, 0))
-            if right == left:
+            seed_count, donor_count = (seed_fns.get(name, 0), donor_fns.get(name, 0))
+            if donor_count == seed_count:
                 continue
-            if right == left + 1:
+            if donor_count == seed_count + 1:
                 measured_extra.append(name)
                 continue
-            require(left == right + 1, f"donor function census diverges at {name}")
+            require(seed_count == donor_count + 1, f"donor function census diverges at {name}")
             measured_only.append(name)
         require(
             sorted(measured_extra) == sorted(declared_donor_extras or []),
@@ -564,9 +575,15 @@ def compose_same_slot_resize(
         )
     local_set_delta = function.get("local_set_delta")
     representation_delta = function.get("debug_representation_delta")
-    local_set_detail = {}
+    local_set_detail: dict[str, Any] = {}
     reduced_debug_raw = None
-    debug_shape_keys = ("name", "raw_size", "relocation_count", "line_count", "characteristics")
+    debug_shape_keys: tuple[str, ...] = (
+        "name",
+        "raw_size",
+        "relocation_count",
+        "line_count",
+        "characteristics",
+    )
     if local_set_delta is not None:
         require(
             "target_source_refactor" in function
@@ -703,22 +720,23 @@ def compose_same_slot_resize(
     donor_function_index, donor_function = function_symbol(donor, mangled, dp["number"])
     require(sp["line_count"] > 0 and dp["line_count"] > 0, "target COFF line count changed")
     seed_lines = _coff_table_bytes(seed, sp, "lines")
-    donor_lines = bytearray(_coff_table_bytes(donor, dp, "lines"))
+    donor_line_buffer = bytearray(_coff_table_bytes(donor, dp, "lines"))
     require(
         coff_unpack("<IH", seed_lines, 0, "seed line sentinel") == (seed_function_index, 0)
-        and coff_unpack("<IH", donor_lines, 0, "donor line sentinel") == (donor_function_index, 0),
+        and coff_unpack("<IH", bytes(donor_line_buffer), 0, "donor line sentinel")
+        == (donor_function_index, 0),
         "COFF line sentinel is invalid",
     )
-    donor_lines[0:4] = seed_function_index.to_bytes(4, "little")
+    donor_line_buffer[0:4] = seed_function_index.to_bytes(4, "little")
     previous = -1
     for index in range(1, dp["line_count"]):
-        offset, line = coff_unpack("<IH", bytes(donor_lines), index * 6, "donor line row")
+        offset, line = coff_unpack("<IH", bytes(donor_line_buffer), index * 6, "donor line row")
         require(
             line != 0 and previous <= offset < dp["raw_size"],
             "donor COFF line row is outside/nonmonotonic",
         )
         previous = offset
-    donor_lines = bytes(donor_lines)
+    donor_lines = bytes(donor_line_buffer)
     seed_debug_raw = coff_body(seed, sd)
     donor_debug_raw = coff_body(donor, dd)
     require(
@@ -739,7 +757,7 @@ def compose_same_slot_resize(
     )
     expected_debug_raw[16:28] = donor_debug_raw[16:28]
     old_end = sp["raw_offset"] + sp["raw_size"]
-    replacements = [
+    replacements: list[tuple[int, int, bytes]] = [
         (sp["raw_offset"], old_end, donor_code),
         (sp["line_offset"], sp["line_offset"] + sp["line_count"] * 6, donor_lines),
     ]

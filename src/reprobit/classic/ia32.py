@@ -1,8 +1,9 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError, require
+from reprobit.coff_format import CoffObject
 from reprobit.coff_format import coff_unpack as _coff_unpack
 from reprobit.ia32_decode import (
     supported_ia32_instruction_length as _supported_ia32_instruction_length,
@@ -89,7 +90,7 @@ def require_supported_complete_ia32_instruction(encoded: bytes, context: str) ->
 
 
 def require_coff_line_certified_ia32_boundaries(
-    coff,
+    coff: CoffObject,
     section: dict[str, Any],
     body: bytes,
     ranges: list[dict[str, Any]],
@@ -123,7 +124,7 @@ def require_coff_line_certified_ia32_boundaries(
         )
         previous = offset
         line_offsets.append(offset)
-    require(line_offsets, f"{context}: compiler line boundaries are absent")
+    require(bool(line_offsets), f"{context}: compiler line boundaries are absent")
     prefixed = role in {"target", "instruction_donor"}
     prefix = role if prefixed else ""
     decoded_count = 0
@@ -131,7 +132,7 @@ def require_coff_line_certified_ia32_boundaries(
         start = item[f"{prefix}_start"] if prefixed else item["start"]
         end = item[f"{prefix}_end"] if prefixed else item["end"]
         anchors = [offset for offset in line_offsets if offset <= start]
-        require(anchors, f"{context}: range {index} has no preceding compiler line boundary")
+        require(bool(anchors), f"{context}: range {index} has no preceding compiler line boundary")
         cursor = max(anchors)
         boundaries = {cursor}
         in_range_lengths = []
@@ -181,7 +182,7 @@ def validate_cross_tu_instruction_hybrid_ranges(
     normalized = []
     previous_target_end = 0
     previous_source_end = 0
-    for index, item in enumerate(value):
+    for index, item in enumerate(cast(list[Any], value)):
         item_context = f"{context}[{index}]"
         require(isinstance(item, dict), f"{item_context} must be an object")
         exact_audit_keys(item, CROSS_TU_INSTRUCTION_HYBRID_RANGE_KEYS, item_context)
@@ -268,7 +269,7 @@ def decode_commutable_ia32_instruction(encoded: bytes, context: str) -> dict[str
     encoded = bytes(encoded)
     entry = _IA32_COMMUTABLE_OPCODES.get(encoded[0])
     require(entry is not None, f"{context}: opcode is outside the commutable instruction subset")
-    _, reads_destination, writes_flags = entry
+    _, reads_destination, writes_flags = cast(tuple[str, bool, bool], entry)
     modrm = encoded[1]
     mod = modrm >> 6
     reg = modrm >> 3 & 7
@@ -347,11 +348,12 @@ def validate_instruction_self_permutation(
     value: object, context: str, body: bytes
 ) -> dict[str, Any]:
     """Validate a payload-free bijective commute from a fresh donor body."""
-    require(isinstance(body, bytes) and body, f"{context}: donor body is missing")
+    require(isinstance(body, bytes) and bool(body), f"{context}: donor body is missing")
     body_length = len(body)
     require(isinstance(value, dict), f"{context} must be an object")
+    document = cast(dict[str, Any], value)
     exact_audit_keys(
-        value,
+        document,
         {
             "kind",
             "source_start",
@@ -370,25 +372,25 @@ def validate_instruction_self_permutation(
         },
         context,
     )
-    require(value.get("kind") in SELF_PERMUTATION_KINDS, f"{context}.kind differs")
-    bounds = {}
+    require(document.get("kind") in SELF_PERMUTATION_KINDS, f"{context}.kind differs")
+    bounds: dict[str, tuple[int, int]] = {}
     for role in ("source", "target"):
         start = require_exact_int(
-            value.get(f"{role}_start"),
+            document.get(f"{role}_start"),
             f"{context}.{role}_start",
             minimum=0,
             maximum=body_length - 1,
         )
         end = require_exact_int(
-            value.get(f"{role}_end"), f"{context}.{role}_end", minimum=1, maximum=body_length
+            document.get(f"{role}_end"), f"{context}.{role}_end", minimum=1, maximum=body_length
         )
         require(start < end, f"{context}.{role} range is empty")
         bounds[role] = (start, end)
     require(bounds["source"] == bounds["target"], f"{context}: self-permutation windows differ")
     width = bounds["source"][1] - bounds["source"][0]
-    declared_lengths = {}
+    declared_lengths: dict[str, list[Any]] = {}
     for role in ("source", "target"):
-        lengths = value.get(f"{role}_instruction_lengths")
+        lengths = document.get(f"{role}_instruction_lengths")
         require(
             isinstance(lengths, list)
             and len(lengths) == 2
@@ -396,14 +398,14 @@ def validate_instruction_self_permutation(
             and (sum(lengths) == width),
             f"{context}.{role}_instruction_lengths differs",
         )
-        declared_lengths[role] = list(lengths)
-    moves = value.get("moves")
+        declared_lengths[role] = list(cast(list[Any], lengths))
+    moves = document.get("moves")
     require(
         isinstance(moves, list) and len(moves) == 2,
         f"{context}.moves must contain exactly two instructions",
     )
-    normalized_moves = []
-    for index, move in enumerate(moves):
+    normalized_moves: list[dict[str, Any]] = []
+    for index, move in enumerate(cast(list[Any], moves)):
         move_context = f"{context}.moves[{index}]"
         require(isinstance(move, dict), f"{move_context} must be an object")
         exact_audit_keys(
@@ -493,7 +495,7 @@ def validate_instruction_self_permutation(
     source_order = sorted(normalized_moves, key=lambda item: item["donor_start"])
     first = body[source_order[0]["donor_start"] : source_order[0]["donor_end"]]
     second = body[source_order[1]["donor_start"] : source_order[1]["donor_end"]]
-    if value["kind"] == ORDINARY_FPO_SELF_PERMUTATION_KIND:
+    if document["kind"] == ORDINARY_FPO_SELF_PERMUTATION_KIND:
         require(
             first == b"3\xff",
             f"{context}: first source instruction is not the closed XOR-zero encoding",
@@ -512,7 +514,7 @@ def validate_instruction_self_permutation(
         first, second, f"{context} commuting pair"
     )
     normalized = {
-        "kind": value["kind"],
+        "kind": document["kind"],
         "commuting_pair_independence": independence,
         "source_start": bounds["source"][0],
         "source_end": bounds["source"][1],
@@ -523,27 +525,27 @@ def validate_instruction_self_permutation(
         "moves": normalized_moves,
         "expected_changed_offsets": [],
         "expected_linker_payload_count": require_exact_int(
-            value.get("expected_linker_payload_count"),
+            document.get("expected_linker_payload_count"),
             f"{context}.expected_linker_payload_count",
             minimum=0,
         ),
     }
-    changed_offsets = value.get("expected_changed_offsets")
+    changed_offsets = document.get("expected_changed_offsets")
     require(
         isinstance(changed_offsets, list)
-        and changed_offsets
+        and bool(changed_offsets)
         and (changed_offsets == sorted(set(changed_offsets)))
         and all(type(offset) is int and 0 <= offset < body_length for offset in changed_offsets),
         f"{context}.expected_changed_offsets differs",
     )
-    normalized["expected_changed_offsets"] = list(changed_offsets)
+    normalized["expected_changed_offsets"] = list(cast(list[Any], changed_offsets))
     for name in (
         "expected_function_multiset_sha256",
         "expected_comdat_multiset_sha256",
         "expected_section_shape_sha256",
         "expected_linker_payload_sha256",
     ):
-        normalized[name] = require_sha(value.get(name), f"{context}.{name}")
+        normalized[name] = require_sha(document.get(name), f"{context}.{name}")
     return normalized
 
 
@@ -562,7 +564,7 @@ def validate_instruction_mosaic_ranges(
     )
     normalized = []
     previous_end = 0
-    for index, item in enumerate(value):
+    for index, item in enumerate(cast(list[Any], value)):
         item_context = f"{context}[{index}]"
         require(isinstance(item, dict), f"{item_context} must be an object")
         kind = item.get("kind")
@@ -639,7 +641,7 @@ def validate_instruction_mosaic_ranges(
                 lengths = item.get(f"{role}_instruction_lengths")
                 require(
                     isinstance(lengths, list)
-                    and lengths
+                    and bool(lengths)
                     and (len(lengths) <= 64)
                     and all(type(length) is int and 1 <= length <= 15 for length in lengths)
                     and (sum(lengths) == end - start),

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import itertools
-from typing import Any
+from typing import Any, TypeAlias, cast
 
 from reprobit.binary import require
 from reprobit.ia32_decode import supported_ia32_instruction_length
@@ -26,6 +26,12 @@ from .rewriting_exchanges import _SIMULATOR_REGS
 
 SIMULATED_REGION_REWRITE_KIND = "simulated_region_rewrite_v1"
 
+# A symbolic term of the region simulator: a tagged tuple such as ("load", addr)
+# or ("add", term, int), a literal int/bytes, a symbol name, or None.  The term
+# language is open (every opcode branch below builds its own shape), so the
+# simulator's state is typed by this alias rather than a closed union.
+_Term: TypeAlias = Any
+
 
 def _srr_simulate(
     body: bytes,
@@ -35,7 +41,15 @@ def _srr_simulate(
     relocations: dict[int, Any] | None = None,
     oracles: dict[str, Any] | None = None,
     entry_loads: dict[str, Any] | None = None,
-):
+) -> tuple[
+    dict[str, _Term],
+    list[_Term],
+    list[_Term],
+    dict[_Term, _Term],
+    _Term,
+    _Term,
+    dict[_Term, tuple[_Term, int]],
+]:
     """Symbolically execute [start, end); return the end state.
 
     `relocations` maps a byte offset (of a relocated field inside the
@@ -54,30 +68,30 @@ def _srr_simulate(
     oracles = oracles or {}
     oracle_callees = oracles.get("callees") or {}
     oracle_vtables = oracles.get("vtables") or {}
-    regs = {name: ("reg0", name) for name in _SIMULATOR_REGS}
+    regs: dict[str, _Term] = {name: ("reg0", name) for name in _SIMULATOR_REGS}
     for name, disp in (entry_loads or {}).items():
         regs[name] = ("load", ("addr", ("reg0", "ebp"), disp))
-    stack = []
-    pushes = []
-    slots = {}
-    widths = {}
-    heap_slots = {}
-    heap_base = [None]
-    last_flags = None
-    frames = []
+    stack: list[_Term] = []
+    pushes: list[_Term] = []
+    slots: dict[_Term, _Term] = {}
+    widths: dict[_Term, int] = {}
+    heap_slots: dict[_Term, tuple[_Term, int]] = {}
+    heap_base: list[_Term] = [None]
+    last_flags: _Term = None
+    frames: list[tuple[bytes, int, int, int]] = []
     cur_body, offset, cur_end = (body, start, end)
     reloc_base = 0
-    reloc_maps = [relocations]
+    reloc_maps: list[dict[Any, Any]] = [relocations]
 
-    def norm_isub(left, right):
+    def norm_isub(left: _Term, right: _Term) -> _Term:
         if isinstance(left, tuple) and left[0] == "isub":
             base, parts = (left[1], left[2])
         else:
             base, parts = (left, ())
         return ("isub", base, tuple(sorted((*parts, right), key=repr)))
 
-    def norm_iadd(left, right):
-        parts = []
+    def norm_iadd(left: _Term, right: _Term) -> _Term:
+        parts: list[_Term] = []
         for item in (left, right):
             if isinstance(item, tuple) and item[0] == "iadd":
                 parts.extend(item[1])
@@ -85,8 +99,8 @@ def _srr_simulate(
                 parts.append(item)
         return ("iadd", tuple(sorted(parts, key=repr)))
 
-    def norm_sum(left, right):
-        parts = []
+    def norm_sum(left: _Term, right: _Term) -> _Term:
+        parts: list[_Term] = []
         for item in (left, right):
             if isinstance(item, tuple) and item[0] == "fsum":
                 parts.extend(item[1])
@@ -94,14 +108,14 @@ def _srr_simulate(
                 parts.append(item)
         return ("fsum", tuple(sorted(parts, key=repr)))
 
-    def flatten_add(value):
+    def flatten_add(value: _Term) -> tuple[_Term, int]:
         total = 0
         while isinstance(value, tuple) and value[0] == "add" and isinstance(value[2], int):
             total += value[2]
             value = value[1]
         return (value, total)
 
-    def frame_address(value):
+    def frame_address(value: _Term) -> int | None:
         base, extra = flatten_add(value)
         if isinstance(base, tuple) and base[0] == "lea":
             addr = base[1]
@@ -135,15 +149,30 @@ def _srr_simulate(
         mod = modrm >> 6 if modrm is not None else None
         reg_field = modrm >> 3 & 7 if modrm is not None else None
         rm = modrm & 7 if modrm is not None else None
+        # Only the branches for opcodes that carry a ModR/M byte read these two.
+        reg = cast(int, reg_field)
+        rm_index = cast(int, rm)
         cur_relocs = reloc_maps[-1]
 
-        def reloc_symbol(field_offset):
+        def reloc_symbol(
+            field_offset: int,
+            *,
+            cur_relocs: dict[Any, Any] = cur_relocs,
+            reloc_base: int = reloc_base,
+        ) -> _Term:
             entry = cur_relocs.get(reloc_base + field_offset)
             if entry is None:
                 return None
             return entry["target"] if isinstance(entry, dict) else entry
 
-        def mem_operand(cursor_base):
+        def mem_operand(
+            cursor_base: int,
+            *,
+            mod: int | None = mod,
+            rm: int | None = rm,
+            offset: int = offset,
+            encoded: bytes = encoded,
+        ) -> _Term:
             require(not (mod == 0 and rm == 5), f"{context}: absolute address at {offset}")
             cursor = cursor_base
             if rm == 4:
@@ -155,7 +184,7 @@ def _srr_simulate(
                 )
                 base = regs[_SIMULATOR_REGS[sib & 7]]
             else:
-                base = regs[_SIMULATOR_REGS[rm]]
+                base = regs[_SIMULATOR_REGS[cast(int, rm)]]
             if mod == 1:
                 disp = int.from_bytes(encoded[cursor : cursor + 1], "little", signed=True)
             elif mod == 2:
@@ -166,7 +195,7 @@ def _srr_simulate(
                 return ("addr", base[1], disp + base[2])
             return ("addr", base, disp)
 
-        def frame_disp(addr):
+        def frame_disp(addr: _Term, *, offset: int = offset) -> _Term:
             if addr[1] == ("reg0", "ebp"):
                 return addr[2]
             if addr[1] == ("reg0", "esp"):
@@ -180,7 +209,7 @@ def _srr_simulate(
                 return pointed + addr[2]
             return None
 
-        def heap_key(addr):
+        def heap_key(addr: _Term, *, offset: int = offset) -> _Term:
             """The single-base heap map's key, or None for a frame address.
 
             Non-frame stores are admitted under two invariants the emitting
@@ -203,7 +232,7 @@ def _srr_simulate(
             )
             return addr[2]
 
-        def frame_disp_quiet(addr):
+        def frame_disp_quiet(addr: _Term) -> _Term:
             if addr[1] == ("reg0", "ebp"):
                 return addr[2]
             if addr[1] == ("reg0", "esp") and addr[2] >= 0:
@@ -213,7 +242,7 @@ def _srr_simulate(
                 return pointed + addr[2]
             return None
 
-        def heap_store(addr, value, width):
+        def heap_store(addr: _Term, value: _Term, width: int, *, offset: int = offset) -> None:
             key = heap_key(addr)
             for other, (_, other_width) in heap_slots.items():
                 if other == key:
@@ -228,14 +257,14 @@ def _srr_simulate(
             )
             heap_slots[key] = (value, width)
 
-        def heap_load(addr, width):
+        def heap_load(addr: _Term, width: int) -> _Term:
             key = heap_key(addr)
             held = heap_slots.get(key)
             if held is not None and held[1] == width:
                 return held[0]
             return None
 
-        def read_disp(addr):
+        def read_disp(addr: _Term) -> _Term:
             if addr[1] == ("reg0", "ebp"):
                 return addr[2]
             if addr[1] == ("reg0", "esp"):
@@ -245,13 +274,13 @@ def _srr_simulate(
                 return pointed + addr[2]
             return None
 
-        def read_slot(addr):
+        def read_slot(addr: _Term) -> _Term:
             disp = read_disp(addr)
             if disp is not None and disp in slots:
                 return slots[disp]
             return None
 
-        def resolve_pushed(addr):
+        def resolve_pushed(addr: _Term) -> _Term:
             base, _extra = flatten_add(regs["esp"])
             if base != ("reg0", "esp") or addr[1] != ("reg0", "esp"):
                 return None
@@ -262,7 +291,7 @@ def _srr_simulate(
                 return pushes[index]
             return None
 
-        def do_push(value):
+        def do_push(value: _Term) -> None:
             pushes.append(value)
             esp = regs["esp"]
             if isinstance(esp, tuple) and esp[0] == "add" and isinstance(esp[2], int):
@@ -270,7 +299,15 @@ def _srr_simulate(
             else:
                 regs["esp"] = ("add", esp, -4)
 
-        def enter_callee(symbol):
+        def enter_callee(
+            symbol: _Term,
+            *,
+            offset: int = offset,
+            length: int = length,
+            cur_body: bytes = cur_body,
+            cur_end: int = cur_end,
+            reloc_base: int = reloc_base,
+        ) -> bytes:
             callee = oracle_callees.get(symbol)
             require(
                 callee is not None,
@@ -280,7 +317,7 @@ def _srr_simulate(
             do_push(("return_to", len(frames), offset + length))
             frames.append((cur_body, offset + length, cur_end, reloc_base))
             reloc_maps.append((oracles.get("callee_relocations") or {}).get(symbol, {}))
-            return callee
+            return cast(bytes, callee)
 
         advanced = False
         if op == 139 and mod != 3:
@@ -288,48 +325,48 @@ def _srr_simulate(
             pushed = resolve_pushed(addr)
             forwarded = read_slot(addr) if pushed is None else None
             if forwarded is not None:
-                regs[_SIMULATOR_REGS[reg_field]] = forwarded
+                regs[_SIMULATOR_REGS[reg]] = forwarded
             elif pushed is not None:
-                regs[_SIMULATOR_REGS[reg_field]] = pushed
+                regs[_SIMULATOR_REGS[reg]] = pushed
             elif heap_slots and frame_disp_quiet(addr) is None:
                 held = heap_load(addr, 4)
-                regs[_SIMULATOR_REGS[reg_field]] = held if held is not None else ("load", addr)
+                regs[_SIMULATOR_REGS[reg]] = held if held is not None else ("load", addr)
             else:
-                regs[_SIMULATOR_REGS[reg_field]] = ("load", addr)
+                regs[_SIMULATOR_REGS[reg]] = ("load", addr)
         elif op in (139, 137) and mod == 3:
             if op == 139:
-                regs[_SIMULATOR_REGS[reg_field]] = regs[_SIMULATOR_REGS[rm]]
+                regs[_SIMULATOR_REGS[reg]] = regs[_SIMULATOR_REGS[rm_index]]
             else:
-                regs[_SIMULATOR_REGS[rm]] = regs[_SIMULATOR_REGS[reg_field]]
+                regs[_SIMULATOR_REGS[rm_index]] = regs[_SIMULATOR_REGS[reg]]
         elif op == 137 and mod != 3:
             addr = mem_operand(2)
             disp = frame_disp_quiet(addr)
             if disp is None:
-                heap_store(addr, regs[_SIMULATOR_REGS[reg_field]], 4)
+                heap_store(addr, regs[_SIMULATOR_REGS[reg]], 4)
             else:
                 require(
                     widths.get(disp, 4) == 4, f"{context}: the store at {offset} resizes a slot"
                 )
-                slots[disp] = regs[_SIMULATOR_REGS[reg_field]]
+                slots[disp] = regs[_SIMULATOR_REGS[reg]]
                 widths[disp] = 4
         elif op == 138 and mod != 3:
             addr = mem_operand(2)
             disp = read_disp(addr)
             forwarded = slots.get(disp) if disp is not None and widths.get(disp) == 1 else None
-            name = _SIMULATOR_REGS[reg_field & 3]
+            name = _SIMULATOR_REGS[reg & 3]
             value = forwarded if forwarded is not None else ("load8", addr)
-            regs[name] = ("setbyte", regs[name], reg_field >> 2, value)
+            regs[name] = ("setbyte", regs[name], reg >> 2, value)
         elif op == 136 and mod != 3:
             addr = mem_operand(2)
             disp = frame_disp_quiet(addr)
             if disp is None:
-                heap_store(addr, ("byte", regs[_SIMULATOR_REGS[reg_field & 3]], reg_field >> 2), 1)
+                heap_store(addr, ("byte", regs[_SIMULATOR_REGS[reg & 3]], reg >> 2), 1)
             else:
                 require(
                     widths.get(disp, 1) == 1,
                     f"{context}: the byte store at {offset} resizes a slot",
                 )
-                slots[disp] = ("byte", regs[_SIMULATOR_REGS[reg_field & 3]], reg_field >> 2)
+                slots[disp] = ("byte", regs[_SIMULATOR_REGS[reg & 3]], reg >> 2)
                 widths[disp] = 1
         elif 184 <= op <= 191:
             require(
@@ -374,7 +411,7 @@ def _srr_simulate(
                 slots[disp] = value
                 widths[disp] = 1
         elif op == 141 and mod != 3:
-            regs[_SIMULATOR_REGS[reg_field]] = ("lea", mem_operand(2))
+            regs[_SIMULATOR_REGS[reg]] = ("lea", mem_operand(2))
         elif op == 131 and mod != 3 and (reg_field == 0):
             addr = mem_operand(2)
             disp = frame_disp(addr)
@@ -404,16 +441,16 @@ def _srr_simulate(
             last_flags = ("incflags", slots[disp])
         elif op == 131 and mod == 3 and (reg_field == 0):
             value = int.from_bytes(encoded[2:3], "little", signed=True)
-            name = _SIMULATOR_REGS[rm]
+            name = _SIMULATOR_REGS[rm_index]
             regs[name] = ("add", regs[name], value)
             last_flags = ("addflags", regs[name])
         elif op == 129 and mod == 3 and (reg_field == 0):
             value = int.from_bytes(encoded[2:6], "little", signed=True)
-            name = _SIMULATOR_REGS[rm]
+            name = _SIMULATOR_REGS[rm_index]
             regs[name] = ("add", regs[name], value)
             last_flags = ("addflags", regs[name])
         elif op == 133 and mod == 3:
-            last_flags = ("test", regs[_SIMULATOR_REGS[rm]], regs[_SIMULATOR_REGS[reg_field]])
+            last_flags = ("test", regs[_SIMULATOR_REGS[rm_index]], regs[_SIMULATOR_REGS[reg]])
         elif op == 128 and mod != 3 and (reg_field == 7):
             last_flags = ("cmp8", mem_operand(2), encoded[length - 1])
         elif op == 131 and mod != 3 and (reg_field == 7):
@@ -425,32 +462,32 @@ def _srr_simulate(
                 ("imm", int.from_bytes(encoded[length - 1 : length], "little", signed=True)),
             )
         elif op == 57 and mod == 3:
-            last_flags = ("cmp", regs[_SIMULATOR_REGS[rm]], regs[_SIMULATOR_REGS[reg_field]])
+            last_flags = ("cmp", regs[_SIMULATOR_REGS[rm_index]], regs[_SIMULATOR_REGS[reg]])
         elif op == 57 and mod != 3:
             addr = mem_operand(2)
             left = read_slot(addr)
             last_flags = (
                 "cmp",
                 left if left is not None else ("load", addr),
-                regs[_SIMULATOR_REGS[reg_field]],
+                regs[_SIMULATOR_REGS[reg]],
             )
         elif op == 59 and mod == 3:
-            last_flags = ("cmp", regs[_SIMULATOR_REGS[reg_field]], regs[_SIMULATOR_REGS[rm]])
+            last_flags = ("cmp", regs[_SIMULATOR_REGS[reg]], regs[_SIMULATOR_REGS[rm_index]])
         elif op == 59 and mod != 3:
             addr = mem_operand(2)
             right = read_slot(addr)
             last_flags = (
                 "cmp",
-                regs[_SIMULATOR_REGS[reg_field]],
+                regs[_SIMULATOR_REGS[reg]],
                 right if right is not None else ("load", addr),
             )
         elif op == 43 and mod != 3:
-            name = _SIMULATOR_REGS[reg_field]
+            name = _SIMULATOR_REGS[reg]
             regs[name] = norm_isub(regs[name], ("load", mem_operand(2)))
             last_flags = ("subflags", regs[name])
         elif op == 43 and mod == 3:
-            name = _SIMULATOR_REGS[reg_field]
-            regs[name] = norm_isub(regs[name], regs[_SIMULATOR_REGS[rm]])
+            name = _SIMULATOR_REGS[reg]
+            regs[name] = norm_isub(regs[name], regs[_SIMULATOR_REGS[rm_index]])
             last_flags = ("subflags", regs[name])
         elif 64 <= op <= 71:
             name = _SIMULATOR_REGS[op - 64]
@@ -461,27 +498,27 @@ def _srr_simulate(
             regs[name] = norm_iadd(regs[name], -1)
             last_flags = ("decflags", regs[name])
         elif op == 3 and mod == 3:
-            name = _SIMULATOR_REGS[reg_field]
-            regs[name] = norm_iadd(regs[name], regs[_SIMULATOR_REGS[rm]])
+            name = _SIMULATOR_REGS[reg]
+            regs[name] = norm_iadd(regs[name], regs[_SIMULATOR_REGS[rm_index]])
             last_flags = ("addflags", regs[name])
         elif op == 3 and mod != 3:
-            name = _SIMULATOR_REGS[reg_field]
+            name = _SIMULATOR_REGS[reg]
             regs[name] = norm_iadd(regs[name], ("load", mem_operand(2)))
             last_flags = ("addflags", regs[name])
         elif op == 51 and mod == 3 and (reg_field == rm):
-            name = _SIMULATOR_REGS[reg_field]
+            name = _SIMULATOR_REGS[reg]
             regs[name] = ("imm", 0)
             last_flags = ("zeroflags",)
         elif op == 193 and mod == 3 and (reg_field == 4):
-            name = _SIMULATOR_REGS[rm]
+            name = _SIMULATOR_REGS[rm_index]
             regs[name] = ("shl", regs[name], encoded[length - 1])
             last_flags = ("shlflags", regs[name])
         elif op == 193 and mod == 3 and (reg_field == 5):
-            name = _SIMULATOR_REGS[rm]
+            name = _SIMULATOR_REGS[rm_index]
             regs[name] = ("shr", regs[name], encoded[length - 1])
             last_flags = ("shrflags", regs[name])
         elif op == 193 and mod == 3 and (reg_field == 7):
-            name = _SIMULATOR_REGS[rm]
+            name = _SIMULATOR_REGS[rm_index]
             regs[name] = ("sar", regs[name], encoded[length - 1])
             last_flags = ("sarflags", regs[name])
         elif 80 <= op <= 87:
@@ -538,7 +575,7 @@ def _srr_simulate(
                 reloc_base = 0
                 advanced = True
         elif op in (194, 195):
-            require(frames, f"{context}: a return at {offset} outside any inlined callee")
+            require(bool(frames), f"{context}: a return at {offset} outside any inlined callee")
             popped = int.from_bytes(encoded[1:3], "little") if op == 194 else 0
             require(popped % 4 == 0, f"{context}: the callee pops a non-dword argument size")
             count = popped // 4 + 1
@@ -567,7 +604,7 @@ def _srr_simulate(
             forwarded = read_slot(addr)
             stack.append(forwarded if forwarded is not None else ("load32", addr))
         elif op == 217 and mod != 3 and (reg_field == 3):
-            require(stack, f"{context}: fstp at {offset} pops the unknown stack base")
+            require(bool(stack), f"{context}: fstp at {offset} pops the unknown stack base")
             addr = mem_operand(2)
             disp = frame_disp(addr)
             require(
@@ -578,17 +615,19 @@ def _srr_simulate(
             slots[disp] = ("f32", stack.pop())
             widths[disp] = 4
         elif op == 217 and mod == 3 and (encoded[:2] == b"\xd9\xfa"):
-            require(stack, f"{context}: fsqrt at {offset} reads the unknown stack base")
+            require(bool(stack), f"{context}: fsqrt at {offset} reads the unknown stack base")
             stack[-1] = ("fsqrt", stack[-1])
         elif op == 216 and mod != 3 and (reg_field == 0):
-            require(stack, f"{context}: fadd at {offset} adds to the unknown stack base")
+            require(bool(stack), f"{context}: fadd at {offset} adds to the unknown stack base")
             addr = mem_operand(2)
             forwarded = read_slot(addr)
             stack[-1] = norm_sum(
                 stack[-1], forwarded if forwarded is not None else ("load32", addr)
             )
         elif op == 216 and mod != 3 and (reg_field == 4):
-            require(stack, f"{context}: fsub at {offset} subtracts from the unknown stack base")
+            require(
+                bool(stack), f"{context}: fsub at {offset} subtracts from the unknown stack base"
+            )
             addr = mem_operand(2)
             forwarded = read_slot(addr)
             stack[-1] = (
@@ -597,7 +636,7 @@ def _srr_simulate(
                 forwarded if forwarded is not None else ("load32", addr),
             )
         elif op == 216 and mod != 3 and (reg_field == 1):
-            require(stack, f"{context}: fmul at {offset} multiplies the unknown stack base")
+            require(bool(stack), f"{context}: fmul at {offset} multiplies the unknown stack base")
             addr = mem_operand(2)
             forwarded = read_slot(addr)
             stack[-1] = (
@@ -608,7 +647,7 @@ def _srr_simulate(
         elif op == 221 and mod != 3 and (reg_field == 0):
             stack.append(("load64", mem_operand(2)))
         elif op == 220 and mod != 3 and (reg_field == 1):
-            require(stack, f"{context}: fmul at {offset} multiplies the unknown stack base")
+            require(bool(stack), f"{context}: fmul at {offset} multiplies the unknown stack base")
             stack[-1] = ("fmul", stack[-1], ("load64", mem_operand(2)))
         elif encoded == b"\xde\xc1":
             require(len(stack) >= 2, f"{context}: faddp at {offset} reaches the unknown stack base")
@@ -714,9 +753,9 @@ def apply_simulated_region_rewrite(
 ) -> tuple[bytes, dict[str, Any]]:
     """Apply declared permutation+field rewrites, proved by simulation."""
     require_payload_free_declaration(regions, f"{context} simulated-region declaration")
-    require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
+    require(isinstance(body, (bytes, bytearray)) and bool(body), f"{context}: body is empty")
     body = bytes(body)
-    require(isinstance(regions, list) and regions, f"{context}: no region is declared")
+    require(isinstance(regions, list) and bool(regions), f"{context}: no region is declared")
     items, successors, entries = ia32_relational_flow_walk(
         body, relocations, context, code_length, external_entries
     )
@@ -767,7 +806,7 @@ def apply_simulated_region_rewrite(
             isinstance(order, list) and sorted(order) == list(range(len(pieces))),
             f"{item_context}: the order is not a permutation of the {len(pieces)} instructions",
         )
-        rewrites = {}
+        rewrites: dict[int, list[tuple[int, str]]] = {}
         for rewrite in item.get("field_rewrites") or []:
             index, field_ordinal, register = rewrite
             require(
@@ -816,9 +855,9 @@ def apply_simulated_region_rewrite(
             moved_offsets[pieces[source_index][0]] = cursor
             rebuilt.append(encoded)
             cursor += len(encoded)
-        rebuilt = b"".join(rebuilt)
-        require(len(rebuilt) == end - start, f"{item_context}: the permuted region changed length")
-        image[start:end] = rebuilt
+        permuted = b"".join(rebuilt)
+        require(len(permuted) == end - start, f"{item_context}: the permuted region changed length")
+        image[start:end] = permuted
         seed_state = _srr_simulate(body, start, end, f"{item_context} seed")
         image_state = _srr_simulate(bytes(image), start, end, f"{item_context} image")
         for label, seed_part, image_part in (
@@ -901,15 +940,15 @@ def apply_simulated_region_rewrite(
                 ),
             }
         )
-    image = bytes(image)
-    require(image != body, f"{context}: the image does not move the body")
-    changed = {offs for offs in range(len(body)) if body[offs] != image[offs]}
+    output = bytes(image)
+    require(output != body, f"{context}: the image does not move the body")
+    changed = {offs for offs in range(len(body)) if body[offs] != output[offs]}
     declared = {offs for region in proved for offs in region["rewritten_offsets"]}
     require(
-        changed <= declared, f"{context}: the image changed a byte outside the declared regions"
+        changed <= declared, f"{context}: the output changed a byte outside the declared regions"
     )
     return (
-        image,
+        output,
         {
             "kind": SIMULATED_REGION_REWRITE_KIND,
             "regions": proved,

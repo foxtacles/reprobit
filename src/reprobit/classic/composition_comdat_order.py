@@ -124,11 +124,11 @@ def compose_swap_comdat_group_order(
             f"symbol identity changed at {index}",
         )
     for old_number, definition in definitions.items():
-        peer = checked_definitions.get(mapped(old_number))
+        mapped_definition = checked_definitions.get(mapped(old_number))
         require(
-            peer is not None
-            and peer["selection"] == definition["selection"]
-            and (peer["associated"] == mapped(definition["associated"])),
+            mapped_definition is not None
+            and mapped_definition["selection"] == definition["selection"]
+            and (mapped_definition["associated"] == mapped(definition["associated"])),
             f"section definition mapping changed: {old_number}",
         )
     checked_first = checked.function_section(specification["first"])
@@ -204,7 +204,7 @@ def compose_restore_comdat_group_order(
         return [primary["number"], *children]
 
     groups = []
-    listed = set()
+    listed: set[int] = set()
     kinds = set()
     for name in order:
         primary = comdat_primary_section(seed, name)
@@ -303,11 +303,11 @@ def compose_restore_comdat_group_order(
             f"symbol identity changed at {index}",
         )
     for old_number, definition in definitions.items():
-        peer = checked_definitions.get(mapped(old_number))
+        mapped_definition = checked_definitions.get(mapped(old_number))
         require(
-            peer is not None
-            and peer["selection"] == definition["selection"]
-            and (peer["associated"] == mapped(definition["associated"])),
+            mapped_definition is not None
+            and mapped_definition["selection"] == definition["selection"]
+            and (mapped_definition["associated"] == mapped(definition["associated"])),
             f"section definition mapping changing: {old_number}",
         )
     final_numbers = [comdat_primary_section(checked, name)["number"] for name in order]

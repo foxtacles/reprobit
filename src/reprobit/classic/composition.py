@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from reprobit.binary import require
 from reprobit.coff_format import (
@@ -168,7 +168,7 @@ def measure_composition_pins(
     return {
         key: value
         for key, value in measured.items()
-        if key in function and key in REPINNABLE_PIN_KEYS[splice_class]
+        if key in function and key in REPINNABLE_PIN_KEYS[cast(str, splice_class)]
     }
 
 
@@ -226,9 +226,11 @@ def compose_equal_body_comdat(
         seed_definition is not None and donor_definition is not None,
         "target COMDAT definition record is missing",
     )
+    seed_record = cast(dict[str, Any], seed_definition)
+    donor_record = cast(dict[str, Any], donor_definition)
     require(
         all(
-            seed_definition[field] == donor_definition[field]
+            seed_record[field] == donor_record[field]
             for field in ("selection", "associated", "length", "relocations")
         ),
         "target COMDAT definition record differs",
@@ -295,7 +297,7 @@ def compose_equal_body_comdat(
         )
         renames = _normalized_relocation_renames(seed, seed_primary, donor, donor_primary, "code")
         require(renames == [], "strict splice forbids relocation renames")
-        detail = {"code_renames": []}
+        detail: dict[str, Any] = {"code_renames": []}
     else:
         require(
             splice_class in ("equal_body_eh_structural_local", "equal_body_eh_reloc_layout"),
@@ -377,8 +379,8 @@ def compose_equal_body_comdat(
         for ordinal, offset in enumerate(donor_offsets):
             record_at = seed_primary["relocation_offset"] + ordinal * 10
             composed[record_at : record_at + 4] = offset.to_bytes(4, "little")
-    composed = bytes(composed)
-    checked = CoffObject(composed)
+    image = bytes(composed)
+    checked = CoffObject(image)
     checked_primary = checked.function_section(mangled)
     require(
         coff_body(checked, checked_primary) == donor_body, "composed body differs from the donor"
@@ -401,7 +403,7 @@ def compose_equal_body_comdat(
         )
     changed_offsets = [
         index
-        for index, pair in enumerate(zip(seed_bytes, composed, strict=True))
+        for index, pair in enumerate(zip(seed_bytes, image, strict=True))
         if pair[0] != pair[1]
     ]
     allowed = set(range(start, start + seed_primary["raw_size"]))
@@ -413,7 +415,7 @@ def compose_equal_body_comdat(
         }
     require(set(changed_offsets) <= allowed, "composition changed bytes outside the selected body")
     return (
-        composed,
+        image,
         {
             "mangled": mangled,
             "splice_class": splice_class,

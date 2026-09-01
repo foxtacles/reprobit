@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 import reprobit.binary as binary
 from reprobit.model import Digest
@@ -128,11 +128,11 @@ def exact_json_equal(left: object, right: object) -> bool:
     """JSON equality that never treats bool/int/float as interchangeable."""
     if type(left) is not type(right):
         return False
-    if isinstance(left, dict):
+    if isinstance(left, dict) and isinstance(right, dict):
         return left.keys() == right.keys() and all(
             exact_json_equal(left[key], right[key]) for key in left
         )
-    if isinstance(left, list):
+    if isinstance(left, list) and isinstance(right, list):
         return len(left) == len(right) and all(
             (exact_json_equal(a, b) for a, b in zip(left, right, strict=True))
         )
@@ -144,15 +144,16 @@ def require_sha(value: object, context: str) -> str:
         isinstance(value, str) and SHA256_RE.fullmatch(value) is not None,
         f"{context} must be a lowercase SHA-256",
     )
-    return value
+    return cast(str, value)
 
 
 def require_exact_int(
     value: object, context: str, *, minimum: int | None = None, maximum: int | None = None
 ) -> int:
     binary.require(type(value) is int, f"{context} must be an exact JSON integer")
+    number = cast(int, value)
     if minimum is not None:
-        binary.require(value >= minimum, f"{context} is below its minimum")
+        binary.require(number >= minimum, f"{context} is below its minimum")
     if maximum is not None:
-        binary.require(value <= maximum, f"{context} exceeds its maximum")
-    return value
+        binary.require(number <= maximum, f"{context} exceeds its maximum")
+    return number

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from reprobit.binary import require
 
@@ -42,7 +42,9 @@ def ia32_web_control_flow(
                 f"{context}: a computed jump at {item['offset']} requires the relocated in-body target set",
             )
             edges.extend(
-                index_of[target] for target in sorted(internal_targets) if target in index_of
+                index_of[target]
+                for target in sorted(cast(frozenset[int], internal_targets))
+                if target in index_of
             )
         successors.append(sorted(set(edges)))
     seen = set()
@@ -66,7 +68,7 @@ def ia32_web_control_flow(
 
 
 def _ia32_web_predecessors(successors: list[list[int]]) -> list[list[int]]:
-    predecessors = [[] for _ in successors]
+    predecessors: list[list[int]] = [[] for _ in successors]
     for index, edges in enumerate(successors):
         for edge in edges:
             predecessors[edge].append(index)
@@ -144,7 +146,7 @@ def _ia32_web_reaching_definitions(
             else:
                 stack.append(previous)
         require(
-            predecessors[index] or index in uses,
+            bool(predecessors[index]) or index in uses,
             f"{context}: the instruction at {instructions[index]['offset']} has no predecessor, so a use is reached by no definition",
         )
     return (reaching, seen)
@@ -161,10 +163,10 @@ def _ia32_web_membership(web: dict[str, Any], role: str, context: str) -> tuple[
     schema would be silently bypassed.
     """
     entries = web.get(role)
-    require(isinstance(entries, list) and entries, f"{context}.{role} is invalid")
+    require(isinstance(entries, list) and bool(entries), f"{context}.{role} is invalid")
     offsets = []
     scopes = {}
-    for item in entries:
+    for item in cast(list[Any], entries):
         if type(item) is int:
             offsets.append(item)
             continue

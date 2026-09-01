@@ -213,18 +213,18 @@ def _require_permuted_instruction_mosaic_relocations(
     unmatched_left = []
     matched_right = set()
     for a in left:
-        index = right_by_offset.get(a["offset"])
-        if index is not None and index not in matched_right:
-            ok, rename = _mosaic_relocation_pair_rename(seed, donor, a, right[index])
+        match = right_by_offset.get(a["offset"])
+        if match is not None and match not in matched_right:
+            ok, rename = _mosaic_relocation_pair_rename(seed, donor, a, right[match])
             if ok:
-                matched_right.add(index)
+                matched_right.add(match)
                 if rename is not None:
                     renames.append(rename)
                 continue
         unmatched_left.append(a)
     unmatched_right = [row for index, row in enumerate(right) if index not in matched_right]
     require(
-        unmatched_left,
+        bool(unmatched_left),
         f"{context}: relocation permutation is empty; the strict relocation order applies",
     )
     require(

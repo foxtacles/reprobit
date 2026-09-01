@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, cast
 
 from reprobit.binary import require
 
@@ -199,6 +199,7 @@ def ia32_schedule_instruction_facts(instruction: dict[str, Any], context: str) -
         effect is not None,
         f"{context}: opcode 0x{opcode:02x} is outside the instruction-schedule table",
     )
+    flag_effect = cast(tuple[bool, bool], effect)
     require(
         instruction["flow"] == "fall",
         f"{context}: a control-transfer instruction is outside the instruction-schedule table",
@@ -243,8 +244,8 @@ def ia32_schedule_instruction_facts(instruction: dict[str, Any], context: str) -
         "opcode": opcode,
         "reads": instruction["reads"],
         "writes": instruction["writes"],
-        "reads_flags": effect[0],
-        "writes_flags": effect[1],
+        "reads_flags": flag_effect[0],
+        "writes_flags": flag_effect[1],
         "memory": memory,
     }
 
@@ -263,7 +264,7 @@ def ia32_memory_provably_disjoint(left: dict[str, Any], right: dict[str, Any]) -
         return False
     if left["base"] is None or left["base"] != right["base"]:
         return False
-    return (
+    return bool(
         left["displacement"] + left["width"] <= right["displacement"]
         or right["displacement"] + right["width"] <= left["displacement"]
     )
@@ -308,19 +309,20 @@ def _require_ia32_schedule_stack_frontier(
         f"{context}: stack-frontier theorem differs",
     )
     require(body is not None, f"{context}: the stack-frontier theorem needs its body")
+    image = cast(bytes, body)
     pushes = [
         index
         for index, item in enumerate(facts)
         if item["opcode"] in _IA32_SCHEDULE_STACK_PUSH_OPCODES
     ]
-    require(pushes, f"{context}: the stack-frontier theorem names no register PUSH")
+    require(bool(pushes), f"{context}: the stack-frontier theorem names no register PUSH")
     for index, (instruction, fact) in enumerate(zip(instructions, facts, strict=True)):
         if index in pushes:
             offset = instruction["offset"]
             require(
                 instruction["length"] == 1
-                and 0 <= offset < len(body)
-                and body[offset] == fact["opcode"],
+                and 0 <= offset < len(image)
+                and image[offset] == fact["opcode"],
                 f"{context}: the stack-frontier theorem only admits an unprefixed 32-bit register PUSH",
             )
         else:
@@ -330,9 +332,9 @@ def _require_ia32_schedule_stack_frontier(
             )
             if "esp" not in fact["reads"]:
                 continue
-            direct = ia32_esp_used_only_as_a_base(body, instruction)
+            direct = ia32_esp_used_only_as_a_base(image, instruction)
             if direct:
-                found = ia32_esp_relative_displacement(body, instruction)
+                found = ia32_esp_relative_displacement(image, instruction)
                 require(
                     stack_adjusted,
                     f"{context}: the ESP-derived address at {fact['offset']} has no exact stack-adjustment declaration",
@@ -469,12 +471,14 @@ def _ia32_schedule_stack_frontier_projection(
                 "crosses_in_target_order": crossed,
             }
         )
-    require(discharged, f"{context}: the stack-frontier theorem has no moved PUSH-memory crossing")
+    require(
+        bool(discharged), f"{context}: the stack-frontier theorem has no moved PUSH-memory crossing"
+    )
     return (
         projected,
         {
             "theorem": theorem,
-            "compiler_identity": compiler_identity.proof_receipt(),
+            "compiler_identity": cast(Msvc420CompilerIdentity, compiler_identity).proof_receipt(),
             "discharged_memory_pairs": discharged,
         },
     )
@@ -557,7 +561,7 @@ def _ia32_schedule_private_stack_object_projection(
             }
         )
     require(
-        discharged,
+        bool(discharged),
         f"{context}: the private-stack/object theorem discharges no moved memory crossing",
     )
     stack_dependency_rebases: list[dict[str, object]] = []
@@ -590,7 +594,7 @@ def _ia32_schedule_private_stack_object_projection(
         )
     return projected, {
         "theorem": theorem,
-        "compiler_identity": compiler_identity.proof_receipt(),
+        "compiler_identity": cast(Msvc420CompilerIdentity, compiler_identity).proof_receipt(),
         "discharged_memory_pairs": discharged,
         "discharged_esp_dependencies": stack_dependency_rebases,
     }
@@ -651,7 +655,7 @@ def ia32_schedule_dependence_edges(
         if stack_adjusted:
             require(body is not None, f"{context}: a stack-adjusted window needs its body")
             for item in instructions:
-                found = ia32_esp_relative_displacement(body, item)
+                found = ia32_esp_relative_displacement(cast(bytes, body), item)
                 if found is None or found[0] == "no_displacement":
                     continue
                 require(
@@ -729,7 +733,7 @@ def ia32_schedule_dependence_edges(
                     )
                 ):
 
-                    def _canonical(mem, index):
+                    def _canonical(mem: dict[str, Any], index: int) -> dict[str, Any]:
                         depth = sum(
                             1
                             for k in range(index)

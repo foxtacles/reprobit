@@ -87,7 +87,9 @@ def produce_cross_tu_complete_target_resize_candidate(
     target_primary = target.function_section(mangled)
     complete_primary = complete.function_section(mangled)
 
-    def require_object_pins(role, coff, primary, prefix, length_name):
+    def require_object_pins(
+        role: str, coff: CoffObject, primary: dict[str, Any], prefix: str, length_name: str
+    ) -> None:
         require(
             len(coff.sections) == function[f"expected_{prefix}_section_count"]
             and primary["number"] == function[f"expected_{prefix}_section_number"],
@@ -159,7 +161,7 @@ def produce_cross_tu_complete_target_resize_candidate(
         "complete donor and owner carrier target shapes differ",
     )
 
-    def preceding_file_aux(coff, primary):
+    def preceding_file_aux(coff: CoffObject, primary: dict[str, Any]) -> bytes:
         function_index, _ = function_symbol(coff, mangled, primary["number"])
         candidates = [
             (index, symbol)
@@ -170,7 +172,7 @@ def produce_cross_tu_complete_target_resize_candidate(
             and (symbol["section"] == -2)
             and (symbol["aux_count"] >= 1)
         ]
-        require(candidates, "complete-target function has no preceding .file record")
+        require(bool(candidates), "complete-target function has no preceding .file record")
         index, symbol = max(candidates, key=lambda item: item[0])
         start = coff.symbol_offset + (index + 1) * 18
         end = start + symbol["aux_count"] * 18
@@ -186,7 +188,9 @@ def produce_cross_tu_complete_target_resize_candidate(
         "complete-target preceding .file bytes differ",
     )
 
-    def relocation_semantics(coff, section, primary_number):
+    def relocation_semantics(
+        coff: CoffObject, section: dict[str, Any], primary_number: int
+    ) -> list[tuple[Any, ...]]:
         return [
             (
                 row["offset"],
@@ -306,24 +310,24 @@ def produce_cross_tu_complete_target_resize_candidate(
         set(debug_differences) - set(range(16, 28)) == type_bytes,
         "complete-target CodeView differences are not type-index words",
     )
-    normalized_debug = bytearray(target_debug)
-    normalized_debug[16:28] = complete_debug[16:28]
-    normalized_debug = bytes(normalized_debug)
-    normalized = bytearray(target_donor_bytes)
-    normalized[
+    debug_buffer = bytearray(target_debug)
+    debug_buffer[16:28] = complete_debug[16:28]
+    normalized_debug = bytes(debug_buffer)
+    normalized_buffer = bytearray(target_donor_bytes)
+    normalized_buffer[
         target_primary["raw_offset"] : target_primary["raw_offset"] + target_primary["raw_size"]
     ] = coff_body(complete, complete_primary)
-    normalized[
+    normalized_buffer[
         target_primary["line_offset"] : target_primary["line_offset"] + len(normalized_lines)
     ] = normalized_lines
-    normalized[
+    normalized_buffer[
         target_fpo_section["raw_offset"] : target_fpo_section["raw_offset"] + len(complete_fpo)
     ] = complete_fpo
-    normalized[
+    normalized_buffer[
         target_debug_section["raw_offset"] : target_debug_section["raw_offset"]
         + len(normalized_debug)
     ] = normalized_debug
-    normalized = bytes(normalized)
+    normalized = bytes(normalized_buffer)
     allowed_offsets = (
         set(
             range(
@@ -352,7 +356,7 @@ def produce_cross_tu_complete_target_resize_candidate(
         if left != right
     }
     require(
-        changed_offsets and changed_offsets <= allowed_offsets,
+        bool(changed_offsets) and changed_offsets <= allowed_offsets,
         "complete-target normalizer changed a non-target byte",
     )
     normalized_coff = CoffObject(normalized)
@@ -617,7 +621,7 @@ def _produce_instruction_hybrid_resize_candidate_core(
     )
     target_relocations = detailed_relocations(target, target_primary)
     instruction_relocations = detailed_relocations(instruction_donor, instruction_primary)
-    hybrid = bytearray(target_donor_bytes)
+    hybrid_buffer = bytearray(target_donor_bytes)
     range_detail = []
     for index, item in enumerate(ranges):
         target_start, target_end = (item["target_start"], item["target_end"])
@@ -647,7 +651,7 @@ def _produce_instruction_hybrid_resize_candidate_core(
                 f"cross-TU range {index} overlaps a {role} relocation operand",
             )
         at = target_primary["raw_offset"] + target_start
-        hybrid[at : at + target_end - target_start] = source_instruction
+        hybrid_buffer[at : at + target_end - target_start] = source_instruction
         range_detail.append(
             {
                 "target_start": target_start,
@@ -658,7 +662,7 @@ def _produce_instruction_hybrid_resize_candidate_core(
                 "instruction_donor_sha256": item["instruction_donor_sha256"],
             }
         )
-    hybrid = bytes(hybrid)
+    hybrid = bytes(hybrid_buffer)
     # A range may resize the body; only the offsets both carry are compared here.
     changed_file_offsets = {
         offset
@@ -671,7 +675,7 @@ def _produce_instruction_hybrid_resize_candidate_core(
         for offset in range(item["target_start"], item["target_end"])
     }
     require(
-        changed_file_offsets and changed_file_offsets <= allowed_file_offsets,
+        bool(changed_file_offsets) and changed_file_offsets <= allowed_file_offsets,
         "cross-TU hybrid changed a non-target-donor byte",
     )
     hybrid_coff = CoffObject(hybrid)

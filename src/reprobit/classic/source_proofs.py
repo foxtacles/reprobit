@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Iterator
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from reprobit.binary import require
 
@@ -159,10 +159,10 @@ def require_declaration_carrier_seat_complement(
     """
     seed_lines = seed_source.split(b"\n")
     include_rows = [index for index, line in enumerate(seed_lines) if line.startswith(b"#include")]
-    require(include_rows, f"{context} seed lacks an include seat")
+    require(bool(include_rows), f"{context} seed lacks an include seat")
     insert_at = include_rows[-1] + 1
     head, tail = (seed_lines[:insert_at], seed_lines[insert_at:])
-    require(head and tail, f"{context} seed include seat is degenerate")
+    require(bool(head and tail), f"{context} seed include seat is degenerate")
     donor_lines = donor_source.split(b"\n")
     require(
         len(donor_lines) > len(tail) and donor_lines[len(donor_lines) - len(tail) :] == tail,
@@ -220,7 +220,7 @@ def select_same_tu_source_identity_window(
     opening = next((index for index, item in enumerate(tokens) if item[0] == "{"), None)
     require(opening is not None, f"{context} function body is missing")
     depth = 0
-    close = None
+    close: int | None = None
     for token, _, token_end in tokens[opening:]:
         if token == "{":
             depth += 1
@@ -234,7 +234,7 @@ def select_same_tu_source_identity_window(
         close is not None and close < len(data) and (data[close] == 10),
         f"{context} closing brace lacks one physical LF",
     )
-    return data[start : close + 1]
+    return data[start : cast(int, close) + 1]
 
 
 def require_same_tu_source_identity(
@@ -320,19 +320,20 @@ def select_source_permutation_window(data: bytes, proof: dict[str, Any], context
     opening = next((index for index, item in enumerate(tokens) if item[0] == "{"), None)
     require(opening is not None, f"{context} function body is missing")
     depth = 0
-    end = None
+    closing: int | None = None
     for token, _, token_end in tokens[opening:]:
         if token == "{":
             depth += 1
         elif token == "}":
             depth -= 1
             if depth == 0:
-                end = token_end
+                closing = token_end
                 break
-    require(end is not None, f"{context} function body is unbalanced")
-    if data[end : end + 1] == b"\n":
-        end += 1
-    return data[start:end]
+    require(closing is not None, f"{context} function body is unbalanced")
+    stop = cast(int, closing)
+    if data[stop : stop + 1] == b"\n":
+        stop += 1
+    return data[start:stop]
 
 
 def require_target_source_refactor_identity(

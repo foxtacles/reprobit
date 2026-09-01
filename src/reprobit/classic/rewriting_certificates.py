@@ -24,7 +24,7 @@ COMPOSED_REWRITING_KIND = "schedule_bijection_relational_v1"
 
 
 def _validate_commutative_operand_forms(
-    value: object, context: str, body_length: int
+    value: dict[str, Any], context: str, body_length: int
 ) -> tuple[list[Any], list[Any]]:
     """Validate the `commutative_operand_forms` list of a seam declaration.
 
@@ -54,7 +54,7 @@ def _validate_commutative_operand_forms(
         offsets = item.get("expected_rewritten_offsets")
         require(
             isinstance(offsets, list)
-            and offsets
+            and bool(offsets)
             and (offsets == sorted(set(offsets)))
             and all(
                 type(offset) is int and at <= offset < min(at + 12, body_length)
@@ -78,7 +78,7 @@ def _validate_commutative_operand_forms(
 
 
 def _validate_esp_argument_exchanges(
-    value: object, context: str, body_length: int
+    value: dict[str, Any], context: str, body_length: int
 ) -> tuple[list[Any], list[Any]]:
     """Validate the `esp_argument_exchanges` list of a seam declaration.
 
@@ -181,7 +181,7 @@ def _validate_fp_sum_rotations(
     where chain_bytes is every offset inside a declared chain."""
     normalized_rotations = []
     rotation_bytes = []
-    rotation_regions = set()
+    rotation_regions: set[int] = set()
     previous_chain_end = 0
     for index, item in enumerate(value.get("fp_sum_rotations") or []):
         item_context = f"{context}.fp_sum_rotations[{index}]"
@@ -213,7 +213,7 @@ def _validate_fp_sum_rotations(
         offsets = item.get("expected_rewritten_offsets")
         require(
             isinstance(offsets, list)
-            and offsets
+            and bool(offsets)
             and (offsets == sorted(set(offsets)))
             and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
@@ -242,7 +242,7 @@ def _validate_x87_squared_addend_exchanges(
     every offset inside a declared chain."""
     normalized_x87 = []
     x87_bytes = []
-    x87_regions = set()
+    x87_regions: set[int] = set()
     previous_x87_end = 0
     for index, item in enumerate(value.get("x87_squared_addend_exchanges") or []):
         item_context = f"{context}.x87_squared_addend_exchanges[{index}]"
@@ -283,7 +283,7 @@ def _validate_x87_squared_addend_exchanges(
         offsets = item.get("expected_rewritten_offsets")
         require(
             isinstance(offsets, list)
-            and offsets
+            and bool(offsets)
             and (offsets == sorted(set(offsets)))
             and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
@@ -298,7 +298,7 @@ def _validate_x87_squared_addend_exchanges(
         if reseat is not None:
             require(
                 isinstance(reseat, list)
-                and reseat
+                and bool(reseat)
                 and all(
                     isinstance(pair, list)
                     and len(pair) == 2
@@ -327,7 +327,7 @@ def _validate_simulated_region_rewrites(
     is every offset inside a declared region."""
     normalized_rewrites = []
     rewrite_bytes = []
-    rewrite_regions = set()
+    rewrite_regions: set[int] = set()
     previous_rewrite_end = 0
     for index, item in enumerate(value.get("simulated_region_rewrites") or []):
         item_context = f"{context}.simulated_region_rewrites[{index}]"
@@ -407,7 +407,7 @@ def _validate_simulated_region_rewrites(
         offsets = item.get("expected_rewritten_offsets")
         require(
             isinstance(offsets, list)
-            and offsets
+            and bool(offsets)
             and (offsets == sorted(set(offsets)))
             and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
@@ -440,7 +440,7 @@ def _validate_register_bijections(
     `.debug$S` S_REGISTER claims each bijection makes; the donor seam lets
     regions overlap when they rename disjoint registers and makes no
     `.debug$S` claim.  Returns (normalized_bijections, rewritten_bytes)."""
-    normalized_bijections = []
+    normalized_bijections: list[dict[str, Any]] = []
     bijection_bytes = []
     previous_end = 0
     for index, item in enumerate(value.get("register_bijections") or []):
@@ -506,7 +506,7 @@ def _validate_register_bijections(
         offsets = item.get("expected_rewritten_offsets")
         require(
             isinstance(offsets, list)
-            and offsets
+            and bool(offsets)
             and (offsets == sorted(set(offsets)))
             and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
@@ -677,7 +677,7 @@ def _validate_slot_bijections(value: dict[str, Any], context: str, body_length: 
         offsets = item.get("expected_rewritten_offsets")
         require(
             isinstance(offsets, list)
-            and offsets
+            and bool(offsets)
             and (offsets == sorted(set(offsets)))
             and all(type(offset) is int and 0 <= offset < body_length for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
@@ -704,7 +704,7 @@ def _require_changed_offsets(value: dict[str, Any], context: str, body_length: i
     changed = value.get("expected_changed_offsets")
     require(
         isinstance(changed, list)
-        and changed
+        and bool(changed)
         and (changed == sorted(set(changed)))
         and all(type(offset) is int and 0 <= offset < body_length for offset in changed),
         f"{context}.expected_changed_offsets is invalid",
@@ -766,8 +766,9 @@ def validate_composed_rewriting(
 ) -> dict[str, Any]:
     """Validate one composed-rewriting certificate declaration."""
     require(isinstance(value, dict), f"{context} must be an object")
+    document = cast(dict[str, Any], value)
     exact_audit_keys(
-        value,
+        document,
         {
             "kind",
             "windows",
@@ -806,19 +807,19 @@ def validate_composed_rewriting(
         },
     )
     code_length, targets, normalized_windows = _validate_rewriting_scope(
-        value, context, body_length, COMPOSED_REWRITING_KIND
+        document, context, body_length, COMPOSED_REWRITING_KIND
     )
     normalized_rotations, rotation_bytes, rotation_regions = _validate_fp_sum_rotations(
-        value, context, body_length
+        document, context, body_length
     )
     normalized_x87, x87_bytes, x87_regions = _validate_x87_squared_addend_exchanges(
-        value, context, body_length
+        document, context, body_length
     )
     normalized_region_rewrites = []
     region_rewrite_bytes = []
-    region_rewrite_regions = set()
+    region_rewrite_regions: set[int] = set()
     previous_region_end = 0
-    for index, item in enumerate(value.get("simulated_region_rewrites") or []):
+    for index, item in enumerate(document.get("simulated_region_rewrites") or []):
         item_context = f"{context}.simulated_region_rewrites[{index}]"
         require(isinstance(item, dict), f"{item_context} must be an object")
         exact_audit_keys(
@@ -865,7 +866,7 @@ def validate_composed_rewriting(
         offsets = item.get("expected_rewritten_offsets")
         require(
             isinstance(offsets, list)
-            and offsets
+            and bool(offsets)
             and (offsets == sorted(set(offsets)))
             and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
@@ -884,42 +885,48 @@ def validate_composed_rewriting(
             }
         )
     normalized_bijections, bijection_bytes = _validate_register_bijections(
-        value, context, body_length, composed=True
+        document, context, body_length, composed=True
     )
     # The class-specific loop above refuses a reseat and keeps its own
     # normalized shape; the shared validator still runs so that the
     # field-rewrite, dead-register, dead-slot and reseat-shape obligations
     # every region rewrite carries are checked for this class as well.
-    _validate_simulated_region_rewrites(value, context, body_length)
-    normalized_sites, relational_bytes = _validate_relational_sites(value, context, body_length)
-    normalized_forms, form_bytes = _validate_commutative_operand_forms(value, context, body_length)
-    normalized_exchange_items, exchange_bytes = _validate_esp_argument_exchanges(
-        value, context, body_length
+    _validate_simulated_region_rewrites(document, context, body_length)
+    normalized_sites, relational_bytes = _validate_relational_sites(document, context, body_length)
+    normalized_forms, form_bytes = _validate_commutative_operand_forms(
+        document, context, body_length
     )
-    declared_slots = value.get("slot_bijections") or []
+    normalized_exchange_items, exchange_bytes = _validate_esp_argument_exchanges(
+        document, context, body_length
+    )
+    declared_slots = document.get("slot_bijections") or []
     require(
-        normalized_windows
-        or normalized_bijections
-        or normalized_sites
-        or normalized_rotations
-        or normalized_region_rewrites
-        or normalized_forms
-        or declared_slots
-        or normalized_x87,
+        bool(
+            normalized_windows
+            or normalized_bijections
+            or normalized_sites
+            or normalized_rotations
+            or normalized_region_rewrites
+            or normalized_forms
+            or declared_slots
+            or normalized_x87
+        ),
         f"{context} declares no certificate",
     )
     require(
-        normalized_region_rewrites
-        or normalized_forms
-        or normalized_x87
-        or lone_statement_ok
-        or (
-            len(normalized_windows)
-            + len(normalized_bijections)
-            + len(normalized_sites)
-            + len(normalized_rotations)
-            + len(declared_slots)
-            >= 2
+        bool(
+            normalized_region_rewrites
+            or normalized_forms
+            or normalized_x87
+            or lone_statement_ok
+            or (
+                len(normalized_windows)
+                + len(normalized_bijections)
+                + len(normalized_sites)
+                + len(normalized_rotations)
+                + len(declared_slots)
+                >= 2
+            )
         ),
         f"{context} composes nothing: a single statement belongs to its own class",
     )
@@ -974,7 +981,7 @@ def validate_composed_rewriting(
         not set(form_bytes) & (window_bytes | set(bijection_bytes) | set(relational_bytes)),
         f"{context}: a commutative operand form overlaps another certificate's bytes",
     )
-    changed = _require_changed_offsets(value, context, body_length)
+    changed = _require_changed_offsets(document, context, body_length)
     slot_bytes = {
         offset
         for item in declared_slots
@@ -1014,12 +1021,12 @@ def validate_composed_rewriting(
         f"{context}.expected_changed_offsets names a byte no declared certificate can move",
     )
     procedure, references, external, rationale = _validate_rewriting_envelope(
-        value, context, body_length
+        document, context, body_length
     )
     normalized = {
         "kind": COMPOSED_REWRITING_KIND,
         "expected_instruction_count": require_exact_int(
-            value.get("expected_instruction_count"),
+            document.get("expected_instruction_count"),
             f"{context}.expected_instruction_count",
             minimum=2,
         ),
@@ -1028,14 +1035,15 @@ def validate_composed_rewriting(
         "expected_code_symbol_references": [list(item) for item in references],
         "expected_external_entries": list(external),
         "expected_seed_debug_s_sha256": require_sha(
-            value.get("expected_seed_debug_s_sha256"), f"{context}.expected_seed_debug_s_sha256"
+            document.get("expected_seed_debug_s_sha256"), f"{context}.expected_seed_debug_s_sha256"
         ),
         "expected_image_debug_s_sha256": require_sha(
-            value.get("expected_image_debug_s_sha256"), f"{context}.expected_image_debug_s_sha256"
+            document.get("expected_image_debug_s_sha256"),
+            f"{context}.expected_image_debug_s_sha256",
         ),
         "authenticity_rationale": rationale,
     }
-    normalized_slots = _validate_slot_bijections(value, context, body_length)
+    normalized_slots = _validate_slot_bijections(document, context, body_length)
     normalized["windows"] = normalized_windows
     normalized["register_bijections"] = normalized_bijections
     normalized["relational_sites"] = normalized_sites
@@ -1058,8 +1066,9 @@ DONOR_REWRITING_KIND = "donor_fp_bijection_rewriting_v1"
 def validate_donor_rewriting(value: object, context: str, body_length: int) -> dict[str, Any]:
     """Validate one donor-rewriting certificate declaration."""
     require(isinstance(value, dict), f"{context} must be an object")
+    document = cast(dict[str, Any], value)
     exact_audit_keys(
-        value,
+        document,
         {
             "kind",
             "windows",
@@ -1096,13 +1105,13 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         },
     )
     code_length, targets, normalized_windows = _validate_rewriting_scope(
-        value, context, body_length, DONOR_REWRITING_KIND
+        document, context, body_length, DONOR_REWRITING_KIND
     )
     normalized_rotations, rotation_bytes, rotation_regions = _validate_fp_sum_rotations(
-        value, context, body_length
+        document, context, body_length
     )
     normalized_x87, x87_bytes, x87_regions = _validate_x87_squared_addend_exchanges(
-        value, context, body_length
+        document, context, body_length
     )
     rotation_bytes.extend(x87_bytes)
     require(
@@ -1111,12 +1120,12 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
     )
     rotation_regions |= x87_regions
     normalized_bijections, bijection_bytes = _validate_register_bijections(
-        value, context, body_length, composed=False
+        document, context, body_length, composed=False
     )
     normalized_exchanges = []
     exchange_bytes = []
     previous_exchange_end = 0
-    for index, item in enumerate(value.get("fp_pointer_exchanges") or []):
+    for index, item in enumerate(document.get("fp_pointer_exchanges") or []):
         item_context = f"{context}.fp_pointer_exchanges[{index}]"
         require(isinstance(item, dict), f"{item_context} must be an object")
         exact_audit_keys(
@@ -1163,7 +1172,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         offsets = item.get("expected_rewritten_offsets")
         require(
             isinstance(offsets, list)
-            and offsets
+            and bool(offsets)
             and (offsets == sorted(set(offsets)))
             and all(type(offset) is int and start <= offset < end for offset in offsets),
             f"{item_context}.expected_rewritten_offsets is invalid",
@@ -1179,21 +1188,25 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             }
         )
     normalized_rewrites, rewrite_bytes, rewrite_regions = _validate_simulated_region_rewrites(
-        value, context, body_length
+        document, context, body_length
     )
-    normalized_sites, relational_bytes = _validate_relational_sites(value, context, body_length)
-    normalized_slots = _validate_slot_bijections(value, context, body_length)
-    normalized_forms, form_bytes = _validate_commutative_operand_forms(value, context, body_length)
+    normalized_sites, relational_bytes = _validate_relational_sites(document, context, body_length)
+    normalized_slots = _validate_slot_bijections(document, context, body_length)
+    normalized_forms, form_bytes = _validate_commutative_operand_forms(
+        document, context, body_length
+    )
     require(
-        normalized_windows
-        or normalized_rotations
-        or normalized_bijections
-        or normalized_exchanges
-        or normalized_rewrites
-        or normalized_sites
-        or normalized_forms
-        or normalized_slots
-        or normalized_x87,
+        bool(
+            normalized_windows
+            or normalized_rotations
+            or normalized_bijections
+            or normalized_exchanges
+            or normalized_rewrites
+            or normalized_sites
+            or normalized_forms
+            or normalized_slots
+            or normalized_x87
+        ),
         f"{context} declares no certificate",
     )
     window_bytes = {
@@ -1241,7 +1254,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         not window_bytes & set(relational_bytes),
         f"{context}: a relational reversal rewrites a byte inside a reordered window",
     )
-    changed = _require_changed_offsets(value, context, body_length)
+    changed = _require_changed_offsets(document, context, body_length)
     identity_relational = {
         offset
         for site in normalized_sites
@@ -1280,12 +1293,12 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         f"{context}.expected_changed_offsets names a byte no declared certificate can move",
     )
     procedure, references, external, rationale = _validate_rewriting_envelope(
-        value, context, body_length
+        document, context, body_length
     )
     normalized = {
         "kind": DONOR_REWRITING_KIND,
         "expected_instruction_count": require_exact_int(
-            value.get("expected_instruction_count"),
+            document.get("expected_instruction_count"),
             f"{context}.expected_instruction_count",
             minimum=2,
         ),

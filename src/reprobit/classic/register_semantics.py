@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Iterable
+from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError, require
 from reprobit.ia32_decode import IA32_PREFIXES, supported_ia32_instruction_length
@@ -338,7 +339,9 @@ _IA32_OPERAND_SIZE_PREFIX = 102
 _IA32_REPEAT_PREFIXES = frozenset({242, 243})
 
 
-def _ia32_string_form(reads, writes, *, memory_read, memory_write) -> dict[str, Any]:
+def _ia32_string_form(
+    reads: Iterable[str], writes: Iterable[str], *, memory_read: bool, memory_write: bool
+) -> dict[str, Any]:
     """One repeated string operation, with its COMPLETE implicit operand set.
 
     Every general register such a form touches -- the count in ECX, the
@@ -413,12 +416,12 @@ _IA32_ATOMS_OF = {
 }
 
 
-def ia32_register_atoms(names) -> frozenset[str]:
+def ia32_register_atoms(names: Iterable[str]) -> frozenset[str]:
     """The atom set of a collection of whole general registers."""
     return frozenset().union(*[_IA32_ATOMS_OF[name] for name in names]) if names else frozenset()
 
 
-def _ia32_atom_registers(atoms) -> list[str]:
+def _ia32_atom_registers(atoms: Iterable[str]) -> list[str]:
     """The register names an atom set touches, for a refusal message."""
     return sorted({atom.split(".")[0] for atom in atoms})
 
@@ -566,6 +569,7 @@ def decode_ia32_bijection_instruction(
         form is not None,
         f"{context}: opcode 0x{opcode:02x} is outside the register-bijection table",
     )
+    form = cast(dict[str, Any], form)
     width = form["width"]
     if operand_size_16:
         require(
@@ -845,7 +849,7 @@ def decode_ia32_bijection_body(
     exactly `code_length` with no straddling instruction, and its last
     instruction may not fall through into the tail.
     """
-    require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
+    require(isinstance(body, (bytes, bytearray)) and bool(body), f"{context}: body is empty")
     body = bytes(body)
     limit = len(body) if code_length is None else code_length
     require(
@@ -894,7 +898,7 @@ def _ia32_backward_liveness(
     web certificate proves a value has no consumer outside its own web.
     """
     blind = blind or {}
-    live = [frozenset() for _ in instructions]
+    live: list[frozenset[str]] = [frozenset() for _ in instructions]
     for _ in range(len(instructions) * 20 + 20):
         changed = False
         for index in reversed(range(len(instructions))):
@@ -929,7 +933,7 @@ def _ia32_live_out(
 
 def _register_bijection_live_sets(
     instructions: list[dict[str, Any]], context: str
-) -> list[frozenset[str]]:
+) -> tuple[list[frozenset[str]], list[list[int]]]:
     """Backward liveness over the body's own control-flow graph.
 
     Successors are the fall-through and the decoded branch target; `ret` has

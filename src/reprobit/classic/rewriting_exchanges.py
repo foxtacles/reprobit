@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from reprobit.binary import require
 from reprobit.ia32_decode import supported_ia32_instruction_length
@@ -64,7 +64,7 @@ def apply_esp_argument_exchange(
           the two registers exchanged.
     """
     require_payload_free_declaration(exchanges, f"{context} ESP argument declaration")
-    require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
+    require(isinstance(body, (bytes, bytearray)) and bool(body), f"{context}: body is empty")
     body = bytes(body)
     require(
         isinstance(exchanges, list) and len(exchanges) == 1,
@@ -193,9 +193,9 @@ def apply_esp_argument_exchange(
             )
             image[byte_index] = (image[byte_index] & ~(7 << shift) | numbers[value] << shift) & 255
             rewritten.append(byte_index)
-    image = bytes(image)
+    output = bytes(image)
     image_instructions = decode_ia32_bijection_body(
-        image, f"{context} image", relocations, code_length
+        output, f"{context} output", relocations, code_length
     )
     require(
         [(entry["offset"], entry["length"]) for entry in image_instructions]
@@ -223,7 +223,7 @@ def apply_esp_argument_exchange(
             left["reads"] == expected_reads and left["writes"] == expected_writes,
             f"{item_context}: the rewrite at {right['offset']} is not the declared two-register exchange",
         )
-    rewritten = sorted(set(offset for offset in rewritten if image[offset] != body[offset]))
+    rewritten = sorted(set(offset for offset in rewritten if output[offset] != body[offset]))
     sites = [
         {
             "first_offset": first,
@@ -235,7 +235,7 @@ def apply_esp_argument_exchange(
             "rewritten_offsets": rewritten,
         }
     ]
-    return (image, {"sites": sites})
+    return (output, {"sites": sites})
 
 
 FP_POINTER_EXCHANGE_KIND = "fp_pointer_addend_exchange_v1"
@@ -244,15 +244,17 @@ FP_POINTER_EXCHANGE_KIND = "fp_pointer_addend_exchange_v1"
 _SIMULATOR_REGS = ("eax", "ecx", "edx", "ebx", "esp", "ebp", "esi", "edi")
 
 
-def _fp_exchange_simulate(body: bytes, start: int, end: int, context: str):
+def _fp_exchange_simulate(
+    body: bytes, start: int, end: int, context: str
+) -> tuple[dict[str, Any], list[Any], tuple[int, Any] | None]:
     """Symbolically execute [start, end); return the end state."""
-    regs = {name: ("reg0", name) for name in _SIMULATOR_REGS}
-    stack = []
-    last_flags = None
+    regs: dict[str, Any] = {name: ("reg0", name) for name in _SIMULATOR_REGS}
+    stack: list[Any] = []
+    last_flags: tuple[int, Any] | None = None
     offset = start
 
-    def norm_sum(left, right):
-        parts = []
+    def norm_sum(left: Any, right: Any) -> tuple[Any, ...]:
+        parts: list[Any] = []
         for item in (left, right):
             if isinstance(item, tuple) and item[0] == "fsum":
                 parts.extend(item[1])
@@ -273,9 +275,16 @@ def _fp_exchange_simulate(body: bytes, start: int, end: int, context: str):
         reg_field = modrm >> 3 & 7 if modrm is not None else None
         rm = modrm & 7 if modrm is not None else None
 
-        def mem_operand(cursor_base):
+        def mem_operand(
+            cursor_base: int,
+            *,
+            mod: int | None = mod,
+            rm: int | None = rm,
+            offset: int = offset,
+            encoded: bytes = encoded,
+        ) -> tuple[Any, ...]:
             require(rm != 4, f"{context}: SIB addressing at {offset} is outside the simulator set")
-            base = regs[_SIMULATOR_REGS[rm]]
+            base = regs[_SIMULATOR_REGS[cast(int, rm)]]
             cursor = cursor_base
             if mod == 1:
                 disp = int.from_bytes(encoded[cursor : cursor + 1], "little", signed=True)
@@ -288,30 +297,34 @@ def _fp_exchange_simulate(body: bytes, start: int, end: int, context: str):
             return ("addr", base, disp)
 
         if op == 139 and mod != 3:
-            regs[_SIMULATOR_REGS[reg_field]] = ("load", mem_operand(2))
+            regs[_SIMULATOR_REGS[cast(int, reg_field)]] = ("load", mem_operand(2))
         elif op == 139 and mod == 3:
-            regs[_SIMULATOR_REGS[reg_field]] = regs[_SIMULATOR_REGS[rm]]
+            regs[_SIMULATOR_REGS[cast(int, reg_field)]] = regs[_SIMULATOR_REGS[cast(int, rm)]]
         elif op == 137 and mod == 3:
-            regs[_SIMULATOR_REGS[rm]] = regs[_SIMULATOR_REGS[reg_field]]
+            regs[_SIMULATOR_REGS[cast(int, rm)]] = regs[_SIMULATOR_REGS[cast(int, reg_field)]]
         elif op == 131 and mod == 3 and (reg_field == 0):
             value = int.from_bytes(encoded[2:3], "little", signed=True)
-            name = _SIMULATOR_REGS[rm]
+            name = _SIMULATOR_REGS[cast(int, rm)]
             regs[name] = ("add", regs[name], value)
             last_flags = (offset - start, ("addflags", regs[name]))
         elif op == 129 and mod == 3 and (reg_field == 0):
             value = int.from_bytes(encoded[2:6], "little", signed=True)
-            name = _SIMULATOR_REGS[rm]
+            name = _SIMULATOR_REGS[cast(int, rm)]
             regs[name] = ("add", regs[name], value)
             last_flags = (offset - start, ("addflags", regs[name]))
         elif op == 133 and mod == 3:
             last_flags = (
                 offset - start,
-                ("test", regs[_SIMULATOR_REGS[rm]], regs[_SIMULATOR_REGS[reg_field]]),
+                (
+                    "test",
+                    regs[_SIMULATOR_REGS[cast(int, rm)]],
+                    regs[_SIMULATOR_REGS[cast(int, reg_field)]],
+                ),
             )
         elif op == 217 and mod != 3 and (reg_field == 0):
             stack.append(("load32", mem_operand(2)))
         elif op == 216 and mod != 3 and (reg_field == 1):
-            require(stack, f"{context}: fmul at {offset} multiplies the unknown stack base")
+            require(bool(stack), f"{context}: fmul at {offset} multiplies the unknown stack base")
             stack[-1] = ("fmul", stack[-1], ("load32", mem_operand(2)))
         elif encoded == b"\xde\xc1":
             require(len(stack) >= 2, f"{context}: faddp at {offset} reaches the unknown stack base")
@@ -339,9 +352,9 @@ def apply_fp_pointer_exchange(
 ) -> tuple[bytes, dict[str, Any]]:
     """Exchange declared pointer-setup immediates, or refuse."""
     require_payload_free_declaration(exchanges, f"{context} FP pointer declaration")
-    require(isinstance(body, (bytes, bytearray)) and body, f"{context}: body is empty")
+    require(isinstance(body, (bytes, bytearray)) and bool(body), f"{context}: body is empty")
     body = bytes(body)
-    require(isinstance(exchanges, list) and exchanges, f"{context}: no exchange is declared")
+    require(isinstance(exchanges, list) and bool(exchanges), f"{context}: no exchange is declared")
     items, successors, entries = ia32_relational_flow_walk(
         body, relocations, context, code_length, external_entries
     )
@@ -445,11 +458,11 @@ def apply_fp_pointer_exchange(
                 ),
             }
         )
-    image = bytes(image)
+    output = bytes(image)
     require(image != body, f"{context}: the image does not move the body")
-    changed = {offset for offset in range(len(body)) if body[offset] != image[offset]}
+    changed = {offset for offset in range(len(body)) if body[offset] != output[offset]}
     declared = {offset for item in proved for offset in item["rewritten_offsets"]}
     require(
-        changed <= declared, f"{context}: the image changed a byte outside the declared exchanges"
+        changed <= declared, f"{context}: the output changed a byte outside the declared exchanges"
     )
-    return (image, {"kind": FP_POINTER_EXCHANGE_KIND, "exchanges": proved})
+    return (output, {"kind": FP_POINTER_EXCHANGE_KIND, "exchanges": proved})
