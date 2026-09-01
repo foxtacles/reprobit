@@ -2,7 +2,7 @@
 
 ``rbit source lock`` refuses to bless stale pins.  This module captures one
 immutable project snapshot, delegates the closed classic derivations to
-``reprobit.classic.source_regeneration``, and returns a reviewable plan whose
+``reprobit.classic_source_regeneration``, and returns a reviewable plan whose
 publication is guarded by compare-and-swap preconditions.
 
 The derivation only refreshes mechanical identities.  It never deletes an
@@ -20,7 +20,7 @@ from types import MappingProxyType
 from typing import Any
 
 from reprobit.authority_snapshot import AuthoritySnapshotError, json_authority_members
-from reprobit.classic.source_regeneration import derive_classic_source_regeneration
+from reprobit.classic_source_regeneration import derive_classic_source_regeneration
 from reprobit.project_loader import load_project
 from reprobit.schema import BuildPlanDocument, InterventionDocument, ProofDocument
 from reprobit.source_lock import SourceLockError, receipt_source_input

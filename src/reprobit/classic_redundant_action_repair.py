@@ -5,11 +5,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from hashlib import sha256
 
-from reprobit.classic.repair_authority import (
+from reprobit.classic_project import ClassicDispatchMaterials
+from reprobit.classic_repair_authority import (
     ClassicInterventionEdit,
     ClassicReceiptEdit,
 )
-from reprobit.classic_project import ClassicDispatchMaterials
 from reprobit.coff_format import CoffObject, coff_body
 from reprobit.schema import (
     ClassicProofReceipt,

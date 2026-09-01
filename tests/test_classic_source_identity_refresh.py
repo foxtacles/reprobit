@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from reprobit.artifacts import digest_bytes
-from reprobit.classic.source_regeneration import (
+from reprobit.classic_source_regeneration import (
     _ClassicRegenerationContext,
     _parameter_map,
     _refresh_source_identities,

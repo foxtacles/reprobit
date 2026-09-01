@@ -14,22 +14,22 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Protocol
 
-from reprobit.classic.redundant_action_repair import (
+from reprobit.classic_project import ClassicDispatchMaterials
+from reprobit.classic_redundant_action_repair import (
     RedundantActionRepairError,
     plan_redundant_action_retirements,
 )
-from reprobit.classic.repair_authority import apply_classic_authority_edits
-from reprobit.classic.repair_probe import (
+from reprobit.classic_repair_authority import apply_classic_authority_edits
+from reprobit.classic_repair_probe import (
     MAX_RETUNE_PROBE_CANDIDATES,
     ClassicDonorRetuneRefusal,
 )
-from reprobit.classic.repair_session import (
+from reprobit.classic_repair_session import (
     ClassicReceiptRepair,
     ClassicRepairRefusal,
     ClassicRepairSession,
     apply_classic_receipt_repairs,
 )
-from reprobit.classic_project import ClassicDispatchMaterials
 from reprobit.cli_build import command_build
 from reprobit.cli_output import CLIOutput
 from reprobit.cli_project import command_source_lock

@@ -4,12 +4,6 @@ from typing import cast
 
 import pytest
 
-from reprobit.classic.repair_dispatch import (
-    ClassicActionDispatchResult,
-    ClassicMeasuredReceiptRepair,
-    ClassicMeasuredReceiptRepairRequest,
-    dispatch_classic_action,
-)
 from reprobit.classic_donors import matching_candidate_constraints
 from reprobit.classic_orchestration import ClassicPreparedUnit
 from reprobit.classic_project import (
@@ -17,6 +11,12 @@ from reprobit.classic_project import (
     ClassicDispatchMaterials,
     ClassicFamilyDispatcher,
     ClassicProjectError,
+)
+from reprobit.classic_repair_dispatch import (
+    ClassicActionDispatchResult,
+    ClassicMeasuredReceiptRepair,
+    ClassicMeasuredReceiptRepairRequest,
+    dispatch_classic_action,
 )
 from reprobit.model import Scope
 from reprobit.schema import (

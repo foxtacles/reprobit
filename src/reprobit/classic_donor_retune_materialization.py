@@ -8,7 +8,8 @@ from copy import deepcopy
 from dataclasses import dataclass
 from typing import cast
 
-from reprobit.classic.donor_retune_candidates import (
+from reprobit.classic.overlay_document import render_classic_overlay_proposal
+from reprobit.classic_donor_retune_candidates import (
     MAX_RETUNE_RADIUS,
     DonorRetuneCandidate,
     DonorRetuneChange,
@@ -18,7 +19,6 @@ from reprobit.classic.donor_retune_candidates import (
     _copy_with_parameters,
     _parameter_values,
 )
-from reprobit.classic.overlay_document import render_classic_overlay_proposal
 from reprobit.classic_donors import (
     DonorSourceError,
     merge_candidate_constraints,

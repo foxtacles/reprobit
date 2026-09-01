@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from reprobit.classic.repair_session import (
+from reprobit.classic_repair_session import (
     ClassicReceiptRepair,
     ClassicRepairSessionError,
     apply_classic_receipt_repairs,

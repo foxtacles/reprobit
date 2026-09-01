@@ -7,17 +7,17 @@ from pathlib import Path
 from threading import Lock
 from typing import cast
 
-from reprobit.classic.measured_pin_repair import (
+from reprobit.classic_measured_pin_repair import (
     MeasuredPinRepairError,
     repair_measured_pins,
 )
-from reprobit.classic.repair_authority import (
+from reprobit.classic_orchestration import ClassicPreparedUnit
+from reprobit.classic_project import ClassicDispatchMaterials
+from reprobit.classic_repair_authority import (
     ClassicReceiptEdit,
     apply_classic_authority_edits,
 )
-from reprobit.classic.repair_dispatch import ClassicMeasuredReceiptRepairRequest
-from reprobit.classic_orchestration import ClassicPreparedUnit
-from reprobit.classic_project import ClassicDispatchMaterials
+from reprobit.classic_repair_dispatch import ClassicMeasuredReceiptRepairRequest
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeIntervention,

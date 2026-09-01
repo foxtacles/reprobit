@@ -7,23 +7,23 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
 
-from reprobit.classic.repair_authority import (
-    ClassicInterventionEdit,
-    ClassicReceiptEdit,
-    apply_classic_authority_edits,
-)
-from reprobit.classic.repair_probe import (
-    MAX_RETUNE_PROBE_CANDIDATES,
-    ClassicDonorRetuneProbeResult,
-    ClassicDonorRetuneRepair,
-    probe_bounded_donor_retunes,
-)
-from reprobit.classic.repair_session import ClassicRepairRefusal
 from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
     canonical_overlay_operations,
 )
 from reprobit.classic_project import ClassicProjectError
+from reprobit.classic_repair_authority import (
+    ClassicInterventionEdit,
+    ClassicReceiptEdit,
+    apply_classic_authority_edits,
+)
+from reprobit.classic_repair_probe import (
+    MAX_RETUNE_PROBE_CANDIDATES,
+    ClassicDonorRetuneProbeResult,
+    ClassicDonorRetuneRepair,
+    probe_bounded_donor_retunes,
+)
+from reprobit.classic_repair_session import ClassicRepairRefusal
 from reprobit.cli_build import prepare_producer_graph_run
 from reprobit.cli_environment import (
     resolve_classic_execution_inputs,

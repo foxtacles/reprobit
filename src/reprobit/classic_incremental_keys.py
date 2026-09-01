@@ -6,13 +6,7 @@ from collections.abc import Callable, Mapping, Sequence
 from functools import partial
 from pathlib import Path
 
-from reprobit.classic_incremental_context import (
-    ClassicIncrementalError,
-    ClassicIncrementalPlan,
-    json_value,
-    reference_payload,
-)
-from reprobit.classic_link_closure import (
+from reprobit.classic.link_closure import (
     ClassicLinkClosureError,
     MissingDirectiveInputsError,
     audit_classic_link_directives,
@@ -20,6 +14,12 @@ from reprobit.classic_link_closure import (
     link_directive_closure_material,
     module_definition_material,
     parse_classic_module_definition,
+)
+from reprobit.classic_incremental_context import (
+    ClassicIncrementalError,
+    ClassicIncrementalPlan,
+    json_value,
+    reference_payload,
 )
 from reprobit.classic_orchestration import ClassicPreparedUnit
 from reprobit.incremental_executor import NodeOutcome

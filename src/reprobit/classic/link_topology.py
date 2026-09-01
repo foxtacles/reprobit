@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from reprobit.classic_link_closure import (
+from reprobit.classic.link_closure import (
     ClassicLinkClosureError,
     direct_terminal_link_control_references,
 )

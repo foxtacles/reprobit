@@ -252,3 +252,52 @@ def test_production_imports_and_exports_internal_owners_directly() -> None:
     assert not violations, (
         f"import and export names from their defining internal modules: {violations}"
     )
+
+
+# Module prefixes that build on the classic package: the classic runtime,
+# project and repair layer, execution and state, the CLI and every workflow
+# above it.  The package may reach the model, format, path and toolchain-profile
+# foundations, never these.
+CLASSIC_UPPER_LAYERS = (
+    "reprobit.classic_",
+    "reprobit.backends",
+    "reprobit.cache",
+    "reprobit.cli",
+    "reprobit.cmake",
+    "reprobit.discovery",
+    "reprobit.engine",
+    "reprobit.evidence_audit",
+    "reprobit.execution",
+    "reprobit.incremental",
+    "reprobit.msvc",
+    "reprobit.repair",
+    "reprobit.report",
+    "reprobit.scheduler",
+    "reprobit.state",
+    "reprobit.transactions",
+    "reprobit.verify",
+)
+
+
+def test_classic_package_is_a_leaf_beneath_the_runtime_layers() -> None:
+    modules = _internal_modules()
+    graph = {module: _dependencies(module, path, modules) for module, path in modules.items()}
+    roots = sorted(module for module in modules if module.startswith("reprobit.classic."))
+    assert roots
+    parent: dict[str, str | None] = dict.fromkeys(roots)
+    pending = list(roots)
+    while pending:
+        module = pending.pop()
+        for dependency in sorted(graph[module]):
+            if dependency not in parent:
+                parent[dependency] = module
+                pending.append(dependency)
+    violations: list[str] = []
+    for module in sorted(parent):
+        if not module.startswith(CLASSIC_UPPER_LAYERS):
+            continue
+        chain = [module]
+        while (owner := parent[chain[-1]]) is not None:
+            chain.append(owner)
+        violations.append(" -> ".join(reversed(chain)))
+    assert not violations, f"the classic package imports a layer built on it: {violations}"

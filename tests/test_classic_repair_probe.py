@@ -5,13 +5,13 @@ from typing import Any
 
 import pytest
 
-import reprobit.classic.repair_probe as subject
-import reprobit.classic.repair_probe_candidates as candidate_support
-from reprobit.classic.measured_pin_repair import MeasuredPinRepairError
-from reprobit.classic.repair_session import ClassicRepairRefusal
+import reprobit.classic_repair_probe as subject
+import reprobit.classic_repair_probe_candidates as candidate_support
 from reprobit.classic_donors import generate_declaration_shape, prepare_donor_compile_request
+from reprobit.classic_measured_pin_repair import MeasuredPinRepairError
 from reprobit.classic_orchestration import ClassicPreparedDonor, ClassicPreparedUnit
 from reprobit.classic_project import ClassicDispatchMaterials
+from reprobit.classic_repair_session import ClassicRepairRefusal
 from reprobit.classic_runtime_probe import ClassicDonorProbeInput, ClassicDonorProbeOutput
 from reprobit.execution import StepExecutionReceipt
 from reprobit.model import Digest, Scope

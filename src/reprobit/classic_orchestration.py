@@ -17,7 +17,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 import reprobit.classic.composition_comdat_order as composition_comdat_order
-import reprobit.classic.repair_dispatch as repair_dispatch
+import reprobit.classic_repair_dispatch as repair_dispatch
 from reprobit.classic.compiler_identity import (
     Msvc420CompilerIdentity,
     issue_msvc420_compiler_identity,

@@ -8,9 +8,9 @@ from typing import Any, cast
 import pytest
 
 import reprobit.repair_workflow as subject
-from reprobit.classic.donor_retune_candidates import DonorRetuneChange
-from reprobit.classic.redundant_action_repair import RedundantActionRepairError
-from reprobit.classic.repair_probe import (
+from reprobit.classic_donor_retune_candidates import DonorRetuneChange
+from reprobit.classic_redundant_action_repair import RedundantActionRepairError
+from reprobit.classic_repair_probe import (
     ClassicDonorRetuneAttemptRefusal,
     ClassicDonorRetuneProbeResult,
     ClassicDonorRetuneRefusal,

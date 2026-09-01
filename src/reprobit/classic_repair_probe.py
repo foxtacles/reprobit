@@ -13,39 +13,39 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from reprobit.classic.donor_retune_candidates import (
+from reprobit.classic_donor_retune_candidates import (
     DEFAULT_RETUNE_CANDIDATES,
     MAX_RETUNE_RADIUS,
     DonorRetuneChange,
     DonorRetuneError,
     enumerate_donor_retune_candidates,
 )
-from reprobit.classic.donor_retune_materialization import (
+from reprobit.classic_donor_retune_materialization import (
     MaterializedDonorRetuneCandidate,
 )
-from reprobit.classic.measured_pin_repair import MeasuredPinRepairError
-from reprobit.classic.repair_authority import (
+from reprobit.classic_donors import DonorSourceError
+from reprobit.classic_measured_pin_repair import MeasuredPinRepairError
+from reprobit.classic_orchestration import (
+    ClassicPreparedDonor,
+    ClassicPreparedUnit,
+)
+from reprobit.classic_repair_authority import (
     ClassicInterventionEdit,
     ClassicReceiptEdit,
 )
-from reprobit.classic.repair_probe_candidates import (
+from reprobit.classic_repair_probe_candidates import (
     clone_retune_probe_unit,
     prepare_retune_candidate,
     retune_authority_edits,
     same_donor_compile_input,
     validate_retuned_actions,
 )
-from reprobit.classic.repair_probe_execution import (
+from reprobit.classic_repair_probe_execution import (
     ClassicDonorCompileOutcome,
     ClassicDonorCompileRefusal,
     probe_donor_compile_windows,
 )
-from reprobit.classic.repair_session import ClassicRepairRefusal
-from reprobit.classic_donors import DonorSourceError
-from reprobit.classic_orchestration import (
-    ClassicPreparedDonor,
-    ClassicPreparedUnit,
-)
+from reprobit.classic_repair_session import ClassicRepairRefusal
 from reprobit.classic_runtime_probe import (
     ClassicDonorProbeOutput,
     ClassicDonorProbeProgress,

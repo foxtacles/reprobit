@@ -10,11 +10,11 @@ from typing import Any, cast
 import pytest
 
 import reprobit.repair_donor_analysis as subject
-from reprobit.classic.repair_probe import (
+from reprobit.classic_repair_probe import (
     ClassicDonorRetuneProbeResult,
     ClassicDonorRetuneRepair,
 )
-from reprobit.classic.repair_session import ClassicRepairRefusal
+from reprobit.classic_repair_session import ClassicRepairRefusal
 from reprobit.progress import ProgressKind
 
 

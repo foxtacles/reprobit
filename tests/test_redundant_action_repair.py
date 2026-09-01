@@ -5,11 +5,11 @@ from hashlib import sha256
 import pytest
 import test_classic_register_bijection_reencoding_full as coff_fixture
 
-from reprobit.classic.redundant_action_repair import (
+from reprobit.classic_project import ClassicDispatchMaterials
+from reprobit.classic_redundant_action_repair import (
     RedundantActionRepairError,
     plan_redundant_action_retirements,
 )
-from reprobit.classic_project import ClassicDispatchMaterials
 from reprobit.coff_format import CoffObject, coff_body
 from reprobit.model import Scope
 from reprobit.schema import (

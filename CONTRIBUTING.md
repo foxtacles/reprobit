@@ -57,7 +57,9 @@ that fails when it is stale:
 - Structural tests that protect the design rather than a feature:
   `tests/test_architecture.py` (the internal import graph must stay acyclic,
   `reprobit/classic/__init__.py` stays documentation-only, production code
-  imports internal owners directly), `tests/test_project_identity_leakage.py`
+  imports internal owners directly, and nothing under `reprobit/classic/`
+  reaches the `classic_*` runtime layer or anything built on it, even
+  transitively), `tests/test_project_identity_leakage.py`
   (no downstream project name may appear anywhere under `src/`, `tests/`,
   `docs/`, or `schemas/`; the root `README.md` and this file are outside that
   scan), and `tests/test_package.py` (wheel contents and schema currency).
@@ -78,7 +80,8 @@ by filename prefix:
 | Execution | `engine`, `execution`, `scheduler`, `process`, `backends`, `native_device_map`, `sealed_namespace`, `state*`, `transactions`, `cache`, `incremental*`, `artifacts`, `assets`, `context`, `progress` | Running the producer graph in bounded child processes with logical paths, the content-addressed cache, warm builds, state directories. |
 | Toolchains | `toolchains`, `msvc_*`, `msvc42_*` | Profiles, authentication, locking, and the MSVC compile/link drivers. |
 | Verification | `verify`, `evidence_audit`, `oracle_pe32`, `binary`, `coff_format`, `ia32_decode`, `small_msf` | Sealing and comparing references, origin audits, PE/COFF/PDB parsing. |
-| Classic recipes | `classic_*`, `classic/` | The MSVC recipe families: donor rendering, candidate composers, semantic contracts, quarantine handling. `classic` is the label for that older MSVC family (see [docs/architecture.md](docs/architecture.md)). |
+| Classic algorithms | `classic/` | The MSVC recipe families' pure algorithms: COFF and CodeView projection, candidate composers, rewriting and scheduling certificates, semantic contracts, source overlays. A leaf: it imports only the model, format, path and toolchain-profile foundations, never a `classic_*` module. `classic` is the label for that older MSVC family (see [docs/architecture.md](docs/architecture.md)). |
+| Classic runtime | `classic_*` | Everything that runs the package against a project: donor rendering (`classic_donors`), family dispatch (`classic_project`), execution (`classic_runtime_*`, `classic_orchestration`), warm builds (`classic_incremental_*`), quarantine handling, and the repair and retune steps (`classic_repair_*`, `classic_measured_pin_repair`, `classic_redundant_action_repair`, `classic_donor_retune_*`, `classic_source_regeneration`). |
 | Discovery | `discovery_*`, `declaration_shapes` | `rbit discover grind` and `rbit discover run`, the bounded declaration generators, their reports. |
 | CMake import | `cmake_*`, `producer_graph`, `producer_graph_cmake` | The one-time import that extracts the committed producer graph. |
 | Repair | `repair*` | `rbit repair`: analysing an edit, re-issuing guidance, publishing. |

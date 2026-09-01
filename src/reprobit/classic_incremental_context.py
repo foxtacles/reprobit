@@ -12,13 +12,13 @@ from typing import cast
 
 from reprobit.backends import ExecutionBackend
 from reprobit.cache import CacheLease
-from reprobit.classic.repair_dispatch import ClassicMeasuredReceiptRepair
 from reprobit.classic_cache import (
     CompilerDependencyHint,
     DonorTransformDependencyHint,
 )
 from reprobit.classic_includes import SealedIncludeAuthority, SealedIncludeFile
 from reprobit.classic_orchestration import ClassicPreparedUnit
+from reprobit.classic_repair_dispatch import ClassicMeasuredReceiptRepair
 from reprobit.classic_runtime_preparation import (
     ClassicProducerGraphPreparedRun,
     prepare_classic_producer_graph_run,

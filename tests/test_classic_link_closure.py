@@ -4,7 +4,7 @@ import struct
 
 import pytest
 
-from reprobit.classic_link_closure import (
+from reprobit.classic.link_closure import (
     ClassicLinkClosureError,
     MissingDirectiveInputsError,
     audit_classic_link_directives,

@@ -7,7 +7,7 @@ import pytest
 import test_classic_register_bijection_reencoding_full as coff_fixture
 
 from reprobit.classic import composition_mosaic
-from reprobit.classic.measured_pin_repair import (
+from reprobit.classic_measured_pin_repair import (
     MeasuredPinRepairError,
     repair_measured_pins,
 )

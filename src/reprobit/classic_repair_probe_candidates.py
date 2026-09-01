@@ -5,25 +5,25 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
 
-from reprobit.classic.donor_retune_candidates import DonorRetuneCandidate
-from reprobit.classic.donor_retune_materialization import (
+from reprobit.classic.source_refactor_semantics import validate_donor_source_semantics
+from reprobit.classic_donor_retune_candidates import DonorRetuneCandidate
+from reprobit.classic_donor_retune_materialization import (
     MaterializedDonorRetuneCandidate,
     materialize_donor_retune_candidate,
 )
-from reprobit.classic.measured_pin_repair import (
+from reprobit.classic_donors import matching_candidate_constraints, prepare_donor_compile_request
+from reprobit.classic_measured_pin_repair import (
     MeasuredPinRepair,
     MeasuredPinRepairError,
     repair_measured_pins,
 )
-from reprobit.classic.repair_authority import ClassicInterventionEdit, ClassicReceiptEdit
-from reprobit.classic.repair_session import ClassicRepairRefusal
-from reprobit.classic.source_refactor_semantics import validate_donor_source_semantics
-from reprobit.classic_donors import matching_candidate_constraints, prepare_donor_compile_request
 from reprobit.classic_orchestration import (
     ClassicPreparedDonor,
     ClassicPreparedUnit,
 )
 from reprobit.classic_project import ClassicDispatchMaterials
+from reprobit.classic_repair_authority import ClassicInterventionEdit, ClassicReceiptEdit
+from reprobit.classic_repair_session import ClassicRepairRefusal
 from reprobit.classic_runtime_probe import ClassicDonorProbeOutput
 from reprobit.schema import ClassicProofReceipt, ClassicRecipeFamily, ClassicRecipeIntervention
 

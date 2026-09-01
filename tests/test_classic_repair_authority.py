@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from reprobit.classic.repair_authority import (
+from reprobit.classic_repair_authority import (
     ClassicAuthorityRepairError,
     ClassicInterventionEdit,
     ClassicReceiptEdit,

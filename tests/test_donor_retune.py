@@ -7,11 +7,11 @@ from typing import cast
 
 import pytest
 
-from reprobit.classic.donor_retune_candidates import (
+from reprobit.classic_donor_retune_candidates import (
     DonorRetuneError,
     enumerate_donor_retune_candidates,
 )
-from reprobit.classic.donor_retune_materialization import (
+from reprobit.classic_donor_retune_materialization import (
     materialize_donor_retune_candidate,
 )
 from reprobit.classic_donors import generate_declaration_shape, generate_forward_run

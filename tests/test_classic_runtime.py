@@ -18,12 +18,12 @@ from typing import cast
 
 import pytest
 
-import reprobit.classic.repair_probe_execution as classic_repair_probe_execution
 import reprobit.classic_evidence as classic_evidence
 import reprobit.classic_execution_records as classic_execution_records
 import reprobit.classic_includes as classic_includes
 import reprobit.classic_orchestration as classic_orchestration
 import reprobit.classic_publication as classic_publication
+import reprobit.classic_repair_probe_execution as classic_repair_probe_execution
 import reprobit.classic_runtime as classic_runtime
 import reprobit.classic_runtime_donor as classic_runtime_donor
 import reprobit.classic_runtime_environment as classic_runtime_environment

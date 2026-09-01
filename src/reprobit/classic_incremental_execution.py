@@ -22,7 +22,6 @@ from typing import TYPE_CHECKING
 import reprobit.classic_incremental_context as warm_context
 from reprobit.backends import ExecutionBackend
 from reprobit.cache import CacheOutput, IncrementalCache
-from reprobit.classic.repair_dispatch import ClassicMeasuredReceiptRepair
 from reprobit.classic_incremental_context import (
     ClassicIncrementalError,
     ClassicIncrementalPlan,
@@ -40,6 +39,7 @@ from reprobit.classic_publication import (
     ClassicPublicationRequest,
     publish_classic_output_set,
 )
+from reprobit.classic_repair_dispatch import ClassicMeasuredReceiptRepair
 from reprobit.classic_runtime_receipts import _held_publication_receipt
 from reprobit.execution import BuildExecutionReceipt
 from reprobit.incremental import (

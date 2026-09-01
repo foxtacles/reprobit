@@ -15,7 +15,6 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
 from reprobit.classic.arguments import validate_compile_arguments
-from reprobit.classic.repair_dispatch import ClassicMeasuredReceiptRepair
 from reprobit.classic.semantic_contracts import (
     _CLASSIC_SEMANTIC_ISSUER,
     DonorSemanticLane,
@@ -50,6 +49,7 @@ from reprobit.classic_project import (
     ClassicProjectError,
     InterventionWitness,
 )
+from reprobit.classic_repair_dispatch import ClassicMeasuredReceiptRepair
 from reprobit.classic_runtime_environment import (
     _ExecutionLane,
     _logical_join,

@@ -13,6 +13,17 @@ from typing import TYPE_CHECKING, Literal, cast
 from reprobit.classic.compiler_epoch import (
     validate_project_overlay_compiler_epoch,
 )
+from reprobit.classic.link_closure import (
+    ClassicLinkClosureError,
+    ClassicLinkDirectiveClosure,
+    MissingDirectiveInputsError,
+    ModuleDefinitionReceipt,
+    audit_classic_link_directives,
+    direct_terminal_link_control_references,
+    link_directive_closure_material,
+    module_definition_material,
+    parse_classic_module_definition,
+)
 from reprobit.classic.link_topology import (
     ClassicLinkTopologyError,
     terminal_link_input_topology,
@@ -41,17 +52,6 @@ from reprobit.classic.semantic_contracts import (
 from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.classic_execution_records import (
     ClassicCapturedProducerOutput,
-)
-from reprobit.classic_link_closure import (
-    ClassicLinkClosureError,
-    ClassicLinkDirectiveClosure,
-    MissingDirectiveInputsError,
-    ModuleDefinitionReceipt,
-    audit_classic_link_directives,
-    direct_terminal_link_control_references,
-    link_directive_closure_material,
-    module_definition_material,
-    parse_classic_module_definition,
 )
 from reprobit.classic_project import (
     ClassicProjectError,

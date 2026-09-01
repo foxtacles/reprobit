@@ -16,7 +16,6 @@ from reprobit.backends import (
     PosixWineBackend,
 )
 from reprobit.build import BuildPlan
-from reprobit.classic.repair_dispatch import ClassicMeasuredReceiptRepair
 from reprobit.classic.semantic_contracts import CleanSourceInput, ProjectOverlaySourcePair
 from reprobit.classic.source_overlay import plan_project_overlay_compiler_epochs
 from reprobit.classic_orchestration import (
@@ -28,6 +27,7 @@ from reprobit.classic_project import (
     InterventionWitness,
     materialize_effective_workspace,
 )
+from reprobit.classic_repair_dispatch import ClassicMeasuredReceiptRepair
 from reprobit.classic_runtime import (
     ClassicProducerGraphBuildExecutor,
     ClassicProducerGraphRuntimeEvidenceProvider,

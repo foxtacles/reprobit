@@ -4,9 +4,10 @@ from typing import Any
 
 import pytest
 
+import reprobit.classic_source_regeneration as source_regeneration
 from reprobit.artifacts import digest_bytes
-from reprobit.classic import overlay_document, source_regeneration
-from reprobit.classic.source_regeneration import (
+from reprobit.classic import overlay_document
+from reprobit.classic_source_regeneration import (
     _ClassicRegenerationContext,
     _render_donor_relocation_batch,
 )
