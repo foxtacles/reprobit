@@ -11,9 +11,27 @@ from reprobit.coff_format import (
     coff_body,
     coff_unpack,
     detailed_relocations,
-    section_definitions,
 )
 
+from .candidate_recipe import (
+    CandidateRecipe,
+    candidate_proof,
+    candidate_relocation_semantics,
+    comdat_body_range,
+    equal_body_effective,
+    install_equal_body,
+    install_same_slot,
+    internal_relocation_targets,
+    open_candidate_seats,
+    pin_candidate_bodies,
+    relocated_byte_offsets,
+    relocation_symbol_map,
+    require_changes_within,
+    require_closure_children_unchanged,
+    require_declared_internal_targets,
+    require_pinned_length,
+    same_slot_effective,
+)
 from .coff import (
     _coff_marker,
     _coff_section_symbol,
@@ -24,13 +42,9 @@ from .coff import (
     function_multiset,
     function_symbol,
 )
-from .composition import compose_equal_body_comdat
-from .composition_mosaic import instruction_mosaic_metadata_sha256
 from .composition_relocations import require_instruction_mosaic_semantic_relocations
-from .composition_same_slot import compose_same_slot_resize
 from .debug import _apply_replacements, parse_fpo_data, shifted_pointer
-from .foundation import local_symbol_kind, require_payload_free_declaration, sha256_bytes
-from .ia32 import require_declared_relocation_semantics
+from .foundation import local_symbol_kind, sha256_bytes
 from .register_bijection import (
     REGISTER_BIJECTION_CLASS,
     REGISTER_BIJECTION_EH_CLOSURE,
@@ -47,6 +61,28 @@ from .register_reencoding import (
 )
 from .register_semantics import decode_ia32_bijection_body
 
+REGISTER_BIJECTION_RECIPE = CandidateRecipe(
+    label="register-bijection",
+    splice_class=REGISTER_BIJECTION_CLASS,
+    spec_key="register_bijection",
+    admissible_closures=(
+        tuple(REGISTER_BIJECTION_FPO_CLOSURE),
+        tuple(REGISTER_BIJECTION_EH_CLOSURE),
+    ),
+    donor_seat="optional",
+)
+REGISTER_BIJECTION_REENCODING_RECIPE = CandidateRecipe(
+    label="re-encoding",
+    splice_class=REGISTER_BIJECTION_REENCODING_CLASS,
+    spec_key="register_bijection_reencoding",
+    admissible_closures=(tuple(REGISTER_BIJECTION_FPO_CLOSURE),),
+    declaration_label="register-bijection re-encoding",
+    source_refactor_label="register-bijection",
+    kind=(REGISTER_BIJECTION_REENCODING_KIND, "re-encoding bijection kind differs"),
+    length_pins=("expected_seed_length", "expected_preimage_length"),
+    closure_message="re-encoding target closure is not the FPO debug pair",
+)
+
 
 def produce_register_bijection_candidate(
     seed_bytes: bytes, donor_bytes: bytes, function: dict[str, Any]
@@ -61,98 +97,15 @@ def produce_register_bijection_candidate(
     equal-body primitive, so output conservation is proved by the same code
     every other equal-body class uses.
     """
-    require_payload_free_declaration(function, "register-bijection declaration")
-    require(
-        function.get("splice_class") == REGISTER_BIJECTION_CLASS,
-        "splice class is not retail_exact_register_bijection",
-    )
-    require(
-        "target_source_refactor" not in function,
-        "register-bijection functions carry no source refactor",
-    )
-    spec = function["register_bijection"]
-    seed = CoffObject(seed_bytes)
-    donor = CoffObject(donor_bytes)
-    mangled = function["mangled"]
-    sp = seed.function_section(mangled)
-    dp = donor.function_section(mangled)
-    donor_seat = function.get("expected_donor_section_number")
-    if donor_seat is None:
-        require(
-            sp["number"] == dp["number"] == function["expected_section_number"],
-            "register-bijection target section seat changed",
-        )
-    else:
-        require(
-            sp["number"] == function["expected_section_number"] and dp["number"] == donor_seat,
-            "register-bijection target section seat changed",
-        )
-    require(
-        len(seed.sections) == len(donor.sections) == function["expected_section_count"],
-        "register-bijection global section count changed",
-    )
-    seed_functions = function_multiset(seed)
-    donor_functions = function_multiset(donor)
-    require(
-        seed_functions == donor_functions
-        and sum(seed_functions.values()) == function["expected_function_count"],
-        "register-bijection donor function set differs",
-    )
-    seed_comdats = comdat_primary_identity_multiset(seed)
-    donor_comdats = comdat_primary_identity_multiset(donor)
-    require(
-        seed_comdats == donor_comdats
-        and sum(seed_comdats.values()) == function["expected_comdat_count"],
-        "register-bijection donor COMDAT identity set differs",
-    )
-    require(
-        sp["raw_size"] == dp["raw_size"] == function["expected_body_length"]
-        and sp["relocation_count"]
-        == dp["relocation_count"]
-        == function["expected_relocation_count"]
-        and (sp["line_count"] == function["expected_seed_line_count"])
-        and (dp["line_count"] == function["expected_donor_line_count"])
-        and (sp["name"] == dp["name"])
-        and (
-            sp["characteristics"] == dp["characteristics"] == function["expected_characteristics"]
-        ),
-        "register-bijection target header/count pins changed",
-    )
-    require(
-        section_definitions(seed)[sp["number"]]["selection"]
-        == section_definitions(donor)[dp["number"]]["selection"]
-        == function["expected_selection"],
-        "register-bijection COMDAT selection changed",
-    )
-    expected_closure = tuple(function["expected_closure"])
-    require(
-        _comdat_child_closure(seed, sp)
-        == _comdat_child_closure(donor, dp)
-        == (len(expected_closure), expected_closure),
-        "register-bijection target closure changed",
-    )
-    require(
-        list(expected_closure) in (REGISTER_BIJECTION_FPO_CLOSURE, REGISTER_BIJECTION_EH_CLOSURE),
-        "register-bijection closure pin names no installation delegate",
-    )
+    seats = open_candidate_seats(seed_bytes, donor_bytes, function, REGISTER_BIJECTION_RECIPE)
+    seed, donor, mangled = seats.seed, seats.donor, seats.mangled
+    sp, dp, spec = seats.seed_section, seats.donor_section, seats.spec
     delegate = register_bijection_delegate(
         function["expected_closure"],
         function["expected_code_renames"],
         function.get("expected_relocation_moves"),
     )
-    require(
-        instruction_mosaic_metadata_sha256(seed, sp) == function["expected_seed_metadata_sha256"]
-        and instruction_mosaic_metadata_sha256(donor, dp)
-        == function["expected_donor_metadata_sha256"],
-        "register-bijection metadata differs from its pin",
-    )
-    seed_body = coff_body(seed, sp)
-    donor_body = coff_body(donor, dp)
-    require(
-        sha256_bytes(seed_body) == function["expected_seed_body_sha256"]
-        and sha256_bytes(donor_body) == function["expected_donor_body_sha256"],
-        "register-bijection seed/donor body differs from its pin",
-    )
+    seed_body, donor_body = pin_candidate_bodies(seats, function, REGISTER_BIJECTION_RECIPE)
     seed_rows = detailed_relocations(seed, sp)
     donor_rows = detailed_relocations(donor, dp)
     if (
@@ -225,21 +178,10 @@ def produce_register_bijection_candidate(
         {**left, "offset": right["offset"]}
         for left, right in zip(seed_rows, donor_rows, strict=True)
     ]
-    relocation_offsets = frozenset(
-        row["offset"] + byte for row in installed_rows for byte in range(row["width"])
-    )
-    relocation_symbols = {
-        row["offset"]: {"width": row["width"], "target": row["target"]} for row in installed_rows
-    }
-    internal_targets = frozenset(
-        row["target_value"] for row in donor_rows if row["target_section"] == dp["number"]
-    )
-    declared_targets = spec.get("expected_internal_relocation_targets")
-    if declared_targets is not None:
-        require(
-            sorted(internal_targets) == declared_targets,
-            "register-bijection in-body relocated target set changed",
-        )
+    relocation_offsets = relocated_byte_offsets(installed_rows)
+    relocation_symbols = relocation_symbol_map(installed_rows)
+    internal_targets = internal_relocation_targets(donor_rows, dp["number"])
+    require_declared_internal_targets(spec, internal_targets, "register-bijection")
     image, proof = apply_register_bijection(
         donor_body,
         spec["mapping"],
@@ -277,34 +219,14 @@ def produce_register_bijection_candidate(
         "register-bijection image differs from its pin",
     )
     require(image != donor_body, "register-bijection image does not move the donor body")
-    pinned_length = function["retail_oracle"]["length"]
-    require(pinned_length == len(image), "register-bijection linked length changed")
-    semantic_detail = require_declared_relocation_semantics(
-        installed_rows,
-        function["retail_relocations"],
-        "register-bijection candidate relocation semantics",
-    )
+    require_pinned_length(function, image, "register-bijection")
+    semantic_detail = candidate_relocation_semantics(installed_rows, function, "register-bijection")
     derived = bytearray(donor_bytes)
     derived[dp["raw_offset"] : dp["raw_offset"] + dp["raw_size"]] = image
     derived = bytes(derived)
-    effective = {
-        "mangled": mangled,
-        "splice_class": delegate,
-        "expected_body_length": function["expected_body_length"],
-        "expected_body_sha256": function["expected_body_sha256"],
-        "expected_changed_offsets": function["expected_changed_offsets"],
-    }
-    if delegate == "equal_body_eh_structural_local":
-        effective["expected_code_renames"] = function["expected_code_renames"]
-        effective["expected_xdata_rename_offsets"] = function["expected_xdata_rename_offsets"]
-    elif delegate == "equal_body_eh_reloc_layout":
-        effective["expected_relocation_moves"] = function["expected_relocation_moves"]
-        effective["expected_xdata_rename_offsets"] = function["expected_xdata_rename_offsets"]
-    composed, detail = compose_equal_body_comdat(seed_bytes, derived, effective)
-    checked = CoffObject(composed)
-    cp = checked.function_section(mangled)
-    require(
-        coff_body(checked, cp) == image, "register-bijection composed body differs from the image"
+    effective = equal_body_effective(function, mangled, delegate, declared_renames=True)
+    composed, detail, checked, cp = install_equal_body(
+        seed_bytes, derived, effective, mangled, image, "register-bijection"
     )
     composed_rows = detailed_relocations(checked, cp)
     require(
@@ -342,15 +264,8 @@ def produce_register_bijection_candidate(
     final = CoffObject(composed)
     fp = final.function_section(mangled)
     require(coff_body(final, fp) == image, "register-bijection output changed the installed body")
-    for child_name in expected_closure:
-        if child_name == ".debug$S":
-            continue
-        require(
-            coff_body(final, _comdat_child(final, fp, child_name))
-            == coff_body(seed, _comdat_child(seed, sp, child_name)),
-            f"register-bijection output changed its {child_name} child",
-        )
-    allowed = set(range(sp["raw_offset"], sp["raw_offset"] + sp["raw_size"]))
+    require_closure_children_unchanged(seats, final, fp, "register-bijection", skip=(".debug$S",))
+    allowed = comdat_body_range(sp)
     allowed |= set(
         range(debug_child["raw_offset"], debug_child["raw_offset"] + debug_child["raw_size"])
     )
@@ -363,25 +278,19 @@ def produce_register_bijection_candidate(
         allowed |= {
             sp["relocation_offset"] + ordinal * 10 + byte for ordinal in moving for byte in range(4)
         }
-    require(
-        {index for index in range(len(seed_bytes)) if seed_bytes[index] != composed[index]}
-        <= allowed,
-        "register-bijection changed bytes outside its own COMDAT",
-    )
-    return (
-        composed,
+    require_changes_within(seed_bytes, composed, allowed, "register-bijection")
+    return composed, candidate_proof(
+        detail,
+        REGISTER_BIJECTION_CLASS,
         {
-            **detail,
-            "splice_class": REGISTER_BIJECTION_CLASS,
             "register_bijection": dict(sorted(spec["mapping"].items())),
             "region": [spec["region_start"], spec["region_end"]],
             "rewritten_offsets": proof["rewritten_offsets"],
             "region_instruction_count": proof["region_instruction_count"],
             "instruction_count": proof["instruction_count"],
             "debug_s_register_map": spec["debug_s_register_map"],
-            "candidate_only": True,
-            **semantic_detail,
         },
+        semantic_detail,
     )
 
 
@@ -636,108 +545,22 @@ def produce_register_bijection_reencoding_candidate(
     the bijection's own boundary map. Installation is delegated, unchanged, to `compose_same_slot_resize`
     in the mode a dozen landed rows already use.
     """
-    require_payload_free_declaration(function, "register-bijection re-encoding declaration")
-    require(
-        function.get("splice_class") == REGISTER_BIJECTION_REENCODING_CLASS,
-        "splice class is not retail_exact_register_bijection_reencoding",
+    seats = open_candidate_seats(
+        seed_bytes, donor_bytes, function, REGISTER_BIJECTION_REENCODING_RECIPE
     )
-    require(
-        "target_source_refactor" not in function,
-        "register-bijection functions carry no source refactor",
-    )
-    spec = function["register_bijection_reencoding"]
-    require(
-        spec["kind"] == REGISTER_BIJECTION_REENCODING_KIND, "re-encoding bijection kind differs"
-    )
-    seed = CoffObject(seed_bytes)
-    donor = CoffObject(donor_bytes)
-    mangled = function["mangled"]
-    sp = seed.function_section(mangled)
-    dp = donor.function_section(mangled)
-    require(
-        sp["number"] == dp["number"] == function["expected_section_number"],
-        "re-encoding target section seat changed",
-    )
-    require(
-        len(seed.sections) == len(donor.sections) == function["expected_section_count"],
-        "re-encoding global section count changed",
-    )
-    seed_functions = function_multiset(seed)
-    require(
-        seed_functions == function_multiset(donor)
-        and sum(seed_functions.values()) == function["expected_function_count"],
-        "re-encoding donor function set differs",
-    )
-    seed_comdats = comdat_primary_identity_multiset(seed)
-    require(
-        seed_comdats == comdat_primary_identity_multiset(donor)
-        and sum(seed_comdats.values()) == function["expected_comdat_count"],
-        "re-encoding donor COMDAT identity set differs",
-    )
-    require(
-        sp["raw_size"] == function["expected_seed_length"]
-        and dp["raw_size"] == function["expected_preimage_length"]
-        and (
-            sp["relocation_count"]
-            == dp["relocation_count"]
-            == function["expected_relocation_count"]
-        )
-        and (sp["line_count"] == function["expected_seed_line_count"])
-        and (dp["line_count"] == function["expected_donor_line_count"])
-        and (sp["name"] == dp["name"])
-        and (
-            sp["characteristics"] == dp["characteristics"] == function["expected_characteristics"]
-        ),
-        "re-encoding target header/count pins changed",
-    )
-    require(
-        section_definitions(seed)[sp["number"]]["selection"]
-        == section_definitions(donor)[dp["number"]]["selection"]
-        == function["expected_selection"],
-        "re-encoding COMDAT selection changed",
-    )
-    expected_closure = tuple(function["expected_closure"])
-    require(
-        _comdat_child_closure(seed, sp)
-        == _comdat_child_closure(donor, dp)
-        == (len(expected_closure), expected_closure)
-        and list(expected_closure) == REGISTER_BIJECTION_FPO_CLOSURE,
-        "re-encoding target closure is not the FPO debug pair",
-    )
-    require(
-        instruction_mosaic_metadata_sha256(seed, sp) == function["expected_seed_metadata_sha256"]
-        and instruction_mosaic_metadata_sha256(donor, dp)
-        == function["expected_donor_metadata_sha256"],
-        "re-encoding metadata differs from its pin",
-    )
-    seed_body = coff_body(seed, sp)
-    donor_body = bytes(coff_body(donor, dp))
-    require(
-        sha256_bytes(seed_body) == function["expected_seed_body_sha256"]
-        and sha256_bytes(donor_body) == function["expected_donor_body_sha256"],
-        "re-encoding seed/donor body differs from its pin",
-    )
+    seed, donor, mangled = seats.seed, seats.donor, seats.mangled
+    sp, dp, spec = seats.seed_section, seats.donor_section, seats.spec
+    _, donor_body = pin_candidate_bodies(seats, function, REGISTER_BIJECTION_REENCODING_RECIPE)
     donor_rows = detailed_relocations(donor, dp)
     require(
         [row["target"] for row in donor_rows]
         == [row["target"] for row in detailed_relocations(seed, sp)],
         "re-encoding donor relocation targets differ from the seed",
     )
-    relocation_offsets = frozenset(
-        row["offset"] + byte for row in donor_rows for byte in range(row["width"])
-    )
-    relocation_symbols = {
-        row["offset"]: {"width": row["width"], "target": row["target"]} for row in donor_rows
-    }
-    internal_targets = frozenset(
-        row["target_value"] for row in donor_rows if row["target_section"] == dp["number"]
-    )
-    declared_targets = spec.get("expected_internal_relocation_targets")
-    if declared_targets is not None:
-        require(
-            sorted(internal_targets) == declared_targets,
-            "re-encoding in-body relocated target set changed",
-        )
+    relocation_offsets = relocated_byte_offsets(donor_rows)
+    relocation_symbols = relocation_symbol_map(donor_rows)
+    internal_targets = internal_relocation_targets(donor_rows, dp["number"])
+    require_declared_internal_targets(spec, internal_targets, "re-encoding")
     instructions = decode_ia32_bijection_body(
         donor_body, "re-encoding frame proof", relocation_symbols, spec.get("expected_code_length")
     )
@@ -786,17 +609,12 @@ def produce_register_bijection_reencoding_candidate(
         "re-encoding image length differs from its pin",
     )
     require(image != donor_body, "re-encoding image does not move the donor body")
-    pinned_length = function["retail_oracle"]["length"]
-    require(pinned_length == len(image), "re-encoding linked length changed")
+    require_pinned_length(function, image, "re-encoding")
     moved = dict(proof["relocation_reseat"])
     installed_rows = [
         {**row, "offset": moved.get(row["offset"], row["offset"])} for row in donor_rows
     ]
-    semantic_detail = require_declared_relocation_semantics(
-        installed_rows,
-        function["retail_relocations"],
-        "re-encoding candidate relocation semantics",
-    )
+    semantic_detail = candidate_relocation_semantics(installed_rows, function, "re-encoding")
     derived, derived_detail = _reencoded_donor_object(
         donor_bytes, mangled, image, proof, "re-encoding derived donor"
     )
@@ -805,22 +623,10 @@ def produce_register_bijection_reencoding_candidate(
         and derived_detail["carried_code_symbols"] == spec["expected_carried_code_symbols"],
         "re-encoding derived donor differs from its declaration",
     )
-    effective = {
-        "mangled": mangled,
-        "splice_class": "retail_exact_reloc_divergent",
-        "expected_seed_length": function["expected_seed_length"],
-        "expected_donor_length": function["expected_donor_length"],
-        "expected_linked_span": function["expected_linked_span"],
-        "expected_body_sha256": function["expected_body_sha256"],
-        "expected_seed_line_count": function["expected_seed_line_count"],
-        "expected_donor_line_count": function["expected_donor_line_count"],
-        "retail_oracle": function["retail_oracle"],
-        "retail_relocations": function["retail_relocations"],
-    }
-    composed, detail = compose_same_slot_resize(seed_bytes, derived, effective)
-    checked = CoffObject(composed)
-    cp = checked.function_section(mangled)
-    require(coff_body(checked, cp) == image, "re-encoding composed body differs from the image")
+    effective = same_slot_effective(function, mangled)
+    composed, detail, checked, cp = install_same_slot(
+        seed_bytes, derived, effective, mangled, image, "re-encoding"
+    )
     require(
         [row["offset"] for row in detailed_relocations(checked, cp)]
         == [row["offset"] for row in installed_rows]
@@ -828,11 +634,10 @@ def produce_register_bijection_reencoding_candidate(
         == [row["target"] for row in installed_rows],
         "re-encoding composed relocation table is not the proved reseat",
     )
-    return (
-        composed,
+    return composed, candidate_proof(
+        detail,
+        REGISTER_BIJECTION_REENCODING_CLASS,
         {
-            **detail,
-            "splice_class": REGISTER_BIJECTION_REENCODING_CLASS,
             "register_bijection_reencoding": [
                 {
                     "start": item["start"],
@@ -849,7 +654,6 @@ def produce_register_bijection_reencoding_candidate(
             "instruction_count": proof["instruction_count"],
             "carried_code_symbols": derived_detail["carried_code_symbols"],
             "procedure_range": derived_detail["procedure_range"],
-            "candidate_only": True,
-            **semantic_detail,
         },
+        semantic_detail,
     )

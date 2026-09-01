@@ -5,28 +5,39 @@ from __future__ import annotations
 from typing import Any
 
 from reprobit.binary import ByteIdentityError, require
-from reprobit.coff_format import CoffObject, coff_body, detailed_relocations, section_definitions
+from reprobit.coff_format import CoffObject, coff_body, detailed_relocations
 
+from .candidate_recipe import (
+    CandidateRecipe,
+    candidate_proof,
+    candidate_relocation_semantics,
+    comdat_body_range,
+    equal_body_effective,
+    install_equal_body,
+    install_same_slot,
+    internal_relocation_targets,
+    open_candidate_seats,
+    pin_candidate_bodies,
+    relocated_byte_offsets,
+    relocation_symbol_map,
+    require_changes_within,
+    require_closure_children_unchanged,
+    require_declared_internal_targets,
+    require_pinned_length,
+    same_slot_effective,
+)
 from .coff import (
     _coff_table_bytes,
     _comdat_child,
-    _comdat_child_closure,
-    comdat_primary_identity_multiset,
-    function_multiset,
 )
 from .commutative import apply_commutative_operand_form
 from .compiler_identity import Msvc420CompilerIdentity
-from .composition import compose_equal_body_comdat
-from .composition_mosaic import instruction_mosaic_metadata_sha256
-from .composition_same_slot import compose_same_slot_resize
 from .debug import parse_codeview_symbol_stream
 from .floating import apply_fp_sum_reassociation, apply_x87_squared_addend_exchange
 from .foundation import (
     RelocationView,
-    require_payload_free_declaration,
     sha256_bytes,
 )
-from .ia32 import require_declared_relocation_semantics
 from .register_bijection import (
     CODEVIEW_REGISTER_RECORD_TYPE,
     REGISTER_BIJECTION_FPO_CLOSURE,
@@ -51,6 +62,19 @@ from .scheduling_apply import apply_instruction_schedule
 from .scheduling_certificates import require_instruction_schedule_debug_fidelity
 
 COMPOSED_REWRITING_CLASS = "retail_exact_composed_rewriting"
+COMPOSED_REWRITING_RECIPE = CandidateRecipe(
+    label="composed-rewriting",
+    splice_class=COMPOSED_REWRITING_CLASS,
+    spec_key="composed_rewriting",
+    admissible_closures=(
+        tuple(INSTRUCTION_SCHEDULE_FPO_CLOSURE),
+        tuple(INSTRUCTION_SCHEDULE_EH_CLOSURE),
+    ),
+    donor_seat="declared",
+    donor_section_count="declared",
+    witness_word="witness",
+    verbose=True,
+)
 
 
 def composed_rewriting_delegate(expected_closure: object) -> str:
@@ -79,107 +103,18 @@ def produce_composed_rewriting_candidate(
     unchanged; C1 fixes the order, C2 the disjointness, C3 the debug$S
     claims and C4 the provenance. Literal comparison is verifier-only.
     """
-    require_payload_free_declaration(function, "composed-rewriting declaration")
-    require(
-        function.get("splice_class") == COMPOSED_REWRITING_CLASS,
-        "splice class is not retail_exact_composed_rewriting",
-    )
-    require(
-        "target_source_refactor" not in function,
-        "composed-rewriting functions carry no source refactor",
-    )
-    spec = function["composed_rewriting"]
-    seed = CoffObject(seed_bytes)
-    donor = CoffObject(donor_bytes)
-    mangled = function["mangled"]
-    sp = seed.function_section(mangled)
-    dp = donor.function_section(mangled)
-    require(
-        sp["number"] == function["expected_section_number"]
-        and dp["number"] == function["expected_donor_section_number"],
-        f"composed-rewriting target section seat changed: seed {sp['number']} donor {dp['number']}",
-    )
-    require(
-        len(seed.sections) == function["expected_section_count"]
-        and len(donor.sections) == function["expected_donor_section_count"],
-        f"composed-rewriting global section count changed: seed {len(seed.sections)} donor {len(donor.sections)}",
-    )
-    seed_functions = function_multiset(seed)
-    require(
-        seed_functions == function_multiset(donor)
-        and sum(seed_functions.values()) == function["expected_function_count"],
-        f"composed-rewriting witness function set differs: {sum(seed_functions.values())} vs {sum(function_multiset(donor).values())}",
-    )
-    seed_comdats = comdat_primary_identity_multiset(seed)
-    require(
-        seed_comdats == comdat_primary_identity_multiset(donor)
-        and sum(seed_comdats.values()) == function["expected_comdat_count"],
-        f"composed-rewriting witness COMDAT identity set differs: {sum(seed_comdats.values())} vs {sum(comdat_primary_identity_multiset(donor).values())}",
-    )
-    require(
-        sp["raw_size"] == dp["raw_size"] == function["expected_body_length"]
-        and sp["relocation_count"]
-        == dp["relocation_count"]
-        == function["expected_relocation_count"]
-        and (sp["line_count"] == function["expected_seed_line_count"])
-        and (dp["line_count"] == function["expected_donor_line_count"])
-        and (sp["name"] == dp["name"])
-        and (
-            sp["characteristics"] == dp["characteristics"] == function["expected_characteristics"]
-        ),
-        f"composed-rewriting target header/count pins changed: raw {sp['raw_size']}/{dp['raw_size']} relocations {sp['relocation_count']}/{dp['relocation_count']} lines {sp['line_count']}/{dp['line_count']} characteristics {sp['characteristics']}/{dp['characteristics']}",
-    )
-    require(
-        section_definitions(seed)[sp["number"]]["selection"]
-        == section_definitions(donor)[dp["number"]]["selection"]
-        == function["expected_selection"],
-        f"composed-rewriting COMDAT selection changed: {section_definitions(seed)[sp['number']]['selection']}",
-    )
-    expected_closure = tuple(function["expected_closure"])
-    require(
-        _comdat_child_closure(seed, sp)
-        == _comdat_child_closure(donor, dp)
-        == (len(expected_closure), expected_closure),
-        f"composed-rewriting target closure changed: seed {_comdat_child_closure(seed, sp)} donor {_comdat_child_closure(donor, dp)}",
-    )
-    require(
-        list(expected_closure)
-        in (INSTRUCTION_SCHEDULE_FPO_CLOSURE, INSTRUCTION_SCHEDULE_EH_CLOSURE),
-        "composed-rewriting closure pin names no installation delegate",
-    )
+    seats = open_candidate_seats(seed_bytes, donor_bytes, function, COMPOSED_REWRITING_RECIPE)
+    seed, mangled, sp, spec = seats.seed, seats.mangled, seats.seed_section, seats.spec
     delegate = composed_rewriting_delegate(function["expected_closure"])
-    require(
-        instruction_mosaic_metadata_sha256(seed, sp) == function["expected_seed_metadata_sha256"]
-        and instruction_mosaic_metadata_sha256(donor, dp)
-        == function["expected_donor_metadata_sha256"],
-        f"composed-rewriting metadata differs from its pin: seed {instruction_mosaic_metadata_sha256(seed, sp)} donor {instruction_mosaic_metadata_sha256(donor, dp)}",
-    )
-    seed_body = coff_body(seed, sp)
-    donor_body = coff_body(donor, dp)
-    require(
-        sha256_bytes(seed_body) == function["expected_seed_body_sha256"]
-        and sha256_bytes(donor_body) == function["expected_donor_body_sha256"],
-        f"composed-rewriting seed/witness body differs from its pin: seed {sha256_bytes(seed_body)} witness {sha256_bytes(donor_body)}",
-    )
+    seed_body, donor_body = pin_candidate_bodies(seats, function, COMPOSED_REWRITING_RECIPE)
     require(
         donor_body == seed_body, "composed-rewriting witness does not reproduce the seed's body"
     )
     seed_rows = detailed_relocations(seed, sp)
-    relocation_offsets = frozenset(
-        row["offset"] + byte for row in seed_rows for byte in range(row["width"])
-    )
-    relocation_symbols = {
-        row["offset"]: {"width": row["width"], "target": row["target"]} for row in seed_rows
-    }
-    internal_targets = frozenset(
-        row["target_value"] for row in seed_rows if row["target_section"] == sp["number"]
-    )
-    declared_targets = spec.get("expected_internal_relocation_targets")
-    if declared_targets is not None:
-        require(
-            sorted(internal_targets) == declared_targets,
-            "composed-rewriting in-body relocated target set changed",
-        )
+    relocation_offsets = relocated_byte_offsets(seed_rows)
+    relocation_symbols = relocation_symbol_map(seed_rows)
+    internal_targets = internal_relocation_targets(seed_rows, sp["number"])
+    require_declared_internal_targets(spec, internal_targets, "composed-rewriting")
     code_length = spec.get("expected_code_length")
     view = RelocationView(
         relocations=relocation_symbols, code_length=code_length, internal_targets=internal_targets
@@ -490,34 +425,17 @@ def produce_composed_rewriting_candidate(
         "composed-rewriting debug fidelity",
         view=view,
     )
-    pinned_length = function["retail_oracle"]["length"]
-    require(pinned_length == len(image), "composed-rewriting linked length changed")
-    semantic_detail = require_declared_relocation_semantics(
-        installed_rows,
-        function["retail_relocations"],
-        "composed-rewriting candidate relocation semantics",
-    )
+    require_pinned_length(function, image, "composed-rewriting")
+    semantic_detail = candidate_relocation_semantics(installed_rows, function, "composed-rewriting")
     derived = bytearray(lined_seed_bytes)
     derived[sp["raw_offset"] : sp["raw_offset"] + sp["raw_size"]] = image
-    effective = {
-        "mangled": mangled,
-        "splice_class": delegate,
-        "expected_body_length": function["expected_body_length"],
-        "expected_body_sha256": function["expected_body_sha256"],
-        "expected_changed_offsets": function["expected_changed_offsets"],
-    }
     require(
         function["expected_code_renames"] == [] and function["expected_xdata_rename_offsets"] == [],
         "composed-rewriting installs the seed's own tables and can declare no rename",
     )
-    if delegate == "equal_body_eh_structural_local":
-        effective["expected_code_renames"] = []
-        effective["expected_xdata_rename_offsets"] = []
-    composed, detail = compose_equal_body_comdat(bytes(lined_seed_bytes), bytes(derived), effective)
-    checked = CoffObject(composed)
-    cp = checked.function_section(mangled)
-    require(
-        coff_body(checked, cp) == image, "composed-rewriting composed body differs from the image"
+    effective = equal_body_effective(function, mangled, delegate, declared_renames=False)
+    composed, detail, checked, cp = install_equal_body(
+        bytes(lined_seed_bytes), bytes(derived), effective, mangled, image, "composed-rewriting"
     )
     require(
         detailed_relocations(checked, cp) == installed_rows
@@ -605,15 +523,8 @@ def produce_composed_rewriting_candidate(
     final = CoffObject(composed)
     fp = final.function_section(mangled)
     require(coff_body(final, fp) == image, "composed-rewriting output changed the installed body")
-    for child_name in expected_closure:
-        if child_name == ".debug$S":
-            continue
-        require(
-            coff_body(final, _comdat_child(final, fp, child_name))
-            == coff_body(seed, _comdat_child(seed, sp, child_name)),
-            f"composed-rewriting output changed its {child_name} child",
-        )
-    allowed = set(range(sp["raw_offset"], sp["raw_offset"] + sp["raw_size"]))
+    require_closure_children_unchanged(seats, final, fp, "composed-rewriting", skip=(".debug$S",))
+    allowed = comdat_body_range(sp)
     allowed |= set(
         range(debug_child["raw_offset"], debug_child["raw_offset"] + debug_child["raw_size"])
     )
@@ -637,16 +548,11 @@ def produce_composed_rewriting_candidate(
             == _coff_table_bytes(lined_seed, lined_sp, "relocations"),
             "composed-rewriting relocation records differ from the proved reseat",
         )
-    require(
-        {index for index in range(len(seed_bytes)) if seed_bytes[index] != composed[index]}
-        <= allowed,
-        "composed-rewriting changed bytes outside its own COMDAT",
-    )
-    return (
-        composed,
+    require_changes_within(seed_bytes, composed, allowed, "composed-rewriting")
+    return composed, candidate_proof(
+        detail,
+        COMPOSED_REWRITING_CLASS,
         {
-            **detail,
-            "splice_class": COMPOSED_REWRITING_CLASS,
             "instruction_schedule": schedule_detail,
             "fp_sum_reassociation": fp_detail,
             "commutative_operand_forms": form_detail,
@@ -661,13 +567,28 @@ def produce_composed_rewriting_candidate(
             "debug_fidelity": debug_detail,
             "debug_s_register_maps": debug_maps,
             "external_entries": sorted(external_entries),
-            "candidate_only": True,
-            **semantic_detail,
         },
+        semantic_detail,
     )
 
 
 DONOR_REWRITING_CLASS = "retail_exact_donor_rewriting"
+DONOR_REWRITING_RECIPE = CandidateRecipe(
+    label="donor-rewriting",
+    splice_class=DONOR_REWRITING_CLASS,
+    spec_key="donor_rewriting",
+    admissible_closures=(
+        tuple(REGISTER_BIJECTION_FPO_CLOSURE),
+        tuple(INSTRUCTION_SCHEDULE_EH_CLOSURE),
+    ),
+    kind=(DONOR_REWRITING_KIND, "donor-rewriting kind differs"),
+    donor_seat="optional",
+    declared_seat_message="donor-rewriting declared donor seat changed",
+    donor_section_count="optional",
+    census="extras",
+    length_pins=("expected_seed_length", "expected_donor_length"),
+    closure_message="donor-rewriting target closure is neither the FPO debug pair nor the EH pair",
+)
 
 
 def produce_donor_rewriting_candidate(
@@ -678,115 +599,10 @@ def produce_donor_rewriting_candidate(
     compiler_identity: Msvc420CompilerIdentity | None = None,
 ) -> tuple[bytes, dict[str, Any]]:
     """Produce REWRITE(donor body) from a fresh compiler artifact."""
-    require_payload_free_declaration(function, "donor-rewriting declaration")
-    require(
-        function.get("splice_class") == DONOR_REWRITING_CLASS,
-        "splice class is not retail_exact_donor_rewriting",
-    )
-    require(
-        "target_source_refactor" not in function,
-        "donor-rewriting functions carry no source refactor",
-    )
-    spec = function["donor_rewriting"]
-    require(spec["kind"] == DONOR_REWRITING_KIND, "donor-rewriting kind differs")
-    seed = CoffObject(seed_bytes)
-    donor = CoffObject(donor_bytes)
-    mangled = function["mangled"]
-    sp = seed.function_section(mangled)
-    dp = donor.function_section(mangled)
-    declared_donor_seat = function.get("expected_donor_section_number")
-    if declared_donor_seat is None:
-        require(
-            sp["number"] == dp["number"] == function["expected_section_number"],
-            "donor-rewriting target section seat changed",
-        )
-    else:
-        require(
-            sp["number"] == function["expected_section_number"]
-            and dp["number"] == declared_donor_seat,
-            "donor-rewriting declared donor seat changed",
-        )
-    require(
-        len(seed.sections) == function["expected_section_count"]
-        and len(donor.sections)
-        == function.get("expected_donor_section_count", function["expected_section_count"]),
-        "donor-rewriting global section count changed",
-    )
-    extras = sorted(function.get("expected_donor_extra_functions") or [])
-    seed_functions = function_multiset(seed)
-    donor_functions = function_multiset(donor)
-    measured_extra = []
-    for name in set(seed_functions) | set(donor_functions):
-        left = seed_functions.get(name, 0)
-        right = donor_functions.get(name, 0)
-        if right == left:
-            continue
-        require(right == left + 1, f"donor-rewriting donor function census diverges at {name}")
-        measured_extra.append(name)
-    require(
-        sorted(measured_extra) == extras
-        and sum(seed_functions.values()) == function["expected_function_count"],
-        "donor-rewriting donor function set differs from its declared extras",
-    )
-    seed_comdats = comdat_primary_identity_multiset(seed)
-    donor_comdats = comdat_primary_identity_multiset(donor)
-    extra_heads = []
-    for key in set(seed_comdats) | set(donor_comdats):
-        left = seed_comdats.get(key, 0)
-        right = donor_comdats.get(key, 0)
-        if right == left:
-            continue
-        require(right == left + 1, f"donor-rewriting donor COMDAT census diverges at {key}")
-        extra_heads.append(key[0])
-    require(
-        sorted(extra_heads) == extras
-        and sum(seed_comdats.values()) == function["expected_comdat_count"],
-        "donor-rewriting donor COMDAT identity set differs from its declared extras",
-    )
-    require(
-        sp["raw_size"] == function["expected_seed_length"]
-        and dp["raw_size"] == function["expected_donor_length"]
-        and (
-            sp["relocation_count"]
-            == dp["relocation_count"]
-            == function["expected_relocation_count"]
-        )
-        and (sp["line_count"] == function["expected_seed_line_count"])
-        and (dp["line_count"] == function["expected_donor_line_count"])
-        and (sp["name"] == dp["name"])
-        and (
-            sp["characteristics"] == dp["characteristics"] == function["expected_characteristics"]
-        ),
-        "donor-rewriting target header/count pins changed",
-    )
-    require(
-        section_definitions(seed)[sp["number"]]["selection"]
-        == section_definitions(donor)[dp["number"]]["selection"]
-        == function["expected_selection"],
-        "donor-rewriting COMDAT selection changed",
-    )
-    expected_closure = tuple(function["expected_closure"])
-    require(
-        _comdat_child_closure(seed, sp)
-        == _comdat_child_closure(donor, dp)
-        == (len(expected_closure), expected_closure)
-        and list(expected_closure)
-        in (REGISTER_BIJECTION_FPO_CLOSURE, INSTRUCTION_SCHEDULE_EH_CLOSURE),
-        "donor-rewriting target closure is neither the FPO debug pair nor the EH pair",
-    )
-    require(
-        instruction_mosaic_metadata_sha256(seed, sp) == function["expected_seed_metadata_sha256"]
-        and instruction_mosaic_metadata_sha256(donor, dp)
-        == function["expected_donor_metadata_sha256"],
-        "donor-rewriting metadata differs from its pin",
-    )
-    seed_body = coff_body(seed, sp)
-    donor_body = bytes(coff_body(donor, dp))
-    require(
-        sha256_bytes(seed_body) == function["expected_seed_body_sha256"]
-        and sha256_bytes(donor_body) == function["expected_donor_body_sha256"],
-        "donor-rewriting seed/donor body differs from its pin",
-    )
+    seats = open_candidate_seats(seed_bytes, donor_bytes, function, DONOR_REWRITING_RECIPE)
+    seed, donor, mangled = seats.seed, seats.donor, seats.mangled
+    sp, dp, spec = seats.seed_section, seats.donor_section, seats.spec
+    _, donor_body = pin_candidate_bodies(seats, function, DONOR_REWRITING_RECIPE)
     donor_rows = detailed_relocations(donor, dp)
 
     def _relocation_identity(row: dict[str, Any]) -> tuple[Any, ...]:
@@ -841,21 +657,10 @@ def produce_donor_rewriting_candidate(
             _relocation_identity(donor_row) == _relocation_identity(seed_row),
             f"donor-rewriting donor relocation target {ordinal} differs from the seed",
         )
-    relocation_offsets = frozenset(
-        row["offset"] + byte for row in donor_rows for byte in range(row["width"])
-    )
-    relocation_symbols = {
-        row["offset"]: {"width": row["width"], "target": row["target"]} for row in donor_rows
-    }
-    internal_targets = frozenset(
-        row["target_value"] for row in donor_rows if row["target_section"] == dp["number"]
-    )
-    declared_targets = spec.get("expected_internal_relocation_targets")
-    if declared_targets is not None:
-        require(
-            sorted(internal_targets) == declared_targets,
-            "donor-rewriting in-body relocated target set changed",
-        )
+    relocation_offsets = relocated_byte_offsets(donor_rows)
+    relocation_symbols = relocation_symbol_map(donor_rows)
+    internal_targets = internal_relocation_targets(donor_rows, dp["number"])
+    require_declared_internal_targets(spec, internal_targets, "donor-rewriting")
     code_length = spec.get("expected_code_length")
     view = RelocationView(
         relocations=relocation_symbols, code_length=code_length, internal_targets=internal_targets
@@ -1177,11 +982,7 @@ def produce_donor_rewriting_candidate(
     installed_rows = [
         {**row, "offset": relocation_moves.get(row["offset"], row["offset"])} for row in donor_rows
     ]
-    semantic_detail = require_declared_relocation_semantics(
-        installed_rows,
-        function["retail_relocations"],
-        "donor-rewriting candidate relocation semantics",
-    )
+    semantic_detail = candidate_relocation_semantics(installed_rows, function, "donor-rewriting")
     derived = bytearray(lined_donor)
     derived[dp["raw_offset"] : dp["raw_offset"] + dp["raw_size"]] = image
     if relocation_moves:
@@ -1191,41 +992,29 @@ def produce_donor_rewriting_candidate(
             old = int.from_bytes(derived[entry_at : entry_at + 4], "little")
             if old in relocation_moves:
                 derived[entry_at : entry_at + 4] = relocation_moves[old].to_bytes(4, "little")
-    effective = {
-        "mangled": mangled,
-        "splice_class": "retail_exact_reloc_divergent",
-        "expected_seed_length": function["expected_seed_length"],
-        "expected_donor_length": function["expected_donor_length"],
-        "expected_linked_span": function["expected_linked_span"],
-        "expected_body_sha256": function["expected_body_sha256"],
-        "expected_seed_line_count": function["expected_seed_line_count"],
-        "expected_donor_line_count": function["expected_donor_line_count"],
-        "retail_oracle": function["retail_oracle"],
-        "retail_relocations": function["retail_relocations"],
-    }
+    effective = same_slot_effective(function, mangled)
     if "debug_representation_delta" in function:
         effective["debug_representation_delta"] = function["debug_representation_delta"]
     if "expected_donor_section_number" in function:
         effective["expected_donor_section_number"] = function["expected_donor_section_number"]
-    composed, detail = compose_same_slot_resize(
+    composed, detail, checked, cp = install_same_slot(
         seed_bytes,
         bytes(derived),
         effective,
+        mangled,
+        image,
+        "donor-rewriting",
         declared_donor_extras=function.get("expected_donor_extra_functions") or None,
     )
-    checked = CoffObject(composed)
-    cp = checked.function_section(mangled)
-    require(coff_body(checked, cp) == image, "donor-rewriting composed body differs from the image")
     require(
         [_relocation_identity(row) for row in detailed_relocations(checked, cp)]
         == [_relocation_identity(row) for row in installed_rows],
         "donor-rewriting composed relocation table is not the proved reseat",
     )
-    return (
-        composed,
+    return composed, candidate_proof(
+        detail,
+        DONOR_REWRITING_CLASS,
         {
-            **detail,
-            "splice_class": DONOR_REWRITING_CLASS,
             "instruction_schedule": schedule_detail,
             "fp_sum_reassociation": fp_detail,
             "fp_pointer_exchanges": exchange_detail,
@@ -1239,7 +1028,6 @@ def produce_donor_rewriting_candidate(
             "changed_offsets": changed,
             "debug_fidelity": debug_detail,
             "external_entries": sorted(external_entries),
-            "candidate_only": True,
-            **semantic_detail,
         },
+        semantic_detail,
     )

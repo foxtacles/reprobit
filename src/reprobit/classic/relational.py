@@ -9,19 +9,29 @@ from reprobit.coff_format import (
     coff_body,
     coff_table,
     detailed_relocations,
-    section_definitions,
 )
 from reprobit.ia32_decode import supported_ia32_instruction_length
 
+from .candidate_recipe import (
+    CandidateRecipe,
+    candidate_proof,
+    candidate_relocation_semantics,
+    comdat_body_range,
+    equal_body_effective,
+    install_equal_body,
+    open_candidate_seats,
+    pin_candidate_bodies,
+    relocated_byte_offsets,
+    relocation_symbol_map,
+    require_changes_within,
+    require_closure_children_unchanged,
+    require_pinned_length,
+)
 from .coff import (
     _coff_table_bytes,
     _comdat_child,
     _comdat_child_closure,
-    comdat_primary_identity_multiset,
-    function_multiset,
 )
-from .composition import compose_equal_body_comdat
-from .composition_mosaic import instruction_mosaic_metadata_sha256
 from .composition_relocations import require_instruction_mosaic_semantic_relocations
 from .foundation import (
     exact_audit_keys,
@@ -30,7 +40,6 @@ from .foundation import (
     require_sha,
     sha256_bytes,
 )
-from .ia32 import require_declared_relocation_semantics
 from .register_semantics import _ia32_backward_liveness, decode_ia32_bijection_instruction
 
 """Classic compiler algorithms: relational."""
@@ -38,6 +47,12 @@ RELATIONAL_FORM_CLASS = "retail_exact_relational_form"
 RELATIONAL_FORM_KIND = "mirrored_relational_form_v1"
 RELATIONAL_FORM_FPO_CLOSURE = [".debug$F", ".debug$S"]
 RELATIONAL_FORM_EH_CLOSURE = [".debug$S", ".xdata$x"]
+RELATIONAL_FORM_RECIPE = CandidateRecipe(
+    label="relational-form",
+    splice_class=RELATIONAL_FORM_CLASS,
+    spec_key="relational_form",
+    admissible_closures=(tuple(RELATIONAL_FORM_FPO_CLOSURE), tuple(RELATIONAL_FORM_EH_CLOSURE)),
+)
 IA32_ARITHMETIC_FLAGS = frozenset({"cf", "pf", "af", "zf", "sf", "of"})
 IA32_RELATIONAL_PRESERVED_FLAGS = frozenset({"zf"})
 IA32_RELATIONAL_CHANGED_FLAGS = IA32_ARITHMETIC_FLAGS - IA32_RELATIONAL_PRESERVED_FLAGS
@@ -801,89 +816,13 @@ def produce_relational_form_candidate(
     liveness fixpoint. Body installation delegates,
     unchanged, to the equal-body primitive.
     """
-    require_payload_free_declaration(function, "relational-form declaration")
-    require(
-        function.get("splice_class") == RELATIONAL_FORM_CLASS,
-        "splice class is not retail_exact_relational_form",
-    )
-    require(
-        "target_source_refactor" not in function,
-        "relational-form functions carry no source refactor",
-    )
-    spec = function["relational_form"]
-    seed = CoffObject(seed_bytes)
-    donor = CoffObject(donor_bytes)
-    mangled = function["mangled"]
-    sp = seed.function_section(mangled)
-    dp = donor.function_section(mangled)
-    require(
-        sp["number"] == dp["number"] == function["expected_section_number"],
-        "relational-form target section seat changed",
-    )
-    require(
-        len(seed.sections) == len(donor.sections) == function["expected_section_count"],
-        "relational-form global section count changed",
-    )
-    seed_functions = function_multiset(seed)
-    donor_functions = function_multiset(donor)
-    require(
-        seed_functions == donor_functions
-        and sum(seed_functions.values()) == function["expected_function_count"],
-        "relational-form donor function set differs",
-    )
-    seed_comdats = comdat_primary_identity_multiset(seed)
-    donor_comdats = comdat_primary_identity_multiset(donor)
-    require(
-        seed_comdats == donor_comdats
-        and sum(seed_comdats.values()) == function["expected_comdat_count"],
-        "relational-form donor COMDAT identity set differs",
-    )
-    require(
-        sp["raw_size"] == dp["raw_size"] == function["expected_body_length"]
-        and sp["relocation_count"]
-        == dp["relocation_count"]
-        == function["expected_relocation_count"]
-        and (sp["line_count"] == function["expected_seed_line_count"])
-        and (dp["line_count"] == function["expected_donor_line_count"])
-        and (sp["name"] == dp["name"])
-        and (
-            sp["characteristics"] == dp["characteristics"] == function["expected_characteristics"]
-        ),
-        "relational-form target header/count pins changed",
-    )
-    require(
-        section_definitions(seed)[sp["number"]]["selection"]
-        == section_definitions(donor)[dp["number"]]["selection"]
-        == function["expected_selection"],
-        "relational-form COMDAT selection changed",
-    )
-    expected_closure = tuple(function["expected_closure"])
-    require(
-        _comdat_child_closure(seed, sp)
-        == _comdat_child_closure(donor, dp)
-        == (len(expected_closure), expected_closure),
-        "relational-form target closure changed",
-    )
-    require(
-        list(expected_closure) in (RELATIONAL_FORM_FPO_CLOSURE, RELATIONAL_FORM_EH_CLOSURE),
-        "relational-form closure pin names no installation delegate",
-    )
+    seats = open_candidate_seats(seed_bytes, donor_bytes, function, RELATIONAL_FORM_RECIPE)
+    seed, donor, mangled = seats.seed, seats.donor, seats.mangled
+    sp, dp, spec = seats.seed_section, seats.donor_section, seats.spec
     delegate = relational_form_delegate(
         function["expected_closure"], function["expected_code_renames"]
     )
-    require(
-        instruction_mosaic_metadata_sha256(seed, sp) == function["expected_seed_metadata_sha256"]
-        and instruction_mosaic_metadata_sha256(donor, dp)
-        == function["expected_donor_metadata_sha256"],
-        "relational-form metadata differs from its pin",
-    )
-    seed_body = coff_body(seed, sp)
-    donor_body = coff_body(donor, dp)
-    require(
-        sha256_bytes(seed_body) == function["expected_seed_body_sha256"]
-        and sha256_bytes(donor_body) == function["expected_donor_body_sha256"],
-        "relational-form seed/donor body differs from its pin",
-    )
+    _, donor_body = pin_candidate_bodies(seats, function, RELATIONAL_FORM_RECIPE)
     seed_rows = detailed_relocations(seed, sp)
     donor_rows = detailed_relocations(donor, dp)
     code_renames = require_instruction_mosaic_semantic_relocations(
@@ -908,12 +847,8 @@ def produce_relational_form_candidate(
         {**left, "offset": right["offset"]}
         for left, right in zip(seed_rows, donor_rows, strict=True)
     ]
-    relocation_offsets = frozenset(
-        row["offset"] + byte for row in installed_rows for byte in range(row["width"])
-    )
-    relocation_symbols = {
-        row["offset"]: {"width": row["width"], "target": row["target"]} for row in installed_rows
-    }
+    relocation_offsets = relocated_byte_offsets(installed_rows)
+    relocation_symbols = relocation_symbol_map(installed_rows)
     external = relational_form_external_entries(seed, sp, "relational-form seed")
     require(
         external == relational_form_external_entries(donor, dp, "relational-form donor"),
@@ -941,30 +876,15 @@ def produce_relational_form_candidate(
         sha256_bytes(image) == function["expected_body_sha256"],
         "relational-form image differs from its pin",
     )
-    pinned_length = function["retail_oracle"]["length"]
-    require(pinned_length == len(image), "relational-form linked length changed")
-    semantic_detail = require_declared_relocation_semantics(
-        installed_rows,
-        function["retail_relocations"],
-        "relational-form candidate relocation semantics",
-    )
+    require_pinned_length(function, image, "relational-form")
+    semantic_detail = candidate_relocation_semantics(installed_rows, function, "relational-form")
     derived = bytearray(donor_bytes)
     derived[dp["raw_offset"] : dp["raw_offset"] + dp["raw_size"]] = image
     derived = bytes(derived)
-    effective = {
-        "mangled": mangled,
-        "splice_class": delegate,
-        "expected_body_length": function["expected_body_length"],
-        "expected_body_sha256": function["expected_body_sha256"],
-        "expected_changed_offsets": function["expected_changed_offsets"],
-    }
-    if delegate == "equal_body_eh_structural_local":
-        effective["expected_code_renames"] = function["expected_code_renames"]
-        effective["expected_xdata_rename_offsets"] = function["expected_xdata_rename_offsets"]
-    composed, detail = compose_equal_body_comdat(seed_bytes, derived, effective)
-    checked = CoffObject(composed)
-    cp = checked.function_section(mangled)
-    require(coff_body(checked, cp) == image, "relational-form composed body differs from the image")
+    effective = equal_body_effective(function, mangled, delegate, declared_renames=True)
+    composed, detail, checked, cp = install_equal_body(
+        seed_bytes, derived, effective, mangled, image, "relational-form"
+    )
     composed_rows = detailed_relocations(checked, cp)
     require(
         composed_rows == installed_rows
@@ -982,12 +902,7 @@ def produce_relational_form_candidate(
         sha256_bytes(coff_body(checked, debug_child)) == spec["expected_seed_debug_s_sha256"],
         "relational-form debug$S differs from its pin",
     )
-    for child_name in expected_closure:
-        require(
-            coff_body(checked, _comdat_child(checked, cp, child_name))
-            == coff_body(seed, _comdat_child(seed, sp, child_name)),
-            f"relational-form output changed its {child_name} child",
-        )
+    require_closure_children_unchanged(seats, checked, cp, "relational-form")
     boundaries = {
         item["offset"]
         for item in ia32_relational_flow_walk(
@@ -1006,24 +921,17 @@ def produce_relational_form_candidate(
                 row_line != 0 and row_offset in boundaries,
                 f"relational-form line row at {row_offset} does not land on an image instruction boundary",
             )
-    allowed = set(range(sp["raw_offset"], sp["raw_offset"] + sp["raw_size"]))
-    require(
-        {index for index in range(len(seed_bytes)) if seed_bytes[index] != composed[index]}
-        <= allowed,
-        "relational-form changed bytes outside its own COMDAT",
-    )
-    return (
-        composed,
+    require_changes_within(seed_bytes, composed, comdat_body_range(sp), "relational-form")
+    return composed, candidate_proof(
+        detail,
+        RELATIONAL_FORM_CLASS,
         {
-            **detail,
-            "splice_class": RELATIONAL_FORM_CLASS,
             "relational_form": proof["sites"],
             "instruction_count": proof["instruction_count"],
             "rewritten_offsets": proof["rewritten_offsets"],
             "external_entries": proof["external_entries"],
             "preserved_flags": proof["preserved_flags"],
             "changed_flags": proof["changed_flags"],
-            "candidate_only": True,
-            **semantic_detail,
         },
+        semantic_detail,
     )
