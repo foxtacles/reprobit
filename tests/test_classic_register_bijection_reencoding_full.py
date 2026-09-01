@@ -44,6 +44,7 @@ import reprobit.classic.register_reencoding as register_algorithms
 import reprobit.classic.register_semantics as register_semantics
 import reprobit.coff_format as coff_format
 from reprobit.binary import ByteIdentityError
+from reprobit.strict_json import canonical_json
 
 TARGET_SYMBOL = "?erase@?$_Tree@PAVFixture@@@@QAE?AViterator@1@V21@@Z"
 NIL_SYMBOL = "?_Nil@?$_Tree@PAVFixture@@@@1PAU_Node@1@A"
@@ -857,3 +858,79 @@ class FramePointerPrecisionTest(unittest.TestCase):
         body = BODY[:10] + bytes.fromhex("03ec") + BODY[12:]
         with self.assertRaises(ByteIdentityError):
             self._proof(body)
+
+
+# Captured from the producer at the time the golden test was written.
+GOLDEN_OBJECT_SHA256 = "c1c6b2cd58d0a851dc58287a5f23dc6747aebc1680a6128fe94e9094f1d6a944"
+GOLDEN_PROOF_SHA256 = "339d7c94c8b0b89039ec91adaed74fbbc887262bdaa6e27e0f292bce9da477ac"
+GOLDEN_PROOF = {
+    "branch_repairs": [12],
+    "candidate_only": True,
+    "carried_code_symbols": [],
+    "changed_local_values": 0,
+    "donor_length": 35,
+    "file_size_delta": 2,
+    "fpo_record": {
+        "cbFrame": 0,
+        "cbProcSize": 33,
+        "cbProlog": 4,
+        "cbRegs": 4,
+        "cdwLocals": 1,
+        "cdwParams": 2,
+        "fHasSEH": 0,
+        "fUseBP": 1,
+        "reserved": 0,
+        "ulOffStart": 0,
+    },
+    "growth": [[16, 16, 2, 3], [18, 19, 2, 3]],
+    "imported_undefined_symbols": [],
+    "instruction_count": 17,
+    "linked_span": 48,
+    "mangled": TARGET_SYMBOL,
+    "mapped_locals": 0,
+    "oracle_payload_bytes_read": 0,
+    "procedure_range": [35, 4, 30],
+    "register_bijection_reencoding": [{"end": 22, "mapping": dict(SIGMA), "start": 14}],
+    "relocation_reseat": [[24, 26]],
+    "rewritten_field_offsets": [15, 17, 19, 21],
+    "section_number": 1,
+    "seed_length": 33,
+    "semantic_relocation_count": 2,
+    "splice_class": register_algorithms.REGISTER_BIJECTION_REENCODING_CLASS,
+    "substituted_relocations": 0,
+}
+
+
+class ComposerGoldenTest(unittest.TestCase):
+    """Every emitted byte and every proof field of the producer, pinned.
+
+    The golden reference for the candidate-recipe consolidation: a refactor
+    that changes the composed object or the proof must explain itself here.
+    """
+
+    def setUp(self):
+        (self.seed, self.donor, self.image, self.proof, self.derived, self.detail) = (
+            composed_fixture()
+        )
+        self.record = function_record(self.seed, self.donor, self.image, self.proof, self.detail)
+
+    def _compose(self):
+        return register_candidates.produce_register_bijection_reencoding_candidate(
+            self.seed, self.donor, self.record
+        )
+
+    def test_the_golden_object_and_proof_are_unchanged(self):
+        composed, detail = self._compose()
+        self.assertEqual(foundation_algorithms.sha256_bytes(composed), GOLDEN_OBJECT_SHA256)
+        self.assertEqual(detail, GOLDEN_PROOF)
+        self.assertEqual(
+            foundation_algorithms.sha256_bytes(canonical_json(detail)), GOLDEN_PROOF_SHA256
+        )
+
+    def test_the_producer_is_deterministic(self):
+        first = self._compose()
+        seed, donor, image, proof, _derived, detail = composed_fixture()
+        second = register_candidates.produce_register_bijection_reencoding_candidate(
+            seed, donor, function_record(seed, donor, image, proof, detail)
+        )
+        self.assertEqual(first, second)
