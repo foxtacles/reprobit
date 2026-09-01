@@ -9,6 +9,9 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
+from reprobit.binary import ByteIdentityError
+from reprobit.pe32 import parse_pe32_headers
+
 
 class FormatError(ValueError):
     """Raised when a binary format is malformed or unsupported."""
@@ -226,27 +229,14 @@ def parse_pe32(data: bytes, *, require_i386: bool = True) -> Pe32Image:
     pe_offset = struct.unpack("<L", _require(data, 0x3C, 4, "PE offset"))[0]
     if pe_offset < 64:
         raise FormatError("PE offset points into the DOS header")
-    if bytes(_require(data, pe_offset, 4, "PE signature")) != b"PE\0\0":
-        raise FormatError("missing PE signature")
+    try:
+        headers = parse_pe32_headers(data, minimum_optional_size=68, require_i386=require_i386)
+    except ByteIdentityError as error:
+        raise FormatError(str(error)) from error
     header = _parse_header(data, pe_offset + 4, "PE COFF")
-    if require_i386 and header.machine != IMAGE_FILE_MACHINE_I386:
-        raise FormatError(f"unsupported PE machine 0x{header.machine:04x}")
-    optional_at = pe_offset + 4 + _COFF_HEADER.size
-    optional = _require(data, optional_at, header.optional_header_size, "PE optional header")
-    if len(optional) < 68:
-        raise FormatError("PE32 optional header is too short")
-    magic = struct.unpack_from("<H", optional, 0)[0]
-    if magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC:
-        raise FormatError(f"unsupported PE optional-header magic 0x{magic:04x}")
-    image_base = struct.unpack_from("<L", optional, 28)[0]
-    section_alignment = struct.unpack_from("<L", optional, 32)[0]
-    file_alignment = struct.unpack_from("<L", optional, 36)[0]
-    size_of_image = struct.unpack_from("<L", optional, 56)[0]
-    checksum = struct.unpack_from("<L", optional, 64)[0]
-    section_table = optional_at + header.optional_header_size
     sections = _parse_sections(
         data,
-        table_offset=section_table,
+        table_offset=headers.section_table_offset,
         count=header.section_count,
     )
     previous_end = 0
@@ -256,11 +246,11 @@ def parse_pe32(data: bytes, *, require_i386: bool = True) -> Pe32Image:
         previous_end = section.virtual_address + max(section.virtual_size, len(section.raw_data))
     return Pe32Image(
         header=header,
-        image_base=image_base,
-        section_alignment=section_alignment,
-        file_alignment=file_alignment,
-        size_of_image=size_of_image,
-        checksum=checksum,
+        image_base=headers.image_base,
+        section_alignment=headers.section_alignment,
+        file_alignment=headers.file_alignment,
+        size_of_image=headers.size_of_image,
+        checksum=headers.checksum,
         sections=sections,
         pe_offset=pe_offset,
     )

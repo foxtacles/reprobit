@@ -20,7 +20,7 @@ from types import MappingProxyType
 from typing import Any
 
 from reprobit.authority_snapshot import AuthoritySnapshotError, json_authority_members
-from reprobit.classic.source_regeneration import _derive_classic_source_regeneration
+from reprobit.classic.source_regeneration import derive_classic_source_regeneration
 from reprobit.project_loader import load_project
 from reprobit.schema import BuildPlanDocument, InterventionDocument, ProofDocument
 from reprobit.source_lock import SourceLockError, receipt_source_input
@@ -58,7 +58,7 @@ class RegenerationPlan:
         return tuple(sorted({change.document for change in self.changes}))
 
 
-class _SourceReader:
+class ProjectSourceReader:
     """Read project-relative source files once, remembering the exact bytes."""
 
     def __init__(self, root: Path) -> None:
@@ -200,8 +200,8 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
     else:
         control_preimages[plan_relative] = None
 
-    reader = _SourceReader(root)
-    derived = _derive_classic_source_regeneration(
+    reader = ProjectSourceReader(root)
+    derived = derive_classic_source_regeneration(
         documents=documents,
         plan_relative=plan_relative,
         reader=reader,
@@ -259,6 +259,7 @@ def apply_source_regeneration(
 
 
 __all__ = [
+    "ProjectSourceReader",
     "RegenerationChange",
     "RegenerationPlan",
     "SourceRegenerationError",

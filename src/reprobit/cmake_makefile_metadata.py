@@ -46,43 +46,50 @@ class MetadataReader:
     consumed_bytes: int = 0
 
     def read_text(self, path: Path, *, label: str) -> str:
-        if path.is_symlink() or not path.is_file():
-            raise ProducerGraphError(f"{label} is absent or redirected: {path}")
-        if path.stat().st_size > _MAX_METADATA_FILE_BYTES:
-            raise ProducerGraphError(
-                f"{label} exceeds the {_MAX_METADATA_FILE_BYTES}-byte file limit: {path}"
-            )
-        with path.open("rb") as stream:
-            payload = stream.read(_MAX_METADATA_FILE_BYTES + 1)
-        if len(payload) > _MAX_METADATA_FILE_BYTES:
-            raise ProducerGraphError(
-                f"{label} exceeds the {_MAX_METADATA_FILE_BYTES}-byte file limit: {path}"
-            )
+        payload = _read_bounded_payload(
+            path,
+            label=label,
+            max_bytes=_MAX_METADATA_FILE_BYTES,
+            limit="file limit",
+        )
         if self.consumed_bytes + len(payload) > _MAX_METADATA_TOTAL_BYTES:
             raise ProducerGraphError(
                 "configured build metadata exceeds the aggregate extraction byte limit"
             )
-        try:
-            text = payload.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ProducerGraphError(f"{label} is not UTF-8 text: {path}") from error
+        text = _decode_text(payload, path, label=label)
         self.consumed_bytes += len(payload)
         return text
 
 
-def _read_bounded_text(path: Path, *, label: str, max_bytes: int) -> str:
+def _read_bounded_payload(path: Path, *, label: str, max_bytes: int, limit: str) -> bytes:
+    """Read one regular, non-redirected file whose size fits ``max_bytes``."""
+
     if path.is_symlink() or not path.is_file():
         raise ProducerGraphError(f"{label} is absent or redirected: {path}")
     if path.stat().st_size > max_bytes:
-        raise ProducerGraphError(f"{label} exceeds the {max_bytes}-byte extraction limit: {path}")
+        raise ProducerGraphError(f"{label} exceeds the {max_bytes}-byte {limit}: {path}")
     with path.open("rb") as stream:
         payload = stream.read(max_bytes + 1)
     if len(payload) > max_bytes:
-        raise ProducerGraphError(f"{label} exceeds the {max_bytes}-byte extraction limit: {path}")
+        raise ProducerGraphError(f"{label} exceeds the {max_bytes}-byte {limit}: {path}")
+    return payload
+
+
+def _decode_text(payload: bytes, path: Path, *, label: str) -> str:
     try:
         return payload.decode("utf-8")
     except UnicodeDecodeError as error:
         raise ProducerGraphError(f"{label} is not UTF-8 text: {path}") from error
+
+
+def _read_bounded_text(path: Path, *, label: str, max_bytes: int) -> str:
+    payload = _read_bounded_payload(
+        path,
+        label=label,
+        max_bytes=max_bytes,
+        limit="extraction limit",
+    )
+    return _decode_text(payload, path, label=label)
 
 
 def read_compile_database(build_root: Path) -> list[object]:

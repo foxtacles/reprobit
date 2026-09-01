@@ -25,6 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 
+from reprobit.secure_path_contracts import is_redirected_metadata
+
 if TYPE_CHECKING:
     from reprobit.process import CommandSpec
 
@@ -36,7 +38,6 @@ _FILE_READ_ATTRIBUTES = 0x00000080
 _FILE_SHARE_ALL = 0x00000001 | 0x00000002 | 0x00000004
 _OPEN_EXISTING = 3
 _FILE_FLAG_BACKUP_SEMANTICS = 0x02000000
-_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 _VOLUME_NAME_NT = 0x00000002
 _DDD_RAW_TARGET_PATH = 0x00000001
 _DDD_REMOVE_DEFINITION = 0x00000002
@@ -414,12 +415,7 @@ class NativeDeviceMapLease(AbstractContextManager["NativeDeviceMapLease"]):
                 raise NativeDeviceMapError(
                     f"cannot inspect native logical-drive root {self.root}: {error}"
                 ) from error
-            if (
-                stat.S_ISLNK(root_metadata.st_mode)
-                or int(getattr(root_metadata, "st_reparse_tag", False))
-                or int(getattr(root_metadata, "st_file_attributes", False))
-                & _FILE_ATTRIBUTE_REPARSE_POINT
-            ):
+            if is_redirected_metadata(root_metadata):
                 raise NativeDeviceMapError(
                     f"native logical-drive root must not be redirected: {self.root}"
                 )

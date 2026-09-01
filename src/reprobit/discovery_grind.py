@@ -32,11 +32,10 @@ from reprobit.discovery_contracts import (
 )
 from reprobit.discovery_project import (
     ProjectDirectorySnapshot,
-    ProjectFileSnapshot,
     ProjectGrindContext,
-    StagedProject,
     capture_project_grind_inputs,
     resolve_project_grind_context,
+    stage_grind_project,
 )
 from reprobit.execution import classic_semantic_obligation_name
 from reprobit.msvc_discovery_coff import qualify_msvc_reference_object
@@ -48,6 +47,7 @@ from reprobit.schema import (
     LegacyOracleInstallIntervention,
     ProofDocument,
 )
+from reprobit.staged_project import ProjectFileSnapshot
 from reprobit.strict_json import canonical_json
 from reprobit.transactions import CASTransaction
 
@@ -292,6 +292,19 @@ def _publish_solution(
     return result.transaction_id
 
 
+def require_single_acceptance(
+    accept_exact: bool,
+    accept_progress: bool,
+    *,
+    error: Callable[[str], Exception],
+    message: str = "exact and progress acceptance are mutually exclusive",
+) -> None:
+    """Refuse a request that pre-authorizes both exact and progress publication."""
+
+    if accept_exact and accept_progress:
+        raise error(message)
+
+
 def run_project_grind(
     project_root: Path,
     *,
@@ -310,8 +323,7 @@ def run_project_grind(
     certification.
     """
 
-    if accept_exact and accept_progress:
-        raise GrindError("exact and progress acceptance are mutually exclusive")
+    require_single_acceptance(accept_exact, accept_progress, error=GrindError)
 
     live_context = resolve_project_grind_context(
         project_root,
@@ -336,7 +348,7 @@ def run_project_grind(
         | None
     ) = None
 
-    with StagedProject(
+    with stage_grind_project(
         live_context.root,
         live_context.bundle.spec.state_dir,
         snapshot.files,
@@ -651,5 +663,6 @@ __all__ = [
     "GrindSolution",
     "ProjectGrindCallbacks",
     "ProjectGrindResult",
+    "require_single_acceptance",
     "run_project_grind",
 ]

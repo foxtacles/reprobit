@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from itertools import pairwise
 
 from reprobit.binary import require
+from reprobit.pe32 import Pe32Headers, parse_pe32_headers
 
 from .foundation import (
     exact_audit_keys,
@@ -35,59 +36,25 @@ class _PE32:
     """Fail-closed PE32 geometry used by the text repacker."""
 
     def __init__(self, data: bytes) -> None:
-        require(len(data) >= 64 and data[:2] == b"MZ", "missing DOS MZ header")
-        pe = int(struct.unpack_from("<I", data, 0x3C)[0])
-        require(
-            64 <= pe <= len(data) - 24 and data[pe : pe + 4] == b"PE\0\0", "missing PE signature"
-        )
-        machine, count = struct.unpack_from("<HH", data, pe + 4)
-        optional_size = int(struct.unpack_from("<H", data, pe + 20)[0])
-        require(machine == 0x14C, "only i386 PE images are supported")
-        require(0 < count <= 96, "invalid PE section count")
-        optional = pe + 24
-        require(
-            optional_size >= 32 and optional + optional_size <= len(data),
-            "invalid PE32 optional header",
-        )
-        require(
-            struct.unpack_from("<H", data, optional)[0] == 0x10B,
-            "only PE32 images are supported",
-        )
-        self.image_base = int(struct.unpack_from("<I", data, optional + 28)[0])
-        table = optional + optional_size
-        require(table + count * 40 <= len(data), "section table extends past EOF")
+        self._headers: Pe32Headers = parse_pe32_headers(data)
+        self.image_base = self._headers.image_base
         sections: list[_Section] = []
-        for index in range(count):
-            header = table + index * 40
-            raw_name = data[header : header + 8].split(b"\0", 1)[0]
+        for row in self._headers.sections:
+            raw_name = row.raw_name.split(b"\0", 1)[0]
             require(
                 bool(raw_name) and all(32 <= byte < 127 for byte in raw_name),
                 "invalid PE section name",
             )
-            virtual_size, virtual_address, raw_size, raw_offset = struct.unpack_from(
-                "<IIII", data, header + 8
-            )
-            require(
-                raw_size == 0 or raw_offset <= len(data) - raw_size,
-                "section raw data extends past EOF",
-            )
             sections.append(
                 _Section(
                     raw_name.decode("ascii"),
-                    int(virtual_size),
-                    int(virtual_address),
-                    int(raw_size),
-                    int(raw_offset),
-                    header,
+                    row.virtual_size,
+                    row.virtual_address,
+                    row.raw_size,
+                    row.raw_offset,
+                    row.header_offset,
                 )
             )
-        occupied = sorted(
-            (section.raw_offset, section.raw_end) for section in sections if section.raw_size
-        )
-        require(
-            all(left[1] <= right[0] for left, right in pairwise(occupied)),
-            "PE sections overlap in the file",
-        )
         self.sections = tuple(sections)
 
     def section(self, name: str) -> _Section:
@@ -96,16 +63,8 @@ class _PE32:
         return matches[0]
 
     def va_to_offset(self, va: int, size: int = 1) -> int:
-        rva = va - self.image_base
-        matches = [
-            section
-            for section in self.sections
-            if section.virtual_address <= rva
-            and rva + size <= section.virtual_address + section.raw_size
-        ]
-        require(len(matches) == 1, f"virtual range 0x{va:08x}+{size} is not uniquely file-backed")
-        section = matches[0]
-        return section.raw_offset + rva - section.virtual_address
+        context = f"virtual range 0x{va:08x}+{size}"
+        return self._headers.rva_to_offset(va - self.image_base, size, context=context)
 
 
 @dataclass(frozen=True, slots=True)

@@ -20,6 +20,7 @@ from typing import Annotated, Literal
 from pydantic import Field, field_validator, model_validator
 
 from reprobit.model import BuildTarget, Digest, Identifier, StrictModel
+from reprobit.secure_path_contracts import SecurePathError, canonical_relative_path
 from reprobit.strict_json import canonical_json, strict_load
 
 _MARKERS = ("${SOURCE}", "${BUILD}", "${TOOLCHAIN}")
@@ -135,13 +136,10 @@ class ProducerRole(StrEnum):
 def _relative(value: str, *, label: str) -> str:
     if not value or "\x00" in value or "\\" in value:
         raise ValueError(f"{label} must be a non-empty portable path")
-    path = PurePosixPath(value)
-    if (
-        path.is_absolute()
-        or path.as_posix() != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise ValueError(f"{label} must be normalized and relative")
+    try:
+        canonical_relative_path(value)
+    except SecurePathError:
+        raise ValueError(f"{label} must be normalized and relative") from None
     return value
 
 

@@ -21,7 +21,13 @@ from reprobit.discovery_grind import (
     ProjectGrindCallbacks,
     ProjectGrindResult,
 )
-from reprobit.discovery_grind_report import render_grind_report_html
+from reprobit.discovery_grind_report import (
+    GrindReportCommands,
+    GrindReportLayout,
+    grind_approval_argv,
+    publish_grind_outcome,
+    render_cold_verification,
+)
 from reprobit.discovery_project import ProjectGrindPlan
 from reprobit.discovery_project_grind import (
     MAX_PROJECT_GRIND_SYMBOLS,
@@ -34,7 +40,6 @@ from reprobit.discovery_project_grind import (
 )
 from reprobit.discovery_project_grind_report import render_project_auto_grind_report_html
 from reprobit.project_loader import load_project
-from reprobit.report_io import render_report_html
 from reprobit.state import report_publication_lease
 from reprobit.strict_json import JsonValue, canonical_json
 from reprobit.transactions import CASTransaction
@@ -128,6 +133,12 @@ def _campaign_argv(
     return tuple(values)
 
 
+def project_state_root(root: Path) -> Path:
+    """Resolve the project-owned state directory that holds reports and leases."""
+
+    return safe_project_path(root, load_project(root).state_dir)
+
+
 def _project_report_directory(state_root: Path) -> Path:
     return state_root / "reports/grind/project"
 
@@ -163,62 +174,39 @@ def _publish_project_grind_outcome(
 
     directory = _project_report_directory(state_root)
     stem = f"{index:03d}"
-    plan_path = directory / "plans" / f"{stem}-plan.json"
-    decision_path = directory / "outcomes" / f"{stem}-decision.html"
-    plan_output = relative_output(root, str(plan_path))
-    decision_output = relative_output(root, str(decision_path))
+    plan_output = relative_output(root, str(directory / "plans" / f"{stem}-plan.json"))
     plan_relative = PurePosixPath(plan_output.as_posix()).as_posix()
-    files = {plan_output: canonical_json(plan)}
-
-    cold_json_path = directory / "cold" / f"{stem}-verification.json"
-    cold_html_path = directory / "cold" / f"{stem}-verification.html"
-    cold_json_output = relative_output(root, str(cold_json_path))
-    cold_html_output = relative_output(root, str(cold_html_path))
-    cold_json_link: str | None = None
-    cold_html_link: str | None = None
-    solution = result.solution
-    if solution is not None:
-        files[cold_json_output] = canonical_json(solution.report)
-        files[cold_html_output] = render_report_html(
-            solution.report,
-            canonical_json_href=cold_json_path.name,
-        ).encode("utf-8")
-        cold_json_link = f"../cold/{cold_json_path.name}"
-        cold_html_link = f"../cold/{cold_html_path.name}"
-
-    per_symbol_approval = human_command(
-        (
-            "rbit",
-            "discover",
-            "grind",
-            root,
-            "--expert-plan",
-            plan_relative,
-            "--accept-exact" if result.exact else "--accept-progress",
-        )
+    layout = GrindReportLayout(
+        report=directory / "outcomes" / f"{stem}-decision.html",
+        cold_json=directory / "cold" / f"{stem}-verification.json",
+        cold_html=directory / "cold" / f"{stem}-verification.html",
     )
-    files[decision_output] = render_grind_report_html(
+    extra_files = {plan_output: canonical_json(plan)}
+    solution = result.solution
+    cold_files = render_cold_verification(root, layout, solution) if solution is not None else {}
+    publication = publish_grind_outcome(
+        root,
+        state_root,
+        layout,
         result,
         plan_relative=plan_relative,
-        cold_report_html=cold_html_link,
-        cold_report_json=cold_json_link,
-        approval_command=per_symbol_approval,
-        verify_command=human_command(verify_argv),
-        continue_command=human_command(("rbit", "discover", "grind", root)),
-    ).encode("utf-8")
-    with report_publication_lease(state_root):
-        transaction = CASTransaction(root)
-        for owned in (cold_json_output, cold_html_output):
-            if owned not in files and os.path.lexists(root / owned):
-                transaction.delete(owned)
-        for relative, payload in sorted(files.items(), key=lambda item: item[0].as_posix()):
-            transaction.write(relative, payload)
-        transaction.commit()
+        commands=GrindReportCommands(
+            approval=human_command(grind_approval_argv(root, plan_relative, exact=result.exact)),
+            verify=human_command(verify_argv),
+            proceed=human_command(("rbit", "discover", "grind", root)),
+        ),
+        cold_files=cold_files,
+        extra_files=extra_files,
+    )
     return ProjectGrindArtifacts(
         plan=plan_output.as_posix(),
-        decision_report=decision_output.as_posix(),
-        cold_verification_json=(cold_json_output.as_posix() if solution is not None else None),
-        cold_verification_html=(cold_html_output.as_posix() if solution is not None else None),
+        decision_report=publication.report.as_posix(),
+        cold_verification_json=(
+            publication.cold_json.as_posix() if publication.cold_json is not None else None
+        ),
+        cold_verification_html=(
+            publication.cold_html.as_posix() if publication.cold_html is not None else None
+        ),
     )
 
 
@@ -375,7 +363,7 @@ def command_discover_project_grind(
     root = project_root(args.project)
     accept_progress = getattr(args, "accept_progress", False)
     assignments = _project_reference_assignments(args.reference_object)
-    state_root = safe_project_path(root, load_project(root).state_dir)
+    state_root = project_state_root(root)
     report_directory = _project_report_directory(state_root)
     verify_argv = ("rbit", "verify", str(root))
     outcome_report_warnings: list[tuple[ProjectGrindWorkItem, str, str]] = []
@@ -616,4 +604,4 @@ def command_discover_project_grind(
     return 0 if result.qualified else 1
 
 
-__all__ = ["command_discover_project_grind"]
+__all__ = ["command_discover_project_grind", "project_state_root"]

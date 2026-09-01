@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import shutil
 from os import PathLike
-from pathlib import Path, PurePosixPath
+from pathlib import Path
+
+from reprobit.secure_path_contracts import SecurePathError, canonical_relative_path
 
 
 class CLIError(RuntimeError):
@@ -14,16 +16,10 @@ class CLIError(RuntimeError):
 def canonical_project_relative(value: str, *, label: str) -> str:
     """Require one canonical, portable project-relative CLI value."""
 
-    path = PurePosixPath(value)
-    if (
-        not value
-        or "\0" in value
-        or "\\" in value
-        or path.is_absolute()
-        or path.as_posix() != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise CLIError(f"{label} must be a canonical project-relative path")
+    try:
+        canonical_relative_path(value)
+    except SecurePathError:
+        raise CLIError(f"{label} must be a canonical project-relative path") from None
     return value
 
 

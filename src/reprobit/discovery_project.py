@@ -2,14 +2,17 @@
 
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from types import TracebackType
 from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 
+from reprobit.authority_snapshot import (
+    AuthoritySnapshotError,
+    json_authority_members,
+    resolve_project_path,
+)
 from reprobit.classic_orchestration import (
     classic_compiler_translation_unit_authority,
 )
@@ -23,7 +26,7 @@ from reprobit.discovery_contracts import (
     MosaicLimits,
     enumerate_declaration_states,
 )
-from reprobit.model import Digest, Identifier, StrictModel
+from reprobit.model import Identifier, StrictModel
 from reprobit.paths import normalize_logical_path
 from reprobit.producer_graph import ProducerNode, ProducerRole
 from reprobit.project_loader import load_project_tree
@@ -35,9 +38,14 @@ from reprobit.schema import (
     ProjectBundle,
     ProofDocument,
 )
+from reprobit.secure_path_contracts import SecurePathError, canonical_relative_path
 from reprobit.source_lock import receipt_source_input
-from reprobit.state import KeepWorkspace, RunArena
+from reprobit.staged_project import ProjectFileSnapshot, StagedProject
+from reprobit.state import KeepWorkspace
 from reprobit.strict_json import canonical_json, strict_load
+
+DEFAULT_GRIND_CLASSES = InclusiveRange(start=1, stop=4)
+DEFAULT_GRIND_FUNCTIONS = InclusiveRange(start=10, stop=10)
 
 
 class ProjectDiscoveryError(RuntimeError):
@@ -45,15 +53,11 @@ class ProjectDiscoveryError(RuntimeError):
 
 
 def _portable_relative(value: str, *, label: str) -> str:
-    if "\0" in value or "\\" in value:
-        raise ValueError(f"{label} must be canonical POSIX relative text")
-    path = PurePosixPath(value)
-    if (
-        path.is_absolute()
-        or not path.parts
-        or path.as_posix() != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
+    try:
+        path = canonical_relative_path(value)
+    except SecurePathError:
+        raise ValueError(f"{label} must be canonical POSIX relative text") from None
+    if not path.parts:
         raise ValueError(f"{label} must be canonical POSIX relative text")
     # Reuse the compiler path contract's conservative DOS component checks.
     normalize_logical_path("R:\\" + value.replace("/", "\\"))
@@ -140,13 +144,6 @@ class ProjectGrindContext:
 
 
 @dataclass(frozen=True, slots=True)
-class ProjectFileSnapshot:
-    relative_path: str
-    digest: Digest
-    payload: bytes
-
-
-@dataclass(frozen=True, slots=True)
 class ProjectDirectorySnapshot:
     relative_path: str
     json_members: tuple[str, ...]
@@ -160,17 +157,12 @@ class ProjectGrindSnapshot:
 
 def _safe_project_path(root: Path, relative: str) -> Path:
     relative = _portable_relative(relative, label="project path")
-    candidate = root.joinpath(*PurePosixPath(relative).parts)
-    current = root
-    for component in PurePosixPath(relative).parts:
-        current /= component
-        if current.is_symlink():
-            raise ProjectDiscoveryError(f"project input is redirected: {relative!r}")
-    try:
-        candidate.resolve(strict=False).relative_to(root)
-    except ValueError as exc:
-        raise ProjectDiscoveryError(f"project input escapes its root: {relative!r}") from exc
-    return candidate
+    return resolve_project_path(
+        root,
+        relative,
+        error=ProjectDiscoveryError,
+        subject="project input",
+    )
 
 
 def discovery_state_root(root: Path, state_dir: str) -> Path:
@@ -180,6 +172,8 @@ def discovery_state_root(root: Path, state_dir: str) -> Path:
 
 
 def _document_paths(root: Path, relative: str) -> tuple[Path, ...]:
+    """List one authority directory in the exact order ``project_loader`` indexes it."""
+
     directory = _safe_project_path(root, relative)
     if not directory.is_dir() or directory.is_symlink():
         raise ProjectDiscoveryError(f"project document directory is unavailable: {directory}")
@@ -195,6 +189,15 @@ def _document_paths(root: Path, relative: str) -> tuple[Path, ...]:
     if any(not path.is_file() for path in paths):
         raise ProjectDiscoveryError(f"project document entry is not a file: {directory}")
     return paths
+
+
+def _json_members(root: Path, relative: str) -> tuple[str, ...]:
+    """Seal one authority directory's membership exactly as CAS publication rechecks it."""
+
+    try:
+        return json_authority_members(root, relative)
+    except AuthoritySnapshotError as exc:
+        raise ProjectDiscoveryError(f"cannot seal project authority: {exc}") from exc
 
 
 def _relative_to(root: Path, path: Path) -> str:
@@ -350,17 +353,11 @@ def capture_project_grind_inputs(
         bundle.spec.layout.oracles,
     ):
         paths = _document_paths(context.root, relative)
-        directory = _safe_project_path(context.root, relative)
         authority_paths.extend(paths)
         authority_directories.append(
             ProjectDirectorySnapshot(
                 relative_path=relative,
-                json_members=tuple(
-                    sorted(
-                        (_relative_to(directory, path) for path in paths),
-                        key=lambda item: (item.casefold(), item),
-                    )
-                ),
+                json_members=_json_members(context.root, relative),
             )
         )
     relatives = {
@@ -395,78 +392,41 @@ def capture_project_grind_inputs(
             raise ProjectDiscoveryError(f"project grind input changed: {relative!r}")
         snapshots.append(ProjectFileSnapshot(relative, digest, payload))
     for snapshot in authority_directories:
-        current = _document_paths(context.root, snapshot.relative_path)
-        directory = _safe_project_path(context.root, snapshot.relative_path)
-        members = tuple(
-            sorted(
-                (_relative_to(directory, path) for path in current),
-                key=lambda item: (item.casefold(), item),
-            )
-        )
-        if members != snapshot.json_members:
+        _document_paths(context.root, snapshot.relative_path)
+        if _json_members(context.root, snapshot.relative_path) != snapshot.json_members:
             raise ProjectDiscoveryError(
                 f"project authority membership changed: {snapshot.relative_path!r}"
             )
     return ProjectGrindSnapshot(tuple(snapshots), tuple(authority_directories))
 
 
-class StagedProject:
-    """An explicit private copy of every sealed input needed by certification."""
+def stage_grind_project(
+    project_root: Path,
+    state_dir: str,
+    snapshots: tuple[ProjectFileSnapshot, ...],
+) -> StagedProject:
+    """Stage every sealed grind input inside a never-retained ``grind`` arena."""
 
-    def __init__(
-        self,
-        project_root: Path,
-        state_dir: str,
-        snapshots: tuple[ProjectFileSnapshot, ...],
-    ) -> None:
-        root = project_root.resolve(strict=True)
-        self.arena = RunArena(
-            discovery_state_root(root, state_dir),
-            kind="grind",
-            keep=KeepWorkspace.NEVER,
-        )
-        self.snapshots = snapshots
-
-    def __enter__(self) -> Path:
-        arena = self.arena.__enter__()
-        root = arena.path / "project"
-        try:
-            root.mkdir()
-            for snapshot in self.snapshots:
-                destination = root.joinpath(*PurePosixPath(snapshot.relative_path).parts)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                with destination.open("xb") as stream:
-                    stream.write(snapshot.payload)
-                    stream.flush()
-                    os.fsync(stream.fileno())
-                if Digest.from_path(destination) != snapshot.digest:
-                    raise ProjectDiscoveryError(
-                        f"staged project input differs: {snapshot.relative_path!r}"
-                    )
-        except BaseException:
-            arena.finish(succeeded=False)
-            raise
-        return root
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        self.arena.__exit__(exc_type, exc, traceback)
+    return StagedProject(
+        discovery_state_root(project_root, state_dir),
+        snapshots,
+        kind="grind",
+        keep=KeepWorkspace.NEVER,
+        error=lambda relative: ProjectDiscoveryError(f"staged project input differs: {relative!r}"),
+    )
 
 
 __all__ = [
+    "DEFAULT_GRIND_CLASSES",
+    "DEFAULT_GRIND_FUNCTIONS",
     "ProjectDirectorySnapshot",
     "ProjectDiscoveryError",
-    "ProjectFileSnapshot",
     "ProjectGrindContext",
     "ProjectGrindPlan",
     "ProjectGrindSnapshot",
-    "StagedProject",
     "capture_project_grind_inputs",
     "discovery_state_root",
     "load_project_grind_plan",
     "resolve_project_grind_context",
+    "stage_grind_project",
 ]

@@ -18,11 +18,11 @@ from pathlib import Path, PurePath, PurePosixPath
 from reprobit.classic_project import (
     ClassicProjectError,
     _cmake_quote,
+    _effective_source_seal,
     materialize_effective_workspace,
     write_cmake_project_plan,
 )
 from reprobit.cmake import CMakeExportPlan, cmake_module_path
-from reprobit.cmake_source import effective_source_digest
 from reprobit.model import Digest
 from reprobit.process import CommandSpec, ProcessError, ProcessSupervisor
 from reprobit.schema import ProducerGraphBuildAdapter, ProjectBundle
@@ -31,6 +31,22 @@ from reprobit.strict_json import canonical_json
 
 class CMakeConfigureError(ClassicProjectError):
     """A CMake import boundary was incomplete or unsafe."""
+
+
+def effective_source_digest(root: Path) -> Digest:
+    """Digest the complete path, size, and content receipt of an effective tree."""
+
+    return Digest.from_bytes(
+        canonical_json(
+            {
+                "schema": 1,
+                "files": [
+                    {"path": path, "size": size, "sha256": sha256}
+                    for path, size, sha256 in _effective_source_seal(root)
+                ],
+            }
+        )
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -363,4 +379,5 @@ __all__ = [
     "CMakeConfiguration",
     "CMakeConfigureError",
     "configure_cmake_project",
+    "effective_source_digest",
 ]

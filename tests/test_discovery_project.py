@@ -12,10 +12,9 @@ from reprobit.discovery_contracts import (
 )
 from reprobit.discovery_project import (
     ProjectDiscoveryError,
-    ProjectFileSnapshot,
     ProjectGrindPlan,
-    StagedProject,
     load_project_grind_plan,
+    stage_grind_project,
 )
 from reprobit.model import ByteRange, Digest, Scope
 from reprobit.schema import (
@@ -26,6 +25,7 @@ from reprobit.schema import (
     LegacyOracleInstallIntervention,
     OracleInstallRange,
 )
+from reprobit.staged_project import ProjectFileSnapshot
 from reprobit.state import StateStore
 from reprobit.strict_json import canonical_json
 
@@ -158,7 +158,7 @@ def test_staged_project_copies_only_sealed_inputs_and_cleans_up(
     )
 
     state_dir = ".reprobit-state"
-    with StagedProject(tmp_path, state_dir, (snapshot,)) as staged:
+    with stage_grind_project(tmp_path, state_dir, (snapshot,)) as staged:
         state = StateStore(tmp_path / state_dir).status()
         assert len(state.runs) == 1
         assert state.runs[0].active is True
@@ -182,6 +182,6 @@ def test_staged_project_removes_its_owned_arena_when_sealing_fails(
     )
 
     with pytest.raises(ProjectDiscoveryError, match="staged project input differs"):
-        StagedProject(tmp_path, ".reprobit-state", (snapshot,)).__enter__()
+        stage_grind_project(tmp_path, ".reprobit-state", (snapshot,)).__enter__()
 
     assert StateStore(tmp_path / ".reprobit-state").status().runs == ()

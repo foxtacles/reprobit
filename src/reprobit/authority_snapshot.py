@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -22,24 +23,45 @@ class JsonAuthorityDirectorySnapshot:
     file_digests: tuple[tuple[str, str], ...]
 
 
-def _directory(root: Path, relative: str) -> Path:
+def resolve_project_path(
+    root: Path,
+    relative: str,
+    *,
+    error: Callable[[str], Exception],
+    subject: str,
+) -> Path:
+    """Resolve one canonical project-relative path without following a redirected component.
+
+    ``error`` builds the caller's own exception from the failure message so every
+    boundary keeps its exception type while sharing one walk.
+    """
+
     value = PurePosixPath(relative)
     if (
         value.is_absolute()
         or not value.parts
         or any(part in {"", ".", ".."} for part in value.parts)
     ):
-        raise AuthoritySnapshotError(f"authority path is not canonical: {relative!r}")
+        raise error(f"{subject} is not canonical: {relative!r}")
     current = root
     for part in value.parts:
         current /= part
         if current.is_symlink():
-            raise AuthoritySnapshotError(f"authority path is redirected: {relative!r}")
+            raise error(f"{subject} is redirected: {relative!r}")
     try:
         current.resolve(strict=False).relative_to(root)
     except ValueError as exc:
-        raise AuthoritySnapshotError(f"authority path escapes the project: {relative!r}") from exc
+        raise error(f"{subject} escapes the project: {relative!r}") from exc
     return current
+
+
+def _directory(root: Path, relative: str) -> Path:
+    return resolve_project_path(
+        root,
+        relative,
+        error=AuthoritySnapshotError,
+        subject="authority path",
+    )
 
 
 def json_authority_members(root: Path, relative: str) -> tuple[str, ...]:
@@ -137,4 +159,5 @@ __all__ = [
     "capture_file_preimage",
     "capture_json_authority_directories",
     "json_authority_members",
+    "resolve_project_path",
 ]

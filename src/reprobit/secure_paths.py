@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
-from pathlib import Path
-from typing import BinaryIO
+from contextlib import AbstractContextManager, contextmanager
+from pathlib import Path, PurePosixPath
+from typing import BinaryIO, Protocol
 
 import reprobit.secure_paths_posix as _posix
 import reprobit.secure_paths_windows as _windows
@@ -21,7 +21,60 @@ from reprobit.secure_path_contracts import (
     SecureFileIdentity,
     SecureFileSnapshot,
     SecurePathError,
+    canonical_system_path,
 )
+
+
+class _NativeSecurePaths(Protocol):
+    """The platform-independent surface both native implementations provide."""
+
+    def read_relative_file(self, root: Path, relative: str) -> tuple[bytes, SecureFileSnapshot]: ...
+
+    def stat_relative_file(self, root: Path, relative: str) -> SecureFileIdentity: ...
+
+    def digest_relative_file(self, root: Path, relative: str) -> SecureFileSnapshot: ...
+
+    def atomic_copy_new_relative(
+        self,
+        source_root: Path,
+        source_relative: str,
+        destination_root: Path,
+        destination_relative: str,
+        *,
+        executable: bool = ...,
+        expected_digest: Digest | None = ...,
+        expected_size: int | None = ...,
+        expected_source: SecureFileIdentity | None = ...,
+    ) -> SecureFileSnapshot: ...
+
+    def promote_relative_new(
+        self,
+        root: Path,
+        source_relative: str,
+        destination_relative: str,
+        *,
+        expected: SecureFileSnapshot,
+    ) -> SecureFileSnapshot: ...
+
+    def atomic_publish_relative(
+        self, root: Path, relative: str, payload: bytes, *, replace: bool
+    ) -> SecureFileSnapshot: ...
+
+    def remove_published_relative(
+        self, root: Path, relative: str, *, expected: SecureFileSnapshot
+    ) -> bool: ...
+
+    def remove_regular_relative(self, root: Path, relative: str) -> bool: ...
+
+    def hold_relative_file_set(
+        self, root: Path, expected: Mapping[str, SecureFileSnapshot]
+    ) -> AbstractContextManager[Mapping[str, SecureFileSnapshot]]: ...
+
+
+def _native() -> _NativeSecurePaths:
+    """Select the native implementation at call time (tests swap ``os.name``)."""
+
+    return _windows if os.name == "nt" else _posix
 
 
 def windows_attributes_are_basic_restorable(attributes: int) -> bool:
@@ -30,12 +83,19 @@ def windows_attributes_are_basic_restorable(attributes: int) -> bool:
     return _windows.windows_attributes_are_basic_restorable(attributes)
 
 
+def split_absolute(path: Path) -> tuple[Path, str]:
+    """Anchor one absolute path at its filesystem root for held traversal."""
+
+    absolute = canonical_system_path(path)
+    if not absolute.anchor or len(absolute.parts) < 2:
+        raise SecurePathError(f"secure path has no relative location below its root: {path}")
+    return Path(absolute.anchor), PurePosixPath(*absolute.parts[1:]).as_posix()
+
+
 def read_relative_file(root: Path, relative: str) -> tuple[bytes, SecureFileSnapshot]:
     """Read one regular file through a fully held, no-follow ancestor chain."""
 
-    if os.name == "nt":
-        return _windows.read_relative_file(root, relative)
-    return _posix.read_relative_file(root, relative)
+    return _native().read_relative_file(root, relative)
 
 
 def atomic_publish_new_relative_from_stream(
@@ -102,17 +162,13 @@ def atomic_publish_new_relative_from_stream(
 def stat_relative_file(root: Path, relative: str) -> SecureFileIdentity:
     """Inspect one regular file through a held ancestor chain without reading it."""
 
-    if os.name == "nt":
-        return _windows.stat_relative_file(root, relative)
-    return _posix.stat_relative_file(root, relative)
+    return _native().stat_relative_file(root, relative)
 
 
 def digest_relative_file(root: Path, relative: str) -> SecureFileSnapshot:
     """Hash one regular file through a held ancestor chain with bounded memory."""
 
-    if os.name == "nt":
-        return _windows.digest_relative_file(root, relative)
-    return _posix.digest_relative_file(root, relative)
+    return _native().digest_relative_file(root, relative)
 
 
 def atomic_copy_new_relative(
@@ -128,18 +184,7 @@ def atomic_copy_new_relative(
 ) -> SecureFileSnapshot:
     """Copy one held source to a new held destination in a single pass."""
 
-    if os.name == "nt":
-        return _windows.atomic_copy_new_relative(
-            source_root,
-            source_relative,
-            destination_root,
-            destination_relative,
-            executable=executable,
-            expected_digest=expected_digest,
-            expected_size=expected_size,
-            expected_source=expected_source,
-        )
-    return _posix.atomic_copy_new_relative(
+    return _native().atomic_copy_new_relative(
         source_root,
         source_relative,
         destination_root,
@@ -160,14 +205,7 @@ def promote_relative_new(
 ) -> SecureFileSnapshot:
     """Move an exact held file to a new name with commit-time no-overwrite."""
 
-    if os.name == "nt":
-        return _windows.promote_relative_new(
-            root,
-            source_relative,
-            destination_relative,
-            expected=expected,
-        )
-    return _posix.promote_relative_new(
+    return _native().promote_relative_new(
         root, source_relative, destination_relative, expected=expected
     )
 
@@ -186,9 +224,7 @@ def atomic_publish_relative(
 
     if type(payload) is not bytes:
         raise TypeError("secure publication payload must be immutable bytes")
-    if os.name == "nt":
-        return _windows.atomic_publish_relative(root, relative, payload, replace=True)
-    return _posix.atomic_publish_relative(root, relative, payload, replace=True)
+    return _native().atomic_publish_relative(root, relative, payload, replace=True)
 
 
 def atomic_publish_relative_if_current(
@@ -259,9 +295,7 @@ def atomic_publish_new_relative(
 
     if type(payload) is not bytes:
         raise TypeError("secure publication payload must be immutable bytes")
-    if os.name == "nt":
-        return _windows.atomic_publish_relative(root, relative, payload, replace=False)
-    return _posix.atomic_publish_relative(root, relative, payload, replace=False)
+    return _native().atomic_publish_relative(root, relative, payload, replace=False)
 
 
 def remove_published_relative(
@@ -277,17 +311,13 @@ def remove_published_relative(
     Held-parent deletion never follows a final symlink.
     """
 
-    if os.name == "nt":
-        return _windows.remove_published_relative(root, relative, expected=expected)
-    return _posix.remove_published_relative(root, relative, expected=expected)
+    return _native().remove_published_relative(root, relative, expected=expected)
 
 
 def remove_regular_relative(root: Path, relative: str) -> bool:
     """Remove one named regular file through a held no-follow ancestor chain."""
 
-    if os.name == "nt":
-        return _windows.remove_regular_relative(root, relative)
-    return _posix.remove_regular_relative(root, relative)
+    return _native().remove_regular_relative(root, relative)
 
 
 def reseal_relative_file(
@@ -321,11 +351,7 @@ def hold_relative_file_set(
 ) -> Iterator[Mapping[str, SecureFileSnapshot]]:
     """Hold and validate a complete named file set through caller receipt use."""
 
-    if os.name == "nt":
-        with _windows.hold_relative_file_set(root, expected) as snapshots:
-            yield snapshots
-        return
-    with _posix.hold_relative_file_set(root, expected) as snapshots:
+    with _native().hold_relative_file_set(root, expected) as snapshots:
         yield snapshots
 
 
@@ -342,6 +368,7 @@ __all__ = [
     "remove_published_relative",
     "remove_regular_relative",
     "reseal_relative_file",
+    "split_absolute",
     "stat_relative_file",
     "windows_attributes_are_basic_restorable",
 ]

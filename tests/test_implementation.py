@@ -21,7 +21,7 @@ CLASSIC_ROOT_MODULES = (
     "reprobit.classic.semantic_contracts",
     "reprobit.classic_runtime_preparation",
 )
-PRODUCER_ROOT_MODULES = ("reprobit.classic_incremental",)
+PRODUCER_ROOT_MODULES = ("reprobit.classic_incremental_execution",)
 GRAPH_CLI_ROOT_MODULES = ("reprobit.cli_graph",)
 
 
@@ -76,7 +76,7 @@ def test_classic_implementation_import_closure_has_exact_architecture_boundary()
         "implementation.py",
     }.issubset(relative)
     assert {
-        "classic_incremental.py",
+        "classic_incremental_execution.py",
         "cli.py",
         "discovery.py",
     }.isdisjoint(relative)
@@ -115,7 +115,7 @@ def test_graph_cli_import_closure_has_a_narrow_boundary() -> None:
 
     assert "cli_graph.py" in relative
     assert "project_loader.py" in relative
-    assert {"cli.py", "discovery.py", "classic_incremental.py"}.isdisjoint(relative)
+    assert {"cli.py", "discovery.py", "classic_incremental_execution.py"}.isdisjoint(relative)
 
 
 def test_incremental_producer_import_closure_has_a_narrow_product_boundary() -> None:
@@ -124,9 +124,10 @@ def test_incremental_producer_import_closure_has_a_narrow_product_boundary() -> 
     assert relative == tuple(sorted(set(relative)))
     assert {
         "cache.py",
-        "classic_incremental.py",
         "classic_incremental_execution.py",
+        "classic_incremental_nodes.py",
         "classic_incremental_planning.py",
+        "classic_incremental_targets.py",
         "classic_execution_records.py",
         "classic_runtime.py",
         "classic_runtime_files.py",
@@ -189,7 +190,7 @@ def test_incremental_producer_digest_excludes_non_output_product_surfaces(
 @pytest.mark.parametrize(
     "relative",
     (
-        "classic_incremental.py",
+        "classic_incremental_execution.py",
         "classic_execution_records.py",
         "classic_runtime_files.py",
         "classic_runtime_producer.py",
@@ -270,7 +271,7 @@ def test_classic_validator_digest_binds_each_proof_execution_and_publication_sea
 
 @pytest.mark.parametrize(
     "relative",
-    ("classic_incremental.py", "cli.py", "discovery.py"),
+    ("classic_incremental_execution.py", "cli.py", "discovery.py"),
 )
 def test_classic_validator_digest_excludes_unrelated_product_surfaces(
     tmp_path: Path,

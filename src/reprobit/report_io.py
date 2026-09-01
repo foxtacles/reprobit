@@ -3,21 +3,17 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from urllib.parse import quote
 
 from reprobit.report import Report
 from reprobit.report_html import render_report_html as _render_report_html
-from reprobit.secure_paths import atomic_publish_relative
+from reprobit.secure_paths import atomic_publish_relative, split_absolute
 from reprobit.strict_json import JsonValue, StrictJSONError, canonical_json, strict_loads
 
 
 def _atomic_write(path: str | Path, data: bytes) -> None:
-    destination = Path(os.path.abspath(path))
-    if not destination.anchor or len(destination.parts) < 2:
-        raise OSError(f"report destination has no secure relative path: {path}")
-    root = Path(destination.anchor)
-    relative = PurePosixPath(*destination.parts[1:]).as_posix()
+    root, relative = split_absolute(Path(path))
     atomic_publish_relative(root, relative, data)
 
 

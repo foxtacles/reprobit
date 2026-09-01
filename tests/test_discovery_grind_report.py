@@ -11,6 +11,8 @@ from typing import cast
 import pytest
 
 import reprobit.discovery_grind_cli as grind_cli
+import reprobit.discovery_grind_report as grind_report
+import reprobit.discovery_project_grind_cli as project_grind_cli
 from reprobit.cli_output import CLIOutput
 from reprobit.discovery_contracts import (
     DeclarationFamily,
@@ -294,7 +296,7 @@ def _install_cli_result(
     result: ProjectGrindResult,
 ) -> None:
     monkeypatch.setattr(
-        grind_cli,
+        project_grind_cli,
         "load_project",
         lambda _root: SimpleNamespace(state_dir=".reprobit-state"),
     )
@@ -344,14 +346,14 @@ def test_cli_cold_report_links_its_actual_json_sibling(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_cli_result(monkeypatch, _result(solution=_solution()))
-    monkeypatch.setattr(grind_cli, "canonical_json", lambda _value: b"{}")
+    monkeypatch.setattr(grind_report, "canonical_json", lambda _value: b"{}")
     observed_hrefs: list[str | None] = []
 
     def render_cold(_report: object, *, canonical_json_href: str | None) -> str:
         observed_hrefs.append(canonical_json_href)
         return "<!doctype html><title>Cold verification</title>"
 
-    monkeypatch.setattr(grind_cli, "render_report_html", render_cold)
+    monkeypatch.setattr(grind_report, "render_report_html", render_cold)
 
     status = grind_cli.command_discover_grind(
         _args(tmp_path, accept_exact=False),
@@ -372,14 +374,14 @@ def test_report_failure_after_publication_is_an_explicit_nonfatal_event(
         monkeypatch,
         _result(solution=_solution(), published=True),
     )
-    monkeypatch.setattr(grind_cli, "canonical_json", lambda _value: b"{}")
+    monkeypatch.setattr(grind_report, "canonical_json", lambda _value: b"{}")
     monkeypatch.setattr(
-        grind_cli,
+        grind_report,
         "render_report_html",
         lambda _report, **_kwargs: "<!doctype html><title>Cold verification</title>",
     )
     monkeypatch.setattr(
-        grind_cli,
+        grind_report,
         "render_grind_report_html",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("report disk unavailable")),
     )
@@ -409,9 +411,9 @@ def test_cold_report_failure_still_writes_the_human_grind_report(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_cli_result(monkeypatch, _result(solution=_solution()))
-    monkeypatch.setattr(grind_cli, "canonical_json", lambda _value: b"{}")
+    monkeypatch.setattr(grind_report, "canonical_json", lambda _value: b"{}")
     monkeypatch.setattr(
-        grind_cli,
+        grind_report,
         "render_report_html",
         lambda _report, **_kwargs: (_ for _ in ()).throw(OSError("cold report unavailable")),
     )
@@ -457,9 +459,9 @@ def test_save_exit_status_reports_whether_the_requested_publication_happened(
         monkeypatch,
         _result(solution=_solution(project_exact=False), published=published),
     )
-    monkeypatch.setattr(grind_cli, "canonical_json", lambda _value: b"{}")
+    monkeypatch.setattr(grind_report, "canonical_json", lambda _value: b"{}")
     monkeypatch.setattr(
-        grind_cli,
+        grind_report,
         "render_report_html",
         lambda _report, **_kwargs: "<!doctype html><title>Local proof</title>",
     )

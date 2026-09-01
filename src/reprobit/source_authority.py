@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from reprobit.model import Digest
@@ -15,6 +15,7 @@ from reprobit.schema import (
     ProjectBundle,
     SourceManifestDocument,
 )
+from reprobit.secure_path_contracts import SecurePathError, portable_relative_text
 from reprobit.source_lock import SourceLockError, receipt_source_input
 
 if TYPE_CHECKING:
@@ -56,16 +57,10 @@ class _DonorOverlayInputPin:
 
 
 def _relative_path(value: str) -> str:
-    rendered = value.replace("\\", "/")
-    path = PurePosixPath(rendered)
-    if (
-        path.is_absolute()
-        or not path.parts
-        or any(part in {"", ".", ".."} for part in path.parts)
-        or path.as_posix() != rendered
-    ):
-        raise SourceAuthorityError(f"source-overlay path is unsafe: {value!r}")
-    return rendered
+    try:
+        return portable_relative_text(value)
+    except SecurePathError:
+        raise SourceAuthorityError(f"source-overlay path is unsafe: {value!r}") from None
 
 
 def _parameter_map(intervention: ClassicRecipeIntervention) -> dict[str, Any]:

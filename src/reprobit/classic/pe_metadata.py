@@ -5,9 +5,9 @@ from __future__ import annotations
 import struct
 from collections.abc import Mapping
 from dataclasses import dataclass
-from itertools import pairwise
 
 from reprobit.binary import require
+from reprobit.pe32 import Pe32Headers, parse_pe32_headers
 
 from .foundation import (
     exact_audit_keys,
@@ -15,19 +15,6 @@ from .foundation import (
     require_payload_free_declaration,
     sha256_bytes,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _Section:
-    name: bytes
-    virtual_address: int
-    virtual_size: int
-    raw_offset: int
-    raw_size: int
-
-    @property
-    def raw_end(self) -> int:
-        return self.raw_offset + self.raw_size
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,63 +29,16 @@ class _PE32MetadataMap:
     """Validated PE surface needed to locate timestamp fields exactly."""
 
     def __init__(self, data: bytes) -> None:
-        require(len(data) >= 64 and data[:2] == b"MZ", "missing DOS MZ header")
-        pe = struct.unpack_from("<I", data, 0x3C)[0]
-        require(
-            64 <= pe <= len(data) - 24 and data[pe : pe + 4] == b"PE\0\0", "missing PE signature"
-        )
-        machine, section_count = struct.unpack_from("<HH", data, pe + 4)
-        optional_size = struct.unpack_from("<H", data, pe + 20)[0]
-        require(machine == 0x14C, "only i386 PE images are supported")
-        require(0 < section_count <= 96, "invalid PE section count")
-        optional = pe + 24
-        require(
-            optional_size >= 120 and optional + optional_size <= len(data),
-            "PE32 optional header lacks required data directories",
-        )
-        require(
-            struct.unpack_from("<H", data, optional)[0] == 0x10B,
-            "only PE32 images are supported",
-        )
-        directory_count = struct.unpack_from("<I", data, optional + 92)[0]
-        require(directory_count >= 3, "PE image lacks export/resource directories")
+        self._headers: Pe32Headers = parse_pe32_headers(data, minimum_optional_size=120)
+        directories = "export/resource directories"
         self.data = data
-        self.coff_timestamp_offset = pe + 8
-        self.export_rva, self.export_size = struct.unpack_from("<II", data, optional + 96)
-        self.resource_rva, self.resource_size = struct.unpack_from("<II", data, optional + 112)
-
-        table = optional + optional_size
-        require(table + section_count * 40 <= len(data), "section table extends past EOF")
-        sections: list[_Section] = []
-        for index in range(section_count):
-            header = table + index * 40
-            name = data[header : header + 8].rstrip(b"\0")
-            virtual_size, virtual_address, raw_size, raw_offset = struct.unpack_from(
-                "<IIII", data, header + 8
-            )
-            require(
-                raw_size == 0 or raw_offset <= len(data) - raw_size,
-                f"section {name!r} raw data extends past EOF",
-            )
-            sections.append(_Section(name, virtual_address, virtual_size, raw_offset, raw_size))
-        occupied = sorted(
-            (section.raw_offset, section.raw_end) for section in sections if section.raw_size
-        )
-        require(
-            all(left[1] <= right[0] for left, right in pairwise(occupied)),
-            "PE sections overlap in the file",
-        )
-        self.sections = tuple(sections)
+        self.coff_timestamp_offset = self._headers.coff_timestamp_offset
+        self.export_rva, self.export_size = self._headers.data_directory(0, directories)
+        self.resource_rva, self.resource_size = self._headers.data_directory(2, directories)
+        self.sections = self._headers.sections
 
     def rva_to_offset(self, rva: int, size: int, context: str) -> int:
-        require(size >= 0, f"{context} has a negative size")
-        matches = []
-        for section in self.sections:
-            delta = rva - section.virtual_address
-            if delta >= 0 and delta <= section.raw_size - size:
-                matches.append(section.raw_offset + delta)
-        require(len(matches) == 1, f"{context} does not map uniquely to raw data")
-        return matches[0]
+        return self._headers.rva_to_offset(rva, size, context=context)
 
     def export_timestamp_offset(self) -> int | None:
         if self.export_rva == 0 and self.export_size == 0:

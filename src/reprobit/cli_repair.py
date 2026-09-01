@@ -15,11 +15,12 @@ from reprobit.repair import (
     capture_repair_report_preimages,
     capture_repair_snapshot,
 )
-from reprobit.repair_attempt import (
+from reprobit.repair_workflow import (
     RepairAttemptFailure,
+    RepairWorkflowError,
     execute_repair_attempt,
+    repair_classic_records,
 )
-from reprobit.repair_workflow import RepairWorkflowError, repair_classic_records
 from reprobit.state import KeepWorkspace
 
 _CANDIDATE_REPORT_DIRECTORY = ".reprobit-repair/reports"

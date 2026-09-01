@@ -8,10 +8,11 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from reprobit.cli_paths import relative_output, safe_project_path
+from reprobit.authority_snapshot import resolve_project_path
+from reprobit.cli_paths import CLIError, real_directory, relative_output, safe_project_path
 from reprobit.cmake import CMakeExportPlan
+from reprobit.cmake_configure import effective_source_digest
 from reprobit.cmake_import import imported_translation_unit_authority
-from reprobit.cmake_source import effective_source_digest
 from reprobit.model import Digest
 from reprobit.producer_graph import (
     ProducerGraphDocument,
@@ -64,23 +65,14 @@ class _ValidationSnapshot:
 
 
 def _real_directory(path: Path, *, label: str) -> Path:
-    candidate = path.expanduser()
-    if candidate.is_symlink() or not candidate.is_dir():
-        raise CMakeGraphError(f"{label} is not an existing real directory: {candidate}")
-    return candidate.resolve(strict=True)
+    try:
+        return real_directory(path, label=label)
+    except CLIError as error:
+        raise CMakeGraphError(str(error)) from error
 
 
 def _project_path(root: Path, relative: PurePosixPath, *, label: str) -> Path:
-    path = root
-    for part in relative.parts:
-        path /= part
-        if path.is_symlink():
-            raise CMakeGraphError(f"{label} is redirected: {path}")
-    try:
-        path.resolve(strict=False).relative_to(root)
-    except ValueError as error:
-        raise CMakeGraphError(f"{label} escapes the project: {relative}") from error
-    return path
+    return resolve_project_path(root, relative.as_posix(), error=CMakeGraphError, subject=label)
 
 
 def _validation_snapshot(

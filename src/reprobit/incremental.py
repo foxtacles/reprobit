@@ -32,7 +32,7 @@ from reprobit.schema import (
 from reprobit.source_lock import SourceLockError, receipt_source_input
 from reprobit.strict_json import JsonValue
 
-_PRODUCER_IMPLEMENTATION_ROOTS = ("reprobit.classic_incremental",)
+_PRODUCER_IMPLEMENTATION_ROOTS = ("reprobit.classic_incremental_execution",)
 PRODUCER_CACHE_IMPLEMENTATION_FAMILY = "classic-producer-graph-"
 (
     _INITIAL_PRODUCER_IMPLEMENTATION_DIGEST,

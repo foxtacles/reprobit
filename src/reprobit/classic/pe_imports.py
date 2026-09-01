@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from itertools import pairwise
 
 from reprobit.binary import require
+from reprobit.pe32 import Pe32Headers, parse_pe32_headers
 
 from .foundation import (
     canonical_json_bytes,
@@ -19,8 +20,6 @@ from .foundation import (
     sha256_bytes,
 )
 
-IMAGE_FILE_MACHINE_I386 = 0x014C
-IMAGE_NT_OPTIONAL_HDR32_MAGIC = 0x010B
 IMAGE_ORDINAL_FLAG32 = 0x80000000
 IMAGE_REL_BASED_ABSOLUTE = 0
 IMAGE_REL_BASED_HIGHLOW = 3
@@ -65,81 +64,38 @@ def _cstring(data: bytes, offset: int, limit: int, context: str) -> bytes:
 
 class _PE32Imports:
     def __init__(self, data: bytes) -> None:
-        require(len(data) >= 64 and data[:2] == b"MZ", "missing DOS MZ header")
-        pe = struct.unpack_from("<I", data, 0x3C)[0]
-        require(
-            64 <= pe <= len(data) - 24 and data[pe : pe + 4] == b"PE\0\0", "missing PE signature"
-        )
-        machine, section_count = struct.unpack_from("<HH", data, pe + 4)
-        optional_size = struct.unpack_from("<H", data, pe + 20)[0]
-        require(machine == IMAGE_FILE_MACHINE_I386, "only i386 PE images are supported")
-        require(0 < section_count <= 96, "invalid PE section count")
-        optional = pe + 24
-        require(
-            optional_size >= 144 and optional + optional_size <= len(data),
-            "PE32 optional header lacks required data directories",
-        )
-        require(
-            struct.unpack_from("<H", data, optional)[0] == IMAGE_NT_OPTIONAL_HDR32_MAGIC,
-            "only PE32 images are supported",
-        )
-        directory_count = struct.unpack_from("<I", data, optional + 92)[0]
-        require(directory_count >= 6, "PE image lacks import/base-relocation directories")
+        self._headers: Pe32Headers = parse_pe32_headers(data, minimum_optional_size=144)
+        directories = "import/base-relocation directories"
         self.data = data
-        self.machine = machine
-        self.image_base = struct.unpack_from("<I", data, optional + 28)[0]
-        self.section_alignment = struct.unpack_from("<I", data, optional + 32)[0]
+        self.machine = self._headers.machine
+        self.image_base = self._headers.image_base
+        self.section_alignment = self._headers.section_alignment
         require(self.section_alignment != 0, "section alignment must be nonzero")
-        self.import_rva, self.import_size = struct.unpack_from("<II", data, optional + 104)
-        self.reloc_rva, self.reloc_size = struct.unpack_from("<II", data, optional + 136)
-        table = optional + optional_size
-        require(table + section_count * 40 <= len(data), "section table extends past EOF")
+        self.import_rva, self.import_size = self._headers.data_directory(1, directories)
+        self.reloc_rva, self.reloc_size = self._headers.data_directory(5, directories)
         sections = []
-        for index in range(section_count):
-            offset = table + index * 40
-            raw = data[offset : offset + 40]
-            (
-                name_raw,
-                virtual_size,
-                virtual_address,
-                raw_size,
-                raw_offset,
-                _,
-                _,
-                _,
-                _,
-                _,
-            ) = struct.unpack("<8sIIIIIIHHI", raw)
+        for row in self._headers.sections:
             try:
-                name = name_raw.rstrip(b"\0").decode("ascii")
+                name = row.raw_name.rstrip(b"\0").decode("ascii")
             except UnicodeDecodeError as exc:
                 raise ValueError("PE section name is not ASCII") from exc
-            require(
-                raw_size == 0 or raw_offset <= len(data) - raw_size,
-                f"section {name!r} raw data extends past EOF",
-            )
             sections.append(
-                _Section(raw, name, virtual_size, virtual_address, raw_size, raw_offset)
+                _Section(
+                    row.raw_descriptor,
+                    name,
+                    row.virtual_size,
+                    row.virtual_address,
+                    row.raw_size,
+                    row.raw_offset,
+                )
             )
-        occupied = sorted(
-            (section.raw_offset, section.raw_end) for section in sections if section.raw_size
-        )
-        require(
-            all(left[1] <= right[0] for left, right in pairwise(occupied)),
-            "PE sections overlap in the file",
-        )
         self.sections = tuple(sections)
         self.imports = self._parse_imports()
 
     def section_for_rva(self, rva: int, size: int = 1) -> _Section:
         require(size >= 0, "negative mapped size")
-        matches = []
-        for section in self.sections:
-            delta = rva - section.virtual_address
-            if delta >= 0 and delta <= section.raw_size - size:
-                matches.append(section)
-        require(len(matches) == 1, f"RVA 0x{rva:x} does not map uniquely to raw data")
-        return matches[0]
+        row = self._headers.section_for_rva(rva, size, context=f"RVA 0x{rva:x}")
+        return self.sections[self._headers.sections.index(row)]
 
     def rva_to_offset(self, rva: int, size: int = 1) -> int:
         section = self.section_for_rva(rva, size)

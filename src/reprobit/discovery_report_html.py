@@ -24,9 +24,10 @@ from reprobit.report_html_components import (
     details,
     escape,
     format_integer,
+    metric_cards,
+    page_shell,
     table,
 )
-from reprobit.report_html_style import REPORT_CSS, REPORT_SCRIPT, REPROBIT_MARK_SVG
 from reprobit.strict_json import canonical_json, strict_loads
 
 _PROPOSAL_CARD_LIMIT = 100
@@ -187,11 +188,7 @@ def _render_overview(report: DiscoveryCampaignReport) -> str:
         ("Reused from cache", report.cells_cached, "Previously compiled results"),
         ("Exact candidates", proposals, f"Across {count_phrase(symbols, 'symbol')}"),
     )
-    rendered_cards = "".join(
-        f"""<article class="card"><h3>{escape(label)}</h3>
-  <div class="value">{format_integer(value)}</div><p>{escape(detail)}</p></article>"""
-        for label, value, detail in cards
-    )
+    rendered_cards = metric_cards(cards)
     return f"""
 <section class="hero discovery-hero" id="overview" aria-labelledby="report-title">
   <p class="eyebrow">Discovery preview</p>
@@ -695,40 +692,26 @@ def render_discovery_report_html(
     """Render a deterministic, bounded review page with no external assets."""
 
     json_name = _canonical_json_name(canonical_json_name)
-    title = f"{report.plan.target} — ReproBit discovery review"
     schema_label = code(f"v{report.schema_version}")
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>{escape(title)}</title>
-<style>{REPORT_CSS}\n{_DISCOVERY_CSS}</style>
-</head>
-<body>
-<a class="skip-link" href="#overview">Skip to discovery review</a>
-<header class="topbar"><div class="topbar-inner">
-  <div class="brand">{REPROBIT_MARK_SVG}<span class="brand-label">
-    ReproBit · Discovery review
-  </span></div>
-  <div class="run-label">Run {code(report.campaign_id)}</div>
-</div></header>
-{_render_navigation()}
-<main>
-{_render_overview(report)}
-{_render_candidate_charts(report)}
-{_render_proposals(report)}
-{_render_next_steps(report)}
-{_render_advanced(report, json_name)}
-</main>
-<footer class="footer"><div class="footer-inner">
-  ReproBit discovery schema {schema_label} · non-certifying review · no external assets
-</div></footer>
-<script>{REPORT_SCRIPT}</script>
-</body>
-</html>
-"""
+    sections = (
+        _render_overview(report),
+        _render_candidate_charts(report),
+        _render_proposals(report),
+        _render_next_steps(report),
+        _render_advanced(report, json_name),
+    )
+    return page_shell(
+        title=f"{report.plan.target} — ReproBit discovery review",
+        brand="ReproBit · Discovery review",
+        run_label=f"Run {code(report.campaign_id)}",
+        nav=_render_navigation(),
+        main="\n".join(sections),
+        footer=(
+            f"ReproBit discovery schema {schema_label} · non-certifying review · no external assets"
+        ),
+        extra_css=_DISCOVERY_CSS,
+        skip_label="Skip to discovery review",
+    )
 
 
 __all__ = ["render_discovery_report_html"]

@@ -13,7 +13,7 @@ from typing import cast
 import pytest
 
 import reprobit.cmake_configure as cmake_configure
-from reprobit.cmake_source import effective_source_digest
+from reprobit.cmake_configure import effective_source_digest
 from reprobit.model import Digest
 from reprobit.schema import (
     BuildPlanDocument,

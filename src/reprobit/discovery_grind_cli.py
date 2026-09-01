@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import io
-import os
 import shutil
 import tempfile
 from collections import Counter
@@ -24,21 +23,32 @@ from reprobit.cli_paths import (
     relative_output,
     safe_project_path,
 )
-from reprobit.discovery_contracts import InclusiveRange, enumerate_declaration_states
+from reprobit.discovery_contracts import enumerate_declaration_states
 from reprobit.discovery_grind import (
     ColdTrialEvidence,
     ProjectGrindCallbacks,
+    require_single_acceptance,
     run_project_grind,
 )
-from reprobit.discovery_grind_report import render_grind_report_html
-from reprobit.discovery_project import ProjectGrindPlan
+from reprobit.discovery_grind_report import (
+    GrindReportCommands,
+    GrindReportLayout,
+    grind_approval_argv,
+    publish_grind_outcome,
+    render_cold_verification,
+)
+from reprobit.discovery_project import (
+    DEFAULT_GRIND_CLASSES,
+    DEFAULT_GRIND_FUNCTIONS,
+    ProjectGrindPlan,
+)
+from reprobit.discovery_project_grind_cli import project_state_root
 from reprobit.progress import ProgressKind
-from reprobit.project_loader import load_project, load_project_tree
+from reprobit.project_loader import load_project_tree
 from reprobit.report_io import (
     read_report_json,
-    render_report_html,
 )
-from reprobit.state import KeepWorkspace, report_publication_lease
+from reprobit.state import KeepWorkspace
 from reprobit.strict_json import canonical_json
 from reprobit.transactions import CASTransaction
 
@@ -86,8 +96,8 @@ def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> 
         target=unit.target_id,
         translation_unit=unit.id,
         symbol=args.symbol,
-        classes=InclusiveRange(start=1, stop=4),
-        functions=InclusiveRange(start=10, stop=10),
+        classes=DEFAULT_GRIND_CLASSES,
+        functions=DEFAULT_GRIND_FUNCTIONS,
     )
     reference = safe_project_path(root, plan.reference_object)
     if reference.is_symlink() or not reference.is_file():
@@ -292,8 +302,12 @@ def command_discover_grind(
     """Run the public bounded auto-solve workflow."""
 
     accept_progress = getattr(args, "accept_progress", False)
-    if args.accept_exact and accept_progress:
-        raise CLIError("choose either --accept-exact or --accept-progress, not both")
+    require_single_acceptance(
+        args.accept_exact,
+        accept_progress,
+        error=CLIError,
+        message="choose either --accept-exact or --accept-progress, not both",
+    )
     if args.plan is None:
         from reprobit.discovery_project_grind_cli import command_discover_project_grind
 
@@ -312,7 +326,7 @@ def command_discover_grind(
         raise CLIError("--max-symbols belongs to the default project-wide grind")
 
     root = project_root(args.project)
-    state_root = safe_project_path(root, load_project(root).state_dir)
+    state_root = project_state_root(root)
     report_directory = state_root / "reports" / "grind"
     with output.producer_activity("Finding and proving a low-cost adjustment") as progress:
         result = run_project_grind(
@@ -329,28 +343,18 @@ def command_discover_grind(
         )
 
     solution = result.solution
-    desired_grind_report = report_directory / "report.html"
-    desired_cold_json = report_directory / "cold-verification.json"
-    desired_cold_html = report_directory / "cold-verification.html"
+    layout = GrindReportLayout(
+        report=report_directory / "report.html",
+        cold_json=report_directory / "cold-verification.json",
+        cold_html=report_directory / "cold-verification.html",
+    )
     grind_report_html: Path | None = None
     cold_report_json: Path | None = None
     cold_report_html: Path | None = None
     report_transaction_id: str | None = None
     report_warnings: list[str] = []
-    acceptance_flag = (
-        "--accept-exact" if solution is not None and solution.project_exact else "--accept-progress"
-    )
-    report_approval_command = human_command(
-        (
-            "rbit",
-            "discover",
-            "grind",
-            root,
-            "--expert-plan",
-            args.plan,
-            acceptance_flag,
-        )
-    )
+    approval_argv = grind_approval_argv(root, args.plan, exact=result.exact)
+    report_approval_command = human_command(approval_argv)
     report_verify_command = human_command(("rbit", "verify", root))
 
     def warn_report(artifact: str, path: Path, exc: Exception) -> None:
@@ -376,46 +380,31 @@ def command_discover_grind(
     cold_files: dict[Path, bytes] = {}
     if solution is not None:
         try:
-            cold_files = {
-                relative_output(root, str(desired_cold_json)): canonical_json(solution.report),
-                relative_output(root, str(desired_cold_html)): render_report_html(
-                    solution.report,
-                    canonical_json_href=desired_cold_json.name,
-                ).encode("utf-8"),
-            }
+            cold_files = render_cold_verification(root, layout, solution)
         except Exception as exc:
-            warn_report("the cold verification report", desired_cold_html, exc)
+            warn_report("the cold verification report", layout.cold_html, exc)
 
     try:
-        files = {
-            relative_output(root, str(desired_grind_report)): render_grind_report_html(
-                result,
-                plan_relative=args.plan,
-                cold_report_html=(desired_cold_html.name if cold_files else None),
-                cold_report_json=(desired_cold_json.name if cold_files else None),
-                approval_command=report_approval_command,
-                verify_command=report_verify_command,
-                continue_command=human_command(("rbit", "discover", "grind", root)),
-            ).encode("utf-8")
-        }
-        files.update(cold_files)
-        with report_publication_lease(state_root):
-            transaction = CASTransaction(root)
-            for owned in (
-                relative_output(root, str(desired_cold_json)),
-                relative_output(root, str(desired_cold_html)),
-            ):
-                if owned not in files and os.path.lexists(root / owned):
-                    transaction.delete(owned)
-            for relative, payload in files.items():
-                transaction.write(relative, payload)
-            report_transaction_id = transaction.commit().transaction_id
-        grind_report_html = desired_grind_report
+        publication = publish_grind_outcome(
+            root,
+            state_root,
+            layout,
+            result,
+            plan_relative=args.plan,
+            commands=GrindReportCommands(
+                approval=report_approval_command,
+                verify=report_verify_command,
+                proceed=human_command(("rbit", "discover", "grind", root)),
+            ),
+            cold_files=cold_files,
+        )
+        report_transaction_id = publication.transaction_id
+        grind_report_html = layout.report
         if cold_files:
-            cold_report_json = desired_cold_json
-            cold_report_html = desired_cold_html
+            cold_report_json = layout.cold_json
+            cold_report_html = layout.cold_html
     except Exception as exc:
-        warn_report("the grind review report", desired_grind_report, exc)
+        warn_report("the grind review report", layout.report, exc)
 
     report_warning = "; ".join(report_warnings) or None
 
@@ -484,17 +473,6 @@ def command_discover_grind(
         )
     else:
         classes, functions = (solution.state.parameter(name) for name in ("classes", "functions"))
-        approval_command = human_command(
-            (
-                "rbit",
-                "discover",
-                "grind",
-                root,
-                "--expert-plan",
-                args.plan,
-                acceptance_flag,
-            )
-        )
         reuse_line = (
             "Approval will save 1 function intervention, reuse the matching shared donor, "
             "and update its cost assignment.\n"
@@ -520,7 +498,7 @@ def command_discover_grind(
             f"{grind_report_line}\n"
             f"{cold_report_line}\n"
             "Approval always performs a fresh proof run before publishing:\n"
-            f"{approval_command}"
+            f"{report_approval_command}"
         )
 
     output.emit(
@@ -552,17 +530,7 @@ def command_discover_grind(
         cold_verification_report_html=cold_report_html,
         report_transaction_id=report_transaction_id,
         report_warning=report_warning,
-        approval_argv=(
-            "rbit",
-            "discover",
-            "grind",
-            str(root),
-            "--expert-plan",
-            args.plan,
-            acceptance_flag,
-        )
-        if solution is not None and not result.published
-        else (),
+        approval_argv=(approval_argv if solution is not None and not result.published else ()),
         rejections=[
             {
                 "state_id": item.state_id,

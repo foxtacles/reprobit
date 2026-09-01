@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import html
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Literal, TypeAlias
+
+from reprobit.report_html_style import REPORT_CSS, REPORT_SCRIPT, REPROBIT_MARK_SVG
 
 
 def escape(value: object) -> str:
@@ -158,10 +162,119 @@ def bar_chart(
 </figure>"""
 
 
+def metric_cards(items: Sequence[tuple[str, int, str]]) -> str:
+    """Render one row of ``(label, value, detail)`` metric cards."""
+
+    return "".join(
+        f'<article class="card"><h3>{escape(label)}</h3>'
+        f'<div class="value">{format_integer(value)}</div><p>{escape(detail)}</p></article>'
+        for label, value, detail in items
+    )
+
+
+OutcomeBranch: TypeAlias = Literal[
+    "published-exact",
+    "published",
+    "exact",
+    "qualified",
+    "exhausted",
+]
+
+OUTCOME_TONES: Mapping[OutcomeBranch, str] = MappingProxyType(
+    {
+        "published-exact": "ok",
+        "published": "warn",
+        "exact": "ok",
+        "qualified": "warn",
+        "exhausted": "warn",
+    }
+)
+
+
+def outcome_summary(
+    *,
+    published: bool,
+    exact: bool,
+    qualified: bool,
+    copy: Mapping[OutcomeBranch, tuple[str, str]],
+) -> tuple[OutcomeBranch, str, str, str]:
+    """Classify one bounded search outcome and pick its hero tone, heading and explanation.
+
+    The five branches are ordered by strength: a saved exact result, saved local
+    progress, an exact result left for review, a locally proven result left for
+    review, and an exhausted search. ``copy`` supplies ``(heading, explanation)``
+    for every branch.
+    """
+
+    branch: OutcomeBranch
+    if published and exact:
+        branch = "published-exact"
+    elif published:
+        branch = "published"
+    elif exact:
+        branch = "exact"
+    elif qualified:
+        branch = "qualified"
+    else:
+        branch = "exhausted"
+    heading, explanation = copy[branch]
+    return branch, OUTCOME_TONES[branch], heading, explanation
+
+
+def page_shell(
+    *,
+    title: str,
+    brand: str,
+    run_label: str,
+    nav: str,
+    main: str,
+    footer: str,
+    extra_css: str = "",
+    skip_label: str = "Skip to report",
+) -> str:
+    """Wrap rendered sections in the shared deterministic, asset-free page skeleton.
+
+    ``brand``, ``run_label``, ``nav``, ``main`` and ``footer`` are already-rendered
+    markup; ``title`` and ``skip_label`` are plain text.
+    """
+
+    style = f"{REPORT_CSS}\n{extra_css}" if extra_css else REPORT_CSS
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>{escape(title)}</title>
+<style>{style}</style>
+</head>
+<body>
+<a class="skip-link" href="#overview">{escape(skip_label)}</a>
+<header class="topbar"><div class="topbar-inner">
+  <div class="brand">{REPROBIT_MARK_SVG}<span class="brand-label">
+    {brand}
+  </span></div>
+  <div class="run-label">{run_label}</div>
+</div></header>
+{nav}
+<main>
+{main}
+</main>
+<footer class="footer"><div class="footer-inner">
+  {footer}
+</div></footer>
+<script>{REPORT_SCRIPT}</script>
+</body>
+</html>
+"""
+
+
 __all__ = [
+    "OUTCOME_TONES",
     "Bar",
     "Content",
     "Markup",
+    "OutcomeBranch",
     "bar_chart",
     "code",
     "count_phrase",
@@ -170,6 +283,9 @@ __all__ = [
     "filter_control",
     "format_integer",
     "join_markup",
+    "metric_cards",
+    "outcome_summary",
+    "page_shell",
     "plain_content",
     "render_content",
     "short_digest",

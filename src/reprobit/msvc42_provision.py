@@ -9,7 +9,6 @@ It intentionally does not cache or redistribute the Microsoft payload.
 
 from __future__ import annotations
 
-import hashlib
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from reprobit.assets import runtime_asset_directory
+from reprobit.model import Digest
 from reprobit.toolchains import MSVC_42, portable_tree_receipt, profile
 
 _PROFILE = profile(MSVC_42)
@@ -180,11 +180,7 @@ def _emit(progress: ProgressCallback | None, message: str) -> None:
 
 
 def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return Digest.from_path(path).value
 
 
 def _require_file(path: Path, authority: FileAuthority) -> None:

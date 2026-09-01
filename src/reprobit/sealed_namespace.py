@@ -32,7 +32,11 @@ except ImportError:  # pragma: no cover - native Windows
     resource = None  # type: ignore[assignment]
 
 from reprobit.model import Digest
-from reprobit.secure_path_contracts import SecurePathError
+from reprobit.secure_path_contracts import (
+    SecurePathError,
+    no_follow_directory_flags,
+    no_follow_file_flags,
+)
 from reprobit.secure_paths_windows import _WindowsHandles
 
 
@@ -93,24 +97,6 @@ def _metadata(value: os.stat_result) -> _Metadata:
         value.st_size,
         value.st_mtime_ns,
         value.st_ctime_ns,
-    )
-
-
-def _directory_flags() -> int:
-    return (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-
-
-def _file_flags() -> int:
-    return (
-        os.O_RDONLY
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
     )
 
 
@@ -258,7 +244,7 @@ class _PosixNamespaceLease:
         lexical = anchor.absolute()
         filesystem_root = Path(lexical.anchor)
         try:
-            descriptor = os.open(filesystem_root, _directory_flags())
+            descriptor = os.open(filesystem_root, no_follow_directory_flags())
         except OSError as exc:
             raise SealedNamespaceError(
                 f"namespace filesystem root is absent or redirected: {filesystem_root}"
@@ -308,7 +294,7 @@ class _PosixNamespaceLease:
         seal_contents: bool = False,
     ) -> _PosixDirectory:
         try:
-            descriptor = os.open(name, _directory_flags(), dir_fd=parent.descriptor)
+            descriptor = os.open(name, no_follow_directory_flags(), dir_fd=parent.descriptor)
         except OSError as exc:
             raise SealedNamespaceError(
                 f"namespace directory is absent or redirected: {path}"
@@ -411,7 +397,7 @@ class _PosixNamespaceLease:
         name: str,
     ) -> None:
         try:
-            descriptor = os.open(name, _file_flags(), dir_fd=parent.descriptor)
+            descriptor = os.open(name, no_follow_file_flags(), dir_fd=parent.descriptor)
         except OSError as exc:
             raise SealedNamespaceError(f"namespace file is absent or redirected: {path}") from exc
         before = os.fstat(descriptor)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import shutil
-import stat
 import tempfile
 from contextlib import suppress
 from pathlib import Path
@@ -15,6 +14,7 @@ from reprobit.classic_project import (
     materialize_effective_workspace,
 )
 from reprobit.schema import ProjectBundle
+from reprobit.secure_path_contracts import is_redirected
 
 
 class SourceExportError(RuntimeError):
@@ -27,25 +27,10 @@ def _entry_exists(path: Path) -> bool:
     return os.path.lexists(path)
 
 
-def _is_redirected(path: Path) -> bool:
-    """Recognize POSIX links and native Windows directory reparse points."""
-
-    try:
-        metadata = path.lstat()
-    except FileNotFoundError:
-        return False
-    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
-    return bool(
-        stat.S_ISLNK(metadata.st_mode)
-        or int(getattr(metadata, "st_reparse_tag", 0))
-        or int(getattr(metadata, "st_file_attributes", 0)) & reparse_attribute
-    )
-
-
 def _prepare_export_parent(project_root: Path, destination: Path) -> tuple[Path, Path]:
     """Resolve a real in-project parent without following redirected components."""
 
-    if _is_redirected(project_root) or not project_root.is_dir():
+    if is_redirected(project_root) or not project_root.is_dir():
         raise SourceExportError("source export project root is absent or redirected")
     root = project_root.resolve(strict=True)
     destination = Path(os.path.abspath(destination))
@@ -59,7 +44,7 @@ def _prepare_export_parent(project_root: Path, destination: Path) -> tuple[Path,
     current = root
     for part in relative.parts[:-1]:
         current /= part
-        if _is_redirected(current):
+        if is_redirected(current):
             raise SourceExportError(f"source export parent is redirected: {current}")
         if current.exists():
             if not current.is_dir():
@@ -67,10 +52,10 @@ def _prepare_export_parent(project_root: Path, destination: Path) -> tuple[Path,
             continue
         with suppress(FileExistsError):
             current.mkdir()
-        if _is_redirected(current) or not current.is_dir():
+        if is_redirected(current) or not current.is_dir():
             raise SourceExportError(f"source export parent is redirected: {current}")
 
-    if _is_redirected(destination):
+    if is_redirected(destination):
         raise SourceExportError(f"source export destination is redirected: {destination}")
     if destination.exists() and not destination.is_dir():
         raise SourceExportError(f"source export destination is not a directory: {destination}")
@@ -82,7 +67,7 @@ def _remove_owned_tree(path: Path) -> None:
 
     if not _entry_exists(path):
         return
-    if _is_redirected(path) or not path.is_dir():
+    if is_redirected(path) or not path.is_dir():
         raise SourceExportError(f"source export temporary directory was redirected: {path}")
     shutil.rmtree(path)
 
@@ -98,7 +83,7 @@ def _promote_export(staging: Path, destination: Path) -> None:
 
     backup: Path | None = None
     if _entry_exists(destination):
-        if _is_redirected(destination) or not destination.is_dir():
+        if is_redirected(destination) or not destination.is_dir():
             raise SourceExportError(
                 f"source export destination changed before publication: {destination}"
             )

@@ -570,16 +570,16 @@ def test_repair_reports_cleanup_failure_after_success_truthfully(
         _write_candidate_reports(args)
         return 0
 
-    from reprobit.repair import StagedRepairProject
+    from reprobit.staged_project import StagedProject
 
-    original_exit = StagedRepairProject.__exit__
+    original_exit = StagedProject.__exit__
 
-    def fail_cleanup(self: StagedRepairProject, *args: object) -> None:
+    def fail_cleanup(self: StagedProject, *args: object) -> None:
         original_exit(self, *args)  # type: ignore[arg-type]
         raise OSError("simulated cleanup failure")
 
     monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
-    monkeypatch.setattr(StagedRepairProject, "__exit__", fail_cleanup)
+    monkeypatch.setattr(StagedProject, "__exit__", fail_cleanup)
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 0

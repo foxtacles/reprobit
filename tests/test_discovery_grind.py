@@ -258,7 +258,7 @@ def _install_grind_fixture(
     monkeypatch.setattr(grind, "resolve_project_grind_context", resolve)
     monkeypatch.setattr(grind, "capture_project_grind_inputs", capture)
     monkeypatch.setattr(grind, "enumerate_declaration_states", enumerate_states)
-    monkeypatch.setattr(grind, "StagedProject", stage)
+    monkeypatch.setattr(grind, "stage_grind_project", stage)
     monkeypatch.setattr(grind, "build_declaration_shape_donor", donor_authoring)
     monkeypatch.setattr(grind, "build_declaration_shape_equal_body", equal_body_authoring)
     monkeypatch.setattr(grind, "qualify_msvc_reference_object", qualify)

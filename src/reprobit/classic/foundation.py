@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 from typing import Any
 
 import reprobit.binary as binary
+from reprobit.model import Digest
 
 """Classic compiler algorithms: foundation."""
 SHA256_RE = re.compile("^[0-9a-f]{64}$")
@@ -84,7 +84,7 @@ def require_payload_free_declaration(value: object, context: str) -> None:
 
 
 def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+    return Digest.from_bytes(data).value
 
 
 def canonical_json_bytes(value: object) -> bytes:

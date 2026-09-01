@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Iterable, Mapping
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
@@ -11,7 +10,7 @@ from types import MappingProxyType
 from reprobit.classic_project import ClassicProjectError
 from reprobit.model import Digest
 from reprobit.secure_path_contracts import SecurePathError
-from reprobit.secure_paths import remove_regular_relative
+from reprobit.secure_paths import remove_regular_relative, split_absolute
 
 
 def _digest_path(path: Path) -> Digest:
@@ -40,12 +39,8 @@ def _safe_relative(value: str) -> str:
 def _secure_remove_regular(path: Path) -> None:
     """Remove one exact run-private regular file without following parents."""
 
-    path = Path(os.path.abspath(path))
-    if not path.anchor:
-        raise ClassicProjectError("classic warm erasure requires an absolute path")
-    root = Path(path.anchor)
-    relative = PurePosixPath(*path.parts[1:]).as_posix()
     try:
+        root, relative = split_absolute(path)
         removed = remove_regular_relative(root, relative)
     except (OSError, SecurePathError) as exc:
         raise ClassicProjectError(

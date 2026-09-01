@@ -2,16 +2,22 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from types import MappingProxyType
+
 from reprobit.discovery_project_grind import ProjectAutoGrindResult
 from reprobit.report_html_components import (
     Markup,
+    OutcomeBranch,
     code,
     count_phrase,
     escape,
     format_integer,
+    metric_cards,
+    outcome_summary,
+    page_shell,
     table,
 )
-from reprobit.report_html_style import REPORT_CSS, REPORT_SCRIPT, REPROBIT_MARK_SVG
 
 _PROJECT_GRIND_CSS = r"""
 .metric-grid { margin-top: 1rem; }
@@ -21,6 +27,38 @@ _PROJECT_GRIND_CSS = r"""
 """.strip()
 
 _REFERENCE_ARGUMENT = "--reference-object TU=PATH"
+
+_OUTCOME_COPY: Mapping[OutcomeBranch, tuple[str, str]] = MappingProxyType(
+    {
+        "published-exact": (
+            "Exact project reproduced",
+            "ReproBit saved locally proven adjustments in sequence. The final fresh build "
+            "matched every target byte for byte, which is the project certification gate.",
+        ),
+        "published": (
+            "Locally proven progress saved",
+            "ReproBit saved only functions that matched their project-owned reference objects "
+            "and passed the required logic checks. The complete project does not match yet, "
+            "so no project certification was issued.",
+        ),
+        "exact": (
+            "Proven adjustments ready for review",
+            "ReproBit found exact low-cost adjustments, but this preview left project files "
+            "unchanged.",
+        ),
+        "qualified": (
+            "Locally proven adjustments ready for review",
+            "ReproBit found low-cost function adjustments that passed their local proof checks, "
+            "but the complete project does not match yet. This preview left project files "
+            "unchanged.",
+        ),
+        "exhausted": (
+            "Bounded project search complete",
+            "No attempted function produced a locally proven adjustment within the current "
+            "low-cost search limits. Project files stayed unchanged.",
+        ),
+    }
+)
 
 
 def _skip_reason(reason: str) -> str | Markup:
@@ -47,43 +85,12 @@ def render_project_auto_grind_report_html(
 
     if len(outcome_reports) != len(result.outcomes):
         raise ValueError("project grind report links differ from campaign outcomes")
-    if result.published and result.exact:
-        tone = "ok"
-        heading = "Exact project reproduced"
-        explanation = (
-            "ReproBit saved locally proven adjustments in sequence. The final fresh build "
-            "matched every target byte for byte, which is the project certification gate."
-        )
-    elif result.published:
-        tone = "warn"
-        heading = "Locally proven progress saved"
-        explanation = (
-            "ReproBit saved only functions that matched their project-owned reference objects "
-            "and passed the required logic checks. The complete project does not match yet, "
-            "so no project certification was issued."
-        )
-    elif result.exact:
-        tone = "ok"
-        heading = "Proven adjustments ready for review"
-        explanation = (
-            "ReproBit found exact low-cost adjustments, but this preview left project files "
-            "unchanged."
-        )
-    elif result.qualified:
-        tone = "warn"
-        heading = "Locally proven adjustments ready for review"
-        explanation = (
-            "ReproBit found low-cost function adjustments that passed their local proof checks, "
-            "but the complete project does not match yet. This preview left project files "
-            "unchanged."
-        )
-    else:
-        tone = "warn"
-        heading = "Bounded project search complete"
-        explanation = (
-            "No attempted function produced a locally proven adjustment within the current "
-            "low-cost search limits. Project files stayed unchanged."
-        )
+    _branch, tone, heading, explanation = outcome_summary(
+        published=bool(result.published),
+        exact=bool(result.exact),
+        qualified=bool(result.qualified),
+        copy=_OUTCOME_COPY,
+    )
     metrics = (
         ("Functions tried", len(result.outcomes), "bounded project scope"),
         ("Locally proven", result.qualified, "function and logic checks passed"),
@@ -91,11 +98,7 @@ def render_project_auto_grind_report_html(
         ("Saved", result.published, "explicitly accepted"),
         ("Skipped", len(result.campaign.skips), "unavailable or ineligible"),
     )
-    metric_cards = "".join(
-        f'<article class="card"><h3>{escape(label)}</h3>'
-        f'<div class="value">{format_integer(value)}</div><p>{escape(detail)}</p></article>'
-        for label, value, detail in metrics
-    )
+    rendered_metrics = metric_cards(metrics)
     outcome_rows = []
     for outcome, report in zip(result.outcomes, outcome_reports, strict=True):
         if outcome.published:
@@ -162,36 +165,17 @@ def render_project_auto_grind_report_html(
     <pre><code>{escape(next_step_command)}</code></pre>
   </article>
 </section>"""
-    title = f"{result.campaign.project_id} — ReproBit project grind"
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>{escape(title)}</title>
-<style>{REPORT_CSS}\n{_PROJECT_GRIND_CSS}</style>
-</head>
-<body>
-<a class="skip-link" href="#overview">Skip to report</a>
-<header class="topbar"><div class="topbar-inner">
-  <div class="brand">{REPROBIT_MARK_SVG}<span class="brand-label">
-    ReproBit project grind · <code>{escape(result.campaign.project_id)}</code>
-  </span></div>
-  <div class="run-label">Bounded low-cost search</div>
-</div></header>
-<nav class="section-nav" aria-label="Report sections"><ul>
+    nav = f"""<nav class="section-nav" aria-label="Report sections"><ul>
   <li><a href="#overview">Overview</a></li>
   <li><a href="#outcomes">Outcomes</a></li>
   {('<li><a href="#next-step">Next step</a></li>' if next_step else "")}
   <li><a href="#skips">Skipped</a></li>
-</ul></nav>
-<main>
-<section class="hero {escape(tone)}" id="overview" aria-labelledby="report-title">
+</ul></nav>"""
+    main = f"""<section class="hero {escape(tone)}" id="overview" aria-labelledby="report-title">
   <p class="eyebrow">Project-wide automatic search</p>
   <h1 id="report-title">{escape(heading)}</h1>
   <p class="lede">{escape(explanation)}</p>
-  <div class="card-grid metric-grid">{metric_cards}</div>
+  <div class="card-grid metric-grid">{rendered_metrics}</div>
   {truncation}
 </section>
 <section class="section" id="outcomes" aria-labelledby="outcomes-title">
@@ -218,18 +202,21 @@ def render_project_auto_grind_report_html(
             empty_message="No project input was skipped.",
         )
     }
-</section>
-</main>
-<footer class="footer"><div class="footer-inner">
-  Canonical summary:
-  <a class="machine-link" href="{escape(summary_json)}"><code>{escape(summary_json)}</code></a>
-  · deterministic local HTML ·
-  no external assets
-</div></footer>
-<script>{REPORT_SCRIPT}</script>
-</body>
-</html>
-"""
+</section>"""
+    return page_shell(
+        title=f"{result.campaign.project_id} — ReproBit project grind",
+        brand=f"ReproBit project grind · <code>{escape(result.campaign.project_id)}</code>",
+        run_label="Bounded low-cost search",
+        nav=nav,
+        main=main,
+        footer=(
+            "Canonical summary:\n"
+            f'  <a class="machine-link" href="{escape(summary_json)}">'
+            f"<code>{escape(summary_json)}</code></a>\n"
+            "  · deterministic local HTML ·\n  no external assets"
+        ),
+        extra_css=_PROJECT_GRIND_CSS,
+    )
 
 
 __all__ = ["render_project_auto_grind_report_html"]

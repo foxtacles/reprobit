@@ -23,6 +23,7 @@ from pathlib import Path
 from types import TracebackType
 from typing import Self
 
+from reprobit.atomic_io import write_json_atomic
 from reprobit.state_lock import AdvisoryFileLock as _AdvisoryFileLock
 from reprobit.state_lock import StateError as _StateError
 
@@ -117,26 +118,6 @@ def _require_real_directory(path: Path, label: str) -> Path:
     else:
         path.mkdir(parents=True)
     return path.resolve(strict=True)
-
-
-def _atomic_json(path: Path, value: object) -> None:
-    payload = (
-        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-    ).encode("utf-8")
-    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    descriptor = os.open(
-        temporary,
-        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
-        0o600,
-    )
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
 
 
 @contextmanager
@@ -262,7 +243,7 @@ class RunArena:
                 if not lease.acquire(nonblocking=True):  # freshly-created path
                     raise _StateError(f"cannot lease fresh run arena: {self.path}")
                 self._lease = lease
-                _atomic_json(
+                write_json_atomic(
                     self.path / _OUTCOME_FILE,
                     {
                         "kind": self.path.name.split("-", 1)[0],
@@ -283,7 +264,7 @@ class RunArena:
             raise _StateError("run arena is not active")
         self._finished = True
         outcome = "succeeded" if succeeded else "failed"
-        _atomic_json(
+        write_json_atomic(
             self.path / _OUTCOME_FILE,
             {
                 "kind": self.path.name.split("-", 1)[0],

@@ -2,21 +2,35 @@
 
 from __future__ import annotations
 
+import os
+import posixpath
 from collections import Counter
+from collections.abc import Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from types import MappingProxyType
 
+from reprobit.cli_paths import relative_output
 from reprobit.discovery_contracts import declaration_state_id
-from reprobit.discovery_grind import GrindRejection, ProjectGrindResult
+from reprobit.discovery_grind import GrindRejection, GrindSolution, ProjectGrindResult
 from reprobit.report_html_components import (
     Bar,
+    OutcomeBranch,
     bar_chart,
     code,
     count_phrase,
     details,
     escape,
     format_integer,
+    metric_cards,
+    outcome_summary,
+    page_shell,
     table,
 )
-from reprobit.report_html_style import REPORT_CSS, REPORT_SCRIPT, REPROBIT_MARK_SVG
+from reprobit.report_io import render_report_html
+from reprobit.state import report_publication_lease
+from reprobit.strict_json import canonical_json
+from reprobit.transactions import CASTransaction
 
 _GRIND_CSS = r"""
 .metric-grid { margin-top: 1rem; }
@@ -33,72 +47,82 @@ def _claim(label: str, *, tone: str) -> str:
     return f'<span class="claim {escape(tone)}">{escape(label)}</span>'
 
 
-def _summary(result: ProjectGrindResult) -> tuple[str, str, str, tuple[str, ...]]:
-    if result.published and result.exact:
-        return (
-            "ok",
+_OUTCOME_COPY: Mapping[OutcomeBranch, tuple[str, str]] = MappingProxyType(
+    {
+        "published-exact": (
             "Exact adjustment saved",
             "The chosen compiler settings passed a fresh verification build, matched every "
             "target byte for byte, and passed the required logic checks. ReproBit then saved "
             "the adjustment and its supporting verification records together.",
-            (
-                _claim("Exact match", tone="ok"),
-                _claim("Fresh verification passed", tone="ok"),
-                _claim("Project files updated", tone="ok"),
-            ),
-        )
-    if result.published:
-        return (
-            "warn",
+        ),
+        "published": (
             "Locally proven adjustment saved",
             "The chosen compiler settings reproduced this function from the project-owned "
             "reference object and passed the required logic checks in a fresh build. The "
             "complete project does not match yet, so this is saved progress—not project "
             "certification.",
-            (
-                _claim("Function matched", tone="ok"),
-                _claim("Logic checks passed", tone="ok"),
-                _claim("Project not exact", tone="warn"),
-            ),
-        )
-    if result.exact:
-        return (
-            "ok",
+        ),
+        "exact": (
             "Exact adjustment ready for review",
             "The chosen compiler settings passed a fresh verification build, matched every "
             "target byte for byte, and passed the required logic checks. This preview wrote "
             "only review reports; the project files stayed unchanged.",
-            (
-                _claim("Exact match", tone="ok"),
-                _claim("Fresh verification passed", tone="ok"),
-                _claim("Review only", tone="warn"),
-            ),
-        )
-    if result.locally_qualified:
-        return (
-            "warn",
+        ),
+        "qualified": (
             "Locally proven adjustment ready for review",
             "The chosen compiler settings reproduced this function from the project-owned "
             "reference object and passed the required logic checks in a fresh build. The "
             "complete project does not match yet, and this preview left project files "
             "unchanged. This local result is not project certification.",
-            (
-                _claim("Function matched", tone="ok"),
-                _claim("Logic checks passed", tone="ok"),
-                _claim("Review only", tone="warn"),
-            ),
-        )
-    return (
-        "warn",
-        "No safe adjustment within these search limits",
-        "The complete bounded search finished without a locally proven function adjustment. "
-        "No project files changed.",
-        (
-            _claim("Search complete", tone="ok"),
-            _claim("No local match", tone="warn"),
-            _claim("Project files unchanged", tone="ok"),
         ),
+        "exhausted": (
+            "No safe adjustment within these search limits",
+            "The complete bounded search finished without a locally proven function "
+            "adjustment. No project files changed.",
+        ),
+    }
+)
+
+_OUTCOME_CLAIMS: Mapping[OutcomeBranch, tuple[tuple[str, str], ...]] = MappingProxyType(
+    {
+        "published-exact": (
+            ("Exact match", "ok"),
+            ("Fresh verification passed", "ok"),
+            ("Project files updated", "ok"),
+        ),
+        "published": (
+            ("Function matched", "ok"),
+            ("Logic checks passed", "ok"),
+            ("Project not exact", "warn"),
+        ),
+        "exact": (
+            ("Exact match", "ok"),
+            ("Fresh verification passed", "ok"),
+            ("Review only", "warn"),
+        ),
+        "qualified": (
+            ("Function matched", "ok"),
+            ("Logic checks passed", "ok"),
+            ("Review only", "warn"),
+        ),
+        "exhausted": (
+            ("Search complete", "ok"),
+            ("No local match", "warn"),
+            ("Project files unchanged", "ok"),
+        ),
+    }
+)
+
+
+def _summary(result: ProjectGrindResult) -> tuple[str, str, str, tuple[str, ...]]:
+    branch, tone, heading, explanation = outcome_summary(
+        published=result.published,
+        exact=result.exact,
+        qualified=result.locally_qualified,
+        copy=_OUTCOME_COPY,
     )
+    claims = tuple(_claim(label, tone=claim_tone) for label, claim_tone in _OUTCOME_CLAIMS[branch])
+    return tone, heading, explanation, claims
 
 
 def _funnel(result: ProjectGrindResult) -> str:
@@ -363,44 +387,21 @@ def render_grind_report_html(
     """Render one deterministic grind outcome, including bounded failure."""
 
     tone, heading, explanation, claims = _summary(result)
-    title = f"{result.project_id} — ReproBit grind report"
-    metrics = "".join(
+    metrics = metric_cards(
         (
-            f'<article class="card"><h3>States</h3><div class="value">'
-            f"{format_integer(result.states)}</div><p>bounded and attempted</p></article>",
-            f'<article class="card"><h3>Compiler trials</h3><div class="value">'
-            f"{format_integer(result.compiler_trials)}</div>"
-            "<p>current source plus alternatives</p></article>",
-            f'<article class="card"><h3>Fresh verifications</h3><div class="value">'
-            f"{format_integer(result.cold_trials)}</div><p>fresh verification runs</p></article>",
+            ("States", result.states, "bounded and attempted"),
+            ("Compiler trials", result.compiler_trials, "current source plus alternatives"),
+            ("Fresh verifications", result.cold_trials, "fresh verification runs"),
         )
     )
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>{escape(title)}</title>
-<style>{REPORT_CSS}\n{_GRIND_CSS}</style>
-</head>
-<body>
-<a class="skip-link" href="#overview">Skip to report</a>
-<header class="topbar"><div class="topbar-inner">
-  <div class="brand">{REPROBIT_MARK_SVG}<span class="brand-label">
-    ReproBit grind · <code>{escape(result.project_id)}</code>
-  </span></div>
-  <div class="run-label">Target <code>{escape(result.target_id)}</code></div>
-</div></header>
-<nav class="section-nav" aria-label="Report sections"><ul>
+    nav = """<nav class="section-nav" aria-label="Report sections"><ul>
   <li><a href="#overview">Overview</a></li>
   <li><a href="#decision">Decision</a></li>
   <li><a href="#funnel">Funnel</a></li>
   <li><a href="#rejections">Rejections</a></li>
   <li><a href="#technical-details">Technical details</a></li>
-</ul></nav>
-<main>
-<section class="hero {escape(tone)}" id="overview" aria-labelledby="report-title">
+</ul></nav>"""
+    main = f"""<section class="hero {escape(tone)}" id="overview" aria-labelledby="report-title">
   <p class="eyebrow">Automatic adjustment search</p>
   <h1 id="report-title">{escape(heading)}</h1>
   <p class="lede">{escape(explanation)}</p>
@@ -432,16 +433,139 @@ def render_grind_report_html(
 <section class="section" id="advanced" aria-labelledby="advanced-title">
   <p class="eyebrow">Evidence and diagnostics</p><h2 id="advanced-title">Advanced</h2>
   {_technical_details(result, plan_relative=plan_relative, cold_report_json=cold_report_json)}
-</section>
-</main>
-<footer class="footer"><div class="footer-inner">
-  ReproBit bounded grind · plan <code>{escape(plan_relative)}</code> · deterministic local HTML ·
-  no external assets
-</div></footer>
-<script>{REPORT_SCRIPT}</script>
-</body>
-</html>
-"""
+</section>"""
+    return page_shell(
+        title=f"{result.project_id} — ReproBit grind report",
+        brand=f"ReproBit grind · <code>{escape(result.project_id)}</code>",
+        run_label=f"Target <code>{escape(result.target_id)}</code>",
+        nav=nav,
+        main=main,
+        footer=(
+            f"ReproBit bounded grind · plan <code>{escape(plan_relative)}</code> · "
+            "deterministic local HTML ·\n  no external assets"
+        ),
+        extra_css=_GRIND_CSS,
+    )
 
 
-__all__ = ["render_grind_report_html"]
+@dataclass(frozen=True, slots=True)
+class GrindReportLayout:
+    """Absolute output paths for one grind decision and its cold verification pair."""
+
+    report: Path
+    cold_json: Path
+    cold_html: Path
+
+
+@dataclass(frozen=True, slots=True)
+class GrindReportCommands:
+    """Copyable commands shown in one grind decision report."""
+
+    approval: str
+    verify: str
+    proceed: str
+
+
+@dataclass(frozen=True, slots=True)
+class GrindPublication:
+    """Project-relative outputs written by one grind report transaction."""
+
+    transaction_id: str
+    report: Path
+    cold_json: Path | None
+    cold_html: Path | None
+
+
+def grind_approval_argv(root: Path, plan_relative: str, *, exact: bool) -> tuple[str, ...]:
+    """Return the argv that re-runs one plan with the acceptance its outcome earned."""
+
+    return (
+        "rbit",
+        "discover",
+        "grind",
+        str(root),
+        "--expert-plan",
+        plan_relative,
+        "--accept-exact" if exact else "--accept-progress",
+    )
+
+
+def render_cold_verification(
+    root: Path,
+    layout: GrindReportLayout,
+    solution: GrindSolution,
+) -> dict[Path, bytes]:
+    """Render the cold verification pair keyed by project-relative output path."""
+
+    return {
+        relative_output(root, str(layout.cold_json)): canonical_json(solution.report),
+        relative_output(root, str(layout.cold_html)): render_report_html(
+            solution.report,
+            canonical_json_href=layout.cold_json.name,
+        ).encode("utf-8"),
+    }
+
+
+def publish_grind_outcome(
+    root: Path,
+    state_root: Path,
+    layout: GrindReportLayout,
+    result: ProjectGrindResult,
+    *,
+    plan_relative: str,
+    commands: GrindReportCommands,
+    cold_files: Mapping[Path, bytes],
+    extra_files: Mapping[Path, bytes] = MappingProxyType({}),
+) -> GrindPublication:
+    """Atomically publish one grind decision report with its cold verification pair.
+
+    ``cold_files`` comes from :func:`render_cold_verification` (or is empty when
+    there is nothing to link); stale cold outputs from an earlier run are
+    deleted in the same transaction so a report never links a foreign result.
+    """
+
+    report_output = relative_output(root, str(layout.report))
+    cold_json_output = relative_output(root, str(layout.cold_json))
+    cold_html_output = relative_output(root, str(layout.cold_html))
+    files = dict(extra_files)
+    files.update(cold_files)
+    cold_json_link: str | None = None
+    cold_html_link: str | None = None
+    if cold_files:
+        start = report_output.parent.as_posix()
+        cold_json_link = posixpath.relpath(cold_json_output.as_posix(), start=start)
+        cold_html_link = posixpath.relpath(cold_html_output.as_posix(), start=start)
+    files[report_output] = render_grind_report_html(
+        result,
+        plan_relative=plan_relative,
+        cold_report_html=cold_html_link,
+        cold_report_json=cold_json_link,
+        approval_command=commands.approval,
+        verify_command=commands.verify,
+        continue_command=commands.proceed,
+    ).encode("utf-8")
+    with report_publication_lease(state_root):
+        transaction = CASTransaction(root)
+        for owned in (cold_json_output, cold_html_output):
+            if owned not in files and os.path.lexists(root / owned):
+                transaction.delete(owned)
+        for relative, payload in sorted(files.items(), key=lambda item: item[0].as_posix()):
+            transaction.write(relative, payload)
+        transaction_id = transaction.commit().transaction_id
+    return GrindPublication(
+        transaction_id=transaction_id,
+        report=report_output,
+        cold_json=cold_json_output if cold_files else None,
+        cold_html=cold_html_output if cold_files else None,
+    )
+
+
+__all__ = [
+    "GrindPublication",
+    "GrindReportCommands",
+    "GrindReportLayout",
+    "grind_approval_argv",
+    "publish_grind_outcome",
+    "render_cold_verification",
+    "render_grind_report_html",
+]

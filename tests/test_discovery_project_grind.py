@@ -13,6 +13,7 @@ from typing import cast
 import pytest
 
 import reprobit.discovery_grind_cli as grind_cli
+import reprobit.discovery_grind_report as grind_report
 import reprobit.discovery_project_grind as project_grind
 import reprobit.discovery_project_grind_cli as project_grind_cli
 from reprobit.cli_output import CLIOutput, human_command
@@ -588,10 +589,10 @@ def test_project_report_persists_plan_decision_and_copyable_next_step(
         observed_hrefs.append(canonical_json_href)
         return "<!doctype html><title>Cold verification</title>"
 
-    monkeypatch.setattr(project_grind_cli, "render_report_html", render_cold)
+    monkeypatch.setattr(grind_report, "render_report_html", render_cold)
     real_canonical_json = canonical_json
     monkeypatch.setattr(
-        project_grind_cli,
+        grind_report,
         "canonical_json",
         lambda value: b"{}" if value is cold_report else real_canonical_json(value),
     )

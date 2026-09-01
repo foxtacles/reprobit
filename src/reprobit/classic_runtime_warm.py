@@ -73,6 +73,7 @@ from reprobit.secure_paths import (
     atomic_publish_relative,
     digest_relative_file,
     read_relative_file,
+    split_absolute,
     stat_relative_file,
 )
 
@@ -103,14 +104,9 @@ def _secure_copy_new(
     """Copy one run-private file without following or replacing path entries."""
 
     source = canonical_system_path(source)
-    destination = canonical_system_path(destination)
-    if not source.anchor or not destination.anchor:
-        raise ClassicProjectError("classic warm copy requires absolute paths")
-    source_root = Path(source.anchor)
-    destination_root = Path(destination.anchor)
-    source_relative = PurePosixPath(*source.parts[1:]).as_posix()
-    destination_relative = PurePosixPath(*destination.parts[1:]).as_posix()
     try:
+        source_root, source_relative = split_absolute(source)
+        destination_root, destination_relative = split_absolute(destination)
         source_identity = stat_relative_file(source_root, source_relative)
         expected_identity = source_identity
         expected_digest: Digest | None = None
@@ -161,31 +157,23 @@ def _secure_copy_new(
 def _secure_read_bytes(path: Path) -> bytes:
     """Read one absolute run-private file without following path redirects."""
 
-    absolute = canonical_system_path(path)
-    if not absolute.anchor:
-        raise ClassicProjectError("classic warm read requires an absolute path")
-    root = Path(absolute.anchor)
-    relative = PurePosixPath(*absolute.parts[1:]).as_posix()
     try:
+        root, relative = split_absolute(path)
         payload, _snapshot = read_relative_file(root, relative)
         return payload
     except (OSError, SecurePathError) as exc:
-        raise ClassicProjectError(f"classic warm read is unsafe for {absolute}: {exc}") from exc
+        raise ClassicProjectError(f"classic warm read is unsafe for {path}: {exc}") from exc
 
 
 def _secure_publish_new_bytes(payload: bytes, destination: Path) -> SecureFileSnapshot:
     """Create one canonical warm output without a mutable temporary file."""
 
-    absolute = canonical_system_path(destination)
-    if not absolute.anchor:
-        raise ClassicProjectError("classic warm publication requires an absolute path")
-    root = Path(absolute.anchor)
-    relative = PurePosixPath(*absolute.parts[1:]).as_posix()
     try:
+        root, relative = split_absolute(destination)
         return atomic_publish_new_relative(root, relative, payload)
     except (OSError, SecurePathError) as exc:
         raise ClassicProjectError(
-            f"classic warm bytes could not safely publish {absolute}: {exc}"
+            f"classic warm bytes could not safely publish {destination}: {exc}"
         ) from exc
 
 
@@ -414,11 +402,7 @@ class ClassicWarmExecution:
                 self.producer.require_regular(source, label="classic warm staged input")
                 if os.path.lexists(destination):
                     self.producer.require_regular(destination, label="classic warm logical input")
-                    destination_root = Path(canonical_system_path(destination).anchor)
-                    destination_relative = PurePosixPath(
-                        *canonical_system_path(destination).parts[1:]
-                    ).as_posix()
-                    received = digest_relative_file(destination_root, destination_relative)
+                    received = digest_relative_file(*split_absolute(destination))
                     if (
                         received.digest.value != bound.output.digest
                         or received.size != bound.output.size

@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 import shutil
-import stat
-import tempfile
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import Any, Final, Self
+
+from reprobit.atomic_io import fsync_directory, write_json_atomic
+from reprobit.model import Digest
+from reprobit.secure_path_contracts import is_redirected
 
 
 class TransactionError(RuntimeError):
@@ -31,15 +32,11 @@ _AUTOMATIC: Final = object()
 
 
 def sha256_bytes(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+    return Digest.from_bytes(data).value
 
 
 def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return Digest.from_path(path).value
 
 
 def _validate_digest(value: str | None) -> str | None:
@@ -64,54 +61,15 @@ def _relative_path(value: Path | str) -> Path:
     return path
 
 
-def _fsync_directory(path: Path) -> None:
-    if os.name == "nt":
-        return
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
-def _write_json_atomic(path: Path, value: object) -> None:
-    data = (
-        json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
-    ).encode("utf-8")
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
-def _is_redirected(path: Path) -> bool:
-    try:
-        metadata = path.stat(follow_symlinks=False)
-    except FileNotFoundError:
-        return False
-    reparse_attribute = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x0400)
-    return stat.S_ISLNK(metadata.st_mode) or bool(
-        getattr(metadata, "st_reparse_tag", 0)
-        or getattr(metadata, "st_file_attributes", 0) & reparse_attribute
-    )
-
-
 def _prepare_state_root(root: Path, state_root: Path) -> None:
     if os.path.lexists(state_root):
-        if _is_redirected(state_root) or not state_root.is_dir():
+        if is_redirected(state_root) or not state_root.is_dir():
             raise TransactionError(
                 f"project transaction state is not a real directory: {state_root}"
             )
     else:
         state_root.mkdir()
-    if _is_redirected(state_root):
+    if is_redirected(state_root):
         raise TransactionError(f"project transaction state is redirected: {state_root}")
     try:
         state_root.resolve(strict=True).relative_to(root)
@@ -124,11 +82,11 @@ def _safe_target(root: Path, relative_path: Path) -> Path:
     current = root
     for component in relative_path.parts[:-1]:
         current = current / component
-        if _is_redirected(current):
+        if is_redirected(current):
             raise TransactionError(f"transaction parent is redirected: {current}")
         if current.exists() and not current.is_dir():
             raise TransactionError(f"transaction parent is not a directory: {current}")
-    if _is_redirected(target):
+    if is_redirected(target):
         raise TransactionError(f"transaction target is redirected: {target}")
     return target
 
@@ -223,7 +181,7 @@ class CASTransaction:
         candidate = Path(root)
         if not candidate.is_absolute():
             raise ValueError("transaction root must be absolute")
-        if _is_redirected(candidate) or not candidate.is_dir():
+        if is_redirected(candidate) or not candidate.is_dir():
             raise ValueError("transaction root must be an existing real directory")
         self.root = candidate.resolve(strict=True)
         self.state_root = self.root / ".reprobit-transactions"
@@ -324,12 +282,12 @@ class CASTransaction:
         directory = self._target(relative_path)
         if not directory.exists():
             return ()
-        if not directory.is_dir() or _is_redirected(directory):
+        if not directory.is_dir() or is_redirected(directory):
             raise TransactionConflict(
                 f"transaction authority directory changed: {relative_path.as_posix()}"
             )
         entries = tuple(directory.rglob("*"))
-        if any(_is_redirected(path) for path in entries):
+        if any(is_redirected(path) for path in entries):
             raise TransactionConflict(
                 f"transaction authority directory is redirected: {relative_path.as_posix()}"
             )
@@ -424,11 +382,11 @@ class CASTransaction:
                 os.replace(backup, target)
                 if sha256_file(target) != expected:
                     raise TransactionError(f"restored preimage digest differs: {target}")
-                _fsync_directory(target.parent)
+                fsync_directory(target.parent)
             elif expected is None and target.is_file():
                 if result is not None and sha256_file(target) == result:
                     target.unlink()
-                    _fsync_directory(target.parent)
+                    fsync_directory(target.parent)
                 elif result is not None:
                     raise TransactionError(f"recovery target has unknown contents: {target}")
 
@@ -453,13 +411,13 @@ class CASTransaction:
                 cls._rollback_record(root, directory, record)
             recovered.append(str(record.get("transaction_id", directory.name)))
             shutil.rmtree(directory)
-            _fsync_directory(state_root)
+            fsync_directory(state_root)
         return tuple(recovered)
 
     @classmethod
     def recover(cls, root: Path | str, *, nonblocking: bool = False) -> tuple[str, ...]:
         candidate = Path(root)
-        if not candidate.is_absolute() or _is_redirected(candidate) or not candidate.is_dir():
+        if not candidate.is_absolute() or is_redirected(candidate) or not candidate.is_dir():
             raise ValueError("recovery root must be an existing absolute real directory")
         project_root = candidate.resolve(strict=True)
         state_root = project_root / ".reprobit-transactions"
@@ -499,11 +457,11 @@ class CASTransaction:
                     stream.flush()
                     os.fsync(stream.fileno())
             record = self._journal_record(transaction_directory, "prepared")
-            _write_json_atomic(transaction_directory / "journal.json", record)
+            write_json_atomic(transaction_directory / "journal.json", record)
             try:
                 self._verify_preimages()
                 record["state"] = "applying"
-                _write_json_atomic(transaction_directory / "journal.json", record)
+                write_json_atomic(transaction_directory / "journal.json", record)
                 for index, operation in enumerate(self._operations):
                     if operation.kind == "check":
                         continue
@@ -512,22 +470,22 @@ class CASTransaction:
                     backup = backups / str(index)
                     if target.exists():
                         os.replace(target, backup)
-                        _fsync_directory(target.parent)
+                        fsync_directory(target.parent)
                     if operation.data is not None:
                         payload = payloads / str(index)
                         os.replace(payload, target)
                         if sha256_file(target) != operation.result_sha256:
                             raise TransactionError(f"installed output digest differs: {target}")
-                    _fsync_directory(target.parent)
+                    fsync_directory(target.parent)
                 record["state"] = "committed"
-                _write_json_atomic(transaction_directory / "journal.json", record)
+                write_json_atomic(transaction_directory / "journal.json", record)
             except BaseException:
                 self._rollback_record(self.root, transaction_directory, record)
                 shutil.rmtree(transaction_directory)
-                _fsync_directory(self.state_root)
+                fsync_directory(self.state_root)
                 raise
             shutil.rmtree(transaction_directory)
-            _fsync_directory(self.state_root)
+            fsync_directory(self.state_root)
         self._committed = True
         self._closed = True
         return TransactionResult(

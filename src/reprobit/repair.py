@@ -5,13 +5,13 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from types import TracebackType
 
 from reprobit.authority_snapshot import (
     AuthoritySnapshotError,
     JsonAuthorityDirectorySnapshot,
     capture_json_authority_directories,
     json_authority_members,
+    resolve_project_path,
 )
 from reprobit.model import Digest
 from reprobit.project_loader import load_project
@@ -20,21 +20,13 @@ from reprobit.source_lock import (
     SourceLockError,
     receipt_source_input,
 )
-from reprobit.state import KeepWorkspace, RunArena, report_publication_lease
+from reprobit.staged_project import ProjectFileSnapshot, StagedProject
+from reprobit.state import KeepWorkspace, report_publication_lease
 from reprobit.transactions import CASTransaction, TransactionResult
 
 
 class RepairError(RuntimeError):
     """A repair cannot be staged or published without weakening its boundary."""
-
-
-@dataclass(frozen=True, slots=True)
-class RepairFileSnapshot:
-    """One immutable project input captured before repair begins."""
-
-    relative_path: str
-    digest: Digest
-    payload: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,12 +52,12 @@ class RepairSnapshot:
     root: Path
     spec: ProjectSpec
     source_manifest: SourceManifestDocument
-    files: tuple[RepairFileSnapshot, ...]
+    files: tuple[ProjectFileSnapshot, ...]
     authority_directories: tuple[JsonAuthorityDirectorySnapshot, ...]
     outputs: tuple[RepairOutputSnapshot, ...]
 
     @property
-    def files_by_path(self) -> dict[str, RepairFileSnapshot]:
+    def files_by_path(self) -> dict[str, ProjectFileSnapshot]:
         return {item.relative_path: item for item in self.files}
 
 
@@ -80,23 +72,10 @@ class RepairCandidate:
 
 
 def _safe_path(root: Path, relative: str) -> Path:
-    path = PurePosixPath(relative)
-    if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
-        raise RepairError(f"repair input path is not canonical: {relative!r}")
-    candidate = root.joinpath(*path.parts)
-    current = root
-    for part in path.parts:
-        current /= part
-        if current.is_symlink():
-            raise RepairError(f"repair input is redirected: {relative!r}")
-    try:
-        candidate.resolve(strict=False).relative_to(root)
-    except ValueError as exc:
-        raise RepairError(f"repair input escapes the project: {relative!r}") from exc
-    return candidate
+    return resolve_project_path(root, relative, error=RepairError, subject="repair input")
 
 
-def _capture_file(root: Path, relative: str) -> RepairFileSnapshot:
+def _capture_file(root: Path, relative: str) -> ProjectFileSnapshot:
     try:
         size, digest, payload = receipt_source_input(root, relative, capture=True)
     except SourceLockError as exc:
@@ -104,7 +83,7 @@ def _capture_file(root: Path, relative: str) -> RepairFileSnapshot:
     assert payload is not None
     if size != len(payload):
         raise RepairError(f"repair input changed while it was read: {relative!r}")
-    return RepairFileSnapshot(relative, digest, payload)
+    return ProjectFileSnapshot(relative, digest, payload)
 
 
 def _capture_optional_output(root: Path, relative: str) -> RepairOutputSnapshot:
@@ -215,7 +194,7 @@ def capture_repair_snapshot(project_root: Path) -> RepairSnapshot:
     if len({item.casefold() for item in canonical}) != len(canonical):
         raise RepairError("repair inputs collide under case-insensitive path rules")
 
-    files: list[RepairFileSnapshot] = []
+    files: list[ProjectFileSnapshot] = []
     for relative in canonical:
         files.append(config if relative == "reprobit.toml" else _capture_file(root, relative))
     for directory in directories:
@@ -236,47 +215,16 @@ def capture_repair_snapshot(project_root: Path) -> RepairSnapshot:
     return RepairSnapshot(root, spec, manifest, tuple(files), tuple(directories), outputs)
 
 
-class StagedRepairProject:
-    """A run-private project copy containing only sealed certification inputs."""
+def stage_repair_project(snapshot: RepairSnapshot, *, keep: KeepWorkspace) -> StagedProject:
+    """Stage every sealed repair input inside a run-private ``repair`` arena."""
 
-    def __init__(self, snapshot: RepairSnapshot, *, keep: KeepWorkspace) -> None:
-        self.snapshot = snapshot
-        self.arena = RunArena(
-            snapshot.root / snapshot.spec.state_dir,
-            kind="repair",
-            keep=keep,
-        )
-        self.root: Path | None = None
-
-    @property
-    def retained_path(self) -> Path:
-        return self.arena.path
-
-    def __enter__(self) -> Path:
-        arena = self.arena.__enter__()
-        root = arena.path / "project"
-        self.root = root
-        try:
-            root.mkdir()
-            for snapshot in self.snapshot.files:
-                destination = root.joinpath(*PurePosixPath(snapshot.relative_path).parts)
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                with destination.open("xb") as stream:
-                    stream.write(snapshot.payload)
-                if Digest.from_path(destination) != snapshot.digest:
-                    raise RepairError(f"staged repair input differs: {snapshot.relative_path!r}")
-        except BaseException:
-            self.arena.finish(succeeded=False)
-            raise
-        return root
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        self.arena.__exit__(exc_type, exc, traceback)
+    return StagedProject(
+        snapshot.root / snapshot.spec.state_dir,
+        snapshot.files,
+        kind="repair",
+        keep=keep,
+        error=lambda relative: RepairError(f"staged repair input differs: {relative!r}"),
+    )
 
 
 def _publishable_paths(snapshot: RepairSnapshot, staged_root: Path) -> tuple[str, ...]:
@@ -509,15 +457,14 @@ def capture_repair_report_preimages(
 __all__ = [
     "RepairCandidate",
     "RepairError",
-    "RepairFileSnapshot",
     "RepairOutputSnapshot",
     "RepairRecordPostimage",
     "RepairSnapshot",
-    "StagedRepairProject",
     "capture_repair_record_postimages",
     "capture_repair_report_preimages",
     "capture_repair_snapshot",
     "collect_repair_candidate",
     "publish_repair_candidate",
+    "stage_repair_project",
     "validate_repair_report_directory",
 ]

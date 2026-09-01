@@ -11,7 +11,6 @@ from typing import cast
 
 import pytest
 
-import reprobit.classic_incremental as classic_incremental
 import reprobit.classic_incremental_context as incremental_context
 import reprobit.classic_incremental_execution as incremental_execution
 import reprobit.classic_incremental_keys as incremental_keys
@@ -1032,7 +1031,7 @@ def _run(
 ) -> incremental_context.ClassicIncrementalResult:
     toolchain = root / "toolchain"
     toolchain.mkdir(exist_ok=True)
-    return classic_incremental.execute_classic_incremental_build(
+    return incremental_execution.execute_classic_incremental_build(
         DeveloperAuthority(cast(object, bundle), (), (), MappingProxyType({})),  # type: ignore[arg-type]
         project_root=root,
         session_root=session,
@@ -1837,7 +1836,6 @@ def test_progress_reserves_publication_and_summary_covers_the_whole_build(
     def read_clock() -> float:
         return next(clock)
 
-    monkeypatch.setattr(classic_incremental, "monotonic", read_clock)
     monkeypatch.setattr(incremental_execution, "monotonic", read_clock)
     events: list[tuple[ProgressKind, int, int, str, str, str | None]] = []
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from types import MappingProxyType
 from typing import Annotated, Any, Literal, cast
 
@@ -45,6 +45,7 @@ from reprobit.msvc_discovery_coff import (
 )
 from reprobit.msvc_discovery_proposals import build_msvc_discovery_artifacts
 from reprobit.process import CancellationToken
+from reprobit.secure_path_contracts import SecurePathError, canonical_relative_path
 from reprobit.strict_json import JsonValue, canonical_json
 
 _CANONICAL_RELATIVE_PATH_PATTERN = (
@@ -70,15 +71,10 @@ _COMPILE_IMPLEMENTATION_PATHS = (
 
 
 def _relative_input_path(value: str, label: str) -> str:
-    if not value or "\0" in value or "\\" in value:
-        raise ValueError(f"{label} must be a canonical POSIX relative path")
-    path = PurePosixPath(value)
-    if (
-        path.is_absolute()
-        or path.as_posix() != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise ValueError(f"{label} must be a canonical POSIX relative path")
+    try:
+        canonical_relative_path(value)
+    except SecurePathError:
+        raise ValueError(f"{label} must be a canonical POSIX relative path") from None
     return value
 
 

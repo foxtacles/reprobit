@@ -28,7 +28,7 @@ from reprobit.cli_cmake_import import _cmake_import_workspace
 from reprobit.cli_output import CLIOutput, _friendly_incremental_phase, human_command
 from reprobit.cli_paths import CLIError
 from reprobit.cli_project import _human_intervention_detail
-from reprobit.cmake_source import effective_source_digest
+from reprobit.cmake_configure import effective_source_digest
 from reprobit.costs import (
     calculate_cost,
     calculate_intervention_cost,
@@ -4173,7 +4173,10 @@ def test_plain_build_loads_worktree_authority_before_state_and_emits_warm_summar
 
     monkeypatch.setattr("reprobit.cli_build.load_project_tree", load)
     monkeypatch.setattr("reprobit.incremental.current_worktree_authority", worktree)
-    monkeypatch.setattr("reprobit.classic_incremental.execute_classic_incremental_build", execute)
+    monkeypatch.setattr(
+        "reprobit.classic_incremental_execution.execute_classic_incremental_build",
+        execute,
+    )
     monkeypatch.setattr("reprobit.cli_build.selected_backend", lambda _args: object())
 
     assert (

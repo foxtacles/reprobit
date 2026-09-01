@@ -7,10 +7,11 @@ import hashlib
 import os
 import stat
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager, suppress
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
+from typing import TypeVar
 
 from reprobit.model import Digest
 from reprobit.secure_path_contracts import (
@@ -20,8 +21,12 @@ from reprobit.secure_path_contracts import (
     SecureFileSnapshot,
     SecurePathError,
     canonical_relative_path,
+    no_follow_directory_flags,
+    no_follow_file_flags,
     validate_stream_expectations,
 )
+
+_T = TypeVar("_T")
 
 
 def _identity(metadata: os.stat_result) -> tuple[int, int, int, int, int, int]:
@@ -67,24 +72,6 @@ def _matches_posix_snapshot(
     )
 
 
-def _directory_flags() -> int:
-    return (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-
-
-def _file_flags(mode: int) -> int:
-    return (
-        mode
-        | getattr(os, "O_BINARY", 0)
-        | getattr(os, "O_CLOEXEC", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-
-
 class _HeldPosixRoot:
     def __init__(self, root: Path) -> None:
         if os.name != "posix" or os.open not in os.supports_dir_fd:
@@ -94,7 +81,7 @@ class _HeldPosixRoot:
             )
         self.path = root.resolve(strict=True)
         try:
-            self.fd = os.open(self.path, _directory_flags())
+            self.fd = os.open(self.path, no_follow_directory_flags())
         except OSError as exc:
             raise SecurePathError(f"cannot hold secure path root {self.path}: {exc}") from exc
         metadata = os.fstat(self.fd)
@@ -146,7 +133,7 @@ class _HeldPosixRoot:
                             f"cannot create secure path component {component!r}: {exc}"
                         ) from exc
                 try:
-                    child = os.open(component, _directory_flags(), dir_fd=parent)
+                    child = os.open(component, no_follow_directory_flags(), dir_fd=parent)
                 except OSError as exc:
                     raise SecurePathError(
                         f"secure path component is absent or redirected: {component!r}"
@@ -181,59 +168,106 @@ class _HeldPosixRoot:
                 raise SecurePathError(f"secure path component changed while held: {component!r}")
 
 
-def read_relative_file(root: Path, relative: str) -> tuple[bytes, SecureFileSnapshot]:
-    """Read one regular file through a fully held, no-follow ancestor chain."""
+def _inspect_leaf(
+    root: Path,
+    relative: str,
+    *,
+    consume: Callable[[int], _T],
+    verify: Callable[[os.stat_result, _T], bool] | None = None,
+    action: str,
+    verb: str,
+    open_failure: str | None = None,
+) -> tuple[Path, os.stat_result, _T]:
+    """Open one regular leaf no-follow, consume it, and prove it never changed.
+
+    The leaf is opened through a held ancestor chain, ``consume`` runs on the
+    open descriptor, and the descriptor, the directory entry and every held
+    ancestor are then re-verified before ``(path, metadata, result)`` returns.
+    """
 
     canonical = canonical_relative_path(relative)
     with _HeldPosixRoot(root) as held:
         descriptors, edges, name = held.parent_chain(canonical, create=False)
+        descriptor = -1
         try:
             parent = descriptors[-1]
             try:
                 descriptor = os.open(
                     name,
-                    _file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
+                    no_follow_file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
                     dir_fd=parent,
                 )
             except OSError as exc:
-                raise SecurePathError(
-                    f"secure source input is absent or redirected: {relative!r}"
-                ) from exc
-            try:
-                before = os.fstat(descriptor)
-                if not stat.S_ISREG(before.st_mode):
-                    raise SecurePathError(f"secure source input is not regular: {relative!r}")
-                chunks: list[bytes] = []
-                while True:
-                    chunk = os.read(descriptor, 1024 * 1024)
-                    if not chunk:
-                        break
-                    chunks.append(chunk)
-                after = os.fstat(descriptor)
-            finally:
-                os.close(descriptor)
-            if _identity(before) != _identity(after):
-                raise SecurePathError(f"secure source input changed while read: {relative!r}")
+                if open_failure is None:
+                    raise
+                raise SecurePathError(f"{open_failure}: {relative!r}") from exc
+            before = os.fstat(descriptor)
+            if not stat.S_ISREG(before.st_mode):
+                raise SecurePathError(f"secure source input is not regular: {relative!r}")
+            result = consume(descriptor)
+            after = os.fstat(descriptor)
+            if _identity(before) != _identity(after) or (
+                verify is not None and not verify(after, result)
+            ):
+                raise SecurePathError(f"secure source input changed while {verb}: {relative!r}")
             terminal = os.stat(name, dir_fd=parent, follow_symlinks=False)
             if _identity(terminal) != _identity(after) or not stat.S_ISREG(terminal.st_mode):
                 raise SecurePathError(
-                    f"secure source input changed identity while read: {relative!r}"
+                    f"secure source input changed identity while {verb}: {relative!r}"
                 )
             held.recheck(edges)
-            payload = b"".join(chunks)
-            return payload, SecureFileSnapshot(
-                held.path.joinpath(*canonical.parts),
-                Digest.from_bytes(payload),
-                len(payload),
-                after.st_dev,
-                after.st_ino,
-                after.st_mtime_ns,
-                after.st_mode,
-                after.st_ctime_ns,
-            )
+            return held.path.joinpath(*canonical.parts), after, result
+        except OSError as exc:
+            if isinstance(exc, SecurePathError):
+                raise
+            raise SecurePathError(
+                f"cannot securely {action} source input {relative!r}: {exc}"
+            ) from exc
         finally:
-            for descriptor in reversed(descriptors):
+            if descriptor >= 0:
                 os.close(descriptor)
+            for current in reversed(descriptors):
+                os.close(current)
+
+
+def _read_whole(descriptor: int) -> bytes:
+    chunks: list[bytes] = []
+    while chunk := os.read(descriptor, STREAM_COPY_CHUNK):
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _hash_whole(descriptor: int) -> tuple[Digest, int]:
+    hasher = hashlib.sha256()
+    size = 0
+    while block := os.read(descriptor, STREAM_COPY_CHUNK):
+        hasher.update(block)
+        size += len(block)
+    return Digest(value=hasher.hexdigest()), size
+
+
+def read_relative_file(root: Path, relative: str) -> tuple[bytes, SecureFileSnapshot]:
+    """Read one regular file through a fully held, no-follow ancestor chain."""
+
+    path, after, payload = _inspect_leaf(
+        root,
+        relative,
+        consume=_read_whole,
+        verify=lambda metadata, payload: len(payload) == metadata.st_size,
+        action="read",
+        verb="read",
+        open_failure="secure source input is absent or redirected",
+    )
+    return payload, SecureFileSnapshot(
+        path,
+        Digest.from_bytes(payload),
+        len(payload),
+        after.st_dev,
+        after.st_ino,
+        after.st_mtime_ns,
+        after.st_mode,
+        after.st_ctime_ns,
+    )
 
 
 def _sync_directory(descriptor: int) -> None:
@@ -315,7 +349,7 @@ def atomic_publish_relative(
                     )
             descriptor = os.open(
                 temporary,
-                _file_flags(os.O_RDWR | os.O_CREAT | os.O_EXCL),
+                no_follow_file_flags(os.O_RDWR | os.O_CREAT | os.O_EXCL),
                 0o600,
                 dir_fd=parent,
             )
@@ -463,7 +497,7 @@ def atomic_publish_new_relative_from_stream(
                 )
             descriptor = os.open(
                 temporary,
-                _file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL),
+                no_follow_file_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL),
                 0o600,
                 dir_fd=parent,
             )
@@ -563,102 +597,41 @@ def atomic_publish_new_relative_from_stream(
 def stat_relative_file(root: Path, relative: str) -> SecureFileIdentity:
     """Inspect one regular file through a held ancestor chain without reading it."""
 
-    canonical = canonical_relative_path(relative)
-
-    with _HeldPosixRoot(root) as held:
-        descriptors, edges, name = held.parent_chain(canonical, create=False)
-        descriptor = -1
-        try:
-            parent = descriptors[-1]
-            descriptor = os.open(
-                name,
-                _file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
-                dir_fd=parent,
-            )
-            before_stat = os.fstat(descriptor)
-            terminal = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            if not stat.S_ISREG(before_stat.st_mode) or _identity(before_stat) != _identity(
-                terminal
-            ):
-                raise SecurePathError(
-                    f"secure source input is redirected/non-regular: {relative!r}"
-                )
-            held.recheck(edges)
-            return SecureFileIdentity(
-                held.path.joinpath(*canonical.parts),
-                before_stat.st_size,
-                before_stat.st_dev,
-                before_stat.st_ino,
-                before_stat.st_mtime_ns,
-                before_stat.st_mode,
-                before_stat.st_ctime_ns,
-            )
-        except OSError as exc:
-            if isinstance(exc, SecurePathError):
-                raise
-            raise SecurePathError(
-                f"cannot securely inspect source input {relative!r}: {exc}"
-            ) from exc
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-            for current in reversed(descriptors):
-                os.close(current)
+    path, metadata, _nothing = _inspect_leaf(
+        root, relative, consume=lambda _descriptor: None, action="inspect", verb="inspected"
+    )
+    return SecureFileIdentity(
+        path,
+        metadata.st_size,
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_mtime_ns,
+        metadata.st_mode,
+        metadata.st_ctime_ns,
+    )
 
 
 def digest_relative_file(root: Path, relative: str) -> SecureFileSnapshot:
     """Hash one regular file through a held ancestor chain with bounded memory."""
 
-    canonical = canonical_relative_path(relative)
-
-    with _HeldPosixRoot(root) as held:
-        descriptors, edges, name = held.parent_chain(canonical, create=False)
-        descriptor = -1
-        try:
-            parent = descriptors[-1]
-            descriptor = os.open(
-                name,
-                _file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
-                dir_fd=parent,
-            )
-            before_stat = os.fstat(descriptor)
-            if not stat.S_ISREG(before_stat.st_mode):
-                raise SecurePathError(f"secure source input is not regular: {relative!r}")
-            hasher = hashlib.sha256()
-            size = 0
-            while block := os.read(descriptor, STREAM_COPY_CHUNK):
-                hasher.update(block)
-                size += len(block)
-            after_stat = os.fstat(descriptor)
-            terminal = os.stat(name, dir_fd=parent, follow_symlinks=False)
-            if (
-                _identity(before_stat) != _identity(after_stat)
-                or _identity(after_stat) != _identity(terminal)
-                or before_stat.st_ctime_ns != after_stat.st_ctime_ns
-                or not stat.S_ISREG(terminal.st_mode)
-                or size != after_stat.st_size
-            ):
-                raise SecurePathError(f"secure source input changed while hashed: {relative!r}")
-            held.recheck(edges)
-            return SecureFileSnapshot(
-                held.path.joinpath(*canonical.parts),
-                Digest(value=hasher.hexdigest()),
-                size,
-                after_stat.st_dev,
-                after_stat.st_ino,
-                after_stat.st_mtime_ns,
-                after_stat.st_mode,
-                after_stat.st_ctime_ns,
-            )
-        except OSError as exc:
-            if isinstance(exc, SecurePathError):
-                raise
-            raise SecurePathError(f"cannot securely hash source input {relative!r}: {exc}") from exc
-        finally:
-            if descriptor >= 0:
-                os.close(descriptor)
-            for current in reversed(descriptors):
-                os.close(current)
+    path, after, (digest, size) = _inspect_leaf(
+        root,
+        relative,
+        consume=_hash_whole,
+        verify=lambda metadata, hashed: hashed[1] == metadata.st_size,
+        action="hash",
+        verb="hashed",
+    )
+    return SecureFileSnapshot(
+        path,
+        digest,
+        size,
+        after.st_dev,
+        after.st_ino,
+        after.st_mtime_ns,
+        after.st_mode,
+        after.st_ctime_ns,
+    )
 
 
 def atomic_copy_new_relative(
@@ -683,7 +656,7 @@ def atomic_copy_new_relative(
             parent = descriptors[-1]
             descriptor = os.open(
                 name,
-                _file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
+                no_follow_file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
                 dir_fd=parent,
             )
             before_stat = os.fstat(descriptor)
@@ -762,7 +735,7 @@ def promote_relative_new(
             destination_parent = destination_descriptors[-1]
             descriptor = os.open(
                 source_name,
-                _file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
+                no_follow_file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
                 dir_fd=source_parent,
             )
             before_stat = os.fstat(descriptor)
@@ -880,7 +853,7 @@ def remove_published_relative(
             try:
                 descriptor = os.open(
                     name,
-                    _file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
+                    no_follow_file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
                     dir_fd=parent,
                 )
             except FileNotFoundError:
@@ -936,7 +909,7 @@ def remove_regular_relative(root: Path, relative: str) -> bool:
             try:
                 descriptor = os.open(
                     name,
-                    _file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
+                    no_follow_file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
                     dir_fd=parent,
                 )
             except FileNotFoundError:
@@ -992,7 +965,7 @@ def hold_relative_file_set(
                 descriptors, edges, name = held.parent_chain(path, create=False)
                 descriptor = os.open(
                     name,
-                    _file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
+                    no_follow_file_flags(os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)),
                     dir_fd=descriptors[-1],
                 )
                 opened_posix.append((relative, descriptors, edges, name, descriptor))

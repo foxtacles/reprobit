@@ -9,14 +9,20 @@ from pathlib import Path, PurePosixPath
 
 from reprobit.classic_orchestration import classic_compiler_translation_unit_authority
 from reprobit.classic_project import ClassicProjectError
-from reprobit.discovery_contracts import InclusiveRange, enumerate_declaration_states
+from reprobit.discovery_contracts import enumerate_declaration_states
 from reprobit.discovery_grind import (
     GrindProgress,
     ProjectGrindCallbacks,
     ProjectGrindResult,
+    require_single_acceptance,
     run_project_grind,
 )
-from reprobit.discovery_project import ProjectGrindPlan, discovery_state_root
+from reprobit.discovery_project import (
+    DEFAULT_GRIND_CLASSES,
+    DEFAULT_GRIND_FUNCTIONS,
+    ProjectGrindPlan,
+    discovery_state_root,
+)
 from reprobit.model import Digest
 from reprobit.msvc_discovery_coff import isolated_msvc_function_symbols
 from reprobit.progress import ProgressKind
@@ -28,14 +34,13 @@ from reprobit.schema import (
     LegacyOracleInstallIntervention,
     ProjectBundle,
 )
+from reprobit.secure_path_contracts import SecurePathError, canonical_relative_path
 from reprobit.state import KeepWorkspace, RunArena
 from reprobit.strict_json import JsonValue, canonical_json
 
 _MAX_REFERENCE_ENTRIES = 4_096
 _MAX_REFERENCE_OBJECTS = 64
 MAX_PROJECT_GRIND_SYMBOLS = 64
-_DEFAULT_CLASSES = InclusiveRange(start=1, stop=4)
-_DEFAULT_FUNCTIONS = InclusiveRange(start=10, stop=10)
 
 
 class ProjectAutoGrindError(RuntimeError):
@@ -136,16 +141,10 @@ class _EligibleUnit:
 
 
 def _portable_relative(value: str, *, label: str) -> str:
-    path = PurePosixPath(value)
-    if (
-        not value
-        or "\0" in value
-        or "\\" in value
-        or path.is_absolute()
-        or path.as_posix() != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise ProjectAutoGrindError(f"{label} must be a canonical project-relative path")
+    try:
+        canonical_relative_path(value)
+    except SecurePathError:
+        raise ProjectAutoGrindError(f"{label} must be a canonical project-relative path") from None
     return value
 
 
@@ -418,8 +417,8 @@ def project_grind_plan(item: ProjectGrindWorkItem) -> ProjectGrindPlan:
         target=item.target_id,
         translation_unit=item.translation_unit_id,
         symbol=item.symbol,
-        classes=_DEFAULT_CLASSES,
-        functions=_DEFAULT_FUNCTIONS,
+        classes=DEFAULT_GRIND_CLASSES,
+        functions=DEFAULT_GRIND_FUNCTIONS,
     )
 
 
@@ -464,8 +463,7 @@ def run_project_auto_grind(
     in a cold run.  It never claims that the complete project is exact.
     """
 
-    if accept_exact and accept_progress:
-        raise ProjectAutoGrindError("exact and progress acceptance are mutually exclusive")
+    require_single_acceptance(accept_exact, accept_progress, error=ProjectAutoGrindError)
 
     root = project_root.resolve(strict=True)
     campaign = enumerate_project_grind_campaign(

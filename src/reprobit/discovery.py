@@ -15,7 +15,7 @@ import shutil
 import stat
 from collections.abc import Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import cast
 
 from reprobit.cache import IncrementalCache, cache_key
@@ -40,6 +40,7 @@ from reprobit.process import CancellationToken
 from reprobit.progress import ProgressEmitter, ProgressObserver
 from reprobit.secure_path_contracts import (
     SecurePathError,
+    canonical_relative_path,
     canonical_system_path,
 )
 from reprobit.secure_paths import (
@@ -149,15 +150,10 @@ def _json_mapping(value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
 
 
 def _canonical_artifact_prefix(value: str) -> str:
-    if "\0" in value or "\\" in value:
-        raise DiscoveryError("artifact path prefix must be canonical POSIX relative text")
-    path = PurePosixPath(value)
-    if (
-        path.is_absolute()
-        or path.as_posix() != value
-        or any(part in {"", ".", ".."} for part in path.parts)
-    ):
-        raise DiscoveryError("artifact path prefix must be canonical POSIX relative text")
+    try:
+        canonical_relative_path(value)
+    except SecurePathError:
+        raise DiscoveryError("artifact path prefix must be canonical POSIX relative text") from None
     return value
 
 

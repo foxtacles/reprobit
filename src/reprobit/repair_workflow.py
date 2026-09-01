@@ -1,11 +1,18 @@
-"""Bounded classic authority repair for one private staged project."""
+"""Bounded classic authority repair for one private staged project.
+
+One repair attempt stages the sealed project, refreshes its source records,
+repairs saved build guidance through bounded warm analysis passes, proves
+every target from scratch, and publishes the verified result atomically.
+"""
 
 from __future__ import annotations
 
 import argparse
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
+from typing import Protocol
 
 from reprobit.classic.redundant_action_repair import (
     RedundantActionRepairError,
@@ -16,11 +23,27 @@ from reprobit.classic.repair_probe import (
     MAX_RETUNE_PROBE_CANDIDATES,
     ClassicDonorRetuneRefusal,
 )
-from reprobit.classic.repair_session import apply_classic_receipt_repairs
+from reprobit.classic.repair_session import (
+    ClassicReceiptRepair,
+    ClassicRepairRefusal,
+    ClassicRepairSession,
+    apply_classic_receipt_repairs,
+)
 from reprobit.classic_project import ClassicDispatchMaterials
+from reprobit.cli_build import command_build
 from reprobit.cli_output import CLIOutput
+from reprobit.cli_project import command_source_lock
 from reprobit.project_loader import load_project_tree
-from reprobit.repair_analysis import analyze_classic_repair
+from reprobit.repair import (
+    RepairCandidate,
+    RepairError,
+    RepairOutputSnapshot,
+    RepairSnapshot,
+    capture_repair_record_postimages,
+    collect_repair_candidate,
+    publish_repair_candidate,
+    stage_repair_project,
+)
 from reprobit.repair_donor_analysis import (
     apply_classic_donor_repairs,
     probe_classic_donor_repairs,
@@ -32,7 +55,16 @@ from reprobit.schema import (
     ProjectBundle,
     ProjectSpec,
 )
+from reprobit.source_regeneration import (
+    RegenerationPlan,
+    SourceRegenerationError,
+    apply_source_regeneration,
+    plan_source_regeneration,
+)
+from reprobit.staged_project import StagedProject
+from reprobit.state import KeepWorkspace
 from reprobit.strict_json import canonical_json
+from reprobit.transactions import TransactionResult
 
 MAX_REPAIR_ADJUSTMENT_ROUNDS = 24
 MAX_REPAIR_DONOR_CANDIDATES = MAX_RETUNE_PROBE_CANDIDATES
@@ -63,6 +95,51 @@ class RepairWorkflowResult:
     donor_retunes: int
     compiled_candidates: int
     passes: int
+
+
+class RepairAnalysisError(RuntimeError):
+    """A non-certifying analysis failed outside a recorded repair seat."""
+
+
+@dataclass(frozen=True, slots=True)
+class RepairAnalysisResult:
+    """Measured and structural fallout from one bounded incremental pass."""
+
+    completed: bool
+    measured_repairs: tuple[ClassicReceiptRepair, ...]
+    structural_refusals: tuple[ClassicRepairRefusal, ...]
+
+
+def analyze_classic_repair(
+    args: argparse.Namespace,
+    output: CLIOutput,
+    *,
+    cache_root: Path | None = None,
+    progress_description: str = "checking affected source files",
+) -> RepairAnalysisResult:
+    """Run one warm analysis and distinguish repair fallout from fatal failure."""
+
+    session = ClassicRepairSession()
+    values = vars(args).copy()
+    values.update(
+        cold=False,
+        keep_workspace=KeepWorkspace.NEVER.value,
+        _classic_measured_receipt_repair=session,
+        _classic_repair_analysis_only=True,
+        _incremental_cache_root=cache_root,
+        _incremental_progress_description=progress_description,
+    )
+    try:
+        status = command_build(argparse.Namespace(**values), output)
+    except Exception as exc:
+        raise RepairAnalysisError(f"repair analysis failed: {exc}") from exc
+    if status != 0:
+        raise RepairAnalysisError(f"repair analysis returned failure status {status}")
+    return RepairAnalysisResult(
+        not session.refusals,
+        session.repairs,
+        session.refusals,
+    )
 
 
 def _classic_receipts(bundle: ProjectBundle) -> tuple[ClassicProofReceipt, ...]:
@@ -318,10 +395,167 @@ def repair_classic_records(
         raise RepairWorkflowError("automatic repair could not find a safe adjustment: " + detail)
 
 
+class RepairRecords(Protocol):
+    def __call__(
+        self,
+        args: argparse.Namespace,
+        output: CLIOutput,
+        *,
+        staged_root: Path,
+        spec: ProjectSpec,
+        cache_root: Path,
+    ) -> RepairWorkflowResult: ...
+
+
+VerifyCommand = Callable[[argparse.Namespace, CLIOutput], int]
+
+
+@dataclass(frozen=True, slots=True)
+class RepairAttemptResult:
+    candidate: RepairCandidate
+    transaction: TransactionResult
+    regeneration: RegenerationPlan
+    workflow: RepairWorkflowResult
+    staged: StagedProject
+    cleanup_warning: str | None = None
+
+
+class RepairAttemptFailure(RuntimeError):
+    """Expected candidate failure with the phase and retained workspace attached."""
+
+    def __init__(self, error: Exception, *, phase: str, staged: StagedProject) -> None:
+        super().__init__(str(error))
+        self.error = error
+        self.phase = phase
+        self.staged = staged
+
+
+def _candidate_args(
+    args: argparse.Namespace, staged_root: Path, report_directory: str
+) -> argparse.Namespace:
+    values = vars(args).copy()
+    values.update(
+        project=str(staged_root),
+        report_dir=report_directory,
+        action_receipt=None,
+        action_nonce=None,
+        keep_workspace=KeepWorkspace.NEVER.value,
+    )
+    return argparse.Namespace(**values)
+
+
+def execute_repair_attempt(
+    args: argparse.Namespace,
+    output: CLIOutput,
+    *,
+    snapshot: RepairSnapshot,
+    selected_paths: tuple[str, ...],
+    cache_root: Path,
+    candidate_report_directory: str,
+    final_report_directory: str,
+    report_preimages: tuple[RepairOutputSnapshot, ...],
+    keep: KeepWorkspace,
+    verify_command: VerifyCommand,
+    repair_records: RepairRecords,
+) -> RepairAttemptResult:
+    """Run, prove, and publish one candidate or raise an expected typed failure."""
+
+    staged = stage_repair_project(snapshot, keep=keep)
+    phase = "preparing a private repair workspace"
+    published = False
+    result: RepairAttemptResult | None = None
+    try:
+        with staged as staged_root:
+            phase = "refreshing saved source records"
+            try:
+                regeneration = plan_source_regeneration(staged_root)
+                apply_source_regeneration(staged_root, regeneration)
+            except SourceRegenerationError as exc:
+                raise RepairError(f"mechanical source repair refused: {exc}") from exc
+
+            command_source_lock(
+                argparse.Namespace(
+                    project=str(staged_root),
+                    path=list(selected_paths),
+                    invalidate_producer_graph=False,
+                ),
+                output,
+            )
+
+            phase = "repairing saved build guidance"
+            candidate_args = _candidate_args(args, staged_root, candidate_report_directory)
+            workflow = repair_records(
+                candidate_args,
+                output,
+                staged_root=staged_root,
+                spec=snapshot.spec,
+                cache_root=cache_root,
+            )
+            authorized_records = {
+                snapshot.spec.layout.source_manifest,
+                snapshot.spec.layout.build_plan,
+                snapshot.spec.layout.producer_graph,
+                *regeneration.changed_documents,
+                *workflow.changed_records,
+            }
+            record_postimages = capture_repair_record_postimages(
+                snapshot,
+                staged_root,
+                authorized_records,
+            )
+
+            phase = "proving every target from scratch"
+            status = verify_command(candidate_args, output)
+            if status != 0:
+                raise RepairError(
+                    "candidate output did not satisfy exact verification and the committed "
+                    "authenticity policy"
+                )
+
+            phase = "collecting the verified repair result"
+            candidate = collect_repair_candidate(
+                snapshot,
+                staged_root,
+                report_directory=candidate_report_directory,
+                record_postimages=record_postimages,
+            )
+            phase = "publishing the verified repair result"
+            transaction = publish_repair_candidate(
+                snapshot,
+                candidate,
+                report_directory=final_report_directory,
+                report_preimages=report_preimages,
+            )
+            published = True
+            result = RepairAttemptResult(
+                candidate,
+                transaction,
+                regeneration,
+                workflow,
+                staged,
+            )
+    except KeyboardInterrupt:
+        raise
+    except Exception as error:
+        if published and result is not None:
+            return replace(result, cleanup_warning=str(error))
+        raise RepairAttemptFailure(error, phase=phase, staged=staged) from error
+    assert result is not None
+    return result
+
+
 __all__ = [
     "MAX_REPAIR_ADJUSTMENT_ROUNDS",
     "MAX_REPAIR_DONOR_CANDIDATES",
+    "RepairAnalysisError",
+    "RepairAnalysisResult",
+    "RepairAttemptFailure",
+    "RepairAttemptResult",
+    "RepairRecords",
     "RepairWorkflowError",
     "RepairWorkflowResult",
+    "VerifyCommand",
+    "analyze_classic_repair",
+    "execute_repair_attempt",
     "repair_classic_records",
 ]

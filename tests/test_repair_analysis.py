@@ -7,7 +7,7 @@ import pytest
 
 from reprobit.classic_project import ClassicProjectError
 from reprobit.cli_output import CLIOutput
-from reprobit.repair_analysis import RepairAnalysisError, analyze_classic_repair
+from reprobit.repair_workflow import RepairAnalysisError, analyze_classic_repair
 
 
 def _args() -> argparse.Namespace:
@@ -30,7 +30,7 @@ def test_analysis_uses_private_warm_execution(
         observed.append(args)
         return 0
 
-    monkeypatch.setattr("reprobit.repair_analysis.command_build", build)
+    monkeypatch.setattr("reprobit.repair_workflow.command_build", build)
 
     cache_root = tmp_path / "shared-state"
     result = analyze_classic_repair(_args(), _output(), cache_root=cache_root)
@@ -50,7 +50,7 @@ def test_analysis_never_misclassifies_an_unrelated_runtime_failure(
     def build(_args: argparse.Namespace, _output: CLIOutput) -> int:
         raise ClassicProjectError("compiler environment failed")
 
-    monkeypatch.setattr("reprobit.repair_analysis.command_build", build)
+    monkeypatch.setattr("reprobit.repair_workflow.command_build", build)
 
     with pytest.raises(RepairAnalysisError, match="compiler environment failed"):
         analyze_classic_repair(_args(), _output())

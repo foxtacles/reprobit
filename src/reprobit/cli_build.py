@@ -211,7 +211,7 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                     incremental_summary = None
                 else:
                     assert developer_authority is not None
-                    from reprobit.classic_incremental import (
+                    from reprobit.classic_incremental_execution import (
                         execute_classic_incremental_build,
                     )
 

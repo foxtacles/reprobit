@@ -15,6 +15,7 @@ from reprobit.report_html_components import (
     escape,
     format_integer,
     join_markup,
+    page_shell,
     render_content,
     short_digest,
 )
@@ -27,7 +28,6 @@ from reprobit.report_html_format import (
     human_label,
     readable_function,
 )
-from reprobit.report_html_style import REPORT_CSS, REPORT_SCRIPT, REPROBIT_MARK_SVG
 
 
 def _status_copy(report: Report) -> tuple[str, str, str]:
@@ -540,42 +540,26 @@ def render_report_html(
 ) -> str:
     """Render a deterministic, dependency-free report with layered evidence detail."""
 
-    title = f"{report.project_id} — ReproBit report"
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="color-scheme" content="light">
-<title>{escape(title)}</title>
-<style>{REPORT_CSS}</style>
-</head>
-<body>
-<a class="skip-link" href="#overview">Skip to report</a>
-<header class="topbar"><div class="topbar-inner">
-  <div class="brand">{REPROBIT_MARK_SVG}<span class="brand-label">
-    ReproBit · <code>{escape(report.project_id)}</code>
-  </span></div>
-  <div class="run-label">Run <code>{escape(short_digest(report.run_id.value))}</code></div>
-</div></header>
-{_render_navigation(report)}
-<main>
-{_render_overview(report)}
-{_render_target_cards(report)}
-{_render_debug_companions(report)}
-{_render_costs(report)}
-{_render_timings(report)}
-{_render_next_steps(report)}
-{render_advanced(report, canonical_json_href=canonical_json_href)}
-</main>
-<footer class="footer"><div class="footer-inner">
-  ReproBit report schema <code>v{report.schema_version}</code> · deterministic local HTML ·
-  no external assets
-</div></footer>
-<script>{REPORT_SCRIPT}</script>
-</body>
-</html>
-"""
+    sections = (
+        _render_overview(report),
+        _render_target_cards(report),
+        _render_debug_companions(report),
+        _render_costs(report),
+        _render_timings(report),
+        _render_next_steps(report),
+        render_advanced(report, canonical_json_href=canonical_json_href),
+    )
+    return page_shell(
+        title=f"{report.project_id} — ReproBit report",
+        brand=f"ReproBit · <code>{escape(report.project_id)}</code>",
+        run_label=f"Run <code>{escape(short_digest(report.run_id.value))}</code>",
+        nav=_render_navigation(report),
+        main="\n".join(sections),
+        footer=(
+            f"ReproBit report schema <code>v{report.schema_version}</code> · "
+            "deterministic local HTML ·\n  no external assets"
+        ),
+    )
 
 
 __all__ = ["render_report_html"]

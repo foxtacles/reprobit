@@ -12,7 +12,6 @@ from reprobit.discovery_authoring import DeclarationShapeEqualBodyAuthoring
 from reprobit.discovery_grind import ColdTrialEvidence
 from reprobit.discovery_project import (
     ProjectDirectorySnapshot,
-    ProjectFileSnapshot,
     ProjectGrindContext,
 )
 from reprobit.execution import classic_semantic_obligation_name
@@ -23,6 +22,7 @@ from reprobit.schema import (
     InterventionDocument,
     ProofDocument,
 )
+from reprobit.staged_project import ProjectFileSnapshot
 from reprobit.strict_json import canonical_json
 from reprobit.transactions import TransactionConflict
 

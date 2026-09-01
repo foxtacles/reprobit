@@ -24,9 +24,8 @@ from itertools import pairwise
 
 from reprobit.binary import require
 from reprobit.msvc42_pdb import Msvc42PdbIdentity
+from reprobit.pe32 import IMAGE_FILE_MACHINE_I386, parse_pe32_headers
 
-_IMAGE_FILE_MACHINE_I386 = 0x014C
-_IMAGE_NT_OPTIONAL_HDR32_MAGIC = 0x010B
 _IMAGE_DEBUG_TYPE_CODEVIEW = 2
 _IMAGE_DEBUG_TYPE_FPO = 3
 _IMAGE_DEBUG_TYPE_MISC = 4
@@ -103,17 +102,6 @@ class CanonicalizedMsvc42DebugCompanion:
 
 
 @dataclass(frozen=True, slots=True)
-class _Section:
-    virtual_address: int
-    raw_offset: int
-    raw_size: int
-
-    @property
-    def raw_end(self) -> int:
-        return self.raw_offset + self.raw_size
-
-
-@dataclass(frozen=True, slots=True)
 class _ParsedDebugCompanion:
     identity: Msvc42DebugCompanionIdentity
     timestamp_fields: tuple[tuple[DebugCompanionCanonicalizationCategory, int], ...]
@@ -145,66 +133,34 @@ class _Pe32DebugMap:
     """Validated PE32 geometry and the narrow VC 4.2 debug overlay."""
 
     def __init__(self, data: bytes, expected_pdb_path: str) -> None:
-        require(len(data) >= 64 and data[:2] == b"MZ", "missing DOS MZ header")
-        pe = struct.unpack_from("<I", data, 0x3C)[0]
-        require(64 <= pe <= len(data) - 24, "PE header extends past EOF")
-        require(data[pe : pe + 4] == b"PE\0\0", "missing PE signature")
-
-        machine, section_count = struct.unpack_from("<HH", data, pe + 4)
-        optional_size = struct.unpack_from("<H", data, pe + 20)[0]
-        require(machine == _IMAGE_FILE_MACHINE_I386, "debug companion is not i386")
-        require(0 < section_count <= 96, "PE section count is invalid")
-        optional = pe + 24
+        headers = parse_pe32_headers(data, minimum_optional_size=152, require_i386=False)
+        require(headers.machine == IMAGE_FILE_MACHINE_I386, "debug companion is not i386")
+        require(headers.checksum == 0, "MSVC 4.2 debug companion checksum is not zero")
+        size_of_headers = headers.size_of_headers
         require(
-            optional_size >= 152 and optional <= len(data) - optional_size,
-            "PE32 optional header lacks the debug data directory",
-        )
-        require(
-            struct.unpack_from("<H", data, optional)[0] == _IMAGE_NT_OPTIONAL_HDR32_MAGIC,
-            "debug companion is not PE32",
-        )
-        checksum = struct.unpack_from("<I", data, optional + 64)[0]
-        size_of_headers = struct.unpack_from("<I", data, optional + 60)[0]
-        directory_count = struct.unpack_from("<I", data, optional + 92)[0]
-        require(checksum == 0, "MSVC 4.2 debug companion checksum is not zero")
-        require(
-            directory_count > _DEBUG_DIRECTORY_INDEX,
+            headers.directory_count > _DEBUG_DIRECTORY_INDEX,
             "debug companion lacks the PE debug data directory",
         )
 
-        table = optional + optional_size
-        table_end = table + section_count * 40
+        table_end = headers.section_table_offset + headers.section_count * 40
         require(
             table_end <= size_of_headers <= len(data),
             "PE section table is outside SizeOfHeaders",
         )
-
-        sections: list[_Section] = []
-        for index in range(section_count):
-            header = table + index * 40
-            name = data[header : header + 8].rstrip(b"\0")
-            _virtual_size, virtual_address, raw_size, raw_offset = struct.unpack_from(
-                "<IIII", data, header + 8
-            )
+        for section in headers.sections:
+            name = section.raw_name.rstrip(b"\0")
             require(
-                raw_size == 0
-                or (raw_offset >= size_of_headers and raw_offset <= len(data) - raw_size),
+                section.raw_size == 0 or section.raw_offset >= size_of_headers,
                 f"PE section {name!r} raw data is invalid",
             )
-            sections.append(_Section(virtual_address, raw_offset, raw_size))
+        sections = headers.sections
+        self._headers = headers
+        self.sections = sections
+        coff_timestamp_offset = headers.coff_timestamp_offset
 
-        raw_ranges = sorted(
-            (section.raw_offset, section.raw_end) for section in sections if section.raw_size
+        debug_rva, debug_size = headers.data_directory(
+            _DEBUG_DIRECTORY_INDEX, "the PE debug data directory"
         )
-        require(
-            all(left[1] <= right[0] for left, right in pairwise(raw_ranges)),
-            "PE sections overlap in the file",
-        )
-        self.sections = tuple(sections)
-        coff_timestamp_offset = pe + 8
-
-        directory_at = optional + 96 + _DEBUG_DIRECTORY_INDEX * 8
-        debug_rva, debug_size = struct.unpack_from("<II", data, directory_at)
         require(
             debug_rva != 0
             and debug_size >= _DEBUG_DIRECTORY.size
@@ -346,13 +302,7 @@ class _Pe32DebugMap:
     def rva_to_offset(self, rva: int, size: int, context: str) -> int:
         require(size > 0, f"{context} is empty")
         require(0 < rva <= 0xFFFFFFFF - size, f"{context} RVA range overflows")
-        matches = []
-        for section in self.sections:
-            delta = rva - section.virtual_address
-            if delta >= 0 and delta <= section.raw_size - size:
-                matches.append(section.raw_offset + delta)
-        require(len(matches) == 1, f"{context} does not map uniquely to raw section data")
-        return matches[0]
+        return self._headers.rva_to_offset(rva, size, context=context)
 
     @staticmethod
     def _validate_misc(payload: bytes) -> None:

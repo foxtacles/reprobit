@@ -5,11 +5,11 @@ from __future__ import annotations
 import hashlib
 import os
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any
+from typing import Any, TypeVar
 
 from reprobit.model import Digest
 from reprobit.secure_path_contracts import (
@@ -677,7 +677,27 @@ class _HeldWindowsRoot:
                 self.api.close(received)
 
 
-def read_relative_file(root: Path, relative: str) -> tuple[bytes, SecureFileSnapshot]:
+_T = TypeVar("_T")
+
+
+def _inspect_leaf(
+    root: Path,
+    relative: str,
+    *,
+    consume: Callable[[_WindowsHandles, Any], tuple[_T, int]],
+    verb: str,
+    noun: str,
+) -> tuple[Path, tuple[int, int, int, int, int], tuple[Any, ...], _T]:
+    """Open one leaf, consume it, and prove it never changed before settling.
+
+    ``consume`` receives the native API and the open handle and returns its
+    result with the byte count it observed.  The handle's basic and strong
+    identities are compared around the consumption, a deny-write metadata
+    handle then re-identifies the entry, and the settled identity is captured
+    only after the I/O handle closes (Windows may finalize access/change
+    metadata on that close; the deny-write lease keeps external mutation out).
+    """
+
     canonical = canonical_relative_path(relative)
     with _HeldWindowsRoot(root) as held:
         handles, edges, name = held.parent_chain(canonical, create=False)
@@ -689,11 +709,16 @@ def read_relative_file(root: Path, relative: str) -> tuple[bytes, SecureFileSnap
                 raise SecurePathError(f"native source input is absent: {relative!r}")
             before = held.api.identity(file_handle)
             before_strong = held.api.strong_identity(file_handle)
-            payload = held.api.read(file_handle)
+            result, size = consume(held.api, file_handle)
             after = held.api.identity(file_handle)
             after_strong = held.api.strong_identity(file_handle)
-            if before != after or before_strong != after_strong or len(payload) != after[2]:
-                raise SecurePathError(f"native source input changed while read: {relative!r}")
+            if (
+                before != after
+                or before_strong != after_strong
+                or size != after[2]
+                or size != after_strong[5]
+            ):
+                raise SecurePathError(f"native source input changed while {verb}: {relative!r}")
             terminal = held.api.open_relative(
                 handles[-1],
                 name,
@@ -708,10 +733,6 @@ def read_relative_file(root: Path, relative: str) -> tuple[bytes, SecureFileSnap
                 or held.api.strong_identity(terminal) != after_strong
             ):
                 raise SecurePathError(f"native source input changed identity: {relative!r}")
-
-            # Windows may finalize access/change metadata only when the handle
-            # that performed the read closes.  Transfer the deny-write lease to
-            # a metadata-only handle first, then capture the settled snapshot.
             held.api.close(file_handle)
             file_handle = None
             settled = held.api.identity(terminal)
@@ -720,21 +741,10 @@ def read_relative_file(root: Path, relative: str) -> tuple[bytes, SecureFileSnap
                 after_strong, settled_strong
             ):
                 raise SecurePathError(
-                    f"native source input changed while finalizing read: {relative!r}"
+                    f"native source input changed while finalizing {noun}: {relative!r}"
                 )
             held.recheck(edges)
-            return payload, SecureFileSnapshot(
-                held.path.joinpath(*canonical.parts),
-                Digest.from_bytes(payload),
-                len(payload),
-                settled[0],
-                settled[1],
-                settled[3],
-                0,
-                settled_strong[4],
-                settled_strong[1],
-                settled_strong[8],
-            )
+            return held.path.joinpath(*canonical.parts), settled, settled_strong, result
         finally:
             if terminal is not None:
                 held.api.close(terminal)
@@ -742,6 +752,39 @@ def read_relative_file(root: Path, relative: str) -> tuple[bytes, SecureFileSnap
                 held.api.close(file_handle)
             for handle in reversed(handles[1:]):
                 held.api.close(handle)
+
+
+def _read_whole(api: _WindowsHandles, handle: Any) -> tuple[bytes, int]:
+    payload = api.read(handle)
+    return payload, len(payload)
+
+
+def _hash_whole(api: _WindowsHandles, handle: Any) -> tuple[Digest, int]:
+    hasher = hashlib.sha256()
+    size = 0
+    reader = _WindowsHandleReader(api, handle)
+    while block := reader.read(STREAM_COPY_CHUNK):
+        hasher.update(block)
+        size += len(block)
+    return Digest(value=hasher.hexdigest()), size
+
+
+def read_relative_file(root: Path, relative: str) -> tuple[bytes, SecureFileSnapshot]:
+    path, settled, settled_strong, payload = _inspect_leaf(
+        root, relative, consume=_read_whole, verb="read", noun="read"
+    )
+    return payload, SecureFileSnapshot(
+        path,
+        Digest.from_bytes(payload),
+        len(payload),
+        settled[0],
+        settled[1],
+        settled[3],
+        0,
+        settled_strong[4],
+        settled_strong[1],
+        settled_strong[8],
+    )
 
 
 def atomic_publish_relative(
@@ -1089,75 +1132,21 @@ def stat_relative_file(root: Path, relative: str) -> SecureFileIdentity:
 def digest_relative_file(root: Path, relative: str) -> SecureFileSnapshot:
     """Hash one regular file through a held ancestor chain with bounded memory."""
 
-    canonical = canonical_relative_path(relative)
-    with _HeldWindowsRoot(root) as held:
-        handles, edges, name = held.parent_chain(canonical, create=False)
-        handle: Any = None
-        terminal: Any = None
-        try:
-            handle = held.api.open_relative(handles[-1], name, directory=False)
-            if handle is None:
-                raise SecurePathError(f"native source input is absent: {relative!r}")
-            before_strong = held.api.strong_identity(handle)
-            hasher = hashlib.sha256()
-            size = 0
-            reader = _WindowsHandleReader(held.api, handle)
-            while block := reader.read(STREAM_COPY_CHUNK):
-                hasher.update(block)
-                size += len(block)
-            after_strong = held.api.strong_identity(handle)
-            if before_strong != after_strong or size != after_strong[5]:
-                raise SecurePathError(f"native source input changed while hashed: {relative!r}")
-            basic = held.api.identity(handle)
-            terminal = held.api.open_relative(
-                handles[-1],
-                name,
-                directory=False,
-                deny_other_writes=True,
-                read_data=False,
-            )
-            if terminal is None:
-                raise SecurePathError(f"native source input disappeared: {relative!r}")
-            if (
-                held.api.identity(terminal) != basic
-                or held.api.strong_identity(terminal) != after_strong
-            ):
-                raise SecurePathError(f"native source input changed identity: {relative!r}")
-
-            # Query the final timestamp state only after closing the handle
-            # that performed I/O.  The metadata-only handle continuously
-            # denies writes, so accepting Windows' own change-time advance
-            # does not admit an external mutation.
-            held.api.close(handle)
-            handle = None
-            settled = held.api.identity(terminal)
-            settled_strong = held.api.strong_identity(terminal)
-            if settled != basic or not _same_windows_identity_except_change_time(
-                after_strong, settled_strong
-            ):
-                raise SecurePathError(
-                    f"native source input changed while finalizing hash: {relative!r}"
-                )
-            held.recheck(edges)
-            return SecureFileSnapshot(
-                held.path.joinpath(*canonical.parts),
-                Digest(value=hasher.hexdigest()),
-                size,
-                settled[0],
-                settled[1],
-                settled[3],
-                0,
-                settled_strong[4],
-                settled_strong[1],
-                settled_strong[8],
-            )
-        finally:
-            if terminal is not None:
-                held.api.close(terminal)
-            if handle is not None:
-                held.api.close(handle)
-            for current in reversed(handles[1:]):
-                held.api.close(current)
+    path, settled, settled_strong, digest = _inspect_leaf(
+        root, relative, consume=_hash_whole, verb="hashed", noun="hash"
+    )
+    return SecureFileSnapshot(
+        path,
+        digest,
+        settled[2],
+        settled[0],
+        settled[1],
+        settled[3],
+        0,
+        settled_strong[4],
+        settled_strong[1],
+        settled_strong[8],
+    )
 
 
 def atomic_copy_new_relative(

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-import struct
 from collections.abc import Mapping
-from dataclasses import dataclass
-from itertools import pairwise
 from typing import TypedDict
 
 from reprobit.binary import require
+from reprobit.pe32 import Pe32Headers, parse_pe32_headers
 
 from .foundation import (
     exact_audit_keys,
@@ -17,17 +15,6 @@ from .foundation import (
     require_sha,
     sha256_bytes,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _Section:
-    virtual_address: int
-    raw_size: int
-    raw_offset: int
-
-    @property
-    def raw_end(self) -> int:
-        return self.raw_offset + self.raw_size
 
 
 class _ThunkPlan(TypedDict):
@@ -42,53 +29,12 @@ class _PE32AddressMap:
     """The small, fail-closed PE surface needed by the thunk transform."""
 
     def __init__(self, data: bytes) -> None:
-        require(len(data) >= 64 and data[:2] == b"MZ", "missing DOS MZ header")
-        pe = struct.unpack_from("<I", data, 0x3C)[0]
-        require(
-            64 <= pe <= len(data) - 24 and data[pe : pe + 4] == b"PE\0\0", "missing PE signature"
-        )
-        machine, count = struct.unpack_from("<HH", data, pe + 4)
-        optional_size = struct.unpack_from("<H", data, pe + 20)[0]
-        require(machine == 0x14C, "only i386 PE images are supported")
-        require(0 < count <= 96, "invalid PE section count")
-        optional = pe + 24
-        require(
-            optional_size >= 32 and optional + optional_size <= len(data),
-            "invalid PE32 optional header",
-        )
-        require(
-            struct.unpack_from("<H", data, optional)[0] == 0x10B, "only PE32 images are supported"
-        )
-        self.image_base: int = int(struct.unpack_from("<I", data, optional + 28)[0])
-        table = optional + optional_size
-        require(table + count * 40 <= len(data), "section table extends past EOF")
-        sections: list[_Section] = []
-        for index in range(count):
-            header = table + index * 40
-            virtual_address, raw_size, raw_offset = struct.unpack_from("<III", data, header + 12)
-            require(
-                raw_size == 0 or raw_offset <= len(data) - raw_size,
-                "section raw data extends past EOF",
-            )
-            sections.append(_Section(virtual_address, raw_size, raw_offset))
-        occupied = sorted(
-            (section.raw_offset, section.raw_end) for section in sections if section.raw_size
-        )
-        require(
-            all(left[1] <= right[0] for left, right in pairwise(occupied)),
-            "PE sections overlap in the file",
-        )
-        self.sections: tuple[_Section, ...] = tuple(sections)
+        self._headers: Pe32Headers = parse_pe32_headers(data)
+        self.image_base: int = self._headers.image_base
+        self.sections = self._headers.sections
 
     def offset_to_va(self, offset: int, size: int = 1) -> int:
-        matches = [
-            section
-            for section in self.sections
-            if section.raw_offset <= offset and offset + size <= section.raw_end
-        ]
-        require(len(matches) == 1, "file range does not map uniquely to a PE section")
-        section = matches[0]
-        return self.image_base + section.virtual_address + offset - section.raw_offset
+        return self.image_base + self._headers.offset_to_rva(offset, size)
 
 
 def _validated_thunk_plan(value: object, body_length: int) -> _ThunkPlan:

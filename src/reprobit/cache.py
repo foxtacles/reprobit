@@ -8,7 +8,6 @@ validated before use and restored by copying into the fresh run workspace.
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import stat
@@ -21,6 +20,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Self
 
+from reprobit.atomic_io import fsync_directory
 from reprobit.model import Digest
 from reprobit.secure_path_contracts import (
     SecureFileSnapshot,
@@ -35,6 +35,7 @@ from reprobit.secure_paths import (
     promote_relative_new,
     read_relative_file,
     remove_regular_relative,
+    split_absolute,
     stat_relative_file,
 )
 from reprobit.state_lock import AdvisoryFileLock, StateError
@@ -171,7 +172,7 @@ def cache_key(
             "material": material,
         }
     )
-    return hashlib.sha256(payload).hexdigest()
+    return Digest.from_bytes(payload).value
 
 
 def _require_directory(path: Path, *, create: bool, label: str) -> Path:
@@ -185,23 +186,13 @@ def _require_directory(path: Path, *, create: bool, label: str) -> Path:
     return path.resolve(strict=create)
 
 
-def _fsync_directory(path: Path) -> None:
-    if os.name == "nt":
-        return
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _secure_location(path: Path) -> tuple[Path, str]:
     """Anchor one absolute path at its filesystem root for held traversal."""
 
-    absolute = canonical_system_path(path)
-    if not absolute.anchor or len(absolute.parts) < 2:
-        raise CacheError(f"cache path has no secure relative location: {path}")
-    return Path(absolute.anchor), PurePosixPath(*absolute.parts[1:]).as_posix()
+    try:
+        return split_absolute(path)
+    except SecurePathError:
+        raise CacheError(f"cache path has no secure relative location: {path}") from None
 
 
 def _secure_read(path: Path, *, maximum: int | None = None) -> bytes:
@@ -664,7 +655,7 @@ class IncrementalCache:
                 if not dry_run and not _secure_remove(lock_path):
                     raise CachePoisonError(f"cache index lock disappeared during GC: {lock_path}")
             if not dry_run:
-                _fsync_directory(self.format_root)
+                fsync_directory(self.format_root)
             return CacheGCResult(
                 removed_records,
                 removed_blobs,

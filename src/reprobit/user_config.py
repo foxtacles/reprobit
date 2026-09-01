@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import os
 import sys
-import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from reprobit.atomic_io import write_json_atomic
 from reprobit.strict_json import StrictJSONError, strict_loads
 from reprobit.toolchains import ToolchainProfile
 from reprobit.toolchains import profile as load_profile
@@ -151,38 +150,9 @@ def resolve_toolchain_root(
     return candidate
 
 
-def _fsync_directory(path: Path) -> None:
-    if os.name == "nt":
-        return
-    descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-    try:
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-
-
 def _write_roots(path: Path, roots: Mapping[str, str]) -> None:
-    payload = (
-        json.dumps(
-            {"schema": _SCHEMA, "toolchain_roots": dict(roots)},
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
-        + "\n"
-    ).encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    temporary = Path(temporary_name)
-    try:
-        with os.fdopen(descriptor, "wb") as stream:
-            stream.write(payload)
-            stream.flush()
-            os.fsync(stream.fileno())
-        os.replace(temporary, path)
-        _fsync_directory(path.parent)
-    finally:
-        temporary.unlink(missing_ok=True)
+    write_json_atomic(path, {"schema": _SCHEMA, "toolchain_roots": dict(roots)})
 
 
 def save_toolchain_root(

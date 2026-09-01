@@ -923,7 +923,7 @@ def _require_complete(context: _ClassicRegenerationContext) -> None:
             )
 
 
-def _derive_classic_source_regeneration(
+def derive_classic_source_regeneration(
     *,
     documents: dict[str, Any],
     plan_relative: str,
@@ -947,4 +947,4 @@ def _derive_classic_source_regeneration(
     )
 
 
-__all__: list[str] = []
+__all__ = ["derive_classic_source_regeneration"]
