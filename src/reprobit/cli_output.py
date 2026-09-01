@@ -165,10 +165,20 @@ def _jsonable(value: Any) -> Any:
 
 @dataclass(slots=True)
 class CLIOutput:
+    """Route every command's output through one text or ndjson funnel.
+
+    ``quiet`` silences the text-mode progress channel: phase starts,
+    heartbeats, completion lines, unit counts, and the interactive progress
+    display. Results (``emit``), diagnostics, and the context line written
+    when a phase fails are unaffected, and ndjson mode ignores it entirely
+    because machine readers rely on receiving every event.
+    """
+
     output_format: str
     stdout: TextIO
     stderr: TextIO
     heartbeat_seconds: float = 5.0
+    quiet: bool = False
     _progress: ProgressEmitter = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
@@ -180,6 +190,12 @@ class CLIOutput:
     @property
     def _interactive(self) -> bool:
         return bool(getattr(self.stderr, "isatty", lambda: False)())
+
+    @property
+    def _renders_live(self) -> bool:
+        """Whether text mode owns the terminal for a transient progress display."""
+
+        return self._interactive and not self.quiet
 
     def _observe_progress(self, progress_event: ProgressEvent) -> None:
         if self.output_format == "ndjson":
@@ -206,11 +222,13 @@ class CLIOutput:
             )
             self.stdout.flush()
             return
-        if self._interactive or progress_event.kind in {
+        if self._renders_live or progress_event.kind in {
             ProgressKind.UNIT_FINISHED,
             ProgressKind.CACHE_HIT,
             ProgressKind.CACHE_MISS,
         }:
+            return
+        if self.quiet and progress_event.kind is not ProgressKind.PHASE_FAILED:
             return
         context: list[str] = []
         if progress_event.completed is not None and progress_event.total is not None:
@@ -326,7 +344,7 @@ class CLIOutput:
         phase: str = "work",
     ) -> Iterator[Callable[[str], None]]:
         with self._progress.phase(phase, description) as phase_scope:
-            if self.output_format != "text" or not self._interactive:
+            if self.output_format != "text" or not self._renders_live:
 
                 def update(message: str) -> None:
                     phase_scope.activity(
@@ -415,7 +433,7 @@ class CLIOutput:
 
                 yield emit_ndjson
                 return
-            if self._interactive:
+            if self._renders_live:
                 console = Console(file=self.stderr)
                 started = time.monotonic()
                 cache_hits = 0
@@ -576,6 +594,8 @@ class CLIOutput:
                         phase=phase,
                         node_id=node_id,
                     )
+                if self.quiet:
+                    return
                 decile = 10 if completed == total else (completed * 10) // max(total, 1)
                 if completed != 1 and decile <= last_decile:
                     return

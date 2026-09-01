@@ -5,6 +5,13 @@ verification separate. Commands write plain text by default, and long work uses
 one live progress line in an interactive terminal. Pass `--format ndjson`
 (before or after the subcommand) when CI or another program needs stable
 machine-readable events; see [Machine-readable output](#machine-readable-output).
+Pass `--quiet` (before or after the subcommand) to silence text-mode progress:
+phase starts, heartbeats, completion lines, unit counts, and the interactive
+progress display. Results, warnings, errors, and the context line written when
+a phase fails still print. `--quiet` does not change ndjson output, because
+machine readers rely on receiving every event. Output is plain by design: no
+colour, no shell completion, and no terminal control beyond the transient
+progress line, so a log reads the same everywhere it is captured.
 
 This page has one section per command, in the order `rbit --help` lists them.
 The option tables are generated from the parser into
@@ -35,7 +42,10 @@ Redirected logs and CI receive phase starts, heartbeats, completed units, and a
 final event, so a compiler or verifier never goes silently idle. Producer work
 and overall workflow progress use separate event types. Discovery compiler
 totals include declaration experiments only for the source files selected by
-the committed overlay graph.
+the committed overlay graph. In text mode, `--quiet` drops this whole channel
+(a heartbeat exists to prove liveness, which is exactly what `--quiet` opts out
+of) and keeps only the failure context line; in ndjson mode the events are
+always streamed.
 
 </details>
 

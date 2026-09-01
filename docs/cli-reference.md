@@ -10,6 +10,7 @@ in parser order. [docs/cli.md](cli.md) explains the workflow around them.
 |---|---|---|
 | `--version` | | show the program version and exit |
 | `--format` `{text,ndjson}` | `text` | human-readable text or stable machine events; accepted before or after the sub-command |
+| `--quiet` | | silence text-mode progress (phase starts, heartbeats, unit counts); results, warnings and errors still print; ndjson output is unchanged; accepted before or after the sub-command |
 
 Every command also accepts `-h`/`--help`. The exit-status contract is in
 [docs/cli.md](cli.md#exit-status).

@@ -344,12 +344,18 @@ def _subcommand(
     if description is None:
         description = help[0].upper() + help[1:] + "."
     command = commands.add_parser(name, help=help, description=description)
-    # Accept ``--format`` after the sub-command as well as before it. The
-    # default is suppressed so a root-level ``--format ndjson`` survives the
-    # sub-parser's namespace merge; the root option documents the choice.
+    # Accept ``--format`` and ``--quiet`` after the sub-command as well as
+    # before it. The defaults are suppressed so a root-level value survives
+    # the sub-parser's namespace merge; the root options document the choice.
     command.add_argument(
         "--format",
         choices=("text", "ndjson"),
+        default=argparse.SUPPRESS,
+        help=argparse.SUPPRESS,
+    )
+    command.add_argument(
+        "--quiet",
+        action="store_true",
         default=argparse.SUPPRESS,
         help=argparse.SUPPRESS,
     )
@@ -364,7 +370,7 @@ exit status:
   2    any error, including usage errors and unreadable project files
   130  interrupted with Ctrl-C; child processes were asked to drain
 
---format may also follow the sub-command (rbit status --format ndjson).
+--format and --quiet may also follow the sub-command (rbit status --format ndjson).
 Terms used in this help are defined in docs/glossary.md.
 """
 
@@ -382,6 +388,14 @@ def _parser() -> argparse.ArgumentParser:
         choices=("text", "ndjson"),
         default="text",
         help="human-readable text or stable machine events (default: text)",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help=(
+            "silence text-mode progress (phase starts, heartbeats, unit counts); "
+            "results, warnings and errors still print; ndjson output is unchanged"
+        ),
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
@@ -1100,7 +1114,7 @@ def _silence_broken_pipe(stream: TextIO) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    output = CLIOutput(args.format, sys.stdout, sys.stderr)
+    output = CLIOutput(args.format, sys.stdout, sys.stderr, quiet=args.quiet)
     handler: Handler = args.handler
     if hasattr(args, "jobs") and args.jobs is None:
         args.jobs = default_jobs()

@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from io import StringIO
@@ -4722,6 +4723,143 @@ def test_status_honours_format_after_the_subcommand(tmp_path: Path, capsys: Any)
     assert main(["status", "--format", "ndjson", str(tmp_path)]) == 1
     event = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
     assert event["event"] == "project_readiness"
+
+
+def test_quiet_is_accepted_before_or_after_the_subcommand() -> None:
+    parser = _parser()
+    assert parser.parse_args(["status"]).quiet is False
+    assert parser.parse_args(["--quiet", "status"]).quiet is True
+    assert parser.parse_args(["status", "--quiet"]).quiet is True
+    assert parser.parse_args(["source", "lock", "--quiet", "."]).quiet is True
+    assert parser.parse_args(["--quiet", "status", "--quiet"]).quiet is True
+    assert parser.parse_args(["status", "--quiet", "--format", "ndjson"]).format == "ndjson"
+
+
+def test_quiet_silences_redirected_text_progress_but_keeps_results_and_failures() -> None:
+    # Without --quiet a redirected build reports the phase, at least one
+    # heartbeat, every decile, and the completion line.
+    loud = StringIO()
+    with CLIOutput("text", StringIO(), loud, heartbeat_seconds=0.01).producer_activity(
+        "build"
+    ) as progress:
+        progress(1, 100, "compile", "unit.one", ProgressKind.CACHE_MISS)
+        time.sleep(0.08)
+        progress(100, 100, "terminal", "publish.program", ProgressKind.CACHE_HIT)
+    loud_lines = loud.getvalue().splitlines()
+    assert loud_lines[0] == "build..."
+    assert any("s elapsed)" in line and line.startswith("build... (") for line in loud_lines)
+    assert loud_lines[-1].startswith("build: complete")
+
+    # With --quiet the same run writes nothing to the progress channel while
+    # results and diagnostics still flow through emit().
+    quiet = StringIO()
+    results = StringIO()
+    output = CLIOutput("text", results, quiet, heartbeat_seconds=0.01, quiet=True)
+    with output.producer_activity("build") as progress:
+        progress(1, 100, "compile", "unit.one", ProgressKind.CACHE_MISS)
+        time.sleep(0.08)
+        progress(50, 100, "compile", "unit.fifty")
+        progress(100, 100, "terminal", "publish.program", ProgressKind.CACHE_HIT)
+    with output.activity("checking the project files", phase="validate") as update:
+        update("reading records")
+    output.emit("warning", "warning: still visible", diagnostic=True)
+    output.emit("build_complete", "Build complete: 1 output")
+    assert quiet.getvalue() == "warning: still visible\n"
+    assert results.getvalue() == "Build complete: 1 output\n"
+
+    # A failing phase keeps its context line: it is error information, not
+    # progress, and names the unit that failed.
+    failed = StringIO()
+    with (
+        pytest.raises(RuntimeError, match="producer failed"),
+        CLIOutput("text", StringIO(), failed, quiet=True).producer_activity("build") as progress,
+    ):
+        progress(1, 100, "compile", "unit.one")
+        progress(9, 100, "compile", "unit.nine")
+        raise RuntimeError("producer failed")
+    assert failed.getvalue().splitlines() == [
+        "build: failed (9/100; compile: unit.nine; error: producer failed)"
+    ]
+
+
+def test_quiet_suppresses_the_interactive_progress_display() -> None:
+    human = _CapturedTTY()
+    with CLIOutput("text", StringIO(), human, quiet=True).producer_activity("build") as progress:
+        progress(1, 2, "compile", "unit.one", ProgressKind.CACHE_MISS)
+        progress(2, 2, "compile", "unit.two", ProgressKind.CACHE_HIT)
+    with CLIOutput("text", StringIO(), human, quiet=True).activity("loading project") as update:
+        update("checking source files")
+    assert human.getvalue() == ""
+
+    failure = _CapturedTTY()
+    with (
+        pytest.raises(RuntimeError, match="invalid project"),
+        CLIOutput("text", StringIO(), failure, quiet=True).activity("loading project"),
+    ):
+        raise RuntimeError("invalid project")
+    assert failure.getvalue() == "loading project: failed (error: invalid project)\n"
+
+
+def test_quiet_leaves_ndjson_events_unchanged() -> None:
+    def run(*, quiet: bool) -> list[dict[str, Any]]:
+        machine = StringIO()
+        output = CLIOutput("ndjson", machine, StringIO(), heartbeat_seconds=0.01, quiet=quiet)
+        with output.producer_activity("build") as progress:
+            progress(1, 2, "compile", "unit.one", ProgressKind.CACHE_MISS, "header changed")
+            time.sleep(0.03)
+            progress(2, 2, "compile", "unit.two")
+        with output.activity("loading project", phase="setup") as update:
+            update("checking source files")
+        output.emit("warning", "warning: still visible", diagnostic=True)
+        output.emit("build_complete", "Build complete: 1 output", outputs=["out/program.bin"])
+        events = [json.loads(line) for line in machine.getvalue().splitlines()]
+        for event in events:
+            # Heartbeat timing varies between runs and each heartbeat takes a
+            # sequence number, so neither field can be compared across runs.
+            event.pop("elapsed_seconds", None)
+            event.pop("sequence", None)
+        return events
+
+    loud = run(quiet=False)
+    quiet = run(quiet=True)
+    # Heartbeats are still streamed under --quiet; how many depends on timing,
+    # so the comparison below sets them aside.
+    assert any(event.get("kind") == "heartbeat" for event in quiet)
+    assert [event for event in quiet if event.get("kind") != "heartbeat"] == [
+        event for event in loud if event.get("kind") != "heartbeat"
+    ]
+
+
+def test_quiet_build_prints_the_result_and_no_progress(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    project = tmp_path / "project"
+    _complete_project(project, command_build=True)
+    capsys.readouterr()
+
+    assert main(["build", str(project), "--cold"]) == 0
+    loud = capsys.readouterr()
+    assert loud.out.startswith("Build complete: ")
+    assert "checking the project files..." in loud.err
+    assert "executing build plan..." in loud.err
+
+    for argv in (
+        ["--quiet", "build", str(project), "--cold"],
+        ["build", str(project), "--cold", "--quiet"],
+    ):
+        (project / "out" / "program.bin").unlink()  # a cold run refuses existing outputs
+        assert main(argv) == 0
+        captured = capsys.readouterr()
+        assert captured.out.startswith("Build complete: ")
+        assert captured.err == ""
+
+    (project / "out" / "program.bin").unlink()
+    assert main(["build", str(project), "--cold", "--quiet", "--format", "ndjson"]) == 0
+    captured = capsys.readouterr()
+    events = [json.loads(line) for line in captured.out.splitlines()]
+    assert any(event["event"] == "workflow_progress" for event in events)
+    assert events[-1]["event"] == "build_complete"
+    assert captured.err == ""
 
 
 def test_os_errors_name_the_path_and_the_system_explanation(

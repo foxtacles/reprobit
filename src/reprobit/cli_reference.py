@@ -14,7 +14,7 @@ from pathlib import Path
 from reprobit.cli import _parser
 
 _SHARED_GROUPS = ("advanced execution options",)
-_HIDDEN_FLAGS = frozenset({"--format", "--project"})
+_HIDDEN_FLAGS = frozenset({"--format", "--quiet", "--project"})
 
 
 def _flag_cell(action: argparse.Action) -> str:
@@ -137,6 +137,9 @@ def render_cli_reference() -> str:
         "|---|---|---|",
         "| `--version` | | show the program version and exit |",
         "| `--format` `{text,ndjson}` | `text` | human-readable text or stable machine events; "
+        "accepted before or after the sub-command |",
+        "| `--quiet` | | silence text-mode progress (phase starts, heartbeats, unit counts); "
+        "results, warnings and errors still print; ndjson output is unchanged; "
         "accepted before or after the sub-command |",
         "",
         "Every command also accepts `-h`/`--help`. The exit-status contract is in",
