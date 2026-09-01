@@ -406,6 +406,111 @@ def _refresh_source_overlays(context: _ClassicRegenerationContext) -> None:
                 context.effective_by_path[path] = new_effective
 
 
+def _prepare_donor_renderings(
+    context: _ClassicRegenerationContext,
+    renderings: list[Any],
+    *,
+    expected_values: dict[str, Any],
+    values: Mapping[str, Any],
+    document_name: str,
+    identifier: str,
+) -> list[dict[str, Any]]:
+    """Read each rendering's clean bytes and resolve its operation list."""
+
+    prepared: list[dict[str, Any]] = []
+    for index, rendering in enumerate(renderings):
+        if not isinstance(rendering, dict):
+            context.reject(f"donor overlay {identifier!r} rendering {index} is malformed")
+        clean_key = f"renderings[{index}].clean_sha256"
+        rendered_key = f"renderings[{index}].rendered_sha256"
+        if clean_key not in expected_values or rendered_key not in expected_values:
+            context.reject(
+                f"donor overlay {identifier!r} rendering {index} carries no "
+                "proof-pinned digests; its claim form is not regenerable here"
+            )
+        path = str(rendering.get("path"))
+        label = f"{document_name} donor {identifier} rendering {path!r}"
+        operations = rendering.get("operations")
+        if not isinstance(operations, list) or any(
+            not isinstance(operation, dict) for operation in operations
+        ):
+            context.reject(f"{label} has malformed operations")
+        rendered_operations = list(operations)
+        replay = values.get("canonical_overlay_replay")
+        if replay is not None:
+            if replay != "owning_translation_unit_v1":
+                context.reject(f"{label} has an unsupported canonical replay policy")
+            if index == 0:
+                canonical = context.canonical_operations_by_path.get(path)
+                if canonical is None:
+                    context.reject(
+                        f"{label} replays a canonical overlay output that "
+                        "no source overlay declares"
+                    )
+                rendered_operations = [*canonical, *rendered_operations]
+        current = context.reader.read(path, wanted_by=label)
+        prepared.append(
+            {
+                "rendering": rendering,
+                "path": path,
+                "label": label,
+                "clean_key": clean_key,
+                "rendered_key": rendered_key,
+                "operations": rendered_operations,
+                "current": current,
+                "current_digest": _digest(current),
+                "pinned_clean": str(expected_values[clean_key]),
+                "pinned_rendered": str(expected_values[rendered_key]),
+            }
+        )
+    return prepared
+
+
+def _render_donor_relocation_batch(
+    context: _ClassicRegenerationContext,
+    prepared: list[dict[str, Any]],
+    *,
+    label: str,
+) -> dict[str, str]:
+    """Render a donor's relocation-bound renderings together.
+
+    Returns the freshly rendered digest per path, or an empty mapping when the
+    donor carries no relocation or nothing it renders has changed.  A
+    relocation moves bytes between two of the donor's own renderings, so both
+    sides must be rendered in one pass: the consumer's output depends on the
+    producer's clean bytes, and the renderer rejects a producer whose consumer
+    is absent from the same render.
+    """
+
+    from reprobit.classic.overlay_document import render_classic_overlay_proposal
+
+    relocated = any(
+        operation.get("gen", {}).get("k") == "reloc"
+        for item in prepared
+        for operation in item["operations"]
+        if isinstance(operation.get("gen"), dict)
+    )
+    stale = any(item["current_digest"] != item["pinned_clean"] for item in prepared)
+    if not relocated or not stale or len(prepared) < 2:
+        return {}
+
+    declarations = [
+        {
+            "path": item["path"],
+            "clean": item["current_digest"],
+            "effective": item["pinned_rendered"],
+            "ops": item["operations"],
+        }
+        for item in prepared
+    ]
+    clean_inputs = {item["path"]: item["current"] for item in prepared}
+    try:
+        result = render_classic_overlay_proposal(declarations, clean_inputs)
+    except ValueError as exc:
+        context.reject(f"{label} cannot be re-rendered: {exc}", cause=exc)
+    return {receipt.path: receipt.output_digest for receipt in result.receipts}
+
+
 def _refresh_donor_overlays(context: _ClassicRegenerationContext) -> None:
     """Refresh donor-private overlay receipts and merged rendering identities."""
 
@@ -437,74 +542,66 @@ def _refresh_donor_overlays(context: _ClassicRegenerationContext) -> None:
             expected_values = observation["expected_values"]
             merged: list[dict[str, Any]] = []
             donor_changed = False
-            for index, rendering in enumerate(renderings):
-                if not isinstance(rendering, dict):
-                    context.reject(f"donor overlay {identifier!r} rendering {index} is malformed")
-                clean_key = f"renderings[{index}].clean_sha256"
-                rendered_key = f"renderings[{index}].rendered_sha256"
-                if clean_key not in expected_values or rendered_key not in expected_values:
-                    context.reject(
-                        f"donor overlay {identifier!r} rendering {index} carries no "
-                        "proof-pinned digests; its claim form is not regenerable here"
-                    )
-                path = str(rendering.get("path"))
-                label = f"{name} donor {identifier} rendering {path!r}"
-                current = context.reader.read(path, wanted_by=label)
-                current_digest = _digest(current)
-                pinned_clean = str(expected_values[clean_key])
-                pinned_rendered = str(expected_values[rendered_key])
-                if current_digest != pinned_clean:
-                    operations = rendering.get("operations")
-                    if not isinstance(operations, list) or any(
-                        not isinstance(operation, dict) for operation in operations
-                    ):
-                        context.reject(f"{label} has malformed operations")
-                    rendered_operations = list(operations)
-                    replay = values.get("canonical_overlay_replay")
-                    if replay is not None:
-                        if replay != "owning_translation_unit_v1":
-                            context.reject(f"{label} has an unsupported canonical replay policy")
-                        if index == 0:
-                            canonical = context.canonical_operations_by_path.get(path)
-                            if canonical is None:
-                                context.reject(
-                                    f"{label} replays a canonical overlay output that "
-                                    "no source overlay declares"
-                                )
-                            rendered_operations = [*canonical, *rendered_operations]
-                    declaration = {
-                        "path": path,
-                        "clean": current_digest,
-                        "effective": pinned_rendered,
-                        "ops": rendered_operations,
-                    }
+            prepared = _prepare_donor_renderings(
+                context,
+                renderings,
+                expected_values=expected_values,
+                values=values,
+                document_name=name,
+                identifier=identifier,
+            )
+            # A source relocation deletes a range from one rendering and
+            # inserts those same bytes into another, so the renderer checks
+            # that every producer meets its consumer.  Rendering one file at a
+            # time cannot satisfy that: the pair must be rendered together,
+            # and a change to either file moves the relocated bytes.
+            batch_digests = _render_donor_relocation_batch(
+                context, prepared, label=f"{name} donor {identifier}"
+            )
+            for item in prepared:
+                path = item["path"]
+                pinned_clean = item["pinned_clean"]
+                pinned_rendered = item["pinned_rendered"]
+                current_digest = item["current_digest"]
+                new_rendered = batch_digests.get(path)
+                if new_rendered is None and current_digest != pinned_clean:
                     new_rendered, _size, _bytes = _render_single(
-                        context, declaration, current, label=label
+                        context,
+                        {
+                            "path": path,
+                            "clean": current_digest,
+                            "effective": pinned_rendered,
+                            "ops": item["operations"],
+                        },
+                        item["current"],
+                        label=item["label"],
                     )
+                if current_digest != pinned_clean:
                     context.stale_paths[path] = pinned_clean
                     context.bind_stale(pinned_clean, path)
-                    if pinned_rendered != new_rendered:
-                        context.bind_stale(pinned_rendered, path)
                     context.record(
                         proof_name,
-                        f"{identifier} {clean_key}",
+                        f"{identifier} {item['clean_key']}",
                         pinned_clean,
                         current_digest,
                     )
+                    expected_values[item["clean_key"]] = current_digest
+                    pinned_clean = current_digest
+                    donor_changed = True
+                if new_rendered is not None and new_rendered != pinned_rendered:
+                    context.bind_stale(pinned_rendered, path)
                     context.record(
                         proof_name,
-                        f"{identifier} {rendered_key}",
+                        f"{identifier} {item['rendered_key']}",
                         pinned_rendered,
                         new_rendered,
                     )
-                    expected_values[clean_key] = current_digest
-                    expected_values[rendered_key] = new_rendered
-                    pinned_clean = current_digest
+                    expected_values[item["rendered_key"]] = new_rendered
                     pinned_rendered = new_rendered
                     donor_changed = True
                 merged.append(
                     {
-                        **rendering,
+                        **item["rendering"],
                         "clean_sha256": pinned_clean,
                         "rendered_sha256": pinned_rendered,
                     }
