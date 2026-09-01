@@ -10,12 +10,10 @@ from reprobit.classic.coff_evidence import (
     _CoffSection,
     _CoffSymbol,
 )
-from reprobit.classic.coff_projection import (
-    _CodeProjectionCertificate,
-    _coff_compiler_congruence_trace,
-    _coff_semantic_envelope,
-    _runtime_projection_equivalence_proof,
-)
+from reprobit.classic.coff_projection import _coff_compiler_congruence_trace
+from reprobit.classic.coff_projection_code import _runtime_projection_equivalence_proof
+from reprobit.classic.coff_projection_envelope import _coff_semantic_envelope
+from reprobit.classic.coff_projection_runtime import _CodeProjectionCertificate
 from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.model import Digest
 

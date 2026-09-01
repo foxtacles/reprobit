@@ -37,12 +37,15 @@ import unittest
 import test_classic_instruction_schedule_full as fixture
 
 import reprobit.classic.coff as coff_algorithms
-import reprobit.classic.composition as composition_algorithms
+import reprobit.classic.composition_mosaic as composition_mosaic
 import reprobit.classic.debug as debug_algorithms
 import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.register_bijection as register_algorithms
 import reprobit.classic.register_semantics as register_semantics
 import reprobit.classic.scheduling as schedule_algorithms
+import reprobit.classic.scheduling_certificates as scheduling_certificates
+import reprobit.classic.scheduling_dependence as scheduling_dependence
+import reprobit.classic.scheduling_web_recolour as scheduling_web_recolour
 import reprobit.coff_format as coff_format
 from reprobit.binary import ByteIdentityError
 
@@ -121,7 +124,7 @@ def web_declaration(**overrides):
 
 def recolour_spec(**overrides):
     spec = {
-        "kind": schedule_algorithms.WEB_RECOLOUR_KIND,
+        "kind": scheduling_certificates.WEB_RECOLOUR_KIND,
         "windows": [window_declaration()],
         "webs": [web_declaration()],
         "expected_instruction_count": 9,
@@ -175,10 +178,10 @@ def function_record(seed_bytes, donor_bytes, image, **overrides):
             coff_format.coff_body(donor, dp)
         ),
         "expected_body_sha256": foundation_algorithms.sha256_bytes(image),
-        "expected_seed_metadata_sha256": composition_algorithms.instruction_mosaic_metadata_sha256(
+        "expected_seed_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
             seed, sp
         ),
-        "expected_donor_metadata_sha256": composition_algorithms.instruction_mosaic_metadata_sha256(
+        "expected_donor_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
             donor, dp
         ),
         "expected_changed_offsets": sorted(
@@ -202,7 +205,7 @@ class CoalesceObligationTests(unittest.TestCase):
     """The one obligation the class exists for."""
 
     def apply(self, body, webs=None, relocations=frozenset()):
-        return schedule_algorithms.apply_web_recolour(
+        return scheduling_web_recolour.apply_web_recolour(
             body, [web_declaration()] if webs is None else webs, relocations, "web"
         )
 
@@ -227,7 +230,7 @@ class CoalesceObligationTests(unittest.TestCase):
             register_semantics.decode_ia32_bijection_instruction(BODY, offset, "decode")
             for offset in (12, 18)
         ]
-        _, edges = schedule_algorithms.ia32_schedule_dependence_edges(decoded, "dag")
+        _, edges = scheduling_dependence.ia32_schedule_dependence_edges(decoded, "dag")
         self.assertEqual(edges, [])
 
     def test_a_value_live_in_the_image_register_at_the_definition_refuses(self):
@@ -253,7 +256,7 @@ class WebDerivationTests(unittest.TestCase):
     """W3: the web is derived from the graph, never taken on trust."""
 
     def apply(self, webs, body=None):
-        return schedule_algorithms.apply_web_recolour(
+        return scheduling_web_recolour.apply_web_recolour(
             reordered() if body is None else body, webs, frozenset(), "web"
         )
 
@@ -303,7 +306,7 @@ class StructuralRefusalTests(unittest.TestCase):
     def test_esp_and_ebp_are_refused(self):
         for names in (("esp", "ecx"), ("eax", "ebp")):
             with self.assertRaises(ByteIdentityError) as caught:
-                schedule_algorithms.apply_web_recolour(
+                scheduling_web_recolour.apply_web_recolour(
                     reordered(),
                     [web_declaration(source_register=names[0], image_register=names[1])],
                     frozenset(),
@@ -313,7 +316,7 @@ class StructuralRefusalTests(unittest.TestCase):
 
     def test_a_rewritten_byte_over_a_relocation_is_refused(self):
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.apply_web_recolour(
+            scheduling_web_recolour.apply_web_recolour(
                 reordered(), [web_declaration()], frozenset({4}), "web"
             )
         self.assertIn("overlaps a relocation", str(caught.exception))
@@ -323,7 +326,7 @@ class StructuralRefusalTests(unittest.TestCase):
         body = bytearray(reordered())
         body[10:12] = bytes.fromhex("eb07")
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.apply_web_recolour(
+            scheduling_web_recolour.apply_web_recolour(
                 bytes(body), [web_declaration()], frozenset(), "web"
             )
         self.assertIn("unreachable from the entry", str(caught.exception))
@@ -332,7 +335,7 @@ class StructuralRefusalTests(unittest.TestCase):
         body = bytearray(reordered())
         body[10:12] = bytes.fromhex("ffe1")  # jmp ecx
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.apply_web_recolour(
+            scheduling_web_recolour.apply_web_recolour(
                 bytes(body), [web_declaration()], frozenset(), "web"
             )
         self.assertIn("requires the relocated in-body target set", str(caught.exception))
@@ -346,7 +349,7 @@ class StructuralRefusalTests(unittest.TestCase):
         body = bytearray(reordered())
         body[10:12] = bytes.fromhex("8900")
         webs = [web_declaration(uses=[10, 12], expected_rewritten_offsets=[4, 11, 12])]
-        image, _proof = schedule_algorithms.apply_web_recolour(
+        image, _proof = scheduling_web_recolour.apply_web_recolour(
             bytes(body), webs, frozenset(), "web"
         )
         self.assertEqual(image[11], 0x09)  # mov [ecx], ecx
@@ -361,7 +364,7 @@ class StructuralRefusalTests(unittest.TestCase):
         body[10:12] = bytes.fromhex("8bc0")
         webs = [web_declaration(uses=[10, 12], expected_rewritten_offsets=[4, 11, 12])]
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.apply_web_recolour(bytes(body), webs, frozenset(), "web")
+            scheduling_web_recolour.apply_web_recolour(bytes(body), webs, frozenset(), "web")
         self.assertIn("without defining it", str(caught.exception))
 
 
@@ -369,7 +372,7 @@ class RecolourSchemaTests(unittest.TestCase):
     """The manifest schema closes what the composer then measures."""
 
     def validate(self, **overrides):
-        return schedule_algorithms.validate_web_recolour(
+        return scheduling_certificates.validate_web_recolour(
             recolour_spec(**overrides), "recolour", SIZE
         )
 
@@ -391,7 +394,7 @@ class RecolourSchemaTests(unittest.TestCase):
             self.validate(expected_changed_offsets=[13, 14, 15, 16, 17, 18])
 
     def test_the_windows_are_optional(self):
-        normalized = schedule_algorithms.validate_web_recolour(
+        normalized = scheduling_certificates.validate_web_recolour(
             recolour_spec(windows=None, expected_changed_offsets=[4, 12]), "recolour", SIZE
         )
         self.assertNotIn("windows", normalized)
@@ -438,7 +441,7 @@ class DebugRegisterTests(unittest.TestCase):
         stream, rows = self.measured()
         self.assertEqual([row[2] for row in rows], ["eax", "ecx"])
         self.assertEqual(
-            schedule_algorithms.require_web_recolour_debug_registers(stream, rows, "registers"),
+            scheduling_web_recolour.require_web_recolour_debug_registers(stream, rows, "registers"),
             rows,
         )
 
@@ -446,7 +449,7 @@ class DebugRegisterTests(unittest.TestCase):
         _, rows = self.measured()
         stream, _ = self.measured(numbers=(17, 20))
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.require_web_recolour_debug_registers(stream, rows, "registers")
+            scheduling_web_recolour.require_web_recolour_debug_registers(stream, rows, "registers")
         self.assertIn("differs from its declaration", str(caught.exception))
 
 
@@ -483,7 +486,7 @@ class RecolourCompositionTests(unittest.TestCase):
         record = copy.deepcopy(self.record)
         record["expected_donor_body_sha256"] = foundation_algorithms.sha256_bytes(bytes(other))
         record["expected_donor_metadata_sha256"] = (
-            composition_algorithms.instruction_mosaic_metadata_sha256(
+            composition_mosaic.instruction_mosaic_metadata_sha256(
                 coff_format.CoffObject(donor),
                 coff_format.CoffObject(donor).function_section(TARGET_SYMBOL),
             )
@@ -599,7 +602,7 @@ class FieldScopedMembershipTests(unittest.TestCase):
     """One instruction, two webs: the scope decides which field is whose."""
 
     def apply(self, webs, body=SPLIT):
-        return schedule_algorithms.apply_web_recolour(
+        return scheduling_web_recolour.apply_web_recolour(
             body, [copy.deepcopy(web) for web in webs], frozenset(), "web"
         )
 
@@ -661,7 +664,7 @@ class FieldScopedSchemaTests(unittest.TestCase):
     """The manifest side of the scope, normalized once for both readers."""
 
     def validate(self, **overrides):
-        return schedule_algorithms.validate_web_recolour(
+        return scheduling_certificates.validate_web_recolour(
             recolour_spec(**overrides), "recolour", SIZE
         )
 
@@ -732,7 +735,7 @@ class FramePointerFreeWebTests(unittest.TestCase):
             uses=[5],
             expected_rewritten_offsets=rewritten,
         )
-        return schedule_algorithms.apply_web_recolour(
+        return scheduling_web_recolour.apply_web_recolour(
             body, [web], frozenset(), "web", None, None, None, frame_pointer_free
         )
 
@@ -777,7 +780,7 @@ class FramePointerFreeSchemaTests(unittest.TestCase):
     """The declaration side of the EBP admission."""
 
     def validate(self, **overrides):
-        return schedule_algorithms.validate_web_recolour(
+        return scheduling_certificates.validate_web_recolour(
             recolour_spec(**overrides), "recolour", SIZE
         )
 
@@ -817,7 +820,7 @@ class TrailingWindowSchemaTests(unittest.TestCase):
     """A window phase the recolour itself makes legal."""
 
     def validate(self, **overrides):
-        return schedule_algorithms.validate_web_recolour(
+        return scheduling_certificates.validate_web_recolour(
             recolour_spec(**overrides), "recolour", SIZE
         )
 
@@ -867,7 +870,7 @@ class ReadModifyWriteWebTests(unittest.TestCase):
             uses=uses,
             expected_rewritten_offsets=rewritten or [],
         )
-        return schedule_algorithms.apply_web_recolour(RMW, [web], frozenset(), "web")
+        return scheduling_web_recolour.apply_web_recolour(RMW, [web], frozenset(), "web")
 
     def test_the_whole_chain_recolours_as_one_web(self):
         image, proof = self.apply([1, 5, 9], [5, 9, 10], [2, 6, 9, 10])
@@ -894,7 +897,7 @@ class ReadModifyWriteWebTests(unittest.TestCase):
 
     def test_a_through_node_cannot_also_be_field_scoped(self):
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.validate_web_recolour(
+            scheduling_certificates.validate_web_recolour(
                 recolour_spec(webs=[web_declaration(definitions=[[3, 0]], uses=[3, 12])]),
                 "recolour",
                 SIZE,

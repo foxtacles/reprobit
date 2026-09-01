@@ -10,7 +10,8 @@ from typing import Any, cast
 from reprobit.binary import ByteIdentityError
 from reprobit.classic.register_bijection import apply_register_bijection
 from reprobit.classic.register_semantics import IA32_GENERAL_REGISTER_NAMES, ia32_register_atoms
-from reprobit.classic.scheduling import apply_web_recolour, ia32_web_control_flow
+from reprobit.classic.scheduling_web_recolour import apply_web_recolour
+from reprobit.classic.scheduling_webs import ia32_web_control_flow
 from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.model import Digest
 from reprobit.strict_json import canonical_json

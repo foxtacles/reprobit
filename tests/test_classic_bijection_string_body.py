@@ -26,7 +26,7 @@ import unittest
 
 import reprobit.classic.register_bijection as register_algorithms
 import reprobit.classic.register_semantics as register_semantics
-import reprobit.classic.scheduling as schedule_algorithms
+import reprobit.classic.scheduling_web_recolour as scheduling_web_recolour
 from reprobit.binary import ByteIdentityError
 
 # 0: mov ebx, eax   2: xor ebx, ebx   4: rep movsd   6: ret
@@ -61,7 +61,7 @@ class RepeatedStringBodyTests(unittest.TestCase):
     def test_a_web_recolour_reaches_a_verdict_on_a_string_body(self):
         """Not an accept -- a refusal carrying a message, which is a verdict."""
         with self.assertRaises(ByteIdentityError) as raised:
-            schedule_algorithms.apply_web_recolour(
+            scheduling_web_recolour.apply_web_recolour(
                 STRING_BODY,
                 [
                     {

@@ -17,15 +17,19 @@ from reprobit.classic.coff_evidence import (
 from reprobit.classic.coff_projection import (
     _coff_compiler_congruence_trace,
     _CrtPullLinkerDependency,
-    _linkage_statement,
     _OrderedArchiveSeedDependency,
-    _runtime_projection,
-    _runtime_projection_equivalence,
-    _runtime_projection_equivalence_proof,
-    _semantic_code_stream,
-    _SemanticCodePartitionError,
     classic_link_relevant_coff_projection,
     prove_classic_coff_line_number_correspondence,
+)
+from reprobit.classic.coff_projection_code import (
+    _runtime_projection_equivalence,
+    _runtime_projection_equivalence_proof,
+)
+from reprobit.classic.coff_projection_runtime import _runtime_projection
+from reprobit.classic.coff_projection_statements import (
+    _linkage_statement,
+    _semantic_code_stream,
+    _SemanticCodePartitionError,
 )
 from reprobit.classic.compiler_epoch import (
     _crt_pull_linker_dependencies,
@@ -50,15 +54,17 @@ from reprobit.classic.overlay_types import (
     ClassicOverlayOperationReceipt,
 )
 from reprobit.classic.project_overlay import (
-    _archive_semantics,
-    _carrier_isolation_trace,
-    _helper_isolation_trace,
-    _msvc_function_auxiliary_receipt,
-    _overlay_lane_input_is_authorized,
-    _OverlayOutputOwner,
     overlay_semantic_run_binding,
     prove_source_overlay_semantics,
 )
+from reprobit.classic.project_overlay_archives import (
+    _archive_semantics,
+    _msvc_function_auxiliary_receipt,
+    _overlay_lane_input_is_authorized,
+    _OverlayOutputOwner,
+)
+from reprobit.classic.project_overlay_carriers import _carrier_isolation_trace
+from reprobit.classic.project_overlay_helpers import _helper_isolation_trace
 from reprobit.classic.semantic_contracts import (
     _CLASSIC_SEMANTIC_ISSUER,
     CLASSIC_SEMANTIC_CONTRACTS,

@@ -16,7 +16,7 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, cast
 
-import reprobit.classic.composition as composition
+import reprobit.classic.composition_comdat_order as composition_comdat_order
 import reprobit.classic.repair_dispatch as repair_dispatch
 from reprobit.classic.compiler_identity import (
     Msvc420CompilerIdentity,
@@ -33,9 +33,7 @@ from reprobit.classic.semantic_contracts import (
     issue_classic_donor_semantics,
 )
 from reprobit.classic.semantic_errors import ClassicSemanticError
-from reprobit.classic.source_refactor_semantics import (
-    validate_donor_source_semantics,
-)
+from reprobit.classic.source_refactor_semantics import validate_donor_source_semantics
 from reprobit.classic_donors import (
     DonorCompileRequest,
     DonorSourceError,
@@ -938,11 +936,11 @@ def compose_classic_unit(
         proofs: list[Mapping[str, object]] = []
         for order in group_order.orders:
             if group_order.operation == "swap_comdat_group_order":
-                output, proof = composition.compose_swap_comdat_group_order(
+                output, proof = composition_comdat_order.compose_swap_comdat_group_order(
                     output, {"group_order": list(order)}
                 )
             else:
-                output, proof = composition.compose_restore_comdat_group_order(
+                output, proof = composition_comdat_order.compose_restore_comdat_group_order(
                     output, {"group_order": list(order)}
                 )
             proofs.append(proof)

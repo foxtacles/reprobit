@@ -25,7 +25,8 @@ from .coff import (
     comdat_primary_identity_multiset,
     function_multiset,
 )
-from .composition import compose_same_slot_resize, instruction_mosaic_metadata_sha256
+from .composition_mosaic import instruction_mosaic_metadata_sha256
+from .composition_same_slot import compose_same_slot_resize
 from .foundation import sha256_bytes
 from .register_candidates import _reencoded_donor_object
 from .register_reencoding import (
@@ -44,15 +45,9 @@ from .relational import (
     ia32_relational_flow_walk,
     relational_form_external_entries,
 )
-from .rewriting import (
-    _SIMULATOR_REGS,
-    _srr_simulate,
-    _srr_slot_scratch_proof,
-)
-from .scheduling import (
-    INSTRUCTION_SCHEDULE_EH_CLOSURE,
-    INSTRUCTION_SCHEDULE_FPO_CLOSURE,
-)
+from .rewriting_exchanges import _SIMULATOR_REGS
+from .rewriting_region_simulation import _srr_simulate, _srr_slot_scratch_proof
+from .scheduling import INSTRUCTION_SCHEDULE_EH_CLOSURE, INSTRUCTION_SCHEDULE_FPO_CLOSURE
 
 
 def require_retail_relocation_oracle(

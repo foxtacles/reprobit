@@ -6,7 +6,8 @@ host.  These tests pin the closed prologue form and every refusal edge."""
 
 import pytest
 
-import reprobit.classic.rewriting as rewriting_algorithms
+import reprobit.classic.rewriting_certificates as rewriting_certificates
+import reprobit.classic.rewriting_exchanges as rewriting_exchanges
 from reprobit.binary import ByteIdentityError
 
 
@@ -22,7 +23,7 @@ ITEM = {"first_offset": 0, "second_offset": 5, "expected_rewritten_offsets": [3,
 
 def test_exchanges_the_two_argument_slots():
     body = prologue()
-    image, proof = rewriting_algorithms.apply_esp_argument_exchange(
+    image, proof = rewriting_exchanges.apply_esp_argument_exchange(
         body, [dict(ITEM)], frozenset(), "test"
     )
     # depths: 0 at the first load, 4 after push esi; entry-relative slots
@@ -36,7 +37,7 @@ def test_exchanges_the_two_argument_slots():
 
 def test_refuses_a_relocation_under_the_displacement():
     with pytest.raises(ByteIdentityError, match="relocation"):
-        rewriting_algorithms.apply_esp_argument_exchange(
+        rewriting_exchanges.apply_esp_argument_exchange(
             prologue(), [dict(ITEM)], frozenset({3}), "test"
         )
 
@@ -45,14 +46,14 @@ def test_refuses_a_prefix_outside_the_closed_form():
     body = b"\x90" + prologue()
     item = {"first_offset": 1, "second_offset": 6, "expected_rewritten_offsets": [4, 9]}
     with pytest.raises(ByteIdentityError, match="closed form"):
-        rewriting_algorithms.apply_esp_argument_exchange(body, [item], frozenset(), "test")
+        rewriting_exchanges.apply_esp_argument_exchange(body, [item], frozenset(), "test")
 
 
 def test_refuses_identical_argument_slots():
     # second load at [esp+0xc] with depth 4 addresses slot 8 == the first's.
     body = prologue(first_disp=0x08, second_disp=0x0C)
     with pytest.raises(ByteIdentityError, match="distinct incoming"):
-        rewriting_algorithms.apply_esp_argument_exchange(body, [dict(ITEM)], frozenset(), "test")
+        rewriting_exchanges.apply_esp_argument_exchange(body, [dict(ITEM)], frozenset(), "test")
 
 
 def test_refuses_a_third_load_of_an_exchanged_slot():
@@ -62,25 +63,27 @@ def test_refuses_a_third_load_of_an_exchanged_slot():
         + b"\xc2\x08\x00"
     )
     with pytest.raises(ByteIdentityError, match="another prefix load"):
-        rewriting_algorithms.apply_esp_argument_exchange(body, [dict(ITEM)], frozenset(), "test")
+        rewriting_exchanges.apply_esp_argument_exchange(body, [dict(ITEM)], frozenset(), "test")
 
 
 def test_refuses_an_offset_that_is_not_a_load():
     item = {"first_offset": 0, "second_offset": 4, "expected_rewritten_offsets": [3, 7]}
     with pytest.raises(ByteIdentityError, match="not an argument load"):
-        rewriting_algorithms.apply_esp_argument_exchange(prologue(), [item], frozenset(), "test")
+        rewriting_exchanges.apply_esp_argument_exchange(prologue(), [item], frozenset(), "test")
 
 
 def test_refuses_structural_destination():
     #   mov ebp, [esp+8] as the second load
     body = bytes([0x8B, 0x54, 0x24, 0x08, 0x56, 0x8B, 0x6C, 0x24, 0x0C]) + b"\xc2\x08\x00"
     with pytest.raises(ByteIdentityError, match="distinct general"):
-        rewriting_algorithms.apply_esp_argument_exchange(body, [dict(ITEM)], frozenset(), "test")
+        rewriting_exchanges.apply_esp_argument_exchange(body, [dict(ITEM)], frozenset(), "test")
 
 
 def test_shape_validator_pins_the_declaration():
     spec = {"esp_argument_exchanges": [dict(ITEM)]}
-    normalized, rewritten = rewriting_algorithms._validate_esp_argument_exchanges(spec, "test", 64)
+    normalized, rewritten = rewriting_certificates._validate_esp_argument_exchanges(
+        spec, "test", 64
+    )
     assert normalized == [ITEM]
     assert rewritten == [3, 8]
     bad = {
@@ -89,4 +92,4 @@ def test_shape_validator_pins_the_declaration():
         ]
     }
     with pytest.raises(ByteIdentityError, match="unsorted"):
-        rewriting_algorithms._validate_esp_argument_exchanges(bad, "test", 64)
+        rewriting_certificates._validate_esp_argument_exchanges(bad, "test", 64)

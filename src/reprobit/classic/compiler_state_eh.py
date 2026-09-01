@@ -7,11 +7,11 @@ from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError
 from reprobit.classic.register_semantics import IA32_GENERAL_REGISTER_NAMES
-from reprobit.classic.scheduling import (
+from reprobit.classic.scheduling_apply import (
     ia32_schedule_body_walk,
-    ia32_schedule_dependence_edges,
     require_topological_instruction_order,
 )
+from reprobit.classic.scheduling_dependence import ia32_schedule_dependence_edges
 from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.model import Digest
 from reprobit.strict_json import canonical_json

@@ -20,13 +20,13 @@ from reprobit.classic.coff_evidence import (
     _parse_coff,
 )
 from reprobit.classic.coff_projection import (
-    _CODE_SECTION_PREFIXES,
     _coff_compiler_congruence_trace,
     _CrtPullLinkerDependency,
-    _external_function_owner,
     _OrderedArchiveSeedDependency,
-    _runtime_projection_equivalence_proof,
 )
+from reprobit.classic.coff_projection_code import _runtime_projection_equivalence_proof
+from reprobit.classic.coff_projection_runtime import _external_function_owner
+from reprobit.classic.coff_projection_statements import _CODE_SECTION_PREFIXES
 from reprobit.classic.compiler_identity import issue_msvc420_compiler_identity
 from reprobit.classic.compiler_state_foundation import CompilerStateCompilerEvidence
 from reprobit.classic.semantic_contracts import (

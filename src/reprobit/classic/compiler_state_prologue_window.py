@@ -9,7 +9,7 @@ from typing import Any, TypedDict, cast
 
 from reprobit.binary import ByteIdentityError
 from reprobit.classic.register_semantics import IA32_GENERAL_REGISTER_NAMES
-from reprobit.classic.scheduling import (
+from reprobit.classic.scheduling_dependence import (
     ia32_esp_relative_displacement,
     ia32_esp_used_only_as_a_base,
     ia32_schedule_dependence_edges,

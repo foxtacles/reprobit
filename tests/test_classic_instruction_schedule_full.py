@@ -39,10 +39,13 @@ import struct
 import unittest
 
 import reprobit.classic.coff as coff_algorithms
-import reprobit.classic.composition as composition_algorithms
+import reprobit.classic.composition_mosaic as composition_mosaic
 import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.register_semantics as register_algorithms
 import reprobit.classic.scheduling as schedule_algorithms
+import reprobit.classic.scheduling_apply as scheduling_apply
+import reprobit.classic.scheduling_certificates as scheduling_certificates
+import reprobit.classic.scheduling_dependence as scheduling_dependence
 import reprobit.coff_format as coff_format
 from reprobit.binary import ByteIdentityError
 
@@ -335,7 +338,7 @@ def window_declaration(
 
 def schedule_spec(**overrides):
     spec = {
-        "kind": schedule_algorithms.INSTRUCTION_SCHEDULE_KIND,
+        "kind": scheduling_certificates.INSTRUCTION_SCHEDULE_KIND,
         "windows": [window_declaration()],
         "expected_instruction_count": 13,
         "expected_changed_offsets": sorted(
@@ -377,10 +380,10 @@ def function_record(seed_bytes, donor_bytes, image, **overrides):
         "expected_seed_body_sha256": foundation_algorithms.sha256_bytes(seed_body),
         "expected_donor_body_sha256": foundation_algorithms.sha256_bytes(donor_body),
         "expected_body_sha256": foundation_algorithms.sha256_bytes(image),
-        "expected_seed_metadata_sha256": composition_algorithms.instruction_mosaic_metadata_sha256(
+        "expected_seed_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
             seed, sp
         ),
-        "expected_donor_metadata_sha256": composition_algorithms.instruction_mosaic_metadata_sha256(
+        "expected_donor_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
             donor, dp
         ),
         "expected_changed_offsets": sorted(
@@ -405,7 +408,7 @@ class DisambiguationTests(unittest.TestCase):
     """Obligation 4: the only admitted memory proof, and its refusals."""
 
     def decode(self, body=BODY, window=WINDOW):
-        spans, _ = schedule_algorithms.ia32_schedule_body_walk(body, None, "walk")
+        spans, _ = scheduling_apply.ia32_schedule_body_walk(body, None, "walk")
         return [
             register_algorithms.decode_ia32_bijection_instruction(body, start, "decode")
             for start, _ in spans
@@ -413,13 +416,13 @@ class DisambiguationTests(unittest.TestCase):
         ]
 
     def test_same_base_disjoint_spans_carry_no_edge(self):
-        _, edges = schedule_algorithms.ia32_schedule_dependence_edges(self.decode(), "dag")
+        _, edges = scheduling_dependence.ia32_schedule_dependence_edges(self.decode(), "dag")
         self.assertEqual(edges, [])
 
     def test_overlapping_spans_on_one_base_are_a_dependence(self):
         # the second store lands on [esp+24] as well, so it aliases the first
         body = BODY.replace(bytes.fromhex("8974241c"), bytes.fromhex("89742418"))
-        _, edges = schedule_algorithms.ia32_schedule_dependence_edges(self.decode(body), "dag")
+        _, edges = scheduling_dependence.ia32_schedule_dependence_edges(self.decode(body), "dag")
         self.assertEqual([edge[:2] for edge in edges], [[1, 3]])
         self.assertIn("memory", edges[0][2])
 
@@ -431,14 +434,14 @@ class DisambiguationTests(unittest.TestCase):
             register_algorithms.decode_ia32_bijection_instruction(pair, offset, "decode")
             for offset in (0, 3)
         ]
-        _, edges = schedule_algorithms.ia32_schedule_dependence_edges(decoded, "dag")
+        _, edges = scheduling_dependence.ia32_schedule_dependence_edges(decoded, "dag")
         self.assertEqual([edge[:2] for edge in edges], [[0, 1]])
         self.assertEqual(edges[0][2], ["memory"])
 
     def test_an_absolute_memory_operand_is_refused(self):
         body = PROLOGUE + bytes.fromhex("a100000000") + WINDOW_SOURCE[4:] + EPILOGUE
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.ia32_schedule_dependence_edges(self.decode(body, (4, 16)), "dag")
+            scheduling_dependence.ia32_schedule_dependence_edges(self.decode(body, (4, 16)), "dag")
         self.assertIn("outside the instruction-schedule table", str(caught.exception))
 
     def test_a_base_written_inside_the_window_forces_an_edge(self):
@@ -449,12 +452,14 @@ class DisambiguationTests(unittest.TestCase):
         # is precise enough not to turn away a window whose same-base operands
         # are all reads and therefore never ask for a disjointness proof.
         body = BODY.replace(bytes.fromhex("8d5b08"), bytes.fromhex("8d6308"))
-        _facts, edges = schedule_algorithms.ia32_schedule_dependence_edges(self.decode(body), "dag")
+        _facts, edges = scheduling_dependence.ia32_schedule_dependence_edges(
+            self.decode(body), "dag"
+        )
         memory_edges = [edge for edge in edges if "memory" in edge[2]]
         self.assertTrue(memory_edges, "a written memory base must force a memory edge")
         # and the declared reordering is then refused as non-topological
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.require_topological_instruction_order(
+            scheduling_apply.require_topological_instruction_order(
                 len(LENGTHS), edges, ORDER, "dag"
             )
         self.assertIn("dependence DAG forbids", str(caught.exception))
@@ -467,7 +472,7 @@ class DisambiguationTests(unittest.TestCase):
             )
             for offset in (0, 1)
         ]
-        _, edges = schedule_algorithms.ia32_schedule_dependence_edges(decoded, "dag")
+        _, edges = scheduling_dependence.ia32_schedule_dependence_edges(decoded, "dag")
         self.assertEqual([edge[:2] for edge in edges], [[0, 1]])
         self.assertEqual(edges[0][2], ["memory", "register_raw", "register_war", "register_waw"])
 
@@ -480,9 +485,9 @@ class DisambiguationTests(unittest.TestCase):
             register_algorithms.decode_ia32_bijection_instruction(raw, offset, "decode")
             for offset in (0, 6)
         ]
-        _, edges = schedule_algorithms.ia32_schedule_dependence_edges(decoded, "dag")
+        _, edges = scheduling_dependence.ia32_schedule_dependence_edges(decoded, "dag")
         self.assertEqual(edges, [])
-        schedule_algorithms.require_topological_instruction_order(2, edges, [1, 0], "order")
+        scheduling_apply.require_topological_instruction_order(2, edges, [1, 0], "order")
 
     def test_flags_are_a_dependence(self):
         # `test eax, eax` then `sbb eax, [esp+16]`: the second reads CF
@@ -492,7 +497,7 @@ class DisambiguationTests(unittest.TestCase):
             )
             for offset in (0, 2)
         ]
-        _, edges = schedule_algorithms.ia32_schedule_dependence_edges(decoded, "dag")
+        _, edges = scheduling_dependence.ia32_schedule_dependence_edges(decoded, "dag")
         self.assertEqual([edge[:2] for edge in edges], [[0, 1]])
         self.assertIn("flags_raw", edges[0][2])
 
@@ -502,26 +507,26 @@ class TopologicalOrderTests(unittest.TestCase):
 
     def test_an_order_that_violates_an_edge_is_refused(self):
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.require_topological_instruction_order(
+            scheduling_apply.require_topological_instruction_order(
                 3, [[0, 2, ["memory"]]], [2, 0, 1], "order"
             )
         self.assertIn("which the dependence DAG forbids", str(caught.exception))
 
     def test_an_order_that_respects_every_edge_is_accepted(self):
-        schedule_algorithms.require_topological_instruction_order(
+        scheduling_apply.require_topological_instruction_order(
             3, [[0, 2, ["memory"]]], [1, 0, 2], "order"
         )
 
     def test_the_identity_is_not_a_reordering(self):
         with self.assertRaises(ByteIdentityError):
-            schedule_algorithms.require_topological_instruction_order(3, [], [0, 1, 2], "order")
+            scheduling_apply.require_topological_instruction_order(3, [], [0, 1, 2], "order")
 
 
 class WindowImageTests(unittest.TestCase):
     """Obligations 2, 3, 5 and 6: the image itself."""
 
     def apply(self, body=BODY, windows=None, relocations=frozenset(), symbols=None):
-        return schedule_algorithms.apply_instruction_schedule(
+        return scheduling_apply.apply_instruction_schedule(
             body,
             [window_declaration()] if windows is None else windows,
             relocations,
@@ -631,7 +636,7 @@ class DebugFidelityTests(unittest.TestCase):
     def check(self, seed_bytes, image, spec, windows=None):
         coff = coff_format.CoffObject(seed_bytes)
         section = coff.function_section(TARGET_SYMBOL)
-        return schedule_algorithms.require_instruction_schedule_debug_fidelity(
+        return scheduling_certificates.require_instruction_schedule_debug_fidelity(
             coff,
             section,
             image,
@@ -674,7 +679,7 @@ class ScheduleSchemaTests(unittest.TestCase):
     """The manifest schema closes what the composer then measures."""
 
     def validate(self, **overrides):
-        return schedule_algorithms.validate_instruction_schedule(
+        return scheduling_certificates.validate_instruction_schedule(
             schedule_spec(**overrides), "schedule", SIZE
         )
 
@@ -792,7 +797,7 @@ class SwitchTableTailTests(unittest.TestCase):
         targets=SWITCH_TARGETS,
         relocations=None,
     ):
-        return schedule_algorithms.ia32_schedule_body_walk(
+        return scheduling_apply.ia32_schedule_body_walk(
             body, relocations, "walk", code_length, targets
         )
 
@@ -836,7 +841,7 @@ class SwitchTableTailTests(unittest.TestCase):
     def test_the_unpinned_walk_decodes_the_table_as_code(self):
         # the control this whole pin exists for: the tail decodes, so an
         # unpinned walk reports a longer, meaningless instruction list
-        spans, _ = schedule_algorithms.ia32_schedule_body_walk(
+        spans, _ = scheduling_apply.ia32_schedule_body_walk(
             SWITCH_BODY, None, "walk", None, SWITCH_TARGETS
         )
         self.assertGreater(len(spans), 8)
@@ -852,14 +857,14 @@ class SwitchTableTailTests(unittest.TestCase):
             )
         ]
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.apply_instruction_schedule(
+            scheduling_apply.apply_instruction_schedule(
                 SWITCH_BODY, windows, frozenset(), "image", None, SWITCH_CODE_LENGTH, SWITCH_TARGETS
             )
         self.assertIn("reaches into the body's data tail", str(caught.exception))
 
     def test_a_relocated_target_entering_a_window_is_refused(self):
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.apply_instruction_schedule(
+            scheduling_apply.apply_instruction_schedule(
                 SWITCH_BODY,
                 [window_declaration()],
                 frozenset(),
@@ -871,7 +876,7 @@ class SwitchTableTailTests(unittest.TestCase):
         self.assertIn("targets the window interior", str(caught.exception))
 
     def test_the_window_is_reordered_and_the_tail_is_untouched(self):
-        image, proof = schedule_algorithms.apply_instruction_schedule(
+        image, proof = scheduling_apply.apply_instruction_schedule(
             SWITCH_BODY,
             [window_declaration()],
             frozenset(),
@@ -904,7 +909,7 @@ class SwitchTableSchemaTests(unittest.TestCase):
     """The pins are declared in the manifest before they are measured."""
 
     def validate(self, **overrides):
-        return schedule_algorithms.validate_instruction_schedule(
+        return scheduling_certificates.validate_instruction_schedule(
             switch_spec(**overrides), "schedule", len(SWITCH_BODY)
         )
 
@@ -928,7 +933,7 @@ class SwitchTableSchemaTests(unittest.TestCase):
             self.validate(expected_internal_relocation_targets=[26, 0, 19])
 
     def test_the_pins_stay_optional(self):
-        normalized = schedule_algorithms.validate_instruction_schedule(
+        normalized = scheduling_certificates.validate_instruction_schedule(
             schedule_spec(), "schedule", SIZE
         )
         self.assertNotIn("expected_code_length", normalized)

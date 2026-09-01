@@ -16,11 +16,11 @@ from reprobit.classic.source_proofs import (
     select_source_permutation_window,
     source_overlay_significant_sha256,
 )
-from reprobit.classic.source_refactor_semantics import (
-    SourceRefactorSemanticError,
+from reprobit.classic.source_refactor_semantics import validate_donor_source_semantics
+from reprobit.classic.source_refactor_semantics_schema import SourceRefactorSemanticError
+from reprobit.classic.source_refactor_semantics_seats import (
     _require_identifier_fresh_at_seat,
     _require_integral_type,
-    validate_donor_source_semantics,
 )
 from reprobit.model import Scope
 from reprobit.schema import (

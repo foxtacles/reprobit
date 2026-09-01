@@ -49,13 +49,14 @@ import unittest
 import test_classic_instruction_schedule_full as fixture
 
 import reprobit.classic.coff as coff_algorithms
-import reprobit.classic.composition as composition_algorithms
+import reprobit.classic.composition_mosaic as composition_mosaic
 import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.register_bijection as register_algorithms
 import reprobit.classic.register_semantics as register_semantics
 import reprobit.classic.relational as relational_algorithms
 import reprobit.classic.rewriting as rewriting_algorithms
-import reprobit.classic.scheduling as schedule_algorithms
+import reprobit.classic.rewriting_certificates as rewriting_certificates
+import reprobit.classic.scheduling_apply as scheduling_apply
 import reprobit.coff_format as coff_format
 from reprobit.binary import ByteIdentityError
 
@@ -144,7 +145,7 @@ def site_declaration(**overrides):
 
 def composed_spec(**overrides):
     spec = {
-        "kind": rewriting_algorithms.COMPOSED_REWRITING_KIND,
+        "kind": rewriting_certificates.COMPOSED_REWRITING_KIND,
         "windows": [window_declaration()],
         "register_bijections": [bijection_declaration()],
         "relational_sites": [site_declaration()],
@@ -210,10 +211,10 @@ def function_record(seed_bytes, donor_bytes, image, **overrides):
             coff_format.coff_body(donor, dp)
         ),
         "expected_body_sha256": foundation_algorithms.sha256_bytes(image),
-        "expected_seed_metadata_sha256": composition_algorithms.instruction_mosaic_metadata_sha256(
+        "expected_seed_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
             seed, sp
         ),
-        "expected_donor_metadata_sha256": composition_algorithms.instruction_mosaic_metadata_sha256(
+        "expected_donor_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
             donor, dp
         ),
         "expected_changed_offsets": sorted(
@@ -242,7 +243,7 @@ class CompositionTests(unittest.TestCase):
     """The composition itself, on the primitives it delegates to."""
 
     def test_the_three_primitives_reach_retails_code_in_this_order(self):
-        image, _ = schedule_algorithms.apply_instruction_schedule(
+        image, _ = scheduling_apply.apply_instruction_schedule(
             BODY, [window_declaration()], frozenset(), "s", {}
         )
         image, proof = register_algorithms.apply_register_bijection(
@@ -268,7 +269,7 @@ class CompositionTests(unittest.TestCase):
 
     def test_the_bijection_and_the_reversal_commute(self):
         """C1: their relative order is free; only the window must be first."""
-        base, _ = schedule_algorithms.apply_instruction_schedule(
+        base, _ = scheduling_apply.apply_instruction_schedule(
             BODY, [window_declaration()], frozenset(), "s", {}
         )
         first, _ = relational_algorithms.apply_relational_form(
@@ -293,13 +294,13 @@ class CompositionTests(unittest.TestCase):
 
 class DeclarationTests(unittest.TestCase):
     def validate(self, **overrides):
-        return rewriting_algorithms.validate_composed_rewriting(
+        return rewriting_certificates.validate_composed_rewriting(
             composed_spec(**overrides), "fixture", SIZE
         )
 
     def test_the_reference_declaration_validates(self):
         normalized = self.validate()
-        self.assertEqual(normalized["kind"], rewriting_algorithms.COMPOSED_REWRITING_KIND)
+        self.assertEqual(normalized["kind"], rewriting_certificates.COMPOSED_REWRITING_KIND)
         self.assertEqual(len(normalized["windows"]), 1)
         self.assertEqual(len(normalized["register_bijections"]), 1)
         self.assertEqual(len(normalized["relational_sites"]), 1)

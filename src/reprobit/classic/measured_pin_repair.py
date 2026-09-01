@@ -14,6 +14,7 @@ from hashlib import sha256
 from typing import Literal
 
 import reprobit.classic.composition as composition
+import reprobit.classic.composition_mosaic as composition_mosaic
 from reprobit.binary import ByteIdentityError
 from reprobit.classic_donors import merge_candidate_constraints
 from reprobit.classic_project import (
@@ -237,10 +238,10 @@ def _source_equal_body_measurements(
     measured.update(
         {
             "expected_seed_body_sha256": sha256(seed_body).hexdigest(),
-            "expected_seed_metadata_sha256": composition.instruction_mosaic_metadata_sha256(
+            "expected_seed_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
                 seed, seed_primary
             ),
-            "expected_donor_metadata_sha256": composition.instruction_mosaic_metadata_sha256(
+            "expected_donor_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
                 donor, donor_primary
             ),
             "expected_seed_line_count": seed_primary["line_count"],
@@ -325,10 +326,10 @@ def _donor_rewriting_measurements(
     relocation_seats = _named_external_relocation_seats(receipt, donor, donor_primary)
     measured: dict[str, object] = {
         "expected_seed_body_sha256": sha256(bytes(coff_body(seed, seed_primary))).hexdigest(),
-        "expected_seed_metadata_sha256": composition.instruction_mosaic_metadata_sha256(
+        "expected_seed_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
             seed, seed_primary
         ),
-        "expected_donor_metadata_sha256": composition.instruction_mosaic_metadata_sha256(
+        "expected_donor_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
             donor, donor_primary
         ),
         "expected_seed_length": seed_primary["raw_size"],

@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import unittest
 
-import reprobit.classic.rewriting as rewriting_algorithms
+import reprobit.classic.rewriting_exchanges as rewriting_exchanges
 from reprobit.binary import ByteIdentityError
 
 BODY = bytes.fromhex(
@@ -68,7 +68,7 @@ def apply(body=BODY, items=None):
         }
         for item in items
     ]
-    return rewriting_algorithms.apply_fp_pointer_exchange(shifted, moved, frozenset(), "test")
+    return rewriting_exchanges.apply_fp_pointer_exchange(shifted, moved, frozenset(), "test")
 
 
 class ExchangeTests(unittest.TestCase):

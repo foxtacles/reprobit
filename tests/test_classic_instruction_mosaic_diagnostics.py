@@ -10,14 +10,14 @@ from test_classic_instruction_schedule_full import (
     make_coff,
 )
 
-import reprobit.classic.composition as composition
+import reprobit.classic.composition_mosaic as composition_mosaic
 import reprobit.coff_format as coff_format
 from reprobit.binary import ByteIdentityError
 
 
 def _actual_metadata_sha256(payload: bytes) -> str:
     coff = coff_format.CoffObject(payload)
-    return composition.instruction_mosaic_metadata_sha256(
+    return composition_mosaic.instruction_mosaic_metadata_sha256(
         coff,
         coff.function_section(TARGET_SYMBOL),
     )
@@ -49,7 +49,7 @@ def test_variant_wrapper_reports_expected_and_actual_seed_metadata_sha256() -> N
     record["expected_seed_metadata_sha256"] = expected
 
     with pytest.raises(ByteIdentityError) as caught:
-        composition.produce_instruction_mosaic_candidate(
+        composition_mosaic.produce_instruction_mosaic_candidate(
             seed,
             donor,
             record,
@@ -76,7 +76,7 @@ def test_core_reports_expected_and_actual_metadata_sha256(role: str) -> None:
         record["expected_donor_metadata_sha256"] = expected
 
     with pytest.raises(ByteIdentityError) as caught:
-        composition._produce_instruction_mosaic_candidate_core(
+        composition_mosaic._produce_instruction_mosaic_candidate_core(
             seed,
             donor,
             copy.deepcopy(record),

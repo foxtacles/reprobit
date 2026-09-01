@@ -11,10 +11,10 @@ from reprobit.classic.compiler_identity import (
     MSVC420_WIN32_I386_TARGET,
     Msvc420CompilerIdentity,
 )
-from reprobit.classic.scheduling import (
+from reprobit.classic.scheduling_apply import apply_instruction_schedule
+from reprobit.classic.scheduling_dependence import (
     IA32_SCHEDULE_PRIVATE_STACK_OBJECT_THEOREM,
     _ia32_schedule_private_stack_object_projection,
-    apply_instruction_schedule,
     ia32_esp_relative_displacement,
     ia32_esp_used_only_as_a_base,
     ia32_schedule_dependence_edges,

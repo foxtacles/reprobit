@@ -24,12 +24,10 @@ from .coff import (
     function_multiset,
     function_symbol,
 )
-from .composition import (
-    compose_equal_body_comdat,
-    compose_same_slot_resize,
-    instruction_mosaic_metadata_sha256,
-    require_instruction_mosaic_semantic_relocations,
-)
+from .composition import compose_equal_body_comdat
+from .composition_mosaic import instruction_mosaic_metadata_sha256
+from .composition_relocations import require_instruction_mosaic_semantic_relocations
+from .composition_same_slot import compose_same_slot_resize
 from .debug import _apply_replacements, parse_fpo_data, shifted_pointer
 from .foundation import local_symbol_kind, require_payload_free_declaration, sha256_bytes
 from .ia32 import require_declared_relocation_semantics

@@ -26,7 +26,7 @@ from __future__ import annotations
 import unittest
 
 import reprobit.classic.commutative as commutative_algorithms
-import reprobit.classic.rewriting as rewriting_algorithms
+import reprobit.classic.rewriting_certificates as rewriting_certificates
 from reprobit.binary import ByteIdentityError
 
 BODY = bytes.fromhex("90d901d808dec1d94204d84608dec1d95decc3")
@@ -276,7 +276,7 @@ class SeamValidatorTests(unittest.TestCase):
 
     def declaration(self, forms):
         return {
-            "kind": rewriting_algorithms.COMPOSED_REWRITING_KIND,
+            "kind": rewriting_certificates.COMPOSED_REWRITING_KIND,
             "commutative_operand_forms": forms,
             "expected_instruction_count": 9,
             "expected_changed_offsets": sorted(
@@ -293,7 +293,7 @@ class SeamValidatorTests(unittest.TestCase):
         }
 
     def test_a_lone_form_may_stand_alone(self):
-        normalized = rewriting_algorithms.validate_composed_rewriting(
+        normalized = rewriting_certificates.validate_composed_rewriting(
             self.declaration([site()]), "test", len(BODY)
         )
         self.assertEqual(
@@ -303,21 +303,21 @@ class SeamValidatorTests(unittest.TestCase):
 
     def test_duplicate_rewritten_bytes_are_refused(self):
         with self.assertRaises(ByteIdentityError) as raised:
-            rewriting_algorithms.validate_composed_rewriting(
+            rewriting_certificates.validate_composed_rewriting(
                 self.declaration([site(), site(pair_offset=3, offsets=(4, 6))]), "test", len(BODY)
             )
         self.assertIn("rewrite the same byte", str(raised.exception))
 
     def test_an_unknown_operation_is_refused(self):
         with self.assertRaises(ByteIdentityError) as raised:
-            rewriting_algorithms.validate_composed_rewriting(
+            rewriting_certificates.validate_composed_rewriting(
                 self.declaration([site(operation="fsub")]), "test", len(BODY)
             )
         self.assertIn("not a commutative", str(raised.exception))
 
     def test_donor_seam_accepts_the_same_forms_list(self):
         declaration = {
-            "kind": rewriting_algorithms.DONOR_REWRITING_KIND,
+            "kind": rewriting_certificates.DONOR_REWRITING_KIND,
             "commutative_operand_forms": [site()],
             "expected_instruction_count": 9,
             "expected_changed_offsets": [2, 4],
@@ -328,7 +328,7 @@ class SeamValidatorTests(unittest.TestCase):
                 "test fixture: the parse-state-dependent operand order of a commutative x87 product"
             ),
         }
-        normalized = rewriting_algorithms.validate_donor_rewriting(declaration, "test", len(BODY))
+        normalized = rewriting_certificates.validate_donor_rewriting(declaration, "test", len(BODY))
         self.assertEqual(
             normalized["commutative_operand_forms"],
             [{"pair_offset": 1, "operation": "fmul", "expected_rewritten_offsets": [2, 4]}],

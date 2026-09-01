@@ -36,7 +36,7 @@ import struct
 import unittest
 
 import reprobit.classic.coff as coff_algorithms
-import reprobit.classic.composition as composition_algorithms
+import reprobit.classic.composition_mosaic as composition_mosaic
 import reprobit.classic.debug as debug_algorithms
 import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.register_candidates as register_candidates
@@ -347,10 +347,10 @@ def function_record(seed_bytes, donor_bytes, image, proof, derived_detail, **ove
             coff_format.coff_body(donor, dp)
         ),
         "expected_body_sha256": foundation_algorithms.sha256_bytes(image),
-        "expected_seed_metadata_sha256": composition_algorithms.instruction_mosaic_metadata_sha256(
+        "expected_seed_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
             seed, sp
         ),
-        "expected_donor_metadata_sha256": composition_algorithms.instruction_mosaic_metadata_sha256(
+        "expected_donor_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
             donor, dp
         ),
         "expected_closure": [".debug$F", ".debug$S"],

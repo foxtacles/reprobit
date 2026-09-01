@@ -14,11 +14,13 @@ from reprobit.classic.coff_evidence import (
     _CoffSymbol,
 )
 from reprobit.classic.coff_projection import (
-    _CodeProjectionCertificate,
     _coff_compiler_congruence_trace,
-    _coff_semantic_envelope,
     _compiler_state_code_pairs,
     _OrderedArchiveSeedDependency,
+)
+from reprobit.classic.coff_projection_envelope import _coff_semantic_envelope
+from reprobit.classic.coff_projection_runtime import (
+    _CodeProjectionCertificate,
     _RuntimeProjectionEquivalence,
 )
 from reprobit.classic.compiler_identity import (

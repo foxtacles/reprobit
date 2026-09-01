@@ -35,7 +35,7 @@ import hashlib
 import unittest
 
 import reprobit.classic.register_semantics as register_algorithms
-import reprobit.classic.scheduling as schedule_algorithms
+import reprobit.classic.scheduling_dependence as scheduling_dependence
 from reprobit.binary import ByteIdentityError
 
 
@@ -320,14 +320,14 @@ class RepeatedStringFormTests(unittest.TestCase):
         would otherwise mislead refuses it -- twice over, because `F3 A5` is
         not in the schedule flag table either."""
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.ia32_schedule_instruction_facts(decode("f3a5"), "window")
+            scheduling_dependence.ia32_schedule_instruction_facts(decode("f3a5"), "window")
         self.assertIn("outside the instruction-schedule table", str(caught.exception))
         # and the gate behind it, reached by handing an opcode the schedule
         # table DOES admit a memory descriptor of unknown extent
         smuggled = dict(decode("8b4608"))
         smuggled["memory"] = dict(decode("f3a5")["memory"])
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.ia32_schedule_instruction_facts(smuggled, "window")
+            scheduling_dependence.ia32_schedule_instruction_facts(smuggled, "window")
         self.assertIn("unknown extent", str(caught.exception))
 
     def test_a_string_opcode_without_a_repeat_prefix_stays_refused(self):

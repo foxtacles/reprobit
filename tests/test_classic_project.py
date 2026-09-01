@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import reprobit.classic.composition as classic_composition
+import reprobit.classic.composition_same_slot as classic_composition_same_slot
 import reprobit.classic.scheduling as classic_scheduling
 import reprobit.source_export as source_export
 from reprobit.classic.compiler_identity import (
@@ -433,7 +434,7 @@ def test_function_dispatch_materializes_typed_candidate_fields(
         captured.update(values)
         return seed, {"accepted": True}
 
-    monkeypatch.setattr(classic_composition, "compose_same_slot_resize", compose)
+    monkeypatch.setattr(classic_composition_same_slot, "compose_same_slot_resize", compose)
     result = ClassicFamilyDispatcher().dispatch(
         intervention,
         ClassicDispatchMaterials(

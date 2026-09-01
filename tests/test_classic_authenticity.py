@@ -9,12 +9,26 @@ from pathlib import Path
 import pytest
 
 import reprobit.classic.composition as composition_algorithms
+import reprobit.classic.composition_comdat_order as composition_comdat_order
+import reprobit.classic.composition_fpo_identity as composition_fpo_identity
+import reprobit.classic.composition_hybrid_resize as composition_hybrid_resize
+import reprobit.classic.composition_mosaic as composition_mosaic
+import reprobit.classic.composition_relocations as composition_relocations
+import reprobit.classic.composition_same_slot as composition_same_slot
 import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.ia32 as ia32_algorithms
 import reprobit.classic.register_candidates as register_algorithms
 import reprobit.classic.relational as relational_algorithms
 import reprobit.classic.rewriting as rewriting_algorithms
+import reprobit.classic.rewriting_certificates as rewriting_certificates
+import reprobit.classic.rewriting_exchanges as rewriting_exchanges
+import reprobit.classic.rewriting_region_simulation as rewriting_region_simulation
 import reprobit.classic.scheduling as schedule_algorithms
+import reprobit.classic.scheduling_apply as scheduling_apply
+import reprobit.classic.scheduling_certificates as scheduling_certificates
+import reprobit.classic.scheduling_dependence as scheduling_dependence
+import reprobit.classic.scheduling_web_recolour as scheduling_web_recolour
+import reprobit.classic.scheduling_webs as scheduling_webs
 from reprobit.binary import ByteIdentityError
 
 FORBIDDEN_PAYLOAD_PARAMETERS = {
@@ -30,10 +44,24 @@ FORBIDDEN_PAYLOAD_PARAMETERS = {
 QUARANTINED_ORACLE_MODULE = "legacy_elision.py"
 CANDIDATE_MODULES = (
     composition_algorithms,
+    composition_comdat_order,
+    composition_fpo_identity,
+    composition_hybrid_resize,
+    composition_mosaic,
+    composition_relocations,
+    composition_same_slot,
     register_algorithms,
     relational_algorithms,
     rewriting_algorithms,
+    rewriting_certificates,
+    rewriting_exchanges,
+    rewriting_region_simulation,
     schedule_algorithms,
+    scheduling_apply,
+    scheduling_certificates,
+    scheduling_dependence,
+    scheduling_web_recolour,
+    scheduling_webs,
 )
 
 
@@ -59,7 +87,7 @@ def test_clean_candidate_entry_points_have_no_oracle_payload_parameter() -> None
 
 def test_clean_primitive_rejects_an_oracle_keyword() -> None:
     with pytest.raises(TypeError):
-        rewriting_algorithms.apply_simulated_region_rewrite(
+        rewriting_region_simulation.apply_simulated_region_rewrite(
             b"\xc3",
             [],
             frozenset(),
@@ -70,7 +98,7 @@ def test_clean_primitive_rejects_an_oracle_keyword() -> None:
 
 def test_clean_primitive_rejects_a_nested_oracle_payload() -> None:
     with pytest.raises(ByteIdentityError, match="embedded payload"):
-        rewriting_algorithms.apply_simulated_region_rewrite(
+        rewriting_region_simulation.apply_simulated_region_rewrite(
             b"\xc3",
             [{"oracle_payload": b"retail bytes"}],
             frozenset(),
@@ -80,7 +108,7 @@ def test_clean_primitive_rejects_a_nested_oracle_payload() -> None:
 
 def test_clean_producer_rejects_bytes_hidden_under_an_ignored_key() -> None:
     with pytest.raises(ByteIdentityError, match="embeds a byte payload"):
-        composition_algorithms.produce_reloc_divergent_candidate(
+        composition_same_slot.produce_reloc_divergent_candidate(
             b"not parsed",
             b"not parsed",
             {"notes": {"opaque": b"retail bytes"}},
@@ -113,12 +141,12 @@ def test_source_refactor_candidate_authenticates_source_before_composition(
         return b"candidate", {"object_authenticated": True}
 
     monkeypatch.setattr(
-        composition_algorithms,
+        composition_same_slot,
         "require_target_source_refactor_identity",
         authenticate,
     )
-    monkeypatch.setattr(composition_algorithms, "compose_same_slot_resize", compose)
-    output, proof = composition_algorithms.produce_source_refactor_candidate(
+    monkeypatch.setattr(composition_same_slot, "compose_same_slot_resize", compose)
+    output, proof = composition_same_slot.produce_source_refactor_candidate(
         b"seed object",
         b"donor object",
         {
@@ -181,7 +209,7 @@ def test_mosaic_ranges_use_current_reprobit_donor_identifiers() -> None:
 
 
 def test_mosaic_trace_labels_use_the_explicit_primary_dependency() -> None:
-    label = composition_algorithms._instruction_mosaic_range_donor_label
+    label = composition_mosaic._instruction_mosaic_range_donor_label
     assert label({}, "donor_primary") == "donor_primary"
     assert label({"donor": "donor_variant"}, "donor_primary") == "donor_variant"
 

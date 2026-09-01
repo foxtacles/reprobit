@@ -11,7 +11,10 @@ import unittest
 from unittest.mock import patch
 
 import reprobit.classic.register_semantics as register_algorithms
-import reprobit.classic.scheduling as schedule_algorithms
+import reprobit.classic.scheduling_apply as scheduling_apply
+import reprobit.classic.scheduling_certificates as scheduling_certificates
+import reprobit.classic.scheduling_dependence as scheduling_dependence
+import reprobit.classic.scheduling_webs as scheduling_webs
 import reprobit.classic.stack_frontier_balance as frontier_balance
 from reprobit.binary import ByteIdentityError
 from reprobit.classic.compiler_identity import (
@@ -47,7 +50,7 @@ LEA = bytes.fromhex("8d542414")
 PLAIN = bytes.fromhex("8b0a")
 PUSH = bytes.fromhex("52")
 FRAME_LOAD = bytes.fromhex("8b45ec")  # mov eax,[ebp-0x14]
-STACK_FRONTIER = schedule_algorithms.IA32_SCHEDULE_STACK_FRONTIER_THEOREM
+STACK_FRONTIER = scheduling_dependence.IA32_SCHEDULE_STACK_FRONTIER_THEOREM
 
 
 def canonical_compiler_identity() -> Msvc420CompilerIdentity:
@@ -106,10 +109,10 @@ EXTERNAL_CALL_BYTES = frozenset(range(4, 8))
 
 def stack_frontier_window(body: bytes, order: list[int], *, theorem: str = STACK_FRONTIER):
     instructions = decode(body)
-    facts, strict = schedule_algorithms.ia32_schedule_dependence_edges(
+    facts, strict = scheduling_dependence.ia32_schedule_dependence_edges(
         instructions, "w", body, False
     )
-    edges, _receipt = schedule_algorithms._ia32_schedule_stack_frontier_projection(
+    edges, _receipt = scheduling_dependence._ia32_schedule_stack_frontier_projection(
         instructions,
         facts,
         strict,
@@ -133,8 +136,8 @@ def stack_frontier_window(body: bytes, order: list[int], *, theorem: str = STACK
 
 def full_stack_frontier_window(body: bytes, start: int, end: int, order: list[int]):
     inside = [item for item in decode(body) if start <= item["offset"] < end]
-    facts, strict = schedule_algorithms.ia32_schedule_dependence_edges(inside, "w", body, False)
-    edges, _receipt = schedule_algorithms._ia32_schedule_stack_frontier_projection(
+    facts, strict = scheduling_dependence.ia32_schedule_dependence_edges(inside, "w", body, False)
+    edges, _receipt = scheduling_dependence._ia32_schedule_stack_frontier_projection(
         inside,
         facts,
         strict,
@@ -159,10 +162,12 @@ def full_stack_frontier_window(body: bytes, start: int, end: int, order: list[in
 class StackFrontierProjectionTest(unittest.TestCase):
     def test_a_register_push_implicitly_conflicts_with_unknown_explicit_memory(self):
         body = PUSH + FRAME_LOAD
-        _facts, edges = schedule_algorithms.ia32_schedule_dependence_edges(decode(body), "w", body)
+        _facts, edges = scheduling_dependence.ia32_schedule_dependence_edges(
+            decode(body), "w", body
+        )
         self.assertEqual(edges, [[0, 1, ["memory"]]])
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.require_topological_instruction_order(2, edges, [1, 0], "w")
+            scheduling_apply.require_topological_instruction_order(2, edges, [1, 0], "w")
         self.assertIn("dependence DAG forbids", str(caught.exception))
 
     def test_stack_frontier_keeps_register_reasons(self):
@@ -170,8 +175,10 @@ class StackFrontierProjectionTest(unittest.TestCase):
         # stack theorem removes only the implicit-store alias edge.
         body = PUSH + bytes.fromhex("8b55ec")
         instructions = decode(body)
-        facts, strict = schedule_algorithms.ia32_schedule_dependence_edges(instructions, "w", body)
-        edges, _receipt = schedule_algorithms._ia32_schedule_stack_frontier_projection(
+        facts, strict = scheduling_dependence.ia32_schedule_dependence_edges(
+            instructions, "w", body
+        )
+        edges, _receipt = scheduling_dependence._ia32_schedule_stack_frontier_projection(
             instructions,
             facts,
             strict,
@@ -187,8 +194,10 @@ class StackFrontierProjectionTest(unittest.TestCase):
     def test_stack_frontier_keeps_explicit_memory_edges(self):
         body = PUSH + bytes.fromhex("8945ec") + bytes.fromhex("8b0e")
         instructions = decode(body)
-        facts, strict = schedule_algorithms.ia32_schedule_dependence_edges(instructions, "w", body)
-        edges, _receipt = schedule_algorithms._ia32_schedule_stack_frontier_projection(
+        facts, strict = scheduling_dependence.ia32_schedule_dependence_edges(
+            instructions, "w", body
+        )
+        edges, _receipt = scheduling_dependence._ia32_schedule_stack_frontier_projection(
             instructions,
             facts,
             strict,
@@ -203,11 +212,11 @@ class StackFrontierProjectionTest(unittest.TestCase):
 
     def test_stack_frontier_never_projects_an_explicit_esp_alias(self):
         body = PUSH + bytes.fromhex("8b0424")  # push edx / mov eax,[esp]
-        facts, strict = schedule_algorithms.ia32_schedule_dependence_edges(
+        facts, strict = scheduling_dependence.ia32_schedule_dependence_edges(
             decode(body), "w", body, True
         )
         self.assertEqual(strict, [[0, 1, ["memory", "register_raw"]]])
-        self.assertIsNone(schedule_algorithms._ia32_schedule_stack_frontier_pair(0, 1, facts))
+        self.assertIsNone(scheduling_dependence._ia32_schedule_stack_frontier_pair(0, 1, facts))
 
 
 class BoundaryAuthenticityTest(unittest.TestCase):
@@ -242,7 +251,7 @@ class BoundaryAuthenticityTest(unittest.TestCase):
     def test_unrelated_function_pointer_and_ecx_write_are_not_a_member_call(self):
         body = bytes.fromhex("8bc88b1a56ff5304c3")
         instructions = decode(body)
-        flow = schedule_algorithms.ia32_web_control_flow(instructions, "w")
+        flow = scheduling_webs.ia32_web_control_flow(instructions, "w")
         self.assertIsNone(
             frontier_balance._one_word_vcall_shape(body, instructions, predecessors(flow), {}, 3)
         )
@@ -250,7 +259,7 @@ class BoundaryAuthenticityTest(unittest.TestCase):
     def test_sub_esp_is_not_a_callee_clean_argument_push(self):
         body = bytes.fromhex("83ec048bc8ff5304c3")
         instructions = decode(body)
-        flow = schedule_algorithms.ia32_web_control_flow(instructions, "w")
+        flow = scheduling_webs.ia32_web_control_flow(instructions, "w")
         self.assertIsNone(
             frontier_balance._one_word_vcall_shape(body, instructions, predecessors(flow), {}, 2)
         )
@@ -265,7 +274,7 @@ class BoundaryAuthenticityTest(unittest.TestCase):
     def test_strong_vcall_binds_the_exact_receiver_vtable_lea_push_chain(self) -> None:
         body = bytes.fromhex("8bce8b2e8d471050ff5528c3")
         instructions = decode(body)
-        flow = schedule_algorithms.ia32_web_control_flow(instructions, "w")
+        flow = scheduling_webs.ia32_web_control_flow(instructions, "w")
         shape = frontier_balance._one_word_vcall_shape(
             body, instructions, predecessors(flow), {}, 4
         )
@@ -283,7 +292,7 @@ class BoundaryAuthenticityTest(unittest.TestCase):
             with self.subTest(body=body_hex):
                 body = bytes.fromhex(body_hex)
                 instructions = decode(body)
-                flow = schedule_algorithms.ia32_web_control_flow(instructions, "w")
+                flow = scheduling_webs.ia32_web_control_flow(instructions, "w")
                 self.assertIsNone(
                     frontier_balance._one_word_vcall_shape(
                         body, instructions, predecessors(flow), {}, 4
@@ -293,7 +302,7 @@ class BoundaryAuthenticityTest(unittest.TestCase):
     def test_strong_vcall_refuses_an_extra_cfg_entry_into_its_chain(self) -> None:
         body = bytes.fromhex("8bce8b2e8d471050ff5528c3")
         instructions = decode(body)
-        flow = schedule_algorithms.ia32_web_control_flow(instructions, "w")
+        flow = scheduling_webs.ia32_web_control_flow(instructions, "w")
         predecessor_rows = predecessors(flow)
         predecessor_rows[2].append(0)
         self.assertIsNone(
@@ -310,7 +319,7 @@ class BoundaryAuthenticityTest(unittest.TestCase):
             with self.subTest(body=body_hex):
                 body = bytes.fromhex(body_hex)
                 instructions = decode(body)
-                flow = schedule_algorithms.ia32_web_control_flow(instructions, "w")
+                flow = scheduling_webs.ia32_web_control_flow(instructions, "w")
                 self.assertIsNone(
                     frontier_balance._one_word_vcall_shape(
                         body, instructions, predecessors(flow), relocations, 4
@@ -320,7 +329,7 @@ class BoundaryAuthenticityTest(unittest.TestCase):
     def test_strong_vcall_refuses_a_relocated_call_operand(self) -> None:
         body = bytes.fromhex("8bce8b2e8d471050ff9528000000c3")
         instructions = decode(body)
-        flow = schedule_algorithms.ia32_web_control_flow(instructions, "w")
+        flow = scheduling_webs.ia32_web_control_flow(instructions, "w")
         for width in (4, 0, "4"):
             with self.subTest(width=width):
                 relocations = {10: {"width": width, "target": "?slot@@3HA"}}
@@ -363,7 +372,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
             "stack_adjustments": [[3, 11, 28, 24]],
             "stack_frontier_theorem": STACK_FRONTIER,
         }
-        image, proof = schedule_algorithms.apply_instruction_schedule(
+        image, proof = scheduling_apply.apply_instruction_schedule(
             body,
             [window],
             frozenset(),
@@ -399,7 +408,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
             "stack_adjustments": [[4, 17, 24, 28]],
             "stack_frontier_theorem": STACK_FRONTIER,
         }
-        image, proof = schedule_algorithms.apply_instruction_schedule(
+        image, proof = scheduling_apply.apply_instruction_schedule(
             body,
             [window],
             frozenset(),
@@ -421,11 +430,11 @@ class StackFrontierApplicationTest(unittest.TestCase):
         body = bytes.fromhex("83ec20e8000000008b4424185289480483c424c3")
         window = full_stack_frontier_window(body, 12, 16, [1, 0])
         with patch.object(
-            schedule_algorithms,
+            scheduling_apply,
             "decode_ia32_bijection_body",
             side_effect=AssertionError("standard v1 requested private boundary evidence"),
         ):
-            image, proof = schedule_algorithms.apply_instruction_schedule(
+            image, proof = scheduling_apply.apply_instruction_schedule(
                 body,
                 [window],
                 EXTERNAL_CALL_BYTES,
@@ -442,7 +451,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
     def test_stack_frontier_moves_a_push_past_an_explicit_cell(self) -> None:
         body = bytes.fromhex("83ec20e8000000008d4424185289480483c424c3")
         window = full_stack_frontier_window(body, 12, 16, [1, 0])
-        image, proof = schedule_algorithms.apply_instruction_schedule(
+        image, proof = scheduling_apply.apply_instruction_schedule(
             body,
             [window],
             EXTERNAL_CALL_BYTES,
@@ -463,7 +472,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
             10: {"width": 4, "target": "?foo@@QAEJH@Z"},
         }
         instructions = decode(body)
-        successors = schedule_algorithms.ia32_web_control_flow(instructions, "s")
+        successors = scheduling_webs.ia32_web_control_flow(instructions, "s")
         floor, first_call = frame_floor(body, instructions, "s")
         sink = next(index for index, item in enumerate(instructions) if item["offset"] == 18)
         ancestor_set = ancestors(predecessors(successors), {sink})
@@ -491,7 +500,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
             11: {"width": 4, "target": "?foo@@QAEJH@Z"},
         }
         instructions = decode(body)
-        successors = schedule_algorithms.ia32_web_control_flow(instructions, "s")
+        successors = scheduling_webs.ia32_web_control_flow(instructions, "s")
         floor, first_call = frame_floor(body, instructions, "s")
         sink = next(index for index, item in enumerate(instructions) if item["offset"] == 10)
         ancestor_set = ancestors(predecessors(successors), {sink})
@@ -520,7 +529,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
                     10: {"width": 4, "target": target},
                 }
                 instructions = decode(body)
-                successors = schedule_algorithms.ia32_web_control_flow(instructions, "s")
+                successors = scheduling_webs.ia32_web_control_flow(instructions, "s")
                 sink = next(index for index, item in enumerate(instructions) if item["offset"] == 9)
                 ancestor_set = ancestors(predecessors(successors), {sink})
                 floor, first_call = frame_floor(body, instructions, "s")
@@ -543,7 +552,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
         body = bytes.fromhex("83ec10e8000000008bce8b0656ff105e83c410c3")
         relocations = {4: {"width": 4, "target": "?Probe@@YAXXZ"}}
         instructions = decode(body)
-        successors = schedule_algorithms.ia32_web_control_flow(instructions, "s")
+        successors = scheduling_webs.ia32_web_control_flow(instructions, "s")
         sink = next(index for index, item in enumerate(instructions) if item["offset"] == 13)
         ancestor_set = ancestors(predecessors(successors), {sink})
         floor, first_call = frame_floor(body, instructions, "s")
@@ -576,7 +585,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
         body = bytes.fromhex("83ec10e8000000008bce8b0652ff109090909090905a83c410c3")
         relocations = {4: {"width": 4, "target": "?Probe@@YAXXZ"}}
         instructions = decode(body)
-        successors = schedule_algorithms.ia32_web_control_flow(instructions, "s")
+        successors = scheduling_webs.ia32_web_control_flow(instructions, "s")
         predecessor_rows = predecessors(successors)
         sink = next(index for index, item in enumerate(instructions) if item["offset"] == 20)
         ancestor_set = ancestors(predecessor_rows, {sink})
@@ -600,7 +609,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
         body = bytes.fromhex("83ec10e8000000008bce8b0652ff108bce8b0652ff109090909090905a83c410c3")
         relocations = {4: {"width": 4, "target": "?Probe@@YAXXZ"}}
         instructions = decode(body)
-        successors = schedule_algorithms.ia32_web_control_flow(instructions, "s")
+        successors = scheduling_webs.ia32_web_control_flow(instructions, "s")
         floor, first_call = frame_floor(body, instructions, "s")
         with self.assertRaises(ByteIdentityError) as caught:
             frontier_balance.derive_stack_depths(
@@ -621,7 +630,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
         body = bytes.fromhex("83ec10e8000000008bce8b0652ff1090538bce8b0657ff105a83c410c3")
         relocations = {4: {"width": 4, "target": "?Probe@@YAXXZ"}}
         instructions = decode(body)
-        successors = schedule_algorithms.ia32_web_control_flow(instructions, "s")
+        successors = scheduling_webs.ia32_web_control_flow(instructions, "s")
         floor, first_call = frame_floor(body, instructions, "s")
         with self.assertRaises(ByteIdentityError):
             frontier_balance.derive_stack_depths(
@@ -644,7 +653,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
             18: {"width": 4, "target": "?helper@@QAEJH@Z"},
         }
         instructions = decode(body)
-        successors = schedule_algorithms.ia32_web_control_flow(instructions, "s")
+        successors = scheduling_webs.ia32_web_control_flow(instructions, "s")
         floor, first_call = frame_floor(body, instructions, "s")
         with self.assertRaises(ByteIdentityError) as caught:
             frontier_balance.derive_stack_depths(
@@ -663,7 +672,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
         body = bytes.fromhex("83ec10e80000000053eb008bce8b0657ff105b83c410c3")
         relocations = {4: {"width": 4, "target": "?Probe@@YAXXZ"}}
         instructions = decode(body)
-        successors = schedule_algorithms.ia32_web_control_flow(instructions, "s")
+        successors = scheduling_webs.ia32_web_control_flow(instructions, "s")
         floor, first_call = frame_floor(body, instructions, "s")
         with self.assertRaises(ByteIdentityError) as caught:
             frontier_balance.derive_stack_depths(
@@ -682,7 +691,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
         body = bytes.fromhex("83ec10e8000000008bce8b0652ff1083c4048bce8b0652ff1083c410c3")
         relocations = {4: {"width": 4, "target": "?Probe@@YAXXZ"}}
         instructions = decode(body)
-        successors = schedule_algorithms.ia32_web_control_flow(instructions, "s")
+        successors = scheduling_webs.ia32_web_control_flow(instructions, "s")
         floor, first_call = frame_floor(body, instructions, "s")
         with self.assertRaises(ByteIdentityError) as caught:
             frontier_balance.derive_stack_depths(
@@ -710,7 +719,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
         body = bytes.fromhex("8bc483e804891051")
         instructions = decode(body)
         order = [0, 1, 3, 2]
-        _facts, edges = schedule_algorithms.ia32_schedule_dependence_edges(
+        _facts, edges = scheduling_dependence.ia32_schedule_dependence_edges(
             instructions, "w", body, False
         )
         window = {
@@ -723,7 +732,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
             "stack_frontier_theorem": STACK_FRONTIER,
         }
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.apply_instruction_schedule(
+            scheduling_apply.apply_instruction_schedule(
                 body + b"\xc3",
                 [window],
                 frozenset(),
@@ -738,7 +747,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
         for compiler_identity in (None, "msvc-5.00-win32-i386"):
             with self.subTest(compiler_identity=compiler_identity):
                 with self.assertRaises(ByteIdentityError) as caught:
-                    schedule_algorithms.apply_instruction_schedule(
+                    scheduling_apply.apply_instruction_schedule(
                         body + b"\xc3",
                         [window],
                         frozenset(),
@@ -751,7 +760,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
         body = PUSH + FRAME_LOAD
         window = stack_frontier_window(body, [1, 0])
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.apply_instruction_schedule(
+            scheduling_apply.apply_instruction_schedule(
                 body + b"\xc3",
                 [window],
                 frozenset(),
@@ -764,7 +773,9 @@ class StackFrontierApplicationTest(unittest.TestCase):
     def test_stack_frontier_refuses_when_its_discharged_pair_does_not_move(self):
         body = PUSH + FRAME_LOAD + bytes.fromhex("8d4e04")
         instructions = decode(body)
-        _facts, edges = schedule_algorithms.ia32_schedule_dependence_edges(instructions, "w", body)
+        _facts, edges = scheduling_dependence.ia32_schedule_dependence_edges(
+            instructions, "w", body
+        )
         window = {
             "start": 0,
             "end": len(body),
@@ -775,7 +786,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
             "stack_frontier_theorem": STACK_FRONTIER,
         }
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.apply_instruction_schedule(
+            scheduling_apply.apply_instruction_schedule(
                 body + b"\xc3",
                 [window],
                 frozenset(),
@@ -787,7 +798,9 @@ class StackFrontierApplicationTest(unittest.TestCase):
     def test_stack_frontier_refuses_when_there_is_no_explicit_memory_pair(self):
         body = PUSH + bytes.fromhex("8d4e04")
         instructions = decode(body)
-        _facts, edges = schedule_algorithms.ia32_schedule_dependence_edges(instructions, "w", body)
+        _facts, edges = scheduling_dependence.ia32_schedule_dependence_edges(
+            instructions, "w", body
+        )
         window = {
             "start": 0,
             "end": len(body),
@@ -798,7 +811,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
             "stack_frontier_theorem": STACK_FRONTIER,
         }
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.apply_instruction_schedule(
+            scheduling_apply.apply_instruction_schedule(
                 body + b"\xc3",
                 [window],
                 frozenset(),
@@ -819,7 +832,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
             "stack_frontier_theorem": STACK_FRONTIER,
         }
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.apply_instruction_schedule(
+            scheduling_apply.apply_instruction_schedule(
                 body + b"\xc3",
                 [window],
                 frozenset(),
@@ -840,7 +853,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
             "stack_frontier_theorem": STACK_FRONTIER,
         }
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms.apply_instruction_schedule(
+            scheduling_apply.apply_instruction_schedule(
                 body + b"\xc3",
                 [window],
                 frozenset(),
@@ -854,7 +867,7 @@ class StackFrontierApplicationTest(unittest.TestCase):
         window = stack_frontier_window(body, [1, 0])
         window["stack_frontier_theorem"] = "msvc-4.20-stack-frontier"
         with self.assertRaises(ByteIdentityError) as caught:
-            schedule_algorithms._validate_schedule_windows([window], "s", len(body))
+            scheduling_certificates._validate_schedule_windows([window], "s", len(body))
         self.assertIn("stack_frontier_theorem differs", str(caught.exception))
 
 

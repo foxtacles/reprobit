@@ -39,6 +39,7 @@ import reprobit.classic.floating as floating_algorithms
 import reprobit.classic.foundation as foundation_algorithms
 import reprobit.classic.register_semantics as register_algorithms
 import reprobit.classic.rewriting as rewriting_algorithms
+import reprobit.classic.rewriting_certificates as rewriting_certificates
 import reprobit.coff_format as coff_format
 from reprobit.binary import ByteIdentityError
 
@@ -168,7 +169,7 @@ class DonorRewritingValidatorTests(unittest.TestCase):
 
     def spec(self, **overrides):
         value = {
-            "kind": rewriting_algorithms.DONOR_REWRITING_KIND,
+            "kind": rewriting_certificates.DONOR_REWRITING_KIND,
             "fp_sum_rotations": [chain_declaration()],
             "register_bijections": [
                 {
@@ -189,7 +190,7 @@ class DonorRewritingValidatorTests(unittest.TestCase):
             "authenticity_rationale": "x" * 64,
         }
         value.update(overrides)
-        return rewriting_algorithms.validate_donor_rewriting(value, "test", SIZE)
+        return rewriting_certificates.validate_donor_rewriting(value, "test", SIZE)
 
     def test_a_valid_declaration_normalizes(self):
         spec = self.spec()
@@ -269,7 +270,7 @@ class ComposedRewritingIntegrationTests(unittest.TestCase):
 
     def record(self, **spec_overrides):
         spec = {
-            "kind": rewriting_algorithms.COMPOSED_REWRITING_KIND,
+            "kind": rewriting_certificates.COMPOSED_REWRITING_KIND,
             "windows": [],
             "relational_sites": [],
             "fp_sum_rotations": [chain_declaration()],
@@ -341,7 +342,7 @@ class ComposedRewritingIntegrationTests(unittest.TestCase):
         del record["composed_rewriting"]["windows"]
         del record["composed_rewriting"]["relational_sites"]
         with self.assertRaises(ByteIdentityError) as raised:
-            rewriting_algorithms.validate_composed_rewriting(
+            rewriting_certificates.validate_composed_rewriting(
                 record["composed_rewriting"], "test", SIZE
             )
         self.assertIn("overlaps another certificate", str(raised.exception))

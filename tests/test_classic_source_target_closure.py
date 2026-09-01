@@ -4,7 +4,7 @@ from hashlib import sha256
 
 import pytest
 
-import reprobit.classic.composition as composition_algorithms
+import reprobit.classic.composition_same_slot as composition_same_slot
 import reprobit.classic.source_proofs as source_proof_algorithms
 from reprobit.binary import ByteIdentityError
 
@@ -66,8 +66,8 @@ def test_target_source_range_identity_rejects_target_change() -> None:
 
 
 def test_source_target_closure_has_oracle_free_public_producer() -> None:
-    assert callable(composition_algorithms.produce_source_target_closure_candidate)
+    assert callable(composition_same_slot.produce_source_target_closure_candidate)
     assert not hasattr(
-        composition_algorithms,
+        composition_same_slot,
         "compose_retail_exact_source_target_closure",
     )

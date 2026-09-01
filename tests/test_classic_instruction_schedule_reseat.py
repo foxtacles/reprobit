@@ -29,6 +29,8 @@ from __future__ import annotations
 import unittest
 
 import reprobit.classic.scheduling as schedule_algorithms
+import reprobit.classic.scheduling_apply as scheduling_apply
+import reprobit.classic.scheduling_certificates as scheduling_certificates
 from reprobit.binary import ByteIdentityError
 
 PROLOGUE = bytes.fromhex("5356")
@@ -60,7 +62,7 @@ def window(reseat=None, order=(1, 0), lengths=(7, 3), edges=()):
 
 
 def apply(windows=None, body=BODY, covered=COVERED, symbols=None):
-    return schedule_algorithms.apply_instruction_schedule(
+    return scheduling_apply.apply_instruction_schedule(
         body,
         [window([[RELOCATION_OFFSET, RESEATED_OFFSET]])] if windows is None else windows,
         covered,
@@ -136,7 +138,7 @@ class ReseatSchemaTests(unittest.TestCase):
         }
 
     def test_a_valid_reseat_is_normalised(self):
-        value = schedule_algorithms.validate_instruction_schedule(
+        value = scheduling_certificates.validate_instruction_schedule(
             self.spec([[RELOCATION_OFFSET, RESEATED_OFFSET]]), "spec", len(BODY)
         )
         self.assertEqual(
@@ -144,7 +146,7 @@ class ReseatSchemaTests(unittest.TestCase):
         )
 
     def test_a_window_without_a_reseat_declares_none(self):
-        value = schedule_algorithms.validate_instruction_schedule(
+        value = scheduling_certificates.validate_instruction_schedule(
             self.spec(None), "spec", len(BODY)
         )
         self.assertNotIn("relocation_reseat", value["windows"][0])
@@ -158,7 +160,9 @@ class ReseatSchemaTests(unittest.TestCase):
             [],
         ):
             with self.subTest(bad=bad), self.assertRaises(ByteIdentityError):
-                schedule_algorithms.validate_instruction_schedule(self.spec(bad), "spec", len(BODY))
+                scheduling_certificates.validate_instruction_schedule(
+                    self.spec(bad), "spec", len(BODY)
+                )
 
 
 class ReseatDelegateTests(unittest.TestCase):

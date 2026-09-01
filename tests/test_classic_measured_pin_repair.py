@@ -6,7 +6,7 @@ from typing import cast
 import pytest
 import test_classic_register_bijection_reencoding_full as coff_fixture
 
-from reprobit.classic import composition
+from reprobit.classic import composition_mosaic
 from reprobit.classic.measured_pin_repair import (
     MeasuredPinRepairError,
     repair_measured_pins,
@@ -277,10 +277,10 @@ def test_source_equal_body_refreshes_seed_and_metadata_but_not_donor_goal() -> N
     assert expected["expected_seed_body_sha256"] == sha256(_body(seed)).hexdigest()
     assert expected["expected_changed_offsets"] == [0]
     assert expected["expected_seed_metadata_sha256"] == (
-        composition.instruction_mosaic_metadata_sha256(seed_coff, seed_primary)
+        composition_mosaic.instruction_mosaic_metadata_sha256(seed_coff, seed_primary)
     )
     assert expected["expected_donor_metadata_sha256"] == (
-        composition.instruction_mosaic_metadata_sha256(donor_coff, donor_primary)
+        composition_mosaic.instruction_mosaic_metadata_sha256(donor_coff, donor_primary)
     )
     assert expected["expected_code_renames"] == [[7, "L"]]
     assert dispatcher.constraints == expected
@@ -314,11 +314,11 @@ def test_source_equal_body_requires_matching_donor_pins_and_dispatch_acceptance(
             "expected_body_sha256": donor_digest,
             "expected_changed_offsets": [1],
             "expected_donor_body_sha256": donor_digest,
-            "expected_donor_metadata_sha256": composition.instruction_mosaic_metadata_sha256(
+            "expected_donor_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
                 donor_coff, donor_coff.function_section(SYMBOL)
             ),
             "expected_seed_body_sha256": sha256(_body(seed)).hexdigest(),
-            "expected_seed_metadata_sha256": composition.instruction_mosaic_metadata_sha256(
+            "expected_seed_metadata_sha256": composition_mosaic.instruction_mosaic_metadata_sha256(
                 seed_coff, seed_coff.function_section(SYMBOL)
             ),
         },

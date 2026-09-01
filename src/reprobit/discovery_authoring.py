@@ -14,10 +14,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from reprobit.binary import ByteIdentityError
-from reprobit.classic.composition import (
-    compose_equal_body_comdat,
-    measure_composition_pins,
-)
+from reprobit.classic.composition import compose_equal_body_comdat, measure_composition_pins
 from reprobit.classic_donors import (
     DonorSourceError,
     generate_declaration_shape,

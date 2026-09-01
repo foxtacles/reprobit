@@ -20,11 +20,9 @@ from .coff import (
     comdat_primary_identity_multiset,
     function_multiset,
 )
-from .composition import (
-    compose_equal_body_comdat,
-    instruction_mosaic_metadata_sha256,
-    require_instruction_mosaic_semantic_relocations,
-)
+from .composition import compose_equal_body_comdat
+from .composition_mosaic import instruction_mosaic_metadata_sha256
+from .composition_relocations import require_instruction_mosaic_semantic_relocations
 from .foundation import (
     exact_audit_keys,
     require_exact_int,

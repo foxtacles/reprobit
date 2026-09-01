@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import unittest
 
-import reprobit.classic.rewriting as rewriting_algorithms
+import reprobit.classic.rewriting_region_simulation as rewriting_region_simulation
 from reprobit.binary import ByteIdentityError
 
 BODY = bytes.fromhex("908b4df08b55f4894dec8955e833c933d2c3")
@@ -49,7 +49,7 @@ def declaration(**overrides):
 
 
 def apply(body=BODY, items=None):
-    return rewriting_algorithms.apply_simulated_region_rewrite(
+    return rewriting_region_simulation.apply_simulated_region_rewrite(
         body, items if items is not None else [declaration()], frozenset(), "test"
     )
 
@@ -99,7 +99,7 @@ class RewriteTests(unittest.TestCase):
             "dead_registers": [],
             "dead_slots": [],
         }
-        image, proof = rewriting_algorithms.apply_simulated_region_rewrite(
+        image, proof = rewriting_region_simulation.apply_simulated_region_rewrite(
             body, [item], frozenset({4, 5, 6, 7}), "test"
         )
         self.assertEqual(proof["relocation_reseat"], [[4, 7]])

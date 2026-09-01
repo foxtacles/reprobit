@@ -18,6 +18,9 @@ from types import MappingProxyType
 from typing import Any
 
 import reprobit.classic.composition as composition
+import reprobit.classic.composition_hybrid_resize as hybrid_resize
+import reprobit.classic.composition_mosaic as mosaic
+import reprobit.classic.composition_same_slot as same_slot
 import reprobit.classic.pe_imports as pe_imports
 import reprobit.classic.pe_metadata as pe_metadata
 import reprobit.classic.pe_rdata as pe_rdata
@@ -241,10 +244,10 @@ class ClassicFamilyDispatcher:
         }:
             output, proof = composition.compose_equal_body_comdat(seed, donor, function)
         elif family is ClassicRecipeFamily.SAME_SLOT_RESIZE:
-            output, proof = composition.compose_same_slot_resize(seed, donor, function)
+            output, proof = same_slot.compose_same_slot_resize(seed, donor, function)
         elif family is ClassicRecipeFamily.RETAIL_EXACT_RELOC_DIVERGENT:
             if "target_source_refactor" in function:
-                output, proof = composition.produce_source_refactor_candidate(
+                output, proof = same_slot.produce_source_refactor_candidate(
                     seed,
                     donor,
                     function,
@@ -252,14 +255,14 @@ class ClassicFamilyDispatcher:
                     _required_bytes(materials.donor_source, "donor source"),
                 )
             else:
-                output, proof = composition.produce_reloc_divergent_candidate(seed, donor, function)
+                output, proof = same_slot.produce_reloc_divergent_candidate(seed, donor, function)
         elif family is ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING:
             output, proof = rewriting.produce_donor_rewriting_candidate(
                 seed, donor, function, compiler_identity=materials.compiler_identity
             )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC:
             if "target_source_refactor" in function:
-                output, proof = composition.produce_source_instruction_mosaic_candidate(
+                output, proof = mosaic.produce_source_instruction_mosaic_candidate(
                     seed,
                     donor,
                     function,
@@ -269,7 +272,7 @@ class ClassicFamilyDispatcher:
                     primary_donor_id=intervention.dependencies[0],
                 )
             else:
-                output, proof = composition.produce_instruction_mosaic_candidate(
+                output, proof = mosaic.produce_instruction_mosaic_candidate(
                     seed,
                     donor,
                     function,
@@ -297,7 +300,7 @@ class ClassicFamilyDispatcher:
                 seed, donor, function, compiler_identity=materials.compiler_identity
             )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_CROSS_TU_COMPLETE_TARGET_RESIZE:
-            output, proof = composition.produce_cross_tu_complete_target_resize_candidate(
+            output, proof = hybrid_resize.produce_cross_tu_complete_target_resize_candidate(
                 seed,
                 _required_bytes(materials.target_donor_object, "target donor object"),
                 _required_bytes(materials.complete_donor_object, "complete donor object"),
@@ -308,7 +311,7 @@ class ClassicFamilyDispatcher:
                 seed, donor, function
             )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_SAME_TU_INSTRUCTION_HYBRID_RESIZE:
-            output, proof = composition.produce_same_tu_instruction_hybrid_resize_candidate(
+            output, proof = hybrid_resize.produce_same_tu_instruction_hybrid_resize_candidate(
                 seed,
                 _required_bytes(materials.target_donor_object, "target donor object"),
                 _required_bytes(materials.instruction_donor_object, "instruction donor object"),
@@ -318,7 +321,7 @@ class ClassicFamilyDispatcher:
                 _required_bytes(materials.instruction_donor_source, "instruction donor source"),
             )
         elif family is ClassicRecipeFamily.RETAIL_EXACT_SOURCE_TARGET_CLOSURE:
-            output, proof = composition.produce_source_target_closure_candidate(
+            output, proof = same_slot.produce_source_target_closure_candidate(
                 seed,
                 donor,
                 function,
