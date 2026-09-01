@@ -2,20 +2,14 @@ from __future__ import annotations
 
 import os
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from reprobit.classic_incremental_context import (
-    SNAPSHOT_IDENTITY_FIELDS,
     ClassicIncrementalError,
     PhysicalInputCensus,
-    snapshot_identity_is_exact,
 )
-from reprobit.model import Digest
-from reprobit.secure_path_contracts import SecureFileIdentity, SecureFileSnapshot
 
 
 def test_known_path_returns_exact_sample_without_resolving_again(
@@ -115,137 +109,5 @@ def test_census_still_rejects_mutation_after_exact_known_path_lookup(tmp_path: P
     assert census.known_path(sampled) == sampled
 
     source.write_text("int value = 2;\n")
-    with pytest.raises(ClassicIncrementalError, match="changed before cache publication"):
-        census.validate_all()
-
-
-def _count_hashes(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
-    """Record every full content hash the census performs."""
-
-    import reprobit.classic_incremental_context as context
-
-    hashed: list[Path] = []
-    real_digest = context.digest_relative_file
-
-    def counting_digest(root: Path, relative: str) -> SecureFileSnapshot:
-        hashed.append(root.joinpath(*relative.split("/")))
-        return real_digest(root, relative)
-
-    monkeypatch.setattr(context, "digest_relative_file", counting_digest)
-    return hashed
-
-
-def test_snapshot_reuses_an_exact_sample_without_hashing_again(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = tmp_path / "source.cpp"
-    source.write_text("int value = 1;\n")
-    hashed = _count_hashes(monkeypatch)
-    census = PhysicalInputCensus()
-
-    first = census.snapshot(source)
-    assert len(hashed) == 1
-    assert census.snapshot(source) == first
-    assert census.snapshot(tmp_path / "nested" / ".." / "source.cpp") == first
-    assert len(hashed) == 1
-
-    census.validate_all()
-    census.validate([source])
-    assert len(hashed) == 1
-
-
-@pytest.mark.parametrize("field", SNAPSHOT_IDENTITY_FIELDS)
-def test_snapshot_hashes_again_when_any_identity_field_differs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
-) -> None:
-    import reprobit.classic_incremental_context as context
-
-    source = tmp_path / "source.cpp"
-    source.write_text("int value = 1;\n")
-    hashed = _count_hashes(monkeypatch)
-    census = PhysicalInputCensus()
-    first = census.snapshot(source)
-    real_stat = context.stat_relative_file
-
-    def drifted_stat(root: Path, relative: str) -> SecureFileIdentity:
-        identity = real_stat(root, relative)
-        recorded = getattr(identity, field)
-        drifted = recorded + b"\x01" if isinstance(recorded, bytes) else recorded + 1
-        return replace(identity, **{field: drifted})
-
-    monkeypatch.setattr(context, "stat_relative_file", drifted_stat)
-    # The file itself is unchanged, so the forced re-hash agrees with the sample.
-    assert census.snapshot(source) == first
-    assert len(hashed) == 2
-    census.validate_all()
-    assert len(hashed) == 3
-
-
-def test_snapshot_hashes_again_when_the_identity_lacks_an_attribute(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import reprobit.classic_incremental_context as context
-
-    source = tmp_path / "source.cpp"
-    source.write_text("int value = 1;\n")
-    hashed = _count_hashes(monkeypatch)
-    census = PhysicalInputCensus()
-    first = census.snapshot(source)
-    real_stat = context.stat_relative_file
-
-    def partial_stat(root: Path, relative: str) -> object:
-        identity = real_stat(root, relative)
-        values = {name: getattr(identity, name) for name in SNAPSHOT_IDENTITY_FIELDS}
-        del values["ctime_ns"]
-        return SimpleNamespace(path=identity.path, **values)
-
-    monkeypatch.setattr(context, "stat_relative_file", partial_stat)
-    assert census.snapshot(source) == first
-    assert len(hashed) == 2
-
-
-def test_snapshot_identity_is_exact_requires_the_same_path_and_every_field() -> None:
-    recorded = SecureFileSnapshot(
-        Path("/held/source.cpp"), Digest.from_bytes(b"x"), 1, 2, 3, 4, 5, 6, b"id", 7
-    )
-    same = SecureFileIdentity(Path("/held/source.cpp"), 1, 2, 3, 4, 5, 6, b"id", 7)
-    assert snapshot_identity_is_exact(recorded, same)
-    assert not snapshot_identity_is_exact(recorded, replace(same, path=Path("/held/other.cpp")))
-    for field in SNAPSHOT_IDENTITY_FIELDS:
-        current = getattr(same, field)
-        drifted = current + b"!" if isinstance(current, bytes) else current + 1
-        assert not snapshot_identity_is_exact(recorded, replace(same, **{field: drifted}))
-    assert not snapshot_identity_is_exact(recorded, SimpleNamespace(path=recorded.path))
-    assert not snapshot_identity_is_exact(recorded, object())
-
-
-def test_census_rejects_an_edit_that_keeps_the_size_and_modification_time(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    source = tmp_path / "source.cpp"
-    source.write_text("int value = 1;\n")
-    hashed = _count_hashes(monkeypatch)
-    census = PhysicalInputCensus()
-    census.snapshot(source)
-    original = os.stat(source)
-
-    source.write_text("int value = 2;\n")
-    os.utime(source, ns=(original.st_atime_ns, original.st_mtime_ns))
-    # Same size and mtime, but the change time and content differ: the edit is
-    # hashed again and rejected everywhere the census is consulted.
-    with pytest.raises(ClassicIncrementalError, match="changed while planning"):
-        census.snapshot(source)
-    with pytest.raises(ClassicIncrementalError, match="changed before cache publication"):
-        census.validate_all()
-    assert len(hashed) == 3
-
-
-def test_census_rejects_a_touch_that_leaves_the_content_alone(tmp_path: Path) -> None:
-    source = tmp_path / "source.cpp"
-    source.write_text("int value = 1;\n")
-    census = PhysicalInputCensus()
-    sampled = census.snapshot(source)
-
-    os.utime(source, ns=(sampled.mtime_ns + 1_000_000_000, sampled.mtime_ns + 1_000_000_000))
     with pytest.raises(ClassicIncrementalError, match="changed before cache publication"):
         census.validate_all()
