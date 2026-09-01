@@ -219,6 +219,8 @@ def _derive_register_transposition(
                     clean_entries,
                 )
             except ByteIdentityError:
+                # This mapping cannot be applied to the clean body; it is not a
+                # candidate, and the next mapping is tried.
                 continue
             if image == effective_section.body:
                 candidates.append((mapping, proof))

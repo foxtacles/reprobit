@@ -144,6 +144,8 @@ def _try_register_bijection(
                             source_records,
                         )
                     except ByteIdentityError:
+                        # The bijection does not re-encode this region; it is not
+                        # a candidate colouring, and the next one is tried.
                         continue
                     image_instructions = _instructions(
                         image,
@@ -572,6 +574,8 @@ def _prove_register_web_recolour(
                 entry_offsets=frozenset(pair.external_entries),
             )
         except ByteIdentityError:
+            # This recolouring cannot be applied to the clean body; it is not a
+            # candidate, and the next one is tried.
             continue
         if image == pair.effective_body:
             return _ImageState(pair.effective_body, list(state.relocation_offsets)), {

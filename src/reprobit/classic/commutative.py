@@ -395,6 +395,10 @@ def derive_commutative_operand_forms(
                 )
             )
         except (ByteIdentityError, KeyError, TypeError, ValueError):
+            # Every adjacent pair is tried.  A pair that is not ``fld m; op m``
+            # fails a requirement, or has no ModRM/displacement fields at all
+            # (KeyError, TypeError, ValueError from the decoded records); either
+            # way it is simply not a candidate site.
             continue
         if source[at:end] == target[at:end] or pair_image != target[at:end]:
             continue

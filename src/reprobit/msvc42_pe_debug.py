@@ -268,7 +268,9 @@ class _Pe32DebugMap:
                 nb10_signature_offset = payload_offset + 8
 
         require(
-            nb10_age is not None and nb10_signature_offset is not None,
+            nb10_signature is not None
+            and nb10_age is not None
+            and nb10_signature_offset is not None,
             "PE debug data lacks a validated NB10 record",
         )
         assert nb10_signature is not None
