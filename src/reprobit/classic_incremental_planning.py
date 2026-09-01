@@ -8,7 +8,7 @@ from dataclasses import asdict
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import Lock
 from types import MappingProxyType
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from reprobit.assets import runtime_asset_path
 from reprobit.backends import ExecutionBackend, PosixWineBackend
@@ -71,6 +71,9 @@ from reprobit.secure_path_contracts import SecureFileSnapshot
 from reprobit.strict_json import JsonValue
 from reprobit.toolchains import ClassicMSVCToolchain
 
+if TYPE_CHECKING:
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
+
 
 def _runtime_material(
     backend: ExecutionBackend,
@@ -121,6 +124,7 @@ def _render_sources(
     project_root: Path,
     *,
     read_payload: Callable[[Path], tuple[bytes, SecureFileSnapshot]] = read_payload,
+    overlay_render_session: ClassicOverlayRenderSession | None = None,
 ) -> tuple[
     Mapping[str, bytes],
     Mapping[str, bytes],
@@ -187,6 +191,7 @@ def _render_sources(
             rendered = render_classic_overlay(
                 {"schema": schema, "outputs": outputs, "graph": graph},
                 clean_inputs,
+                session=overlay_render_session,
             )
             for raw in outputs:
                 assert isinstance(raw, dict)
@@ -602,6 +607,7 @@ def prepare_classic_incremental_plan(
     cleanup_timeout: float,
     progress: IncrementalProgress | None,
     measured_receipt_repair: ClassicMeasuredReceiptRepair | None,
+    overlay_render_session: ClassicOverlayRenderSession | None = None,
 ) -> ClassicIncrementalPlan:
     implementation_receipt = PRODUCER_IMPLEMENTATION_DIGEST
     revalidate_producer_implementation(implementation_receipt)
@@ -671,7 +677,12 @@ def prepare_classic_incremental_plan(
     )
     runtime_input_paths = census.paths()
     clean_sources, effective_sources, overlay_by_path, generated_paths, _cleanless_outputs = (
-        _render_sources(bundle, project_root, read_payload=census.payload)
+        _render_sources(
+            bundle,
+            project_root,
+            read_payload=census.payload,
+            overlay_render_session=overlay_render_session,
+        )
     )
     ordinary_authority, generated_authority, physical_by_logical, source_payloads = (
         _include_authorities(

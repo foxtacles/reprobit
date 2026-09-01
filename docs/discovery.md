@@ -198,8 +198,9 @@ functions and the request's `max_observed_functions` caps the campaign total at
 100,000; crossing either limit stops the campaign instead of silently dropping
 functions.
 
-The default worker count is four. An explicit `--jobs` runs independent cells in
-parallel; Wine is capped at four workers. On POSIX hosts ReproBit clears the
+Without `--jobs` the worker count is the number of CPUs the process may use,
+capped at 8. An explicit `--jobs` runs independent cells in parallel; Wine is
+capped at four workers either way. On POSIX hosts ReproBit clears the
 campaign's exclusively locked private Wine prefix before compiling, then stops
 and reaps its wineserver on success or failure. Use `--wineserver` when it is not
 on `PATH`, and `--cleanup-timeout` to change the bounded shutdown limit. Terminal

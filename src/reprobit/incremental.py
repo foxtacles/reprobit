@@ -29,7 +29,7 @@ from reprobit.schema import (
     SourceManifestEntry,
     source_manifest_digest,
 )
-from reprobit.source_lock import SourceLockError, receipt_source_input
+from reprobit.source_lock import SourceLockError, receipt_source_input, resolve_source_root
 from reprobit.strict_json import JsonValue
 
 _PRODUCER_IMPLEMENTATION_ROOTS = ("reprobit.classic_incremental_execution",)
@@ -200,9 +200,10 @@ def current_worktree_authority(
     entries: list[SourceManifestEntry] = []
     changed: list[str] = []
     old_by_path = {item.path.casefold(): item for item in manifest.entries}
+    source_root = resolve_source_root(root)
     for entry in manifest.entries:
         try:
-            size, digest, _ = receipt_source_input(root, entry.path)
+            size, digest, _ = receipt_source_input(source_root, entry.path)
         except SourceLockError as exc:
             raise IncrementalAuthorityError(
                 f"incremental build cannot change the admitted path topology: {entry.path!r}: {exc}"

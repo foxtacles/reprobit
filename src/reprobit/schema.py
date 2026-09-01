@@ -1062,6 +1062,48 @@ class ClassicDebugCompanionPaths:
     pdb: str
 
 
+class _ProtectedPathClaims:
+    """Project paths a debug-companion output may neither alias nor overlap.
+
+    Each claim is keyed by its folded path and numbered by arrival. ``_beneath``
+    maps every proper ancestor directory of a claimed path to the earliest
+    claim below it, so testing one path costs a walk over its own ancestors
+    instead of a scan of every earlier claim. When several earlier claims
+    overlap, the earliest one is reported, exactly as a full scan in arrival
+    order would report it.
+    """
+
+    __slots__ = ("_beneath", "_claims")
+
+    def __init__(self) -> None:
+        self._claims: dict[str, tuple[int, str]] = {}
+        self._beneath: dict[str, tuple[int, str]] = {}
+
+    def claim(self, relative: str, owner: str) -> None:
+        folded = relative.replace("\\", "/").casefold()
+        previous = self._claims.get(folded)
+        if previous is not None:
+            raise ValueError(f"debug-companion path {relative!r} aliases protected {previous[1]}")
+        ancestors: list[str] = []
+        separator = folded.find("/")
+        while separator != -1:
+            ancestors.append(folded[:separator])
+            separator = folded.find("/", separator + 1)
+        overlapping = [
+            hit for ancestor in ancestors if (hit := self._claims.get(ancestor)) is not None
+        ]
+        below = self._beneath.get(folded)
+        if below is not None:
+            overlapping.append(below)
+        if overlapping:
+            _, overlap = min(overlapping)
+            raise ValueError(f"debug-companion path {relative!r} overlaps protected {overlap}")
+        entry = (len(self._claims), owner)
+        self._claims[folded] = entry
+        for ancestor in ancestors:
+            self._beneath.setdefault(ancestor, entry)
+
+
 def classic_debug_companion_paths(
     bundle: ProjectBundle,
 ) -> tuple[ClassicDebugCompanionPaths, ...]:
@@ -1074,25 +1116,8 @@ def classic_debug_companion_paths(
     if bundle.source_manifest is None:
         raise ValueError("debug-companion outputs require a complete source manifest")
 
-    claims: dict[str, str] = {}
-
-    def claim(relative: str, owner: str) -> None:
-        folded = relative.replace("\\", "/").casefold()
-        previous = claims.get(folded)
-        if previous is not None:
-            raise ValueError(f"debug-companion path {relative!r} aliases protected {previous}")
-        overlap = next(
-            (
-                previous_owner
-                for previous_path, previous_owner in claims.items()
-                if folded.startswith(previous_path + "/") or previous_path.startswith(folded + "/")
-            ),
-            None,
-        )
-        if overlap is not None:
-            raise ValueError(f"debug-companion path {relative!r} overlaps protected {overlap}")
-        claims[folded] = owner
-
+    claims = _ProtectedPathClaims()
+    claim = claims.claim
     for target in bundle.spec.targets:
         claim(target.artifact, f"target artifact for {target.id!r}")
         claim(target.oracle, f"verification oracle for {target.id!r}")

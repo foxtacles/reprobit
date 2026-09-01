@@ -16,7 +16,7 @@ from reprobit.schema import (
     SourceManifestDocument,
 )
 from reprobit.secure_path_contracts import SecurePathError, portable_relative_text
-from reprobit.source_lock import SourceLockError, receipt_source_input
+from reprobit.source_lock import SourceLockError, receipt_source_input, resolve_source_root
 
 if TYPE_CHECKING:
     from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
@@ -185,10 +185,11 @@ def inspect_source_authority(
 
     verified_digests: dict[str, Digest] = {}
     effective: dict[str, bytes] = {}
+    source_root = resolve_source_root(root)
     for entry in manifest.entries:
         try:
             size, digest, data = receipt_source_input(
-                root,
+                source_root,
                 entry.path,
                 capture=entry.path in capture_paths,
             )
@@ -198,7 +199,7 @@ def inspect_source_authority(
             drift_hint: str | None = None
             try:
                 _second_size, second_digest, current = receipt_source_input(
-                    root,
+                    source_root,
                     entry.path,
                     capture=True,
                 )

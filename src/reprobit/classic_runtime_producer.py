@@ -317,6 +317,9 @@ class ClassicProducerExecution:
         self._evidence_lock = Lock()
         self._physical_outputs: dict[Path, Path] = {}
         self._producer_reads: list[ClassicProducerReadReceipt] = []
+        # Compiler read receipts indexed by (node id, epoch) as they arrive, so
+        # freezing one epoch's invocation does not rescan every receipt.
+        self._compiler_reads: dict[tuple[str, str], list[ClassicProducerReadReceipt]] = {}
         self._resource_dependency_receipts: dict[str, ResourceDependencyReceipt] = {}
         self._namespace_payload_intern: dict[tuple[str, int], bytes] = {}
         self._compiler_namespaces: dict[str, ClassicCompilerNamespaceReceipt] = {}
@@ -368,6 +371,13 @@ class ClassicProducerExecution:
     def producer_reads(self) -> tuple[ClassicProducerReadReceipt, ...]:
         with self._evidence_lock:
             return tuple(self._producer_reads)
+
+    def _record_producer_read(self, receipt: ClassicProducerReadReceipt) -> None:
+        """Append one read receipt; the caller holds the evidence lock."""
+
+        self._producer_reads.append(receipt)
+        if receipt.role is ProducerRole.COMPILER:
+            self._compiler_reads.setdefault((receipt.node_id, receipt.epoch), []).append(receipt)
 
     def resource_dependency_receipts(self) -> Mapping[str, ResourceDependencyReceipt]:
         with self._evidence_lock:
@@ -596,13 +606,7 @@ class ClassicProducerExecution:
         if node.role is not ProducerRole.COMPILER:
             raise ClassicProjectError(f"producer {node.id!r} is not a compiler invocation")
         with self._evidence_lock:
-            matches = tuple(
-                item
-                for item in self._producer_reads
-                if item.node_id == node.id
-                and item.role is ProducerRole.COMPILER
-                and item.epoch == epoch
-            )
+            matches = tuple(self._compiler_reads.get((node.id, epoch), ()))
         if len(matches) != 1:
             raise ClassicProjectError(
                 f"compiler {node.id!r} has {len(matches)} {epoch!r} read receipts"
@@ -857,7 +861,7 @@ class ClassicProducerExecution:
                     f"resource node {node.id!r} repeated its dependency receipt"
                 )
             self._resource_dependency_receipts[node.id] = receipt
-            self._producer_reads.append(read_receipt)
+            self._record_producer_read(read_receipt)
         return _ResourceDependencyAudit(step, receipt)
 
     def declared_outputs(self, node: ProducerNode) -> tuple[Path, ...]:
@@ -1006,7 +1010,7 @@ class ClassicProducerExecution:
             if namespace is None:
                 raise ClassicProjectError(f"compiler node {node.id!r} names an unknown namespace")
             with self._evidence_lock:
-                self._producer_reads.append(
+                self._record_producer_read(
                     ClassicProducerReadReceipt(
                         node.id,
                         producer_receipt.step_id,

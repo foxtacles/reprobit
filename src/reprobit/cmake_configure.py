@@ -18,7 +18,7 @@ from pathlib import Path, PurePath, PurePosixPath
 from reprobit.classic_project import (
     ClassicProjectError,
     _cmake_quote,
-    _effective_source_seal,
+    effective_source_seal,
     materialize_effective_workspace,
     write_cmake_project_plan,
 )
@@ -42,7 +42,7 @@ def effective_source_digest(root: Path) -> Digest:
                 "schema": 1,
                 "files": [
                     {"path": path, "size": size, "sha256": sha256}
-                    for path, size, sha256 in _effective_source_seal(root)
+                    for path, size, sha256 in effective_source_seal(root)
                 ],
             }
         )

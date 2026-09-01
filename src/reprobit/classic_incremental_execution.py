@@ -17,6 +17,7 @@ from functools import partial
 from pathlib import Path
 from time import monotonic
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 import reprobit.classic_incremental_context as warm_context
 from reprobit.backends import ExecutionBackend
@@ -51,6 +52,9 @@ from reprobit.incremental_executor import (
     IncrementalProgress,
     IncrementalProgressEventKind,
 )
+
+if TYPE_CHECKING:
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 
 
 def execute_classic_incremental_plan(
@@ -432,6 +436,7 @@ def execute_classic_incremental_build(
     progress: IncrementalProgress | None = None,
     measured_receipt_repair: ClassicMeasuredReceiptRepair | None = None,
     repair_analysis: bool = False,
+    overlay_render_session: ClassicOverlayRenderSession | None = None,
 ) -> ClassicIncrementalResult:
     """Execute one current-worktree producer graph with conservative reuse."""
 
@@ -452,6 +457,7 @@ def execute_classic_incremental_build(
         cleanup_timeout=cleanup_timeout,
         progress=progress,
         measured_receipt_repair=measured_receipt_repair,
+        overlay_render_session=overlay_render_session,
     )
     add_producer_nodes(plan)
     add_transform_nodes(plan)

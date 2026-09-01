@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import random
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -33,12 +34,14 @@ from reprobit.schema import (
     InterventionDocument,
     LinkOrderingIntervention,
     LogicalPathProfile,
+    OracleDocument,
     ProjectBundle,
     ProofDocument,
     SchemaError,
     SchemaVersionError,
     SourceManifestDocument,
     SourceManifestEntry,
+    _ProtectedPathClaims,
     classic_debug_companion_paths,
     project_document_schemas,
     schema_catalog,
@@ -49,7 +52,9 @@ from reprobit.schema import (
 from reprobit.strict_json import (
     DuplicateKeyError,
     NonFiniteNumberError,
+    StrictJSONError,
     canonical_json,
+    strict_load_bytes,
     strict_loads,
 )
 
@@ -143,6 +148,119 @@ def test_debug_companion_path_cannot_alias_a_verification_oracle(tmp_path: Path)
 
     with pytest.raises(ValueError, match="aliases protected verification oracle"):
         classic_debug_companion_paths(bundle)
+
+
+def _companion_bundle(
+    tmp_path: Path, *, oracle: str | None = None, extra_sources: tuple[str, ...] = ()
+) -> ProjectBundle:
+    tmp_path.mkdir(exist_ok=True)
+    create_tree(tmp_path)
+    baseline = load_project_tree(tmp_path)
+    assert baseline.source_manifest is not None
+    entries = list(baseline.source_manifest.entries)
+    entries.extend(
+        SourceManifestEntry(path=path, size=1, digest=Digest(value="1" * 64))
+        for path in extra_sources
+    )
+    manifest = baseline.source_manifest.model_copy(
+        update={
+            "entries": tuple(sorted(entries, key=lambda item: (item.path.casefold(), item.path)))
+        }
+    )
+    plan = _build_plan_with_link_options(("/DEBUG",)).model_copy(
+        update={"source_manifest_digest": source_manifest_digest(manifest)}
+    )
+    spec = baseline.spec
+    if oracle is not None:
+        target = spec.targets[0]
+        spec = spec.model_copy(update={"targets": (target.model_copy(update={"oracle": oracle}),)})
+    return baseline.model_copy(
+        update={"spec": spec, "source_manifest": manifest, "build_plan": plan}
+    )
+
+
+def test_debug_companion_path_cannot_sit_below_or_above_a_protected_path(
+    tmp_path: Path,
+) -> None:
+    # A source file below the derived image path: the image would be its directory.
+    below = _companion_bundle(tmp_path, extra_sources=("build/reprobit-debug/program.exe/a.c",))
+    with pytest.raises(
+        ValueError,
+        match=r"'build/reprobit-debug/program\.exe' overlaps protected source-manifest entry "
+        r"'build/reprobit-debug/program\.exe/a\.c'",
+    ):
+        classic_debug_companion_paths(below)
+
+    # A source file named like the companion directory: the image would sit inside a file.
+    above = _companion_bundle(tmp_path / "above", extra_sources=("build/REPROBIT-DEBUG",))
+    with pytest.raises(
+        ValueError,
+        match=r"'build/reprobit-debug/program\.exe' overlaps protected source-manifest entry "
+        r"'build/REPROBIT-DEBUG'",
+    ):
+        classic_debug_companion_paths(above)
+
+    # Several earlier claims overlap: the earliest claimed (the oracle) is the one named.
+    earliest = _companion_bundle(
+        tmp_path / "earliest",
+        oracle="build/reprobit-debug/program.PDB/oracle.bin",
+        extra_sources=("build/reprobit-debug/program.PDB/a.c",),
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"'build/reprobit-debug/program\.PDB' overlaps protected verification oracle "
+        r"for 'program'",
+    ):
+        classic_debug_companion_paths(earliest)
+
+
+def _scan_every_claim(paths: list[str]) -> str | None:
+    """The full arrival-order scan the ancestor index must reproduce exactly."""
+
+    claims: dict[str, str] = {}
+    for ordinal, relative in enumerate(paths):
+        owner = f"owner {ordinal}"
+        folded = relative.replace("\\", "/").casefold()
+        previous = claims.get(folded)
+        if previous is not None:
+            return f"debug-companion path {relative!r} aliases protected {previous}"
+        for previous_path, previous_owner in claims.items():
+            if folded.startswith(previous_path + "/") or previous_path.startswith(folded + "/"):
+                return f"debug-companion path {relative!r} overlaps protected {previous_owner}"
+        claims[folded] = owner
+    return None
+
+
+def test_protected_path_claims_report_exactly_what_a_full_scan_reports() -> None:
+    rng = random.Random(20260901)
+    parts = ("a", "B", "c", "dir", "x.cpp", "", "A")
+    trials = 0
+    outcomes = {"accepted": 0, "aliases": 0, "overlaps": 0}
+    for _ in range(4000):
+        paths = [
+            rng.choice(("/", "\\")).join(rng.choice(parts) for _ in range(rng.randint(1, 4)))
+            + rng.choice(("", "", "/"))
+            for _ in range(rng.randint(1, 8))
+        ]
+        expected = _scan_every_claim(paths)
+        claims = _ProtectedPathClaims()
+        received = None
+        for ordinal, relative in enumerate(paths):
+            try:
+                claims.claim(relative, f"owner {ordinal}")
+            except ValueError as error:
+                received = str(error)
+                break
+        assert received == expected, paths
+        trials += 1
+        if expected is None:
+            outcomes["accepted"] += 1
+        elif " aliases " in expected:
+            outcomes["aliases"] += 1
+        else:
+            outcomes["overlaps"] += 1
+    assert trials == 4000
+    assert all(count > 100 for count in outcomes.values()), outcomes
 
 
 def test_build_target_can_lead_with_a_digit_without_widening_internal_ids() -> None:
@@ -481,6 +599,70 @@ def test_strict_json_rejects_ambiguous_documents() -> None:
     with pytest.raises(NonFiniteNumberError, match="non-finite"):
         strict_loads('{"seconds":NaN}')
     assert canonical_json({"z": 1, "a": [2, 3]}) == b'{"a":[2,3],"z":1}\n'
+
+
+def test_strict_load_bytes_gates_the_file_and_returns_its_own_bytes(tmp_path: Path) -> None:
+    path = tmp_path / "record.json"
+    original = b'{\n  "z": 1,\n  "a": [2, 3.5e1, "\\u00e9", "\xc3\xa9"]\n}\n'
+    path.write_bytes(original)
+    assert strict_load_bytes(path) == original
+
+    # json.loads reads a byte-order mark and UTF-16/32 through encoding detection;
+    # the gate hands the second parser plain UTF-8 so those files stay accepted.
+    for encoded in (b"\xef\xbb\xbf" + original, original.decode().encode("utf-16")):
+        path.write_bytes(encoded)
+        assert strict_load_bytes(path) == original
+
+    for data, error, message in (
+        (b'{"schema_version":3,"schema_version":2}', DuplicateKeyError, "duplicate JSON object"),
+        (b'{"seconds":NaN}', NonFiniteNumberError, "non-finite JSON number: NaN"),
+        (b'{"seconds":-Infinity}', NonFiniteNumberError, "non-finite JSON number: -Infinity"),
+        (b'{"nested":{"a":1,"a":1}}', DuplicateKeyError, "duplicate JSON object key: 'a'"),
+        (b'{"open":', StrictJSONError, "Expecting value"),
+        (b'{"s":"\xff"}', StrictJSONError, "'utf-8' codec can't decode"),
+    ):
+        path.write_bytes(data)
+        with pytest.raises(error, match=message):
+            strict_load_bytes(path)
+    with pytest.raises(StrictJSONError, match="cannot read"):
+        strict_load_bytes(tmp_path / "absent.json")
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ('{"schema_version":3,"target_id":"program","target_id":"other"}', "duplicate JSON"),
+        ('{"schema_version":NaN,"target_id":"program"}', "non-finite JSON number: NaN"),
+        ('{"schema_version":Infinity}', "non-finite JSON number: Infinity"),
+        ('{"schema_version":3,"comparison":{"kind":"literal","kind":"literal"}}', "duplicate"),
+        ('{"schema_version":3,', "Expecting"),
+    ],
+)
+def test_load_project_tree_still_gates_each_record_with_the_strict_decoder(
+    tmp_path: Path, data: str, message: str
+) -> None:
+    create_tree(tmp_path)
+    (tmp_path / "reprobit/oracles/program.json").write_text(data, encoding="utf-8")
+    with pytest.raises(SchemaError, match=f"invalid .*program.json: {message}"):
+        load_project_tree(tmp_path)
+
+
+def test_load_project_tree_reads_array_syntax_into_tuple_fields_without_a_re_dump(
+    tmp_path: Path,
+) -> None:
+    create_tree(tmp_path)
+    oracle = tmp_path / "reprobit/oracles/program.json"
+    document = strict_loads(oracle.read_bytes())
+    assert isinstance(document, dict)
+    # Unsorted keys and pretty-printing must be read exactly like canonical bytes.
+    oracle.write_text(
+        json.dumps(dict(reversed(list(document.items()))), indent=3, sort_keys=False),
+        encoding="utf-8",
+    )
+    bundle = load_project_tree(tmp_path)
+    assert bundle.oracle_documents[0] == OracleDocument.model_validate_json(
+        canonical_json(document)
+    )
 
 
 def test_load_project_is_v3_only_and_forbids_unknown_fields(tmp_path: Path) -> None:

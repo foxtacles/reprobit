@@ -49,6 +49,7 @@ from reprobit.secure_path_contracts import (
 from reprobit.secure_paths import (
     digest_relative_file,
     read_relative_file,
+    stat_relative_file,
 )
 from reprobit.strict_json import JsonValue, canonical_json
 
@@ -119,8 +120,51 @@ def read_payload(path: Path) -> tuple[bytes, SecureFileSnapshot]:
         ) from exc
 
 
+SNAPSHOT_IDENTITY_FIELDS = (
+    "device",
+    "inode",
+    "size",
+    "mtime_ns",
+    "ctime_ns",
+    "mode",
+    "windows_file_id",
+    "windows_attributes",
+)
+"""Every identity attribute a sampled snapshot carries besides its content digest."""
+
+
+def snapshot_identity_is_exact(recorded: SecureFileSnapshot, current: object) -> bool:
+    """Return whether ``current`` proves the file behind ``recorded`` unchanged.
+
+    ``current`` is the held identity observed for the same path just now.  It
+    proves the sample exact only when it names the same path and carries every
+    attribute in :data:`SNAPSHOT_IDENTITY_FIELDS` with the recorded value.  A
+    missing attribute or any difference means the content must be hashed
+    again; the identity alone never stands in for a hash it cannot vouch for.
+    """
+
+    if getattr(current, "path", None) != recorded.path:
+        return False
+    for name in SNAPSHOT_IDENTITY_FIELDS:
+        try:
+            observed = getattr(current, name)
+        except AttributeError:
+            return False
+        if observed is None or observed != getattr(recorded, name):
+            return False
+    return True
+
+
 class PhysicalInputCensus:
-    """Exact physical receipts sampled while planning one warm invocation."""
+    """Exact physical receipts sampled while planning one warm invocation.
+
+    The first sample of a path hashes it through a held, no-follow ancestor
+    chain.  Later samples and the pre-publication checks re-observe the held
+    identity of the same path (device, inode, size, both timestamps, mode and
+    the Windows file id) and reuse the recorded receipt only when every one of
+    those attributes still matches; otherwise the file is hashed again and any
+    difference is rejected exactly as a first sample would be.
+    """
 
     def __init__(self) -> None:
         self._lock = Lock()
@@ -134,7 +178,35 @@ class PhysicalInputCensus:
             raise ClassicIncrementalError(f"warm physical input changed while planning: {path}")
         return snapshot
 
+    @staticmethod
+    def _still_exact(recorded: SecureFileSnapshot, path: Path) -> bool:
+        """Re-observe ``path`` through the held chain and compare its identity.
+
+        Any failure to observe the identity reports ``False`` so the caller
+        falls back to a full hash, whose own error names the actual problem.
+        """
+
+        try:
+            root, relative = secure_location(path)
+            current = stat_relative_file(root, relative)
+        except (ClassicIncrementalError, SecurePathError):
+            return False
+        return snapshot_identity_is_exact(recorded, current)
+
+    def _exact_sample(self, path: Path) -> SecureFileSnapshot | None:
+        """Return the recorded receipt for ``path`` when its identity is still exact."""
+
+        key = canonical_system_path(path)
+        with self._lock:
+            recorded = self._entries.get(key)
+        if recorded is None or not self._still_exact(recorded, key):
+            return None
+        return recorded
+
     def snapshot(self, path: Path) -> SecureFileSnapshot:
+        exact = self._exact_sample(path)
+        if exact is not None:
+            return exact
         return self._record(snapshot_file(path))
 
     def payload(self, path: Path) -> tuple[bytes, SecureFileSnapshot]:
@@ -175,6 +247,8 @@ class PhysicalInputCensus:
         for path in sorted(selected, key=str):
             prior = expected[path]
             assert prior is not None
+            if self._still_exact(prior, path):
+                continue
             current = snapshot_file(path)
             if current != prior:
                 raise ClassicIncrementalError(
@@ -611,6 +685,7 @@ def runtime_factory(plan: ClassicIncrementalPlan) -> WarmRuntime:
 
 
 __all__ = [
+    "SNAPSHOT_IDENTITY_FIELDS",
     "ClassicIncrementalError",
     "ClassicIncrementalPlan",
     "ClassicIncrementalResult",
@@ -629,6 +704,7 @@ __all__ = [
     "runtime_factory",
     "sampled_reference_path",
     "snapshot_file",
+    "snapshot_identity_is_exact",
     "staged_reference_inputs",
     "verify_before_store",
 ]

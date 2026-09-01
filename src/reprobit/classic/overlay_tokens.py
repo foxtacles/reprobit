@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from array import array
+from bisect import bisect_left, bisect_right
 from collections import OrderedDict, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -43,12 +44,19 @@ _ANNOTATION_COMMENT_RE = re.compile(
 
 @dataclass(frozen=True, slots=True)
 class _TokenIndex:
-    """Significant-token bytes and offsets without retaining the clean source."""
+    """Significant-token bytes and offsets without retaining the clean source.
+
+    ``newline_boundaries`` lists, in ascending order, every token boundary
+    whose preceding inter-token gap contains a newline byte.  Only such a
+    boundary can carry the default after-newline structural seat, so anchor
+    searches for that seat kind hash those windows alone.
+    """
 
     token_blob: bytes
     blob_starts: array[int]
     source_starts: array[int]
     source_ends: array[int]
+    newline_boundaries: array[int]
 
     @property
     def token_count(self) -> int:
@@ -61,6 +69,7 @@ class _TokenIndex:
             + self.blob_starts.buffer_info()[1] * self.blob_starts.itemsize
             + self.source_starts.buffer_info()[1] * self.source_starts.itemsize
             + self.source_ends.buffer_info()[1] * self.source_ends.itemsize
+            + self.newline_boundaries.buffer_info()[1] * self.newline_boundaries.itemsize
         )
 
     def blob_end(self, index: int) -> int:
@@ -70,8 +79,10 @@ class _TokenIndex:
 
 
 _SourceIndexKey = tuple[int, str]
-_AnchorRequest = tuple[int, int, tuple[str, ...]]
-_AnchorMatchKey = tuple[int, int, str]
+# (before_count, after_count, newline_boundaries_only, sorted context digests)
+_AnchorRequest = tuple[int, int, bool, tuple[str, ...]]
+# (before_count, after_count, newline_boundaries_only, context digest)
+_AnchorMatchKey = tuple[int, int, bool, str]
 _AnchorBatchKey = tuple[_SourceIndexKey, tuple[_AnchorRequest, ...]]
 
 
@@ -201,11 +212,11 @@ class ClassicOverlayRenderSession:
         self,
         data: bytes,
         content_digest: str,
-        requests: Mapping[tuple[int, int], set[str]],
+        requests: Mapping[tuple[int, int, bool], set[str]],
     ) -> tuple[_TokenIndex, Mapping[_AnchorMatchKey, tuple[int, ...]]]:
         normalized_requests = tuple(
-            (before, after, tuple(sorted(digests)))
-            for (before, after), digests in sorted(requests.items())
+            (before, after, newline_only, tuple(sorted(digests)))
+            for (before, after, newline_only), digests in sorted(requests.items())
         )
         with self._lock:
             self._require_open()
@@ -220,7 +231,7 @@ class ClassicOverlayRenderSession:
             self._anchor_batch_builds += 1
             self._anchor_windows_hashed += windows_hashed
             frozen = MappingProxyType(matches)
-            request_count = sum(len(digests) for _before, _after, digests in normalized_requests)
+            request_count = sum(len(request[3]) for request in normalized_requests)
             if (
                 self._maximum_anchor_batches
                 and self._maximum_anchor_requests
@@ -232,7 +243,7 @@ class ClassicOverlayRenderSession:
                 ):
                     discarded_key, _discarded = self._anchor_batches.popitem(last=False)
                     self._anchor_request_count -= sum(
-                        len(digests) for _before, _after, digests in discarded_key[1]
+                        len(request[3]) for request in discarded_key[1]
                     )
                 self._anchor_batches[batch_key] = frozen
                 self._anchor_request_count += request_count
@@ -258,23 +269,35 @@ def _build_token_index(data: bytes) -> _TokenIndex:
     blob_starts = array("I")
     source_starts = array("I")
     source_ends = array("I")
+    newline_boundaries = array("I")
+    previous_end = 0
     for match in _TOKEN_RE.finditer(text):
         token = match.group(0)
         if token.startswith(("//", "/*")):
             continue
         if blob_starts:
             token_blob.append(0)
+        start, end = match.span()
+        if text.find("\n", previous_end, start) >= 0:
+            newline_boundaries.append(len(source_starts))
         blob_starts.append(len(token_blob))
-        source_starts.append(match.start())
-        source_ends.append(match.end())
+        source_starts.append(start)
+        source_ends.append(end)
+        previous_end = end
         token_blob.extend(token.encode("latin1"))
-    if any(offset.itemsize != 4 for offset in (blob_starts, source_starts, source_ends)):
+    if text.find("\n", previous_end) >= 0:
+        newline_boundaries.append(len(source_starts))
+    if any(
+        offset.itemsize != 4
+        for offset in (blob_starts, source_starts, source_ends, newline_boundaries)
+    ):
         raise RuntimeError("classic overlay compact offset storage is not 32-bit")
     return _TokenIndex(
         token_blob=bytes(token_blob),
         blob_starts=blob_starts,
         source_starts=source_starts,
         source_ends=source_ends,
+        newline_boundaries=newline_boundaries,
     )
 
 
@@ -294,49 +317,106 @@ def _token_sequence_digest(tokens: Sequence[str]) -> str:
     return digest_bytes("\0".join(tokens).encode("latin1"))
 
 
+def _seat_window_from_index(
+    index: _TokenIndex,
+    token_boundary: int,
+    before_count: int,
+    after_count: int,
+) -> bytes:
+    """The exact NUL-joined token window whose SHA-256 is a seat's context digest."""
+
+    token_blob = index.token_blob
+    blob_starts = index.blob_starts
+    token_count = len(blob_starts)
+    if before_count:
+        # Token ``token_boundary - 1`` ends one byte before the next token's
+        # blob start (the NUL separator) or at the end of the blob.
+        window = token_blob[
+            blob_starts[token_boundary - before_count] : (
+                blob_starts[token_boundary] - 1 if token_boundary < token_count else len(token_blob)
+            )
+        ] + (b"\0<SEAT>\0" if after_count else b"\0<SEAT>")
+    else:
+        window = b"<SEAT>\0" if after_count else b"<SEAT>"
+    if after_count:
+        last = token_boundary + after_count
+        window += token_blob[
+            blob_starts[token_boundary] : (
+                blob_starts[last] - 1 if last < token_count else len(token_blob)
+            )
+        ]
+    return window
+
+
 def _seat_digest_from_index(
     index: _TokenIndex,
     token_boundary: int,
     before_count: int,
     after_count: int,
 ) -> str:
-    digest = hashlib.sha256()
-    token_blob = memoryview(index.token_blob)
-    if before_count:
-        first = token_boundary - before_count
-        last = token_boundary - 1
-        digest.update(token_blob[index.blob_starts[first] : index.blob_end(last)])
-        digest.update(b"\0<SEAT>\0" if after_count else b"\0<SEAT>")
-    else:
-        digest.update(b"<SEAT>\0" if after_count else b"<SEAT>")
-    if after_count:
-        last = token_boundary + after_count - 1
-        digest.update(token_blob[index.blob_starts[token_boundary] : index.blob_end(last)])
-    return digest.hexdigest()
+    return hashlib.sha256(
+        _seat_window_from_index(index, token_boundary, before_count, after_count)
+    ).hexdigest()
 
 
 def _requested_anchor_matches(
     index: _TokenIndex,
     requests: Sequence[_AnchorRequest],
 ) -> tuple[dict[_AnchorMatchKey, tuple[int, ...]], int]:
-    """Hash each required seat once and retain only requested digest matches."""
+    """Hash each required seat once and retain only requested digest matches.
+
+    A request flagged ``newline_boundaries_only`` serves after-newline seats,
+    which the resolver accepts only at a boundary whose preceding gap holds a
+    newline; the other boundaries can never seat such an anchor and are not
+    hashed for it.  When one window shape is requested both ways, every
+    boundary is hashed once and the digest is checked against both sets.
+    """
 
     retained: dict[_AnchorMatchKey, list[int]] = {}
     windows_hashed = 0
-    for before_count, after_count, requested_digests in requests:
-        requested = set(requested_digests)
+    # Requested digests are validated lowercase hex; comparing raw digest bytes
+    # avoids a hex encoding per hashed window.  Values map back to the hex form
+    # the resolver looks up.
+    by_window: dict[tuple[int, int], dict[bool, dict[bytes, str]]] = {}
+    for before_count, after_count, newline_only, requested_digests in requests:
+        by_window.setdefault((before_count, after_count), {})[newline_only] = {
+            bytes.fromhex(digest): digest for digest in requested_digests
+        }
+    newline_boundaries = index.newline_boundaries
+    sha256 = hashlib.sha256
+    for (before_count, after_count), requested_by_kind in by_window.items():
         upper = index.token_count - after_count
-        for token_boundary in range(before_count, upper + 1):
+        newline_requested = requested_by_kind.get(True, {})
+        all_requested = requested_by_kind.get(False, {})
+        boundaries: Sequence[int]
+        newline_set: frozenset[int] | None
+        if not all_requested:
+            boundaries = newline_boundaries[
+                bisect_left(newline_boundaries, before_count) : bisect_right(
+                    newline_boundaries, upper
+                )
+            ]
+            newline_set = None
+        else:
+            boundaries = range(before_count, upper + 1)
+            newline_set = frozenset(newline_boundaries) if newline_requested else frozenset()
+        for token_boundary in boundaries:
             windows_hashed += 1
-            context_digest = _seat_digest_from_index(
-                index, token_boundary, before_count, after_count
-            )
-            if context_digest not in requested:
-                continue
-            key = (before_count, after_count, context_digest)
-            matches = retained.setdefault(key, [])
-            if len(matches) < 2:
-                matches.append(token_boundary)
+            context_digest = sha256(
+                _seat_window_from_index(index, token_boundary, before_count, after_count)
+            ).digest()
+            requested_hex = all_requested.get(context_digest)
+            if requested_hex is not None:
+                key = (before_count, after_count, False, requested_hex)
+                matches = retained.setdefault(key, [])
+                if len(matches) < 2:
+                    matches.append(token_boundary)
+            requested_hex = newline_requested.get(context_digest)
+            if requested_hex is not None and (newline_set is None or token_boundary in newline_set):
+                key = (before_count, after_count, True, requested_hex)
+                matches = retained.setdefault(key, [])
+                if len(matches) < 2:
+                    matches.append(token_boundary)
     return {key: tuple(value) for key, value in retained.items()}, windows_hashed
 
 
@@ -383,12 +463,18 @@ class _AnchorResolver:
     matches: Mapping[_AnchorMatchKey, tuple[int, ...]]
 
 
-def _anchor_requests(output: _Output) -> dict[tuple[int, int], set[str]]:
-    requests: dict[tuple[int, int], set[str]] = defaultdict(set)
+def _newline_boundaries_only(anchor: _Anchor) -> bool:
+    return anchor.boundary == "after_newline"
+
+
+def _anchor_requests(output: _Output) -> dict[tuple[int, int, bool], set[str]]:
+    requests: dict[tuple[int, int, bool], set[str]] = defaultdict(set)
     for operation in output.operations:
         for anchor in (operation.start, operation.end):
             if anchor is not None:
-                requests[(anchor.before_count, anchor.after_count)].add(anchor.context_digest)
+                requests[
+                    (anchor.before_count, anchor.after_count, _newline_boundaries_only(anchor))
+                ].add(anchor.context_digest)
     return requests
 
 
@@ -412,7 +498,15 @@ def _resolve_anchor(
     data = resolver.data
     matches = resolver.tokens
     candidates = list(
-        resolver.matches.get((anchor.before_count, anchor.after_count, anchor.context_digest), ())
+        resolver.matches.get(
+            (
+                anchor.before_count,
+                anchor.after_count,
+                _newline_boundaries_only(anchor),
+                anchor.context_digest,
+            ),
+            (),
+        )
     )
     if len(candidates) > 1:
         _fail(f"{context} is ambiguous")

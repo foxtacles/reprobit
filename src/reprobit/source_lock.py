@@ -6,6 +6,7 @@ import os
 import stat
 import subprocess
 from collections.abc import Iterable
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 
@@ -56,15 +57,42 @@ def _receipt(path: Path, *, capture: bool = False) -> tuple[int, Digest, bytes |
     return after.st_size, Digest(value=digest.hexdigest()), data
 
 
+@dataclass(frozen=True, slots=True)
+class ResolvedSourceRoot:
+    """A project root resolved once so a batch of receipts can share it.
+
+    Build one with :func:`resolve_source_root` before receipting many inputs
+    below the same root.  Only the root resolution is shared; each receipt
+    still walks its own components and resolves the input before and after
+    reading it.
+    """
+
+    path: Path
+
+    def __post_init__(self) -> None:
+        if not self.path.is_absolute():
+            raise SourceLockError(f"resolved source root must be absolute: {self.path}")
+
+
+def resolve_source_root(root: Path) -> ResolvedSourceRoot:
+    """Strictly resolve ``root`` once for a batch of :func:`receipt_source_input` calls."""
+
+    return ResolvedSourceRoot(root.resolve(strict=True))
+
+
 def receipt_source_input(
-    root: Path,
+    root: Path | ResolvedSourceRoot,
     relative: str | Path,
     *,
     capture: bool = False,
 ) -> tuple[int, Digest, bytes | None]:
-    """Receipt one canonical input while rejecting redirected path components."""
+    """Receipt one canonical input while rejecting redirected path components.
 
-    root = root.resolve(strict=True)
+    ``root`` may be a :class:`ResolvedSourceRoot` when the caller receipts
+    many inputs; a plain path is resolved here for that one receipt.
+    """
+
+    root = root.path if isinstance(root, ResolvedSourceRoot) else root.resolve(strict=True)
     canonical = _relative(relative)
     path = root
     for component in PurePosixPath(canonical).parts:
@@ -204,10 +232,10 @@ def build_source_manifest(
 ) -> SourceManifestDocument:
     """Hash an explicit source read set, rejecting redirects and DOS collisions."""
 
-    root = root.resolve(strict=True)
+    resolved = resolve_source_root(root)
     entries = []
     for relative in _selected_source_paths(paths, spec=spec):
-        size, digest, _ = receipt_source_input(root, relative)
+        size, digest, _ = receipt_source_input(resolved, relative)
         entries.append(SourceManifestEntry(path=relative, size=size, digest=digest))
     if not entries:
         raise SourceLockError("source manifest would contain no admitted files")
@@ -225,11 +253,13 @@ def lock_tracked_sources(root: Path, spec: ProjectSpec) -> SourceManifestDocumen
 
 
 __all__ = [
+    "ResolvedSourceRoot",
     "SourceLockError",
     "build_source_manifest",
     "git_tracked_paths",
     "is_git_worktree",
     "lock_tracked_sources",
     "receipt_source_input",
+    "resolve_source_root",
     "tracked_source_paths",
 ]

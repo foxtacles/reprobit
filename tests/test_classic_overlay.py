@@ -17,7 +17,7 @@ from reprobit.classic.overlay_document import (
     render_classic_overlay_subset,
 )
 from reprobit.classic.overlay_generator import render_classic_overlay_generator
-from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
+from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession, _build_token_index
 from reprobit.classic.overlay_types import SourceEditError
 
 
@@ -260,6 +260,123 @@ def test_anchor_ambiguity_behavior_is_preserved_by_match_only_index() -> None:
 
     with pytest.raises(SourceEditError, match="ambiguous"):
         render_classic_overlay_declarations([declaration], {"src/unit.cpp": source})
+
+
+def test_token_index_records_newline_following_boundaries() -> None:
+    # tokens: x ; | int value ; | x ; int value ; |   (| marks a newline gap)
+    index = _build_token_index(b"x;\nint value;\nx; int value;\n")
+
+    assert index.token_count == 10
+    assert list(index.newline_boundaries) == [2, 5, 10]
+    assert list(_build_token_index(b"").newline_boundaries) == []
+    assert list(_build_token_index(b"\n").newline_boundaries) == [0]
+    assert list(_build_token_index(b"/* a\n */ x").newline_boundaries) == [0]
+
+
+def _repeated_context_declaration(
+    anchor_extra: dict[str, object],
+) -> tuple[dict[str, object], bytes]:
+    # "; <SEAT> int value ;" occurs at boundary 2 (after a newline) and at
+    # boundary 7 (after a space); only the first can carry an after-newline seat.
+    source = b"x;\nint value;\nx; int value;\n"
+    anchor: dict[str, object] = {
+        "ctx": _seat_digest([";", "<SEAT>", "int", "value", ";"]),
+        "b": 1,
+        "a": 3,
+    }
+    anchor.update(anchor_extra)
+    effective = b"x;\nclass Spare;\nint value;\nx; int value;\n"
+    declaration: dict[str, object] = {
+        "path": "src/unit.cpp",
+        "clean": digest_bytes(source),
+        "effective": digest_bytes(effective),
+        "size": len(effective),
+        "ops": [{"op": "insert", "anchor": anchor, "gen": {"k": "fwd", "id": "Spare"}}],
+    }
+    return declaration, source
+
+
+def test_after_newline_seat_hashes_only_newline_following_boundaries() -> None:
+    declaration, source = _repeated_context_declaration(
+        {"line_before": digest_bytes(b"x;"), "line_after": digest_bytes(b"int value;")}
+    )
+
+    with ClassicOverlayRenderSession() as session:
+        result = render_classic_overlay_declarations(
+            [declaration], {"src/unit.cpp": source}, session=session
+        )
+        stats = session.stats
+
+    assert result.outputs["src/unit.cpp"] == b"x;\nclass Spare;\nint value;\nx; int value;\n"
+    anchor_receipt = result.receipts[0].operations[0].anchors[0]
+    assert (anchor_receipt.token_boundary, anchor_receipt.byte_offset) == (2, 3)
+    # Newline boundaries 2 and 5 lie inside the [1, 7] window range; 10 does not.
+    assert stats.anchor_windows_hashed == 2
+
+
+def test_other_seat_kinds_still_search_every_boundary() -> None:
+    declaration, source = _repeated_context_declaration({"at": "before_token"})
+
+    with ClassicOverlayRenderSession() as session:
+        with pytest.raises(SourceEditError, match="ambiguous"):
+            render_classic_overlay_declarations(
+                [declaration], {"src/unit.cpp": source}, session=session
+            )
+        assert session.stats.anchor_windows_hashed == 7
+
+
+def test_shared_window_shape_hashes_each_boundary_once_for_both_seat_kinds() -> None:
+    source = b"x;\nint value;\nx; int value;\n"
+    effective = b"x;\nclass Spare;\nint class Late;\nvalue;\nx; int value;\n"
+    declaration: dict[str, object] = {
+        "path": "src/unit.cpp",
+        "clean": digest_bytes(source),
+        "effective": digest_bytes(effective),
+        "size": len(effective),
+        "ops": [
+            {
+                "id": "op_seat",
+                "op": "insert",
+                "anchor": {
+                    "ctx": _seat_digest([";", "<SEAT>", "int", "value", ";"]),
+                    "b": 1,
+                    "a": 3,
+                    "line_before": digest_bytes(b"x;"),
+                    "line_after": digest_bytes(b"int value;"),
+                },
+                "gen": {"k": "fwd", "id": "Spare"},
+            },
+            {
+                "id": "op_token",
+                "op": "insert",
+                "anchor": {
+                    "ctx": _seat_digest(["int", "<SEAT>", "value", ";", "x"]),
+                    "b": 1,
+                    "a": 3,
+                    "at": "before_token",
+                },
+                "gen": {"k": "fwd", "id": "Late"},
+            },
+        ],
+    }
+
+    with ClassicOverlayRenderSession() as session:
+        result = render_classic_overlay_declarations(
+            [declaration], {"src/unit.cpp": source}, session=session
+        )
+        stats = session.stats
+
+    assert result.outputs["src/unit.cpp"] == effective
+    seats = {
+        operation.operation_id: (
+            operation.anchors[0].token_boundary,
+            operation.anchors[0].byte_offset,
+        )
+        for operation in result.receipts[0].operations
+    }
+    assert seats == {"op_seat": (2, 3), "op_token": (3, 7)}
+    # One pass over boundaries 1..7 serves both seat kinds of the (1, 3) shape.
+    assert stats.anchor_windows_hashed == 7
 
 
 def test_declaration_digest_rejects_changed_clean_input() -> None:

@@ -20,9 +20,12 @@ from reprobit.backends import NativeWindowsBackend, PosixWineBackend
 from reprobit.cache import IncrementalCache, cache_key
 from reprobit.classic_project import ClassicProjectError
 from reprobit.cli import (
+    JOBS_CEILING,
     _parser,
     _positive_seconds,
+    default_jobs,
     main,
+    usable_cpu_count,
 )
 from reprobit.cli_build import _quarantine_oracle_targets
 from reprobit.cli_cmake_import import _cmake_import_workspace
@@ -3991,9 +3994,14 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Cold developer and certifying paths stay outside cache initialization."""
+    """Cold developer and certifying paths stay outside cache initialization.
+
+    Both paths also hand the one overlay render session that validated the
+    project's source authority to the run preparation, and close it after.
+    """
 
     from reprobit.build import BuildPlan
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
     from reprobit.execution import BuildExecutionReceipt, FileReceipt
 
     project = tmp_path / "project"
@@ -4002,6 +4010,11 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
     prepared_calls: list[str] = []
     cold_requests: list[bool] = []
     bound_legacy_targets: list[frozenset[str]] = []
+    render_sessions: list[tuple[str, object]] = []
+
+    def load(root: Path, **kwargs: object) -> ProjectBundle:
+        render_sessions.append(("load", kwargs.get("overlay_render_session")))
+        return load_project_tree(root, **kwargs)  # type: ignore[arg-type]
 
     class CacheBomb:
         def __init__(self, *_args: object, **_kwargs: object) -> None:
@@ -4038,6 +4051,7 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
 
     def prepare(*_args: object, **_kwargs: object) -> SimpleNamespace:
         prepared_calls.append("prepared")
+        render_sessions.append(("prepare", _kwargs.get("overlay_render_session")))
         executor = FakeExecutor()
         return SimpleNamespace(
             executor=executor,
@@ -4063,6 +4077,7 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
         return FakeVerificationResult()
 
     monkeypatch.setattr("reprobit.cache.IncrementalCache", CacheBomb)
+    monkeypatch.setattr("reprobit.cli_build.load_project_tree", load)
     monkeypatch.setattr("reprobit.cli_build.prepare_producer_graph_run", prepare)
     monkeypatch.setattr(
         "reprobit.cli_environment.resolve_classic_execution_inputs",
@@ -4083,6 +4098,17 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
     assert cold_requests == [True, True]
     assert prepared_calls == ["prepared", "prepared"]
     assert bound_legacy_targets == [frozenset(), frozenset()]
+    assert [label for label, _session in render_sessions] == ["load", "prepare"] * 2
+    build_sessions, verify_sessions = render_sessions[:2], render_sessions[2:]
+    for (_load, loading_session), (_prepare, preparing_session) in (
+        build_sessions,
+        verify_sessions,
+    ):
+        assert isinstance(loading_session, ClassicOverlayRenderSession)
+        assert preparing_session is loading_session
+        with pytest.raises(ValueError, match="render session is closed"):
+            loading_session.significant_tokens(b"")
+    assert build_sessions[0][1] is not verify_sessions[0][1]
 
 
 def test_build_preflight_failure_does_not_retain_an_empty_run(
@@ -4611,6 +4637,74 @@ def test_project_is_positional_everywhere_and_project_option_stays_an_alias(
             )
             command = nested.choices[prefix[1]]
         assert "--project" not in command.format_help()
+
+
+def test_default_jobs_follows_the_usable_cpus_up_to_the_ceiling(monkeypatch: Any) -> None:
+    assert JOBS_CEILING == 8
+    assert 1 <= default_jobs() <= JOBS_CEILING
+    assert default_jobs() == min(usable_cpu_count(), JOBS_CEILING)
+    for cpus, expected in ((1, 1), (3, 3), (8, 8), (9, 8), (18, 8)):
+        monkeypatch.setattr("reprobit.cli.usable_cpu_count", lambda count=cpus: count)
+        assert default_jobs() == expected
+
+
+def test_usable_cpu_count_never_reports_fewer_than_one_cpu(monkeypatch: Any) -> None:
+    monkeypatch.setattr(os, "process_cpu_count", lambda: None, raising=False)
+    assert usable_cpu_count() == 1
+    monkeypatch.setattr(os, "process_cpu_count", lambda: 5, raising=False)
+    assert usable_cpu_count() == 5
+
+
+@pytest.mark.parametrize(
+    "prefix",
+    [("build",), ("verify",), ("repair",), ("discover", "grind"), ("discover", "run", "r.json")],
+)
+def test_jobs_defaults_to_the_host_count_and_explicit_values_win(
+    prefix: tuple[str, ...], monkeypatch: Any
+) -> None:
+    parser = _parser()
+    assert parser.parse_args(list(prefix)).jobs is None
+    assert parser.parse_args([*prefix, "--jobs", "3"]).jobs == 3
+    assert "default: the CPUs this process may use, at most 8" in parser.format_help() or any(
+        "default: the CPUs this process may use, at most 8" in child.format_help()
+        for child in _all_subparsers(parser)
+    )
+
+    seen: list[int] = []
+
+    def record(args: argparse.Namespace, _output: CLIOutput) -> int:
+        seen.append(args.jobs)
+        return 0
+
+    monkeypatch.setattr("reprobit.cli.default_jobs", lambda: 6)
+    handler_target = {
+        ("build",): "reprobit.cli.command_build",
+        ("verify",): "reprobit.cli.command_verify",
+        ("repair",): "reprobit.cli._lazy_repair",
+        ("discover", "grind"): "reprobit.cli._lazy_discover_grind",
+        ("discover", "run", "r.json"): "reprobit.cli.command_discover",
+    }[prefix]
+    monkeypatch.setattr(handler_target, record)
+    assert main(list(prefix)) == 0
+    assert main([*prefix, "--jobs", "2"]) == 0
+    assert seen == [6, 2]
+
+
+def _all_subparsers(parser: argparse.ArgumentParser) -> Iterator[argparse.ArgumentParser]:
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            for child in action.choices.values():
+                yield child
+                yield from _all_subparsers(child)
+
+
+def test_jobs_below_one_is_rejected_before_any_handler_runs(monkeypatch: Any, capsys: Any) -> None:
+    def never(_args: argparse.Namespace, _output: CLIOutput) -> int:
+        raise AssertionError("handler must not run")
+
+    monkeypatch.setattr("reprobit.cli.command_build", never)
+    assert main(["build", "--jobs", "0"]) == 2
+    assert capsys.readouterr().err == "error: --jobs must be at least one\n"
 
 
 def test_format_is_accepted_before_or_after_the_subcommand() -> None:

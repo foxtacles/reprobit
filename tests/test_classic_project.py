@@ -400,6 +400,98 @@ def test_source_authority_rejects_stale_clean_overlay_pin(tmp_path: Path) -> Non
         )
 
 
+def _bundle_with_clean_overlay_input(root: Path) -> tuple[ProjectBundle, bytes, bytes]:
+    """Overlay ``first.cpp`` in place so rendering needs a token index and an anchor."""
+
+    bundle, generated = _bundle(root)
+    clean = (root / "first.cpp").read_bytes()
+    output = {
+        "path": "first.cpp",
+        "clean": sha256(clean).hexdigest(),
+        "effective": sha256(generated + clean).hexdigest(),
+        "size": len(generated + clean),
+        "ops": [
+            {
+                "op": "insert",
+                "anchor": {
+                    "ctx": sha256(b"<SEAT>\0int\0first\0(").hexdigest(),
+                    "b": 0,
+                    "a": 3,
+                    "at": "start",
+                },
+                "gen": {"k": "fwd", "id": "Generated"},
+            }
+        ],
+    }
+    graph = {"generated_tus": [], "link_admissions": []}
+    overlay = next(
+        item
+        for item in bundle.interventions
+        if isinstance(item, ClassicRecipeIntervention)
+        and item.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
+    ).model_copy(
+        update={
+            "parameters": (
+                ClassicField.model_validate({"name": "graph", "value": graph}),
+                ClassicField.model_validate({"name": "outputs", "value": [output]}),
+                ClassicField.model_validate({"name": "schema", "value": 2}),
+            )
+        }
+    )
+    documents = tuple(
+        document.model_copy(
+            update={
+                "interventions": tuple(
+                    overlay if item.id == overlay.id else item for item in document.interventions
+                )
+            }
+        )
+        for document in bundle.intervention_documents
+    )
+    return bundle.model_copy(update={"intervention_documents": documents}), generated, clean
+
+
+def test_effective_workspace_reuses_the_loading_render_session(tmp_path: Path) -> None:
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
+
+    bundle, generated, clean = _bundle_with_clean_overlay_input(tmp_path)
+    effective = tmp_path / "state/effective"
+
+    with ClassicOverlayRenderSession() as session:
+        report = inspect_source_authority(bundle, tmp_path, render_session=session)
+        loaded = session.stats
+        witnesses = materialize_effective_workspace(
+            bundle,
+            tmp_path,
+            effective,
+            overlay_render_session=session,
+        )
+        materialized = session.stats
+
+    assert report.overlay_outputs == ("first.cpp",)
+    assert tuple(item.intervention_id for item in witnesses) == ("overlay.graph",)
+    assert (effective / "first.cpp").read_bytes() == generated + clean
+    assert loaded.token_index_builds == 1
+    assert loaded.anchor_batch_builds == 1
+    assert loaded.anchor_windows_hashed >= 1
+    # The second render found every index and anchor batch in the session.
+    assert materialized.token_index_builds == loaded.token_index_builds
+    assert materialized.anchor_batch_builds == loaded.anchor_batch_builds
+    assert materialized.anchor_windows_hashed == loaded.anchor_windows_hashed
+    assert materialized.token_index_hits == loaded.token_index_hits + 1
+    assert materialized.anchor_batch_hits == loaded.anchor_batch_hits + 1
+
+
+def test_effective_workspace_renders_without_a_shared_session(tmp_path: Path) -> None:
+    bundle, generated, clean = _bundle_with_clean_overlay_input(tmp_path)
+    effective = tmp_path / "state/effective"
+
+    witnesses = materialize_effective_workspace(bundle, tmp_path, effective)
+
+    assert tuple(item.intervention_id for item in witnesses) == ("overlay.graph",)
+    assert (effective / "first.cpp").read_bytes() == generated + clean
+
+
 def test_family_coverage_is_exhaustive_and_quarantine_fails_closed() -> None:
     assert set(FAMILY_COVERAGE) == set(ClassicRecipeFamily)
     simulated = FAMILY_COVERAGE[ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION]

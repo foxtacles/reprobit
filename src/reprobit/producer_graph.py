@@ -21,7 +21,7 @@ from pydantic import Field, field_validator, model_validator
 
 from reprobit.model import BuildTarget, Digest, Identifier, StrictModel
 from reprobit.secure_path_contracts import SecurePathError, canonical_relative_path
-from reprobit.strict_json import canonical_json, strict_load
+from reprobit.strict_json import canonical_json, strict_load_bytes
 
 _MARKERS = ("${SOURCE}", "${BUILD}", "${TOOLCHAIN}")
 _REFERENCE_KINDS = frozenset(
@@ -882,8 +882,7 @@ def materialize_reference(
 
 def read_producer_graph(path: Path) -> ProducerGraphDocument:
     try:
-        value = strict_load(path)
-        return ProducerGraphDocument.model_validate_json(canonical_json(value))
+        return ProducerGraphDocument.model_validate_json(strict_load_bytes(path))
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise ProducerGraphError(f"invalid producer graph {path}: {exc}") from exc
 

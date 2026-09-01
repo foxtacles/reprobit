@@ -37,7 +37,7 @@ from reprobit.classic_orchestration import (
 from reprobit.classic_project import (
     ClassicProjectError,
     InterventionWitness,
-    _effective_source_seal,
+    effective_source_seal,
 )
 from reprobit.classic_publication import (
     ClassicPublicationError,
@@ -1282,7 +1282,7 @@ class ClassicProducerGraphBuildExecutor:
 
         input_paths = [
             self.effective_root / relative
-            for relative, _, _ in _effective_source_seal(self.effective_root)
+            for relative, _, _ in effective_source_seal(self.effective_root)
         ]
         input_paths.extend(
             self.toolchain_root.joinpath(*PurePosixPath(item.path).parts)

@@ -503,6 +503,12 @@ built for the first time on this machine reads
 `rbit build . --cold` for a non-certifying developer build with no cache reads
 or writes.
 
+`build`, `verify`, `repair`, and `discover grind` run independent steps in
+parallel. Without `--jobs COUNT` the worker count is the number of CPUs the
+process may use, capped at 8 (`rbit build --help` prints the rule as
+`default: the CPUs this process may use, at most 8`). Pass `--jobs` to pin a
+count; values below one are rejected with exit status 2.
+
 ### Matched comparison files
 
 If an imported MSVC link asks for debug data, ReproBit automatically writes a

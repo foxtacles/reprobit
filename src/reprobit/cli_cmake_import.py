@@ -37,10 +37,9 @@ from reprobit.msvc42_provision import (
 from reprobit.project_loader import load_project, load_project_tree
 from reprobit.project_readiness import inspect_project_readiness
 from reprobit.schema import ProducerGraphBuildAdapter
+from reprobit.secure_path_contracts import is_redirected_metadata
 from reprobit.state import KeepWorkspace, RunArena
 from reprobit.toolchains import MSVC_42, ClassicMSVCToolchain
-
-_FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400
 
 
 def _absolute_file(path: Path) -> Path:
@@ -60,12 +59,7 @@ def _plain_directory(path: Path) -> bool:
         metadata = path.stat(follow_symlinks=False)
     except OSError:
         return False
-    return bool(
-        stat.S_ISDIR(metadata.st_mode)
-        and not stat.S_ISLNK(metadata.st_mode)
-        and not int(getattr(metadata, "st_reparse_tag", 0))
-        and not (int(getattr(metadata, "st_file_attributes", 0)) & _FILE_ATTRIBUTE_REPARSE_POINT)
-    )
+    return stat.S_ISDIR(metadata.st_mode) and not is_redirected_metadata(metadata)
 
 
 @contextmanager

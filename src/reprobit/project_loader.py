@@ -23,7 +23,7 @@ from reprobit.schema import (
     SourceManifestDocument,
     ToolchainLock,
 )
-from reprobit.strict_json import StrictJSONError, canonical_json, strict_load
+from reprobit.strict_json import StrictJSONError, canonical_json, strict_load_bytes
 
 if TYPE_CHECKING:
     from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
@@ -36,8 +36,10 @@ def _load_json_model(path: Path, model: type[ModelT]) -> ModelT:
     if not path.is_file():
         raise SchemaError(f"required project file is missing: {path}")
     try:
-        value = strict_load(path)
-        return model.model_validate_json(canonical_json(value))
+        # The strict decoder gates the bytes (duplicate keys, non-finite numbers);
+        # the typed validator then reads the same bytes once more in JSON mode,
+        # where array syntax may fill tuple fields, without a canonical re-dump.
+        return model.model_validate_json(strict_load_bytes(path))
     except (StrictJSONError, ValueError) as exc:
         if isinstance(exc, SchemaError):
             raise

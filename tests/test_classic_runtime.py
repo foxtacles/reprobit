@@ -1331,6 +1331,7 @@ def test_prepare_failure_releases_logical_drive_and_uses_stable_temporary(
         current_bundle: ProjectBundle,
         current_project_root: Path,
         effective_root: Path,
+        **_kwargs: object,
     ) -> tuple[()]:
         del current_bundle, current_project_root
         effective_root.mkdir(parents=True, exist_ok=True)
@@ -1892,6 +1893,7 @@ def test_compiler_namespace_payload_census_is_shared_across_nodes(
     executor._namespace_payload_intern = {}
     executor._compiler_namespaces = {}
     executor._producer_reads = []
+    executor._compiler_reads = {}
     executor._evidence_lock = Lock()
     executor.role_tool_ids = MappingProxyType({ProducerRole.COMPILER: "compiler"})
     compiler_digest = Digest.from_bytes(b"compiler")
@@ -1952,20 +1954,21 @@ def test_compiler_namespace_payload_census_is_shared_across_nodes(
         )
         for index in range(64)
     )
-    executor._producer_reads.extend(
-        classic_execution_records.ClassicProducerReadReceipt(
-            node.id,
-            node.id,
-            ProducerRole.COMPILER,
-            "effective",
-            (),
-            "complete-readable-namespace-v1",
-            namespace.evidence.namespace_id,
-            namespace.evidence.namespace_digest,
-            len(namespace.evidence.members),
-        )
-        for node in nodes
-    )
+    with executor._evidence_lock:
+        for node in nodes:
+            executor._record_producer_read(
+                classic_execution_records.ClassicProducerReadReceipt(
+                    node.id,
+                    node.id,
+                    ProducerRole.COMPILER,
+                    "effective",
+                    (),
+                    "complete-readable-namespace-v1",
+                    namespace.evidence.namespace_id,
+                    namespace.evidence.namespace_digest,
+                    len(namespace.evidence.members),
+                )
+            )
 
     invocations = tuple(
         executor.compiler_epoch_invocation(node, epoch="effective") for node in nodes
@@ -1975,6 +1978,57 @@ def test_compiler_namespace_payload_census_is_shared_across_nodes(
     assert len(namespace.reads) == 2
     assert all(not receipt.reads for receipt in executor._producer_reads)
     assert {item.namespace_digest for item in invocations} == {namespace.evidence.namespace_digest}
+
+
+def test_compiler_epoch_invocation_finds_exactly_one_receipt_per_node_and_epoch() -> None:
+    executor = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    executor._producer_reads = []
+    executor._compiler_reads = {}
+    executor._evidence_lock = Lock()
+    executor._compiler_namespaces = {}
+
+    def receipt(node_id: str, role: ProducerRole, epoch: str) -> object:
+        return classic_execution_records.ClassicProducerReadReceipt(
+            node_id, f"{node_id}:{epoch}", role, epoch, ()
+        )
+
+    node = ProducerNode(
+        id="compiler.program.0001",
+        role=ProducerRole.COMPILER,
+        owner="program",
+        arguments=("/c", "${SOURCE}/unit.cpp"),
+        inputs=("source/unit.cpp",),
+        outputs=("build/unit.obj",),
+    )
+    with executor._evidence_lock:
+        # A resource receipt on the same node id and epoch is never a match.
+        executor._record_producer_read(receipt(node.id, ProducerRole.RESOURCE, "effective"))
+        executor._record_producer_read(
+            receipt("compiler.program.0002", ProducerRole.COMPILER, "effective")
+        )
+        executor._record_producer_read(receipt(node.id, ProducerRole.COMPILER, "clean"))
+
+    with pytest.raises(ClassicProjectError, match="has 0 'effective' read receipts"):
+        executor.compiler_epoch_invocation(node, epoch="effective")
+
+    with executor._evidence_lock:
+        executor._record_producer_read(receipt(node.id, ProducerRole.COMPILER, "effective"))
+    # The single match is found; it then fails on the namespace it never named.
+    with pytest.raises(ClassicProjectError, match="lacks shared namespace identity"):
+        executor.compiler_epoch_invocation(node, epoch="effective")
+
+    with executor._evidence_lock:
+        executor._record_producer_read(receipt(node.id, ProducerRole.COMPILER, "effective"))
+    with pytest.raises(ClassicProjectError, match="has 2 'effective' read receipts"):
+        executor.compiler_epoch_invocation(node, epoch="effective")
+    # Every receipt, whatever its role, is still reported in arrival order.
+    assert [item.step_id for item in executor.producer_reads()] == [
+        "compiler.program.0001:effective",
+        "compiler.program.0002:effective",
+        "compiler.program.0001:clean",
+        "compiler.program.0001:effective",
+        "compiler.program.0001:effective",
+    ]
 
 
 def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(

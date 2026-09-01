@@ -56,7 +56,7 @@ from reprobit.classic_link_closure import (
 from reprobit.classic_project import (
     ClassicProjectError,
     InterventionWitness,
-    _effective_source_seal,
+    effective_source_seal,
 )
 from reprobit.classic_resources import ResourceDependencyReceipt
 from reprobit.classic_runtime_environment import (
@@ -375,7 +375,7 @@ class ClassicOverlayEpochs:
                 )
             )
         actual = {
-            relative.casefold() for relative, _, _ in _effective_source_seal(self.effective_root)
+            relative.casefold() for relative, _, _ in effective_source_seal(self.effective_root)
         }
         if actual != expected:
             raise ClassicProjectError(
@@ -420,7 +420,7 @@ class ClassicOverlayEpochs:
             expected_source_seal.append((entry.path, entry.size, entry.digest.value))
         if tuple(
             sorted(expected_source_seal, key=lambda item: item[0].casefold())
-        ) != _effective_source_seal(self.effective_root):
+        ) != effective_source_seal(self.effective_root):
             raise ClassicProjectError(
                 "clean project-overlay source seat differs from the complete manifest"
             )
@@ -435,7 +435,7 @@ class ClassicOverlayEpochs:
                 "source_manifest_count": len(self._clean_source_inputs),
                 "source_seal": [
                     {"path": path, "size": size, "digest": digest}
-                    for path, size, digest in _effective_source_seal(self.effective_root)
+                    for path, size, digest in effective_source_seal(self.effective_root)
                 ],
             },
             time.monotonic() - started,
@@ -642,7 +642,7 @@ class ClassicOverlayEpochs:
                     "producer_graph": producer_graph_digest(self.graph).model_dump(mode="json"),
                     "counterfactual_source_seal": [
                         {"path": path, "size": size, "digest": digest}
-                        for path, size, digest in _effective_source_seal(self.effective_root)
+                        for path, size, digest in effective_source_seal(self.effective_root)
                     ],
                     "compiler_outputs": output_material,
                     "erased_declared_outputs": sorted(
@@ -722,7 +722,7 @@ class ClassicOverlayEpochs:
         pairs = {item.path.casefold(): item for item in self.project_source_pairs}
         destinations: list[Path] = []
         outputs: list[dict[str, object]] = []
-        before = _effective_source_seal(self.effective_root)
+        before = effective_source_seal(self.effective_root)
         for relative, payload in self.compiler_epoch_plan.declaration_outputs.items():
             pair = pairs.get(relative.casefold())
             if pair is None or relative.casefold() in {
@@ -763,7 +763,7 @@ class ClassicOverlayEpochs:
                 ],
                 "after": [
                     {"path": path, "size": size, "digest": digest}
-                    for path, size, digest in _effective_source_seal(self.effective_root)
+                    for path, size, digest in effective_source_seal(self.effective_root)
                 ],
                 "outputs": outputs,
                 "audit_node_ids": sorted(
@@ -797,7 +797,7 @@ class ClassicOverlayEpochs:
         generated_tus = {item.casefold() for item in self.generated_translation_units}
         destinations: list[Path] = []
         declarations: list[dict[str, object]] = []
-        before_relative = _effective_source_seal(self.effective_root)
+        before_relative = effective_source_seal(self.effective_root)
         for pair in sorted(self.project_source_pairs, key=lambda item: item.path.casefold()):
             relative = _safe_relative(pair.path)
             destination = self.effective_root.joinpath(*PurePosixPath(relative).parts)
@@ -854,7 +854,7 @@ class ClassicOverlayEpochs:
             allowed_outputs=destinations,
             phase="certified project-overlay source epoch",
         )
-        after_relative = _effective_source_seal(self.effective_root)
+        after_relative = effective_source_seal(self.effective_root)
         step_id = "source.certified-project-overlay-epoch"
         receipt = _internal_step(
             step_id,

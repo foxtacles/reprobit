@@ -354,7 +354,7 @@ rbit repair [-h] [--jobs COUNT] [--keep-workspace {never,on-failure,always}] [--
 
 | Argument | Default | Description |
 |---|---|---|
-| `--jobs` `COUNT` | `4` | maximum parallel build workers (default: 4) |
+| `--jobs` `COUNT` |  | maximum parallel build workers (default: the CPUs this process may use, at most 8) |
 | `--keep-workspace` `{never,on-failure,always}` | `on-failure` | retain run-private diagnostics never, on failure, or always (default: on-failure) |
 | `--policy` `{clean,allow-quarantine}` |  | optionally narrow the project's committed authenticity policy |
 | `--report-dir` `PROJECT_RELATIVE_DIRECTORY` |  | write report.json and report.html beneath this project directory |
@@ -375,7 +375,7 @@ rbit build [-h] [--jobs COUNT] [--cold] [--keep-workspace {never,on-failure,alwa
 
 | Argument | Default | Description |
 |---|---|---|
-| `--jobs` `COUNT` | `4` | maximum parallel build workers (default: 4) |
+| `--jobs` `COUNT` |  | maximum parallel build workers (default: the CPUs this process may use, at most 8) |
 | `--cold` |  | build from scratch without using the incremental cache |
 | `--keep-workspace` `{never,on-failure,always}` | `on-failure` | retain run-private diagnostics never, on failure, or always (default: on-failure) |
 
@@ -395,7 +395,7 @@ rbit verify [-h] [--jobs COUNT] [--keep-workspace {never,on-failure,always}] [--
 
 | Argument | Default | Description |
 |---|---|---|
-| `--jobs` `COUNT` | `4` | maximum parallel build workers (default: 4) |
+| `--jobs` `COUNT` |  | maximum parallel build workers (default: the CPUs this process may use, at most 8) |
 | `--keep-workspace` `{never,on-failure,always}` | `on-failure` | retain run-private diagnostics never, on failure, or always (default: on-failure) |
 | `--policy` `{clean,allow-quarantine}` |  | optionally narrow the project's committed authenticity policy |
 | `--report-dir` `PROJECT_RELATIVE_DIRECTORY` |  | write report.json and report.html beneath this project directory |
@@ -441,7 +441,7 @@ rbit discover run [-h] [--report-json PATH] [--report-html PATH] [--state-direct
 | `--report-json` `PATH` |  | canonical JSON report beside the request (default: REQUEST_STEM.report.json) |
 | `--report-html` `PATH` |  | human review report beside the JSON report (default: REQUEST_STEM.report.html) |
 | `--state-directory` `DIRECTORY` | `.reprobit-discovery` | incremental cache and runtime state beside the request |
-| `--jobs` `COUNT` | `4` | maximum compiler workers (Wine is safely capped at 4; default: 4) |
+| `--jobs` `COUNT` |  | maximum compiler workers (Wine is safely capped at 4; default: the CPUs this process may use, at most 8) |
 | `--wine` `PATH_OR_NAME` | `wine` | POSIX Wine executable (default: wine from PATH) |
 | `--wineserver` `PATH_OR_NAME` | `wineserver` | POSIX wineserver executable (default: wineserver from PATH) |
 | `--toolchain-root` `DIRECTORY` |  | compiler installation override (normally remembered by rbit setup) |
@@ -485,7 +485,7 @@ rbit discover grind [-h] [--accept-exact | --accept-progress] [--reference-objec
 | `--reference-object` `TU=PROJECT_PATH` |  | pair a translation unit with a reference .obj; repeat for additional units |
 | `--max-symbols` `COUNT` | `8` | maximum project functions to try in deterministic order (default: 8; max: 64) |
 | `--expert-plan` `PROJECT_RELATIVE_PATH` |  | run one deliberately authored per-symbol plan instead of project-wide discovery |
-| `--jobs` `COUNT` | `4` | maximum parallel build workers (default: 4) |
+| `--jobs` `COUNT` |  | maximum parallel build workers (default: the CPUs this process may use, at most 8) |
 
 Shared: see [advanced execution options](#advanced-execution-options).
 

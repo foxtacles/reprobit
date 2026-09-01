@@ -139,6 +139,37 @@ def _nonnegative_hours(value: str) -> float:
     return hours
 
 
+JOBS_CEILING = 8
+"""Largest worker count chosen automatically when ``--jobs`` is omitted."""
+
+_JOBS_DEFAULT_HELP = f"the CPUs this process may use, at most {JOBS_CEILING}"
+
+
+def usable_cpu_count() -> int:
+    """Return how many CPUs this process may run on, never below one."""
+
+    process_count = getattr(os, "process_cpu_count", None)
+    if process_count is not None:
+        return max(1, process_count() or 1)
+    affinity = getattr(os, "sched_getaffinity", None)
+    if affinity is not None:
+        return max(1, len(affinity(0)))
+    return max(1, os.cpu_count() or 1)
+
+
+def default_jobs() -> int:
+    """Return the worker count used when ``--jobs`` is omitted.
+
+    The value is the CPU count this process may use, capped at
+    :data:`JOBS_CEILING` so that a many-core host does not start more Wine
+    compilers than one wineserver serves well. It is computed once per
+    invocation after parsing, not baked into the parser, so the generated
+    command reference stays host-independent.
+    """
+
+    return min(usable_cpu_count(), JOBS_CEILING)
+
+
 def _add_execution_options(
     command: argparse.ArgumentParser,
     *,
@@ -148,9 +179,9 @@ def _add_execution_options(
     command.add_argument(
         "--jobs",
         type=int,
-        default=4,
+        default=None,
         metavar="COUNT",
-        help="maximum parallel build workers (default: 4)",
+        help=f"maximum parallel build workers (default: {_JOBS_DEFAULT_HELP})",
     )
     if cold_option:
         command.add_argument(
@@ -930,9 +961,11 @@ def _parser() -> argparse.ArgumentParser:
     discover_run.add_argument(
         "--jobs",
         type=int,
-        default=4,
+        default=None,
         metavar="COUNT",
-        help="maximum compiler workers (Wine is safely capped at 4; default: 4)",
+        help=(
+            f"maximum compiler workers (Wine is safely capped at 4; default: {_JOBS_DEFAULT_HELP})"
+        ),
     )
     _add_host_options(discover_run, backend=False)
     _add_timeout_options(discover_run, initialization=False, compile_default=120.0, link=False)
@@ -1069,6 +1102,8 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     output = CLIOutput(args.format, sys.stdout, sys.stderr)
     handler: Handler = args.handler
+    if hasattr(args, "jobs") and args.jobs is None:
+        args.jobs = default_jobs()
     if getattr(args, "jobs", 1) < 1:
         output.emit(
             "error",
@@ -1117,4 +1152,4 @@ if __name__ == "__main__":
     raise SystemExit(main())
 
 
-__all__ = ["main"]
+__all__ = ["JOBS_CEILING", "default_jobs", "main", "usable_cpu_count"]

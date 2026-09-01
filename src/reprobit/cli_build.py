@@ -26,8 +26,22 @@ from reprobit.schema import (
 from reprobit.state import KeepWorkspace, RunArena
 
 if TYPE_CHECKING:
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
     from reprobit.classic_runtime_preparation import ClassicProducerGraphPreparedRun
     from reprobit.cli_environment import ClassicExecutionInputs
+
+
+def _overlay_render_session() -> ClassicOverlayRenderSession:
+    """Create the one overlay render session shared by a build or verify run.
+
+    Project loading renders every source overlay to validate source authority
+    and the effective workspace renders them again; sharing one bounded session
+    lets the second render reuse the first one's token indexes and anchors.
+    """
+
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
+
+    return ClassicOverlayRenderSession()
 
 
 def _host_environment(programs: Sequence[str], temporary: Path) -> tuple[tuple[str, str], ...]:
@@ -79,6 +93,7 @@ def prepare_producer_graph_run(
     session_root: Path,
     execution: ClassicExecutionInputs,
     progress: Callable[[int, int, str, str, ProgressKind, str | None], None],
+    overlay_render_session: ClassicOverlayRenderSession | None = None,
 ) -> ClassicProducerGraphPreparedRun:
     """Prepare the closed built-in direct runtime from CLI authority."""
 
@@ -109,6 +124,7 @@ def prepare_producer_graph_run(
         cleanup_timeout=args.cleanup_timeout,
         progress=relay_progress,
         measured_receipt_repair=getattr(args, "_classic_measured_receipt_repair", None),
+        overlay_render_session=overlay_render_session,
     )
 
 
@@ -133,6 +149,16 @@ def _project_relative(root: Path, path: Path) -> str:
 
 
 def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
+    with _overlay_render_session() as overlay_session:
+        return _command_build(args, output, overlay_session=overlay_session)
+
+
+def _command_build(
+    args: argparse.Namespace,
+    output: CLIOutput,
+    *,
+    overlay_session: ClassicOverlayRenderSession,
+) -> int:
     from reprobit.engine import BuildPlanExecutor
 
     root = project_root(args.project)
@@ -140,7 +166,7 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
         if args.cold:
             # Cold developer builds retain the exact committed source pins and
             # stay wholly outside the incremental cache implementation.
-            bundle = load_project_tree(root)
+            bundle = load_project_tree(root, overlay_render_session=overlay_session)
             developer_authority = None
         else:
             committed = load_project_tree(root, verify_source_authority=False)
@@ -192,7 +218,11 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                             session_root=run_root / "classic",
                             execution=execution,
                             progress=progress,
+                            overlay_render_session=overlay_session,
                         )
+                        # The effective workspace is rendered; release the
+                        # retained indexes before the producers start.
+                        overlay_session.close()
                         with ExitStack() as stack:
                             stack.callback(prepared.close)
                             from reprobit.oracle_pe32 import bind_pe32_oracle
@@ -269,6 +299,7 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
                             repair_analysis=bool(
                                 getattr(args, "_classic_repair_analysis_only", False)
                             ),
+                            overlay_render_session=overlay_session,
                         )
                     receipt = incremental.receipt
                     incremental_summary = incremental.summary
@@ -343,6 +374,16 @@ def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
 
 
 def command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
+    with _overlay_render_session() as overlay_session:
+        return _command_verify(args, output, overlay_session=overlay_session)
+
+
+def _command_verify(
+    args: argparse.Namespace,
+    output: CLIOutput,
+    *,
+    overlay_session: ClassicOverlayRenderSession,
+) -> int:
     from reprobit.engine import (
         EngineRequest,
         ReportDestinations,
@@ -355,7 +396,7 @@ def command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
         raise CLIError("exact verification refuses provisional measured receipt repairs")
     root = project_root(args.project)
     with output.activity("checking the project files", phase="validate"):
-        bundle = load_project_tree(root)
+        bundle = load_project_tree(root, overlay_render_session=overlay_session)
     requested_policy = (
         AuthenticityPolicy(args.policy)
         if args.policy is not None
@@ -414,7 +455,11 @@ def command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
                     session_root=run_root / "classic",
                     execution=execution,
                     progress=progress,
+                    overlay_render_session=overlay_session,
                 )
+                # The effective workspace is rendered; release the retained
+                # indexes before the producers start.
+                overlay_session.close()
                 with ExitStack() as stack:
                     stack.callback(prepared.close)
                     oracles = tuple(

@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from reprobit.backends import (
     BackendError,
@@ -67,6 +68,9 @@ from reprobit.schema import (
     ProjectBundle,
 )
 from reprobit.toolchains import ClassicMSVCToolchain
+
+if TYPE_CHECKING:
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 
 
 @dataclass(frozen=True, slots=True)
@@ -268,8 +272,14 @@ def prepare_classic_producer_graph_run(
     cleanup_timeout: float = 10.0,
     progress: ClassicProgressCallback | None = None,
     measured_receipt_repair: ClassicMeasuredReceiptRepair | None = None,
+    overlay_render_session: ClassicOverlayRenderSession | None = None,
 ) -> ClassicProducerGraphPreparedRun:
-    """Prepare a cold, direct execution of the committed producer graph."""
+    """Prepare a cold, direct execution of the committed producer graph.
+
+    ``overlay_render_session`` should be the session that already rendered the
+    project overlays while ``bundle`` was loaded; the effective workspace then
+    reuses those indexes instead of rendering every overlay a second time.
+    """
 
     if not isinstance(bundle.spec.build, ProducerGraphBuildAdapter):
         raise ClassicProjectError("classic graph execution requires the producer-graph adapter")
@@ -327,6 +337,7 @@ def prepare_classic_producer_graph_run(
         bundle,
         project_root,
         effective_root,
+        overlay_render_session=overlay_render_session,
     )
     overlay_epoch = _capture_and_restore_overlay_outputs(
         bundle,

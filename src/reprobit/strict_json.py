@@ -75,6 +75,30 @@ def strict_load(path: str | Path) -> JsonValue:
         raise StrictJSONError(f"cannot read {source}: {exc}") from exc
 
 
+def strict_load_bytes(path: str | Path) -> bytes:
+    """Return a JSON file's bytes as UTF-8 after :func:`strict_loads` has accepted them.
+
+    Callers that hand the document to a typed JSON validator need the strict
+    decoder only as a gate: it rejects duplicate keys, non-finite numbers, and
+    malformed text with the same errors as :func:`strict_load`, but the decoded
+    object is discarded so the document is not re-serialized before the second
+    parser reads it. A file that :mod:`json` would read through its encoding
+    detection (a UTF-8 byte-order mark, UTF-16, or UTF-32) is transcoded to
+    plain UTF-8 so the second parser accepts exactly what the first did.
+    """
+
+    source = Path(path)
+    try:
+        data = source.read_bytes()
+    except OSError as exc:
+        raise StrictJSONError(f"cannot read {source}: {exc}") from exc
+    strict_loads(data)
+    encoding = json.detect_encoding(data)
+    if encoding != "utf-8":
+        data = data.decode(encoding, "surrogatepass").encode("utf-8", "surrogatepass")
+    return data
+
+
 def _jsonable(value: Any) -> JsonValue:
     if isinstance(value, BaseModel):
         return _jsonable(
@@ -131,5 +155,6 @@ __all__ = [
     "StrictJSONError",
     "canonical_json",
     "strict_load",
+    "strict_load_bytes",
     "strict_loads",
 ]

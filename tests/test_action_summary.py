@@ -14,7 +14,7 @@ import reprobit.cli_build as cli_build_module
 import reprobit.engine as engine_module
 from reprobit.action_summary import main, publish_action_completion
 from reprobit.build import BuildPlan
-from reprobit.cli_build import command_verify
+from reprobit.cli_build import _command_verify, command_verify
 from reprobit.cli_output import CLIOutput
 from reprobit.costs import (
     calculate_cost,
@@ -501,7 +501,9 @@ def test_composite_action_preserves_reports_when_verification_fails() -> None:
 
 
 def test_action_completion_is_outside_prepared_cleanup_scope() -> None:
-    tree = ast.parse(inspect.getsource(command_verify))
+    # ``command_verify`` only owns the overlay render session; the run body
+    # that publishes the completion lives in ``_command_verify``.
+    tree = ast.parse(inspect.getsource(_command_verify))
     parents: dict[ast.AST, ast.AST] = {
         child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
     }
@@ -562,7 +564,7 @@ def test_prepared_cleanup_failure_never_publishes_action_completion(
             raise RuntimeError("fixture cleanup failure")
 
     prepared = Prepared()
-    monkeypatch.setattr(cli_build_module, "load_project_tree", lambda _root: bundle)
+    monkeypatch.setattr(cli_build_module, "load_project_tree", lambda _root, **_kwargs: bundle)
     monkeypatch.setattr(
         cli_build_module,
         "prepare_producer_graph_run",

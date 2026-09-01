@@ -15,7 +15,7 @@ from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import reprobit.classic.composition as composition
 import reprobit.classic.composition_hybrid_resize as hybrid_resize
@@ -48,6 +48,9 @@ from reprobit.secure_paths import (
     read_relative_file,
 )
 from reprobit.strict_json import canonical_json
+
+if TYPE_CHECKING:
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 
 
 @dataclass(frozen=True, slots=True)
@@ -535,7 +538,7 @@ def _copy_effective_source(
             raise ClassicProjectError(f"effective source copy differs from receipt: {entry.path!r}")
 
 
-def _effective_source_seal(root: Path) -> tuple[tuple[str, int, str], ...]:
+def effective_source_seal(root: Path) -> tuple[tuple[str, int, str], ...]:
     """Receipt every effective input and reject redirects in the closed tree."""
 
     root = root.resolve(strict=True)
@@ -557,8 +560,15 @@ def materialize_effective_workspace(
     bundle: ProjectBundle,
     project_root: Path,
     destination: Path,
+    *,
+    overlay_render_session: ClassicOverlayRenderSession | None = None,
 ) -> tuple[InterventionWitness, ...]:
-    """Copy oracle-free project inputs and render authoritative overlay shards."""
+    """Copy oracle-free project inputs and render authoritative overlay shards.
+
+    ``overlay_render_session`` lets a caller that already rendered the same
+    overlays (source-authority validation during project loading) reuse the
+    token indexes and anchor matches it retained instead of rebuilding them.
+    """
     project_root = project_root.resolve(strict=True)
     if project_root != Path(bundle.root).resolve(strict=True):
         raise ClassicProjectError("adapter project root differs from loaded bundle")
@@ -610,6 +620,7 @@ def materialize_effective_workspace(
             rendered = render_classic_overlay(
                 {"schema": schema, "outputs": outputs, "graph": graph},
                 clean_inputs,
+                session=overlay_render_session,
             )
         except ValueError as exc:
             raise ClassicProjectError(f"cannot render overlay {intervention.id!r}: {exc}") from exc
@@ -653,7 +664,7 @@ def materialize_effective_workspace(
     assert manifest is not None
     admitted = {item.path.casefold() for item in manifest.entries}
     admitted.update(item.path.casefold() for item in overlay_witnesses)
-    received = {item[0].casefold() for item in _effective_source_seal(destination)}
+    received = {item[0].casefold() for item in effective_source_seal(destination)}
     if received != admitted:
         missing = sorted(admitted - received)
         extra = sorted(received - admitted)
@@ -789,6 +800,7 @@ __all__ = [
     "FamilyCoverage",
     "FamilyExecutionMode",
     "InterventionWitness",
+    "effective_source_seal",
     "materialize_effective_workspace",
     "write_cmake_project_plan",
 ]
