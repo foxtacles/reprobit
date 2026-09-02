@@ -52,6 +52,7 @@ from .register_semantics import (
     decode_ia32_bijection_body,
 )
 from .relational import (
+    apply_equality_load_exchange,
     apply_relational_form,
     relational_form_external_entries,
 )
@@ -349,6 +350,27 @@ def produce_composed_rewriting_candidate(
             "composed-rewriting relational rewrite set differs from its declaration",
         )
         relational_detail = proof["sites"]
+    equality_detail = []
+    if spec.get("equality_load_exchanges"):
+        image, proof = apply_equality_load_exchange(
+            image,
+            spec["equality_load_exchanges"],
+            relocation_offsets,
+            "composed-rewriting equality exchange",
+            relocation_symbols,
+            code_length,
+            frozenset(external_entries),
+        )
+        require(
+            proof["rewritten_offsets"]
+            == sorted(
+                offset
+                for item in spec["equality_load_exchanges"]
+                for offset in item["expected_rewritten_offsets"]
+            ),
+            "composed-rewriting equality exchange rewrite set differs from its declaration",
+        )
+        equality_detail = proof["exchanges"]
     require(image != seed_body, "composed-rewriting image does not move the seed body")
     image_instructions = decode_ia32_bijection_body(
         image, "composed-rewriting image", relocation_symbols, code_length
@@ -566,6 +588,7 @@ def produce_composed_rewriting_candidate(
             "register_bijections": bijection_detail,
             "slot_bijections": slot_detail,
             "relational_form": relational_detail,
+            **({"equality_load_exchanges": equality_detail} if equality_detail else {}),
             "instruction_count": len(image_instructions),
             "changed_offsets": changed,
             "debug_fidelity": debug_detail,
@@ -898,6 +921,27 @@ def produce_donor_rewriting_candidate(
             "donor-rewriting relational rewrite set differs from its declaration",
         )
         relational_detail = proof["sites"]
+    equality_detail = []
+    if spec.get("equality_load_exchanges"):
+        image, proof = apply_equality_load_exchange(
+            image,
+            spec["equality_load_exchanges"],
+            relocation_offsets,
+            "donor-rewriting equality exchange",
+            relocation_symbols,
+            code_length,
+            frozenset(external_entries),
+        )
+        require(
+            proof["rewritten_offsets"]
+            == sorted(
+                offset
+                for item in spec["equality_load_exchanges"]
+                for offset in item["expected_rewritten_offsets"]
+            ),
+            "donor-rewriting equality exchange rewrite set differs from its declaration",
+        )
+        equality_detail = proof["exchanges"]
     require(image != donor_body, "donor-rewriting image does not move the donor body")
     donor_instructions = decode_ia32_bijection_body(
         donor_body, "donor-rewriting pre-image", relocation_symbols, code_length
@@ -1029,6 +1073,7 @@ def produce_donor_rewriting_candidate(
             "register_bijections": bijection_detail,
             "slot_bijections": slot_detail,
             "relational_form": relational_detail,
+            **({"equality_load_exchanges": equality_detail} if equality_detail else {}),
             "instruction_count": len(image_instructions),
             "changed_offsets": changed,
             "debug_fidelity": debug_detail,

@@ -119,6 +119,15 @@ Contract `classic.binary-transform.<family>.v1`; obligations
 | `retail_exact_instruction_mosaic` | Retail exact instruction mosaic adjustment | Binary surgery (500) | Draws same-offset complete instructions from several declaration-carrier compiles of the same translation unit (see `classic.composition.produce_instruction_mosaic_candidate`). |
 | `retail_exact_same_tu_instruction_hybrid_resize` | Retail exact same tu instruction hybrid resize adjustment | Binary surgery (500) | Composes two source-identical, declaration-carrier same-TU donors (see `classic.composition.produce_same_tu_instruction_hybrid_resize_candidate`). |
 
+The two rewriting families accept the same closed set of instruction-level
+primitives, each proved on the measured body: topological window reorderings,
+regional register bijections, slot bijections, mirrored relational compares,
+mirrored equality-load exchanges (`mov r, [ebp+A]; cmp [ebp+B], r; je/jne`
+becomes the test of `B` against `A` when `r` and every flag but ZF are dead
+after the branch), commutative x87 operand forms, x87 addend and fp-sum
+reassociations, ESP-argument and frame-pointer operand exchanges, and
+simulation-proved region rewrites.
+
 #### Project-level families (role `project`)
 
 | Family | `rbit explain` label | Cost class (points) | Contract and meaning |

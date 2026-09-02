@@ -639,6 +639,69 @@ def _validate_relational_sites(
     return (normalized_sites, relational_bytes)
 
 
+def _validate_equality_load_exchanges(
+    value: dict[str, Any], context: str, body_length: int
+) -> tuple[list[Any], list[Any]]:
+    """Validate the `equality_load_exchanges` list of a seam declaration.
+
+    Shape only -- the exchange obligations are discharged by
+    `apply_equality_load_exchange` on the measured body.  Returns
+    (normalized_exchanges, rewritten_bytes)."""
+    normalized_exchanges = []
+    exchange_bytes = []
+    previous = -1
+    for index, item in enumerate(value.get("equality_load_exchanges") or []):
+        item_context = f"{context}.equality_load_exchanges[{index}]"
+        require(isinstance(item, dict), f"{item_context} must be an object")
+        exact_audit_keys(
+            item,
+            {"load_offset", "compare_offset", "branch_offset", "expected_rewritten_offsets"},
+            item_context,
+        )
+        load_at = require_exact_int(
+            item.get("load_offset"),
+            f"{item_context}.load_offset",
+            minimum=0,
+            maximum=body_length - 3,
+        )
+        compare_at = require_exact_int(
+            item.get("compare_offset"),
+            f"{item_context}.compare_offset",
+            minimum=1,
+            maximum=body_length - 2,
+        )
+        branch_at = require_exact_int(
+            item.get("branch_offset"),
+            f"{item_context}.branch_offset",
+            minimum=2,
+            maximum=body_length - 1,
+        )
+        require(load_at > previous, f"{item_context}: exchanges are unsorted or overlapping")
+        require(
+            load_at < compare_at < branch_at,
+            f"{item_context}: the load, compare and branch are not in order",
+        )
+        previous = branch_at
+        offsets = item.get("expected_rewritten_offsets")
+        require(
+            isinstance(offsets, list)
+            and len(offsets) in (2, 8)
+            and (offsets == sorted(set(offsets)))
+            and all(type(offset) is int and load_at < offset < branch_at for offset in offsets),
+            f"{item_context}.expected_rewritten_offsets is invalid",
+        )
+        exchange_bytes.extend(offsets)
+        normalized_exchanges.append(
+            {
+                "load_offset": load_at,
+                "compare_offset": compare_at,
+                "branch_offset": branch_at,
+                "expected_rewritten_offsets": list(offsets),
+            }
+        )
+    return (normalized_exchanges, exchange_bytes)
+
+
 def _validate_slot_bijections(value: dict[str, Any], context: str, body_length: int) -> list[Any]:
     """Validate the `slot_bijections` list of a seam declaration.
 
@@ -780,6 +843,7 @@ def validate_composed_rewriting(
             "commutative_operand_forms",
             "esp_argument_exchanges",
             "x87_squared_addend_exchanges",
+            "equality_load_exchanges",
             "expected_instruction_count",
             "expected_changed_offsets",
             "expected_procedure_range",
@@ -802,6 +866,7 @@ def validate_composed_rewriting(
             "commutative_operand_forms",
             "esp_argument_exchanges",
             "x87_squared_addend_exchanges",
+            "equality_load_exchanges",
             "expected_code_length",
             "expected_internal_relocation_targets",
         },
@@ -893,6 +958,9 @@ def validate_composed_rewriting(
     # every region rewrite carries are checked for this class as well.
     _validate_simulated_region_rewrites(document, context, body_length)
     normalized_sites, relational_bytes = _validate_relational_sites(document, context, body_length)
+    normalized_equalities, equality_bytes = _validate_equality_load_exchanges(
+        document, context, body_length
+    )
     normalized_forms, form_bytes = _validate_commutative_operand_forms(
         document, context, body_length
     )
@@ -905,6 +973,7 @@ def validate_composed_rewriting(
             normalized_windows
             or normalized_bijections
             or normalized_sites
+            or normalized_equalities
             or normalized_rotations
             or normalized_region_rewrites
             or normalized_forms
@@ -923,6 +992,7 @@ def validate_composed_rewriting(
                 len(normalized_windows)
                 + len(normalized_bijections)
                 + len(normalized_sites)
+                + len(normalized_equalities)
                 + len(normalized_rotations)
                 + len(declared_slots)
                 >= 2
@@ -946,7 +1016,12 @@ def validate_composed_rewriting(
         f"{context}: a bijection and a relational reversal rewrite the same byte",
     )
     require(
-        not window_bytes & (set(bijection_bytes) | set(relational_bytes)),
+        len(set(equality_bytes)) == len(equality_bytes)
+        and not set(equality_bytes) & (set(bijection_bytes) | set(relational_bytes)),
+        f"{context}: an equality exchange rewrites a byte another certificate rewrites",
+    )
+    require(
+        not window_bytes & (set(bijection_bytes) | set(relational_bytes) | set(equality_bytes)),
         f"{context}: a byte-local certificate rewrites a byte inside a reordered window",
     )
     require(
@@ -955,6 +1030,7 @@ def validate_composed_rewriting(
             window_bytes
             | set(bijection_bytes)
             | set(relational_bytes)
+            | set(equality_bytes)
             | set(form_bytes)
             | region_rewrite_regions
         ),
@@ -962,7 +1038,13 @@ def validate_composed_rewriting(
     )
     require(
         not region_rewrite_regions
-        & (window_bytes | set(bijection_bytes) | set(form_bytes) | set(relational_bytes)),
+        & (
+            window_bytes
+            | set(bijection_bytes)
+            | set(form_bytes)
+            | set(relational_bytes)
+            | set(equality_bytes)
+        ),
         f"{context}: a simulated region rewrite overlaps another certificate's bytes",
     )
     require(
@@ -971,6 +1053,7 @@ def validate_composed_rewriting(
             window_bytes
             | set(bijection_bytes)
             | set(relational_bytes)
+            | set(equality_bytes)
             | set(form_bytes)
             | rotation_regions
             | region_rewrite_regions
@@ -978,7 +1061,8 @@ def validate_composed_rewriting(
         f"{context}: an x87 exchange chain overlaps another certificate's bytes",
     )
     require(
-        not set(form_bytes) & (window_bytes | set(bijection_bytes) | set(relational_bytes)),
+        not set(form_bytes)
+        & (window_bytes | set(bijection_bytes) | set(relational_bytes) | set(equality_bytes)),
         f"{context}: a commutative operand form overlaps another certificate's bytes",
     )
     changed = _require_changed_offsets(document, context, body_length)
@@ -992,6 +1076,7 @@ def validate_composed_rewriting(
     strict_union = (
         set(bijection_bytes)
         | set(relational_bytes)
+        | set(equality_bytes)
         | set(rotation_bytes)
         | set(region_rewrite_bytes)
         | set(x87_bytes)
@@ -1013,6 +1098,7 @@ def validate_composed_rewriting(
                 offset
                 in set(bijection_bytes)
                 | set(relational_bytes)
+                | set(equality_bytes)
                 | set(form_bytes)
                 | set(exchange_bytes)
             )
@@ -1047,6 +1133,8 @@ def validate_composed_rewriting(
     normalized["windows"] = normalized_windows
     normalized["register_bijections"] = normalized_bijections
     normalized["relational_sites"] = normalized_sites
+    if normalized_equalities:
+        normalized["equality_load_exchanges"] = normalized_equalities
     normalized["fp_sum_rotations"] = normalized_rotations
     normalized["simulated_region_rewrites"] = normalized_region_rewrites
     normalized["slot_bijections"] = normalized_slots
@@ -1080,6 +1168,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             "commutative_operand_forms",
             "slot_bijections",
             "x87_squared_addend_exchanges",
+            "equality_load_exchanges",
             "expected_instruction_count",
             "expected_changed_offsets",
             "expected_procedure_range",
@@ -1100,6 +1189,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             "commutative_operand_forms",
             "slot_bijections",
             "x87_squared_addend_exchanges",
+            "equality_load_exchanges",
             "expected_code_length",
             "expected_internal_relocation_targets",
         },
@@ -1191,6 +1281,9 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         document, context, body_length
     )
     normalized_sites, relational_bytes = _validate_relational_sites(document, context, body_length)
+    normalized_equalities, equality_bytes = _validate_equality_load_exchanges(
+        document, context, body_length
+    )
     normalized_slots = _validate_slot_bijections(document, context, body_length)
     normalized_forms, form_bytes = _validate_commutative_operand_forms(
         document, context, body_length
@@ -1203,6 +1296,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             or normalized_exchanges
             or normalized_rewrites
             or normalized_sites
+            or normalized_equalities
             or normalized_forms
             or normalized_slots
             or normalized_x87
@@ -1226,8 +1320,19 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         and (len({*bijection_bytes} & {*form_bytes}) == 0)
         and (len({*exchange_bytes} & {*relational_bytes}) == 0)
         and (len({*exchange_bytes} & {*form_bytes}) == 0)
-        and (len({*relational_bytes} & {*form_bytes}) == 0),
+        and (len({*relational_bytes} & {*form_bytes}) == 0)
+        and (
+            len(
+                {*equality_bytes}
+                & ({*bijection_bytes} | {*exchange_bytes} | {*relational_bytes} | {*form_bytes})
+            )
+            == 0
+        ),
         f"{context}: two certificates rewrite the same byte",
+    )
+    require(
+        len(set(equality_bytes)) == len(equality_bytes),
+        f"{context}: two equality exchanges rewrite the same byte",
     )
     require(
         not rotation_regions
@@ -1235,6 +1340,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
             set(bijection_bytes)
             | set(exchange_bytes)
             | set(relational_bytes)
+            | set(equality_bytes)
             | set(form_bytes)
             | window_bytes
             | rewrite_regions
@@ -1243,7 +1349,13 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
     )
     require(
         not rewrite_regions
-        & (set(exchange_bytes) | set(relational_bytes) | set(form_bytes) | window_bytes),
+        & (
+            set(exchange_bytes)
+            | set(relational_bytes)
+            | set(equality_bytes)
+            | set(form_bytes)
+            | window_bytes
+        ),
         f"{context}: another certificate reaches inside a simulated region rewrite",
     )
     require(
@@ -1253,6 +1365,10 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
     require(
         not window_bytes & set(relational_bytes),
         f"{context}: a relational reversal rewrites a byte inside a reordered window",
+    )
+    require(
+        not window_bytes & set(equality_bytes),
+        f"{context}: an equality exchange rewrites a byte inside a reordered window",
     )
     changed = _require_changed_offsets(document, context, body_length)
     identity_relational = {
@@ -1271,6 +1387,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         | set(rewrite_bytes)
         | set(form_bytes)
         | slot_bytes
+        | set(equality_bytes)
         | set(relational_bytes) - identity_relational
         <= set(changed),
         f"{context}.expected_changed_offsets omits a rewritten byte",
@@ -1285,6 +1402,7 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
                 in set(bijection_bytes)
                 | set(exchange_bytes)
                 | set(relational_bytes)
+                | set(equality_bytes)
                 | set(form_bytes)
                 | slot_bytes
             )
@@ -1317,6 +1435,8 @@ def validate_donor_rewriting(value: object, context: str, body_length: int) -> d
         "slot_bijections": normalized_slots,
         "x87_squared_addend_exchanges": normalized_x87,
     }
+    if normalized_equalities:
+        normalized["equality_load_exchanges"] = normalized_equalities
     if code_length is not None:
         normalized["expected_code_length"] = code_length
     if targets is not None:

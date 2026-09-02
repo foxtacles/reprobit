@@ -41,11 +41,20 @@ from .foundation import (
     require_sha,
     sha256_bytes,
 )
-from .register_semantics import _ia32_backward_liveness, decode_ia32_bijection_instruction
+from .register_semantics import (
+    _IA32_ATOMS_OF,
+    _IA32_STRUCTURAL_REGISTERS,
+    IA32_GENERAL_REGISTER_NAMES,
+    _ia32_backward_liveness,
+    _register_bijection_live_sets,
+    decode_ia32_bijection_body,
+    decode_ia32_bijection_instruction,
+)
 
 """Classic compiler algorithms: relational."""
 RELATIONAL_FORM_CLASS = "retail_exact_relational_form"
 RELATIONAL_FORM_KIND = "mirrored_relational_form_v1"
+EQUALITY_LOAD_EXCHANGE_KIND = "mirrored_equality_load_exchange_v1"
 RELATIONAL_FORM_FPO_CLOSURE = [".debug$F", ".debug$S"]
 RELATIONAL_FORM_EH_CLOSURE = [".debug$S", ".xdata$x"]
 RELATIONAL_FORM_RECIPE = CandidateRecipe(
@@ -669,6 +678,299 @@ def apply_relational_form(
         {
             "kind": RELATIONAL_FORM_KIND,
             "sites": proved,
+            "instruction_count": len(items),
+            "rewritten_offsets": rewritten,
+            "external_entries": [items[index]["offset"] for index in entries[1:]],
+            "preserved_flags": sorted(IA32_RELATIONAL_PRESERVED_FLAGS),
+            "changed_flags": sorted(IA32_RELATIONAL_CHANGED_FLAGS),
+        },
+    )
+
+
+_EQUALITY_LOAD_OPCODE = 139  # 8B /r  mov r32, r/m32
+_EQUALITY_COMPARE_OPCODE = 57  # 39 /r  cmp r/m32, r32
+_EQUALITY_CONDITIONS = frozenset({"e", "ne"})
+
+
+def apply_equality_load_exchange(
+    body: bytes,
+    exchanges: list[Any],
+    relocation_offsets: frozenset[int],
+    context: str,
+    relocations: dict[int, Any] | None = None,
+    code_length: int | None = None,
+    external_entries: frozenset[int] | None = None,
+) -> tuple[bytes, dict[str, Any]]:
+    """Exchange which of two frame slots an equality test loads, or refuse.
+
+    `mov r, [ebp+A]; cmp [ebp+B], r; je/jne` tests A == B by way of r.
+    Loading B and comparing A tests the same equality: the two reads are
+    adjacent with no write between them and ZF is symmetric in the operands.
+    The only observable differences are r's final value and the arithmetic
+    flags other than ZF, and the certificate proves both dead.  The rewrite
+    exchanges the two displacement fields in place; no other byte moves.
+
+    Obligations, all discharged on the measured body:
+      Q1  the three offsets are consecutive instruction boundaries: a `8B /r`
+          load and a `39 /r` compare whose ModRM both address `[ebp+disp]`
+          (mod 01 or 10, rm 101, no SIB) through the same general register,
+          followed by a `je` or `jne`;
+      Q2  the compare's only predecessor is the load and the branch's only
+          predecessor is the compare, so no other path reaches the test with
+          a different r or different flags;
+      Q3  the two displacements have the same encoded width and differ, so
+          the exchange is a length-preserving swap that moves the body;
+      Q4  no exchanged byte carries a relocation;
+      Q5  r is dead on every edge out of the branch, which itself reads and
+          writes no register;
+      Q6  every flag the reversal changes is dead on every edge out of the
+          branch and at every external entry, as for the relational mirror;
+      Q7  the image re-decodes to the same boundaries, flow and targets, its
+          load and compare address the exchanged slots, and Q5 and Q6 hold
+          on the image as well.
+    """
+    require_payload_free_declaration(exchanges, f"{context} equality-exchange declaration")
+    require(isinstance(body, (bytes, bytearray)) and bool(body), f"{context}: body is empty")
+    body = bytes(body)
+    require(isinstance(exchanges, list) and bool(exchanges), f"{context}: no exchange is declared")
+    items, successors, entries = ia32_relational_flow_walk(
+        body, relocations, context, code_length, external_entries
+    )
+    index_of = {item["offset"]: index for index, item in enumerate(items)}
+    predecessors: list[list[int]] = [[] for _ in items]
+    for index, edges in enumerate(successors):
+        for edge in edges:
+            predecessors[edge].append(index)
+    live = ia32_relational_flag_liveness(items, successors, context)
+    decoded_body = decode_ia32_bijection_body(body, f"{context} liveness", relocations, code_length)
+    register_live, _register_successors = _register_bijection_live_sets(
+        decoded_body, f"{context} liveness"
+    )
+    register_index = {item["offset"]: index for index, item in enumerate(decoded_body)}
+    image_buffer = bytearray(body)
+    rewritten: list[int] = []
+    proved = []
+    previous_branch = -1
+    for ordinal, exchange in enumerate(exchanges):
+        site_context = f"{context} exchange {ordinal}"
+        load_at = exchange["load_offset"]
+        compare_at = exchange["compare_offset"]
+        branch_at = exchange["branch_offset"]
+        require(
+            load_at in index_of and compare_at in index_of and (branch_at in index_of),
+            f"{site_context}: an offset is not an instruction boundary",
+        )
+        require(load_at > previous_branch, f"{site_context}: exchanges are unsorted or overlapping")
+        previous_branch = branch_at
+        load_index = index_of[load_at]
+        compare_index = index_of[compare_at]
+        branch_index = index_of[branch_at]
+        require(
+            compare_index == load_index + 1 and branch_index == compare_index + 1,
+            f"{site_context}: the load, compare and branch are not consecutive",
+        )
+        load = decode_ia32_bijection_instruction(body, load_at, f"{site_context} load", relocations)
+        compare = decode_ia32_bijection_instruction(
+            body, compare_at, f"{site_context} compare", relocations
+        )
+        branch = items[branch_index]
+        require(
+            load["opcode"] == _EQUALITY_LOAD_OPCODE
+            and compare["opcode"] == _EQUALITY_COMPARE_OPCODE,
+            f"{site_context}: the instructions are not `mov r32, r/m32` and `cmp r/m32, r32`",
+        )
+        require(
+            items[load_index]["flow"] == "fall" and items[compare_index]["flow"] == "fall",
+            f"{site_context}: the load or compare is a control transfer",
+        )
+        for role, decoded in (("load", load), ("compare", compare)):
+            memory = decoded["memory"]
+            encoding = decoded["encoding"]
+            require(
+                memory is not None
+                and not memory.get("unknown")
+                and (memory["base"] == "ebp")
+                and (memory["index"] is None)
+                and (not memory["absolute"])
+                and (memory["width"] == 4)
+                and memory["read"]
+                and (not memory["write"]),
+                f"{site_context}: the {role} does not read one dword frame slot through EBP",
+            )
+            require(
+                encoding["mode"] in (1, 2)
+                and encoding["rm"] == 5
+                and (encoding["sib_at"] is None)
+                and (encoding["displacement_at"] is not None)
+                and (encoding["displacement_size"] in (1, 4)),
+                f"{site_context}: the {role} is not the closed `[ebp+disp]` form",
+            )
+        register_number = load["encoding"]["reg"]
+        require(
+            compare["encoding"]["reg"] == register_number,
+            f"{site_context}: the compare does not read the register the load defines",
+        )
+        register = IA32_GENERAL_REGISTER_NAMES[register_number]
+        require(
+            register not in _IA32_STRUCTURAL_REGISTERS,
+            f"{site_context}: the exchange would move ESP or EBP",
+        )
+        require(
+            load["encoding"]["displacement_size"] == compare["encoding"]["displacement_size"]
+            and load["encoding"]["mode"] == compare["encoding"]["mode"],
+            f"{site_context}: the two displacements have different encoded widths",
+        )
+        require(
+            load["memory"]["displacement"] != compare["memory"]["displacement"],
+            f"{site_context}: the two slots are the same slot",
+        )
+        require(
+            branch["flow"] == "jcc" and branch["condition"] is not None,
+            f"{site_context}: the instruction at {branch_at} is not a conditional branch",
+        )
+        condition = IA32_CONDITION_NAMES[branch["condition"]]
+        require(
+            condition in _EQUALITY_CONDITIONS,
+            f"{site_context}: condition 'j{condition}' reads a flag the exchange changes",
+        )
+        require(
+            predecessors[compare_index] == [load_index],
+            f"{site_context}: the compare has a predecessor other than its load",
+        )
+        require(
+            predecessors[branch_index] == [compare_index],
+            f"{site_context}: the branch has a predecessor other than its compare",
+        )
+        width = load["encoding"]["displacement_size"]
+        load_field = load["encoding"]["displacement_at"]
+        compare_field = compare["encoding"]["displacement_at"]
+        fields = [
+            *range(load_field, load_field + width),
+            *range(compare_field, compare_field + width),
+        ]
+        require(
+            not any(offset in relocation_offsets for offset in fields),
+            f"{site_context}: an exchanged byte overlaps a relocation",
+        )
+        atoms = _IA32_ATOMS_OF[register]
+        register_live_at_branch = register_live[register_index[branch_at]]
+        require(
+            not atoms & register_live_at_branch,
+            f"{site_context}: {register} is live after the branch, so its exchanged value would be observed",
+        )
+        out = (
+            frozenset().union(*[live[edge] for edge in successors[branch_index]])
+            if successors[branch_index]
+            else frozenset()
+        )
+        offending = sorted(out & IA32_RELATIONAL_CHANGED_FLAGS)
+        require(
+            not offending,
+            f"{site_context}: the exchange changes {offending} and a successor of the branch reads it",
+        )
+        load_bytes = bytes(image_buffer[load_field : load_field + width])
+        compare_bytes = bytes(image_buffer[compare_field : compare_field + width])
+        image_buffer[load_field : load_field + width] = compare_bytes
+        image_buffer[compare_field : compare_field + width] = load_bytes
+        rewritten.extend(fields)
+        proved.append(
+            {
+                "load_offset": load_at,
+                "compare_offset": compare_at,
+                "branch_offset": branch_at,
+                "register": register,
+                "condition": condition,
+                "displacement_size": width,
+                "seed_load_displacement": load["memory"]["displacement"],
+                "seed_compare_displacement": compare["memory"]["displacement"],
+                "rewritten_offsets": sorted(fields),
+                "changed_flags": sorted(IA32_RELATIONAL_CHANGED_FLAGS),
+                "flags_live_out": sorted(out),
+            }
+        )
+    for entry in entries[1:]:
+        offending = sorted(live[entry] & IA32_RELATIONAL_CHANGED_FLAGS)
+        require(
+            not offending,
+            f"{context}: the external entry at {items[entry]['offset']} has {offending} live, and the exchange changes it",
+        )
+    image = bytes(image_buffer)
+    require(image != body, f"{context}: the image does not move the body")
+    rewritten = sorted(set(rewritten))
+    require(
+        len(rewritten) == sum(2 * item["displacement_size"] for item in proved),
+        f"{context}: two exchanges rewrite the same byte",
+    )
+    require(
+        {index for index in range(len(body)) if body[index] != image[index]} <= set(rewritten),
+        f"{context}: the image changed a byte no exchange declares",
+    )
+    image_items, image_successors, image_entries = ia32_relational_flow_walk(
+        image, relocations, f"{context} image", code_length, external_entries
+    )
+    require(
+        len(image_items) == len(items)
+        and all(
+            (
+                left["offset"] == right["offset"]
+                and left["length"] == right["length"]
+                and (left["opcode"] == right["opcode"])
+                and (left["flow"] == right["flow"])
+                and (left["target"] == right["target"])
+                and (left["condition"] == right["condition"])
+                for left, right in zip(items, image_items, strict=True)
+            )
+        )
+        and (image_successors == successors)
+        and (image_entries == entries),
+        f"{context}: the image does not re-decode to the same boundaries, flow and branch targets",
+    )
+    for site in proved:
+        image_load = decode_ia32_bijection_instruction(
+            image, site["load_offset"], f"{context} image load", relocations
+        )
+        image_compare = decode_ia32_bijection_instruction(
+            image, site["compare_offset"], f"{context} image compare", relocations
+        )
+        require(
+            image_load["memory"]["displacement"] == site["seed_compare_displacement"]
+            and image_compare["memory"]["displacement"] == site["seed_load_displacement"]
+            and (image_load["encoding"]["reg"] == image_compare["encoding"]["reg"]),
+            f"{context}: the image does not address the exchanged slots",
+        )
+    image_decoded = decode_ia32_bijection_body(
+        image, f"{context} image liveness", relocations, code_length
+    )
+    image_register_live, _image_register_successors = _register_bijection_live_sets(
+        image_decoded, f"{context} image liveness"
+    )
+    image_live = ia32_relational_flag_liveness(image_items, image_successors, f"{context} image")
+    for site in proved:
+        branch_index = index_of[site["branch_offset"]]
+        edges = image_successors[branch_index]
+        out = frozenset().union(*[image_live[edge] for edge in edges]) if edges else frozenset()
+        offending = sorted(out & IA32_RELATIONAL_CHANGED_FLAGS)
+        require(
+            not offending,
+            f"{context}: after the exchange a successor of the branch at {site['branch_offset']} reads {offending}",
+        )
+        require(
+            not _IA32_ATOMS_OF[site["register"]]
+            & image_register_live[register_index[site["branch_offset"]]],
+            f"{context}: after the exchange {site['register']} is live at the branch at {site['branch_offset']}",
+        )
+        site["image_flags_live_out"] = sorted(out)
+    for entry in image_entries[1:]:
+        offending = sorted(image_live[entry] & IA32_RELATIONAL_CHANGED_FLAGS)
+        require(
+            not offending,
+            f"{context}: after the exchange the external entry at {image_items[entry]['offset']} has {offending} live",
+        )
+    return (
+        image,
+        {
+            "kind": EQUALITY_LOAD_EXCHANGE_KIND,
+            "exchanges": proved,
             "instruction_count": len(items),
             "rewritten_offsets": rewritten,
             "external_entries": [items[index]["offset"] for index in entries[1:]],
