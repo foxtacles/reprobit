@@ -14,7 +14,7 @@ import stat
 from collections.abc import Mapping
 from dataclasses import replace
 from functools import partial
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from time import monotonic
 from types import MappingProxyType
 from typing import TYPE_CHECKING
@@ -26,6 +26,7 @@ from reprobit.classic_incremental_context import (
     ClassicIncrementalError,
     ClassicIncrementalPlan,
     ClassicIncrementalResult,
+    SeedObject,
     read_payload,
 )
 from reprobit.classic_incremental_nodes import (
@@ -40,6 +41,7 @@ from reprobit.classic_publication import (
     publish_classic_output_set,
 )
 from reprobit.classic_repair_dispatch import ClassicMeasuredReceiptRepair
+from reprobit.classic_runtime_graph import classic_compiler_product_refs
 from reprobit.classic_runtime_receipts import _held_publication_receipt
 from reprobit.execution import BuildExecutionReceipt
 from reprobit.incremental import (
@@ -51,16 +53,63 @@ from reprobit.incremental_executor import (
     IncrementalDAGExecutor,
     IncrementalProgress,
     IncrementalProgressEventKind,
+    NodeOutcome,
 )
 
 if TYPE_CHECKING:
     from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 
 
+def _collect_seed_objects(
+    plan: ClassicIncrementalPlan,
+    outcomes: Mapping[str, NodeOutcome],
+    cache: IncrementalCache,
+) -> Mapping[str, SeedObject]:
+    """Read every compiled object of this analysis back from its immutable record.
+
+    The staging workspace is transport only, so each object is re-materialized
+    from the cache record the node just published (or hit) into a private
+    census seat and read once.  Compiler nodes without an outcome were not part
+    of this analysis and are simply absent.
+    """
+
+    collected: dict[str, SeedObject] = {}
+    census_root = plan.session_root / "census"
+    with cache.lease() as lease:
+        for node_id, node in sorted(plan.compiler_nodes.items()):
+            outcome = outcomes.get(node_id)
+            if outcome is None:
+                continue
+            objects = [
+                item
+                for item in outcome.record.outputs
+                if PurePosixPath(item.name).suffix.casefold() == ".obj"
+            ]
+            if len(objects) != 1:
+                continue
+            destination = census_root / node_id / PurePosixPath(objects[0].name).name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            lease.restore_selected(
+                outcome.record,
+                {objects[0].name: destination},
+                allowed_root=plan.session_root,
+            )
+            source_reference, object_reference = classic_compiler_product_refs(node)
+            collected[node_id] = SeedObject(
+                node_id,
+                source_reference.split("/", 1)[1],
+                object_reference,
+                node.owner,
+                destination.read_bytes(),
+            )
+    return MappingProxyType(collected)
+
+
 def execute_classic_incremental_plan(
     plan: ClassicIncrementalPlan,
     *,
     publish_targets: bool = True,
+    seed_census: bool = False,
 ) -> ClassicIncrementalResult:
     analysis_nodes = plan.analysis_nodes
     debug_companion_paths = plan.debug_companion_paths
@@ -185,9 +234,15 @@ def execute_classic_incremental_plan(
         invalidations=tuple(sorted(invalidations.items(), key=lambda item: item[0].casefold())),
     )
     if not publish_targets:
+        seed_objects = (
+            _collect_seed_objects(plan, execution.outcomes, cache)
+            if seed_census
+            else MappingProxyType({})
+        )
         return ClassicIncrementalResult(
             BuildExecutionReceipt(False, (), (), ()),
             replace(summary, elapsed_seconds=monotonic() - started),
+            seed_objects,
         )
 
     # The mutable staging workspace is transport only.  Re-materialize each
@@ -436,9 +491,16 @@ def execute_classic_incremental_build(
     progress: IncrementalProgress | None = None,
     measured_receipt_repair: ClassicMeasuredReceiptRepair | None = None,
     repair_analysis: bool = False,
+    seed_census: bool = False,
     overlay_render_session: ClassicOverlayRenderSession | None = None,
 ) -> ClassicIncrementalResult:
-    """Execute one current-worktree producer graph with conservative reuse."""
+    """Execute one current-worktree producer graph with conservative reuse.
+
+    A repair analysis normally executes only the dependency closure of the
+    translation units with transforms.  With ``seed_census`` it also compiles
+    every other translation unit (cache hits when nothing changed) and returns
+    each fresh object, so the repair can census unrecorded fallout.
+    """
 
     plan = prepare_classic_incremental_plan(
         authority,
@@ -464,6 +526,8 @@ def execute_classic_incremental_build(
     if repair_analysis:
         by_id = {node.id: node for node in plan.nodes}
         required = set(plan.transform_ids.values())
+        if seed_census:
+            required.update(node_id for node_id in plan.compiler_nodes if node_id in by_id)
         pending = list(required)
         while pending:
             node_id = pending.pop()
@@ -476,4 +540,8 @@ def execute_classic_incremental_build(
     else:
         add_terminal_nodes(plan)
         add_analysis_nodes(plan)
-    return execute_classic_incremental_plan(plan, publish_targets=not repair_analysis)
+    return execute_classic_incremental_plan(
+        plan,
+        publish_targets=not repair_analysis,
+        seed_census=repair_analysis and seed_census,
+    )

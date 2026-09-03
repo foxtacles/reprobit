@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -736,3 +737,208 @@ def test_workflow_reauthors_functions_from_captured_donors_before_probing(
         }
     ]
     assert result.changed_records == ("reprobit/interventions/tu.json",)
+
+
+def _ledger_root(tmp_path: Path) -> Path:
+    from reprobit.cli_build import COMPOSED_BODY_LEDGER_RELATIVE
+    from reprobit.composition_ledger import ComposedBodyLedger, write_ledger
+
+    cache_root = tmp_path / "state"
+    write_ledger(
+        cache_root.joinpath(*COMPOSED_BODY_LEDGER_RELATIVE),
+        ComposedBodyLedger(graph_digest="0" * 64),
+    )
+    return cache_root
+
+
+def _census_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    analyses: list[Any],
+    censuses: list[Any],
+) -> tuple[subject.RepairWorkflowResult, list[dict[str, object]]]:
+    cache_root = _ledger_root(tmp_path)
+    bundle_counter = iter(range(100))
+    monkeypatch.setattr(
+        subject,
+        "load_project_tree",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            intervention_documents=(
+                SimpleNamespace(model_dump=lambda **_kwargs: {"pass": next(bundle_counter)}),
+            ),
+            proof_documents=(),
+            interventions=(),
+        ),
+    )
+    analyze_calls: list[dict[str, object]] = []
+
+    def analyze(*_args: object, **kwargs: object) -> object:
+        analyze_calls.append(kwargs)
+        return analyses.pop(0)
+
+    monkeypatch.setattr(subject, "analyze_classic_repair", analyze)
+    monkeypatch.setattr(subject, "plan_repair_census", lambda *_args, **_kwargs: censuses.pop(0))
+    result = subject.repair_classic_records(
+        argparse.Namespace(project=str(tmp_path)),
+        cast(Any, object()),
+        staged_root=tmp_path,
+        spec=cast(Any, object()),
+        cache_root=cache_root,
+    )
+    return result, analyze_calls
+
+
+def test_workflow_records_unrecorded_fallout_found_by_the_ledger_census(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal = SimpleNamespace(unit_id="tu.one")
+    censuses = [
+        SimpleNamespace(refusals=(refusal,), unplanned=(), missing=()),
+        SimpleNamespace(refusals=(), unplanned=(), missing=()),
+    ]
+    discovered: list[tuple[object, ...]] = []
+
+    def discover(
+        _args: object, _output: object, refusals: tuple[object, ...], **_kwargs: object
+    ) -> ClassicDiscoveryResult:
+        discovered.append(refusals)
+        return ClassicDiscoveryResult(
+            cast(Any, (SimpleNamespace(unit_id="tu.one", resolutions=("settled",)),)),
+            (),
+            3,
+            {"tu.one": frozenset({"shape"})},
+        )
+
+    monkeypatch.setattr(subject, "probe_classic_carrier_discovery", discover)
+    monkeypatch.setattr(
+        subject,
+        "apply_classic_discovery_repairs",
+        lambda *_args: ("reprobit/interventions/tus/one.json",),
+    )
+
+    result, analyze_calls = _census_run(
+        tmp_path,
+        monkeypatch,
+        [_analysis(completed=True), _analysis(completed=True)],
+        censuses,
+    )
+
+    assert [call["seed_census"] for call in analyze_calls] == [True, True]
+    assert discovered == [(refusal,)]
+    assert result.passes == 2
+    assert result.discovered_actions == 1
+    assert result.compiled_candidates == 3
+    assert result.changed_records == ("reprobit/interventions/tus/one.json",)
+    assert result.affected_units == ("tu.one",)
+    assert censuses == []
+
+
+def test_workflow_admits_units_with_unplanned_census_fallout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    entry = SimpleNamespace(source="src/other.cpp", symbol="?f@@YAXXZ")
+    censuses = [
+        SimpleNamespace(refusals=(), unplanned=(entry,), missing=()),
+        SimpleNamespace(refusals=(), unplanned=(), missing=()),
+    ]
+    planned: list[tuple[object, ...]] = []
+    monkeypatch.setattr(
+        subject,
+        "plan_translation_unit_admissions",
+        lambda _bundle, entries: planned.append(entries) or ("tu.new",),
+    )
+    monkeypatch.setattr(
+        subject,
+        "apply_translation_unit_admissions",
+        lambda *_args: ("reprobit/build-plan.json", "reprobit/interventions/tu.new.json"),
+    )
+
+    result, _calls = _census_run(
+        tmp_path,
+        monkeypatch,
+        [_analysis(completed=True), _analysis(completed=True)],
+        censuses,
+    )
+
+    assert planned == [(entry,)]
+    assert result.admitted_units == 1
+    assert result.passes == 2
+    assert result.changed_records == (
+        "reprobit/build-plan.json",
+        "reprobit/interventions/tu.new.json",
+    )
+
+
+def test_workflow_reports_a_unit_it_cannot_admit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from reprobit.repair_unit_admission import TranslationUnitAdmissionError
+
+    entry = SimpleNamespace(source="src/other.cpp", symbol="?f@@YAXXZ")
+    censuses = [SimpleNamespace(refusals=(), unplanned=(entry,), missing=())]
+
+    def refuse(*_args: object) -> tuple[object, ...]:
+        raise TranslationUnitAdmissionError("src/other.cpp is not in the locked source manifest")
+
+    monkeypatch.setattr(subject, "plan_translation_unit_admissions", refuse)
+
+    with pytest.raises(subject.RepairWorkflowError, match=re.escape("src/other.cpp:?f@@YAXXZ")):
+        _census_run(tmp_path, monkeypatch, [_analysis(completed=True)], censuses)
+
+
+def test_workflow_refuses_census_fallout_no_carrier_state_settles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal = SimpleNamespace(unit_id="tu.one")
+    censuses = [SimpleNamespace(refusals=(refusal,), unplanned=(), missing=())]
+    monkeypatch.setattr(
+        subject,
+        "probe_classic_carrier_discovery",
+        lambda *_args, **_kwargs: ClassicDiscoveryResult(
+            (), (("tu.one", "census.deadbeef", "no state carried the body"),), 5
+        ),
+    )
+
+    with pytest.raises(subject.RepairWorkflowError, match="could not record unrecorded fallout"):
+        _census_run(tmp_path, monkeypatch, [_analysis(completed=True)], censuses)
+
+
+def test_workflow_without_a_ledger_does_not_census(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+    analyses = [_analysis(completed=True)]
+
+    def analyze(*_args: object, **kwargs: object) -> object:
+        calls.append(kwargs)
+        return analyses.pop(0)
+
+    monkeypatch.setattr(
+        subject,
+        "load_project_tree",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            intervention_documents=(SimpleNamespace(model_dump=lambda **_kwargs: {}),),
+            proof_documents=(),
+            interventions=(),
+        ),
+    )
+    monkeypatch.setattr(subject, "analyze_classic_repair", analyze)
+    monkeypatch.setattr(
+        subject, "plan_repair_census", lambda *_args, **_kwargs: pytest.fail("no census expected")
+    )
+
+    result = subject.repair_classic_records(
+        argparse.Namespace(project=str(tmp_path)),
+        cast(Any, object()),
+        staged_root=tmp_path,
+        spec=cast(Any, object()),
+        cache_root=tmp_path / "state",
+    )
+
+    assert result.passes == 1
+    assert [call["seed_census"] for call in calls] == [False]

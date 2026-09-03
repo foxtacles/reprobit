@@ -300,10 +300,18 @@ def _command_build(
                             repair_analysis=bool(
                                 getattr(args, "_classic_repair_analysis_only", False)
                             ),
+                            seed_census=bool(getattr(args, "_classic_seed_census", False)),
                             overlay_render_session=overlay_session,
                         )
                     receipt = incremental.receipt
                     incremental_summary = incremental.summary
+                    seed_recorder = getattr(
+                        getattr(args, "_classic_measured_receipt_repair", None),
+                        "record_seed_objects",
+                        None,
+                    )
+                    if seed_recorder is not None and incremental.seed_objects:
+                        seed_recorder(incremental.seed_objects)
             else:
                 temporary = run_root / "host-tmp"
                 temporary.mkdir()

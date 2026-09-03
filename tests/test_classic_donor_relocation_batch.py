@@ -82,32 +82,53 @@ def test_relocation_pair_is_rendered_in_one_pass(monkeypatch: pytest.MonkeyPatch
     }
 
 
-def test_unchanged_relocation_donor_is_not_rendered(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail_render(*_: Any, **__: Any) -> _Result:  # pragma: no cover - must not run
-        raise AssertionError("nothing is stale, so nothing should be rendered")
+def _recording_render(calls: list[tuple[str, ...]]) -> Any:
+    def fake_render(declarations: Any, clean_inputs: Any, **_: Any) -> _Result:
+        paths = tuple(str(item["path"]) for item in declarations)
+        assert tuple(sorted(clean_inputs)) == tuple(sorted(paths))
+        calls.append(paths)
+        return _Result(list(paths))
 
-    monkeypatch.setattr(overlay_document, "render_classic_overlay_proposal", fail_render)
+    return fake_render
+
+
+def test_an_unchanged_relocation_donor_is_still_rendered(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Unchanged clean bytes do not prove unchanged operations: the owning
+    # overlay's canonical operations or the donor's own may have been retuned.
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        overlay_document, "render_classic_overlay_proposal", _recording_render(calls)
+    )
     prepared = [
         _item("include/unit.h", stale=False, reloc=True),
         _item("src/unit.cpp", stale=False, reloc=True),
     ]
 
-    assert _render_donor_relocation_batch(_context(), prepared, label="donor d0") == {}
+    digests = _render_donor_relocation_batch(_context(), prepared, label="donor d0")
+
+    assert calls == [("include/unit.h", "src/unit.cpp")]
+    assert digests == {
+        "include/unit.h": "rendered:include/unit.h",
+        "src/unit.cpp": "rendered:src/unit.cpp",
+    }
 
 
-def test_donor_without_relocation_keeps_the_single_render_path(
+def test_a_donor_without_relocation_renders_all_its_files_in_one_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fail_render(*_: Any, **__: Any) -> _Result:  # pragma: no cover - must not run
-        raise AssertionError("a donor without a relocation renders one file at a time")
-
-    monkeypatch.setattr(overlay_document, "render_classic_overlay_proposal", fail_render)
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        overlay_document, "render_classic_overlay_proposal", _recording_render(calls)
+    )
     prepared = [
         _item("include/unit.h", stale=True, reloc=False),
-        _item("src/unit.cpp", stale=True, reloc=False),
+        _item("src/unit.cpp", stale=False, reloc=False),
     ]
 
-    assert _render_donor_relocation_batch(_context(), prepared, label="donor d0") == {}
+    digests = _render_donor_relocation_batch(_context(), prepared, label="donor d0")
+
+    assert calls == [("include/unit.h", "src/unit.cpp")]
+    assert sorted(digests) == ["include/unit.h", "src/unit.cpp"]
 
 
 def test_batch_render_failure_is_reported_against_the_donor(
@@ -126,12 +147,19 @@ def test_batch_render_failure_is_reported_against_the_donor(
         _render_donor_relocation_batch(_context(), prepared, label="donor d0")
 
 
-def test_single_rendering_donor_never_batches(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fail_render(*_: Any, **__: Any) -> _Result:  # pragma: no cover - must not run
-        raise AssertionError("one rendering cannot form a relocation pair")
+def test_a_single_rendering_donor_renders_alone_and_nothing_renders_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, ...]] = []
+    monkeypatch.setattr(
+        overlay_document, "render_classic_overlay_proposal", _recording_render(calls)
+    )
 
-    monkeypatch.setattr(overlay_document, "render_classic_overlay_proposal", fail_render)
-    prepared = [_item("include/unit.h", stale=True, reloc=True)]
+    assert _render_donor_relocation_batch(_context(), [], label="donor d0") == {}
+    digests = _render_donor_relocation_batch(
+        _context(), [_item("include/unit.h", stale=True, reloc=True)], label="donor d0"
+    )
 
-    assert _render_donor_relocation_batch(_context(), prepared, label="donor d0") == {}
+    assert calls == [("include/unit.h",)]
+    assert digests == {"include/unit.h": "rendered:include/unit.h"}
     assert source_regeneration._DONOR_OVERLAY_FAMILY == "donor_source_overlay"

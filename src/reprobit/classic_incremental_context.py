@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from threading import Lock
 from types import MappingProxyType
@@ -58,9 +58,26 @@ class ClassicIncrementalError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class SeedObject:
+    """One fresh compiler output captured for the unrecorded-fallout census.
+
+    ``source`` and ``object_reference`` are the compiler node's project-relative
+    source path and its ``build/...`` object reference; ``data`` is the object
+    exactly as the compiler wrote it before any composition.
+    """
+
+    node_id: str
+    source: str
+    object_reference: str
+    build_target: str
+    data: bytes
+
+
+@dataclass(frozen=True, slots=True)
 class ClassicIncrementalResult:
     receipt: BuildExecutionReceipt
     summary: IncrementalBuildSummary
+    seed_objects: Mapping[str, SeedObject] = field(default_factory=lambda: MappingProxyType({}))
 
 
 @dataclass(slots=True)

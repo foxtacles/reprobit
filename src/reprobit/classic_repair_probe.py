@@ -33,6 +33,7 @@ from reprobit.classic_orchestration import (
 from reprobit.classic_repair_authority import (
     ClassicInterventionEdit,
     ClassicReceiptEdit,
+    ClassicRecordAddition,
 )
 from reprobit.classic_repair_probe_cache import (
     ClassicDonorCompileOutcome,
@@ -115,6 +116,8 @@ class ClassicDonorRetuneRepair:
     """Canonical parameters of the donor state this repair moves away from."""
     move_signature: str = ""
     """Family and knob deltas of the accepted move; see :func:`_move_signature`."""
+    additions: tuple[ClassicRecordAddition, ...] = ()
+    """Records re-authored onto the retuned donor because their saved family refused the state."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -637,7 +640,7 @@ def _probe_bounded_donor_retunes(
                         attempt.materialized,
                         outcome,
                     )
-                    intervention_edits, receipt_edits = retune_authority_edits(
+                    intervention_edits, receipt_edits, additions = retune_authority_edits(
                         group.donor,
                         group.donor_receipt,
                         group.validated,
@@ -650,6 +653,16 @@ def _probe_bounded_donor_retunes(
                             attempt.materialized.distance,
                             attempt.materialized.changes,
                             exc.stage,
+                            str(exc),
+                        )
+                    )
+                    continue
+                except ValueError as exc:
+                    rejected[group.key].append(
+                        ClassicDonorRetuneAttemptRefusal(
+                            attempt.materialized.distance,
+                            attempt.materialized.changes,
+                            "ordinary_validation",
                             str(exc),
                         )
                     )
@@ -669,6 +682,7 @@ def _probe_bounded_donor_retunes(
                         group.donor.intervention.family.value,
                         attempt.materialized.changes,
                     ),
+                    additions,
                 )
         return compilable_groups <= set(selected)
 

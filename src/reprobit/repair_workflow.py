@@ -8,12 +8,14 @@ every target from scratch, and publishes the verified result atomically.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
+from types import MappingProxyType
 from typing import Protocol
 
+from reprobit.classic_incremental_context import SeedObject
 from reprobit.classic_project import ClassicDispatchMaterials
 from reprobit.classic_redundant_action_repair import (
     RedundantActionRepairError,
@@ -38,9 +40,10 @@ from reprobit.classic_repair_session import (
     ClassicRepairSession,
     apply_classic_receipt_repairs,
 )
-from reprobit.cli_build import command_build
+from reprobit.cli_build import COMPOSED_BODY_LEDGER_RELATIVE, command_build
 from reprobit.cli_output import CLIOutput
 from reprobit.cli_project import command_source_lock
+from reprobit.composition_ledger import ComposedBodyLedger, read_ledger
 from reprobit.project_loader import load_project_tree
 from reprobit.repair import (
     RepairCandidate,
@@ -52,11 +55,17 @@ from reprobit.repair import (
     publish_repair_candidate,
     stage_repair_project,
 )
+from reprobit.repair_census import RepairCensusEntry, plan_repair_census
 from reprobit.repair_donor_analysis import (
     apply_classic_discovery_repairs,
     apply_classic_donor_repairs,
     probe_classic_carrier_discovery,
     probe_classic_donor_repairs,
+)
+from reprobit.repair_unit_admission import (
+    TranslationUnitAdmissionError,
+    apply_translation_unit_admissions,
+    plan_translation_unit_admissions,
 )
 from reprobit.schema import (
     ClassicProofReceipt,
@@ -109,6 +118,8 @@ class RepairWorkflowResult:
     discovered_actions: int = 0
     replayed_candidates: int = 0
     """Candidates settled from earlier compiles of the same seat instead of compiling."""
+    admitted_units: int = 0
+    """Translation units the ledger census added to the build plan for unrecorded fallout."""
 
 
 class RepairAnalysisError(RuntimeError):
@@ -122,6 +133,7 @@ class RepairAnalysisResult:
     completed: bool
     measured_repairs: tuple[ClassicReceiptRepair, ...]
     structural_refusals: tuple[ClassicRepairRefusal, ...]
+    seed_objects: Mapping[str, SeedObject] = field(default_factory=lambda: MappingProxyType({}))
 
 
 def analyze_classic_repair(
@@ -130,8 +142,13 @@ def analyze_classic_repair(
     *,
     cache_root: Path | None = None,
     progress_description: str = "checking affected source files",
+    seed_census: bool = False,
 ) -> RepairAnalysisResult:
-    """Run one warm analysis and distinguish repair fallout from fatal failure."""
+    """Run one warm analysis and distinguish repair fallout from fatal failure.
+
+    With ``seed_census`` the analysis also compiles every translation unit and
+    returns each fresh object so the caller can census unrecorded fallout.
+    """
 
     session = ClassicRepairSession()
     values = vars(args).copy()
@@ -140,6 +157,7 @@ def analyze_classic_repair(
         keep_workspace=KeepWorkspace.NEVER.value,
         _classic_measured_receipt_repair=session,
         _classic_repair_analysis_only=True,
+        _classic_seed_census=seed_census,
         _incremental_cache_root=cache_root,
         _incremental_progress_description=progress_description,
     )
@@ -153,7 +171,26 @@ def analyze_classic_repair(
         not session.refusals,
         session.repairs,
         session.refusals,
+        session.seed_objects,
     )
+
+
+def _listed_census(entries: Sequence[RepairCensusEntry], limit: int = 8) -> str:
+    listed = ", ".join(f"{entry.source}:{entry.symbol}" for entry in entries[:limit])
+    more = len(entries) - limit
+    return listed + (f" and {more} more" if more > 0 else "")
+
+
+def _composed_body_ledger(cache_root: Path) -> ComposedBodyLedger | None:
+    """The last accepted verify's composed-body ledger of this state directory, if any."""
+
+    path = cache_root.joinpath(*COMPOSED_BODY_LEDGER_RELATIVE)
+    if not path.is_file():
+        return None
+    try:
+        return read_ledger(path)
+    except (OSError, ValueError) as exc:
+        raise RepairWorkflowError(f"composed-body ledger {path} is unreadable: {exc}") from exc
 
 
 def _classic_receipts(bundle: ProjectBundle) -> tuple[ClassicProofReceipt, ...]:
@@ -264,6 +301,7 @@ def repair_classic_records(
     donor_retunes = 0
     reauthored_actions = 0
     discovered_actions = 0
+    admitted_units = 0
     compiled_candidates = 0
     seen_authority: set[str] = set()
     adjustment_rounds = 0
@@ -283,6 +321,13 @@ def repair_classic_records(
     # Donor compiles are pure functions of their seat and compile epoch: never
     # compile one twice, in this command or in a later one.
     compile_cache = ClassicDonorCompileStore(probe_store_directory(cache_root))
+    # The composed-body ledger of the last accepted verify, when this state
+    # directory holds one, lets every clean pass census unrecorded fallout: a
+    # function without a saved record whose fresh seed body left the body the
+    # linker selected at verify time would change the image just like a
+    # refused record does, so it is discovered and recorded before the repair
+    # reports success.
+    ledger = _composed_body_ledger(cache_root)
 
     while True:
         pass_number += 1
@@ -306,6 +351,7 @@ def repair_classic_records(
             output,
             cache_root=cache_root,
             progress_description=f"checking affected source files (pass {pass_number})",
+            seed_census=ledger is not None,
         )
         affected_units.update(item.unit_id for item in analysis.measured_repairs)
         affected_units.update(item.unit_id for item in analysis.structural_refusals)
@@ -331,6 +377,86 @@ def repair_classic_records(
             continue
 
         if analysis.completed:
+            if ledger is not None:
+                census = plan_repair_census(
+                    bundle, ledger, getattr(analysis, "seed_objects", None) or {}
+                )
+                if census.missing:
+                    raise RepairWorkflowError(
+                        "verified functions no longer defined by their fresh object: "
+                        + _listed_census(census.missing)
+                    )
+                if census.unplanned:
+                    # Fallout in a unit the plan never listed: admit the unit (plan
+                    # entry plus empty shards) so the next pass can record it.
+                    if adjustment_rounds >= adjustment_limit:
+                        raise RepairWorkflowError(
+                            "automatic repair reached its limit of "
+                            f"{adjustment_limit} saved-guidance adjustment rounds"
+                        )
+                    try:
+                        admitted = plan_translation_unit_admissions(bundle, census.unplanned)
+                        changed = apply_translation_unit_admissions(staged_root, spec, admitted)
+                    except TranslationUnitAdmissionError as exc:
+                        raise RepairWorkflowError(
+                            "automatic repair could not admit the translation units with "
+                            f"unrecorded fallout ({_listed_census(census.unplanned)}): "
+                            + _one_line(exc)
+                        ) from exc
+                    if not changed:
+                        raise RepairWorkflowError(
+                            "translation-unit admission reported success without changing "
+                            "saved guidance"
+                        )
+                    changed_records.update(changed)
+                    admitted_units += len(admitted)
+                    adjustment_rounds += 1
+                    continue
+                if census.refusals:
+                    if adjustment_rounds >= adjustment_limit:
+                        raise RepairWorkflowError(
+                            "automatic repair reached its limit of "
+                            f"{adjustment_limit} saved-guidance adjustment rounds"
+                        )
+                    remaining_candidates = candidate_limit - compiled_candidates
+                    if remaining_candidates <= 0:
+                        raise RepairWorkflowError(
+                            "automatic repair exhausted its command-wide budget of "
+                            f"{candidate_limit} donor candidates"
+                        )
+                    affected_units.update(item.unit_id for item in census.refusals)
+                    discovery = probe_classic_carrier_discovery(
+                        args,
+                        output,
+                        census.refusals,
+                        candidate_budget=remaining_candidates,
+                        tried_states={
+                            key: frozenset(value) for key, value in discovered_shapes.items()
+                        },
+                        compile_cache=compile_cache,
+                    )
+                    compiled_candidates += discovery.compiled_candidates
+                    for unit_id, digests in getattr(discovery, "tried_states", {}).items():
+                        discovered_shapes.setdefault(unit_id, set()).update(digests)
+                    if not discovery.repairs:
+                        unresolved = ", ".join(
+                            f"{unit_id} {action_id}: {reason}"
+                            for unit_id, action_id, reason in discovery.unresolved[:8]
+                        )
+                        raise RepairWorkflowError(
+                            "automatic repair could not record unrecorded fallout: "
+                            + (unresolved or "no carrier state settled it")
+                        )
+                    changed = apply_classic_discovery_repairs(staged_root, spec, discovery.repairs)
+                    if not changed:
+                        raise RepairWorkflowError(
+                            "unrecorded-fallout census reported success without changing "
+                            "saved guidance"
+                        )
+                    changed_records.update(changed)
+                    discovered_actions += sum(len(item.resolutions) for item in discovery.repairs)
+                    adjustment_rounds += 1
+                    continue
             return RepairWorkflowResult(
                 tuple(sorted(changed_records, key=lambda item: (item.casefold(), item))),
                 tuple(sorted(affected_units, key=str.casefold)),
@@ -343,6 +469,7 @@ def repair_classic_records(
                 reauthored_actions,
                 discovered_actions,
                 compile_cache.memory_hits + compile_cache.disk_hits,
+                admitted_units,
             )
 
         receipts = _classic_receipts(bundle)

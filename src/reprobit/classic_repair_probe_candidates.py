@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
+from hashlib import sha256
 
 from reprobit.classic.source_refactor_semantics import validate_donor_source_semantics
 from reprobit.classic_donor_retune_candidates import DonorRetuneCandidate
@@ -22,10 +23,25 @@ from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
 )
 from reprobit.classic_project import ClassicDispatchMaterials
-from reprobit.classic_repair_authority import ClassicInterventionEdit, ClassicReceiptEdit
+from reprobit.classic_repair_authority import (
+    ClassicInterventionEdit,
+    ClassicReceiptEdit,
+    ClassicRecordAddition,
+)
 from reprobit.classic_repair_session import ClassicRepairRefusal
 from reprobit.classic_runtime_probe import ClassicDonorProbeOutput
-from reprobit.schema import ClassicProofReceipt, ClassicRecipeFamily, ClassicRecipeIntervention
+from reprobit.coff_format import CoffObject, coff_body
+from reprobit.discovery_authoring import (
+    REAUTHORABLE_FAMILIES,
+    DiscoveryAuthoringError,
+    build_measured_function_record,
+)
+from reprobit.schema import (
+    ClassicProofReceipt,
+    ClassicRecipeFamily,
+    ClassicRecipeIntervention,
+    ClassicRecipeRole,
+)
 
 
 def _parameters(intervention: ClassicRecipeIntervention) -> dict[str, object]:
@@ -302,34 +318,112 @@ def other_consumers(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RetunedActionReauthoring:
+    """A consumer the retuned donor serves under a new record instead of its saved one.
+
+    The candidate emits the consumer's exact retail body, but the saved record's
+    family cannot compose it from that state (an equal-length family over a
+    resized body, a mosaic over a body that no longer needs one).  The saved
+    record and its receipt are removed and the function is re-authored onto
+    the same donor with the cheapest closed family that proves the body --
+    what the re-authoring stage does from saved donor objects, here from a
+    retune candidate.
+    """
+
+    action: ClassicRecipeIntervention
+    receipt: ClassicProofReceipt
+    addition: ClassicRecordAddition
+    saved_refusal: str
+
+
+def _goal_body_digest(receipt: ClassicProofReceipt) -> str | None:
+    goal = receipt.expected_values.get("expected_body_sha256")
+    return goal if isinstance(goal, str) and len(goal) == 64 else None
+
+
+def _reauthor_retuned_action(
+    failure: ClassicRepairRefusal,
+    materials: ClassicDispatchMaterials,
+    saved_refusal: MeasuredPinRepairError,
+) -> RetunedActionReauthoring | None:
+    """Re-author a refused consumer whose exact retail body the candidate emits."""
+
+    action = failure.intervention
+    goal = _goal_body_digest(failure.receipt)
+    if (
+        action.role is not ClassicRecipeRole.FUNCTION
+        or action.symbol is None
+        or goal is None
+        or not action.dependencies
+        or not isinstance(materials.seed_object, bytes)
+        or not isinstance(materials.donor_object, bytes)
+    ):
+        return None
+    try:
+        candidate = CoffObject(materials.donor_object)
+        body = coff_body(candidate, candidate.function_section(action.symbol))
+    except Exception:
+        return None
+    if sha256(bytes(body)).hexdigest() != goal:
+        return None
+    for family in REAUTHORABLE_FAMILIES:
+        try:
+            record = build_measured_function_record(
+                target_id=action.scope.target,
+                translation_unit_id=failure.unit_id,
+                build_target=action.build_target,
+                symbol=action.symbol,
+                family=family,
+                donor_id=action.dependencies[0],
+                seed_object=materials.seed_object,
+                donor_object=materials.donor_object,
+            )
+        except DiscoveryAuthoringError:
+            continue
+        return RetunedActionReauthoring(
+            action,
+            failure.receipt,
+            ClassicRecordAddition(record.intervention, record.receipt),
+            str(saved_refusal),
+        )
+    return None
+
+
 def validate_retuned_actions(
     failures: Sequence[ClassicRepairRefusal],
     donor: ClassicPreparedDonor,
     materialized: MaterializedDonorRetuneCandidate,
     output: ClassicDonorProbeOutput,
-) -> tuple[MeasuredPinRepair, ...]:
+) -> tuple[MeasuredPinRepair | RetunedActionReauthoring, ...]:
     """Replay the ordinary composer for every captured consumer failure.
 
     Callers pass the captured failures followed by the donor's other consumers
     (see :func:`other_consumers`), so a candidate that would break a function
     the donor still serves is refused rather than traded for the failing one.
+    A consumer whose saved family refuses the candidate although the candidate
+    emits the consumer's exact retail body is re-authored onto the retuned
+    donor under the cheapest closed family (:class:`RetunedActionReauthoring`).
     """
 
-    repaired: list[MeasuredPinRepair] = []
+    repaired: list[MeasuredPinRepair | RetunedActionReauthoring] = []
     for failure in failures:
         try:
-            repaired.append(
-                repair_measured_pins(
-                    failure.intervention,
-                    failure.receipt,
-                    _candidate_materials(failure, donor, materialized, output),
-                )
-            )
-        except MeasuredPinRepairError as exc:
+            materials = _candidate_materials(failure, donor, materialized, output)
+        except ValueError as exc:
             raise MeasuredPinRepairError(
-                f"action {failure.intervention.id!r} rejected candidate: {exc}",
-                stage=exc.stage,
+                f"action {failure.intervention.id!r} rejected candidate: {exc}"
             ) from exc
+        try:
+            repaired.append(repair_measured_pins(failure.intervention, failure.receipt, materials))
+        except MeasuredPinRepairError as exc:
+            reauthored = _reauthor_retuned_action(failure, materials, exc)
+            if reauthored is None:
+                raise MeasuredPinRepairError(
+                    f"action {failure.intervention.id!r} rejected candidate: {exc}",
+                    stage=exc.stage,
+                ) from exc
+            repaired.append(reauthored)
         except ValueError as exc:
             raise MeasuredPinRepairError(
                 f"action {failure.intervention.id!r} rejected candidate: {exc}"
@@ -342,28 +436,56 @@ def retune_authority_edits(
     donor_receipt: ClassicProofReceipt,
     failures: Sequence[ClassicRepairRefusal],
     materialized: MaterializedDonorRetuneCandidate,
-    repaired: Sequence[MeasuredPinRepair],
-) -> tuple[tuple[ClassicInterventionEdit, ...], tuple[ClassicReceiptEdit, ...]]:
-    """Build exact typed edits after ordinary candidate admission."""
+    repaired: Sequence[MeasuredPinRepair | RetunedActionReauthoring],
+) -> tuple[
+    tuple[ClassicInterventionEdit, ...],
+    tuple[ClassicReceiptEdit, ...],
+    tuple[ClassicRecordAddition, ...],
+]:
+    """Build exact typed edits after ordinary candidate admission.
 
-    intervention_edits = (
+    A re-authored consumer removes its saved record and receipt and adds the
+    new record; the donor's beneficiary set is unchanged because the new
+    record names the same function.
+    """
+
+    intervention_edits: list[ClassicInterventionEdit] = [
         ClassicInterventionEdit(donor_before.intervention, materialized.intervention),
-    )
+    ]
     receipts: dict[str, ClassicReceiptEdit] = {}
+    additions: list[ClassicRecordAddition] = []
     if materialized.receipt != donor_receipt:
         receipts[donor_receipt.id] = ClassicReceiptEdit(donor_receipt, materialized.receipt)
     for failure, result in zip(failures, repaired, strict=True):
-        if result.receipt == failure.receipt:
-            continue
-        edit = ClassicReceiptEdit(failure.receipt, result.receipt)
+        if isinstance(result, RetunedActionReauthoring):
+            if result.action.id != failure.intervention.id:
+                raise ValueError(
+                    f"re-authoring of {result.action.id!r} does not answer "
+                    f"{failure.intervention.id!r}"
+                )
+            intervention_edits.append(ClassicInterventionEdit(result.action, None))
+            edit = ClassicReceiptEdit(result.receipt, None)
+            additions.append(result.addition)
+        else:
+            if result.receipt == failure.receipt:
+                continue
+            edit = ClassicReceiptEdit(failure.receipt, result.receipt)
         previous = receipts.get(edit.before.id)
         if previous is not None and previous != edit:
             raise ValueError(f"receipt {edit.before.id!r} produced conflicting repairs")
         receipts[edit.before.id] = edit
-    return intervention_edits, tuple(receipts[key] for key in sorted(receipts, key=str.casefold))
+    added_ids = [item.intervention.id for item in additions]
+    if len(set(added_ids)) != len(added_ids):
+        raise ValueError("re-authored records repeat an identifier")
+    return (
+        tuple(intervention_edits),
+        tuple(receipts[key] for key in sorted(receipts, key=str.casefold)),
+        tuple(additions),
+    )
 
 
 __all__ = [
+    "RetunedActionReauthoring",
     "clone_retune_probe_unit",
     "other_consumers",
     "prepare_retune_candidate",

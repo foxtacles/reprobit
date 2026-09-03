@@ -388,8 +388,10 @@ def test_apply_flattens_all_typed_edits_into_one_transaction(
     repairs = cast(
         tuple[ClassicDonorRetuneRepair, ...],
         (
-            SimpleNamespace(intervention_edits=("i1",), receipt_edits=("r1", "r2")),
-            SimpleNamespace(intervention_edits=("i2",), receipt_edits=("r3",)),
+            SimpleNamespace(
+                intervention_edits=("i1",), receipt_edits=("r1", "r2"), additions=("a1",)
+            ),
+            SimpleNamespace(intervention_edits=("i2",), receipt_edits=("r3",), additions=()),
         ),
     )
     spec = cast(Any, object())
@@ -411,6 +413,7 @@ def test_apply_flattens_all_typed_edits_into_one_transaction(
         "spec": spec,
         "interventions": ("i1", "i2"),
         "receipts": ("r1", "r2", "r3"),
+        "additions": ("a1",),
     }
 
 

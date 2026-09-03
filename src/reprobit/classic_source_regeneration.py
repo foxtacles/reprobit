@@ -158,23 +158,6 @@ def _set_parameter(
     context.reject(f"intervention parameter is missing: {name!r}")
 
 
-def _render_single(
-    context: _ClassicRegenerationContext,
-    declaration: dict[str, Any],
-    clean: bytes,
-    *,
-    label: str,
-) -> tuple[str, int, bytes]:
-    from reprobit.classic.overlay_document import render_classic_overlay_proposal
-
-    try:
-        result = render_classic_overlay_proposal([declaration], {str(declaration["path"]): clean})
-    except ValueError as exc:
-        context.reject(f"{label} cannot be re-rendered: {exc}", cause=exc)
-    receipt = result.receipts[0]
-    return receipt.output_digest, receipt.output_size, result.outputs[receipt.path]
-
-
 def _render_or_rewitness(
     context: _ClassicRegenerationContext,
     declaration: dict[str, Any],
@@ -218,6 +201,35 @@ def _render_or_rewitness(
             context.record(name, f"{label} operation {location}", old_digest, new_digest)
     receipt = result.receipts[0]
     return receipt.output_digest, receipt.output_size, result.outputs[receipt.path]
+
+
+def _operations_moved_output(output: dict[str, Any], clean: bytes, *, label: str) -> bool:
+    """Report whether the reviewed operations no longer produce the pinned effective bytes.
+
+    A source overlay's ``clean`` digest is unchanged when only its operations were
+    edited (a retuned carrier knob, a widened forward run, a dropped declaration).
+    Regeneration used to key staleness on the clean digest alone, so such an
+    edit left the pinned ``effective`` digest and every downstream donor
+    rendering stale until an operator invalidated the pin by hand.  Rendering
+    the operations strictly against the unchanged clean bytes is cheap and
+    decides the question exactly: a differing output digest means the operator
+    changed what the overlay renders, and the pin must be re-derived.  An
+    output that cannot be rendered on its own (a relocation whose partner
+    output lives in another declaration) is reported as unmoved; the lock
+    still renders every output together and refuses a broken one there.
+    """
+
+    from reprobit.classic.overlay_document import render_classic_overlay_proposal
+
+    del label
+    declaration = dict(output)
+    declaration["clean"] = _digest(clean)
+    declaration["size"] = len(clean)
+    try:
+        result = render_classic_overlay_proposal([declaration], {str(declaration["path"]): clean})
+    except ValueError:
+        return False
+    return result.receipts[0].output_digest != output.get("effective")
 
 
 def _surviving_digest_binding(
@@ -382,7 +394,9 @@ def _refresh_source_overlays(context: _ClassicRegenerationContext) -> None:
                     continue
                 current = context.reader.read(path, wanted_by=f"{name} {label}")
                 current_digest = _digest(current)
-                if current_digest == output.get("clean"):
+                if current_digest == output.get("clean") and not _operations_moved_output(
+                    output, current, label=label
+                ):
                     context.effective_by_path.setdefault(path, str(output.get("effective")))
                     continue
                 declaration = dict(output)
@@ -394,10 +408,13 @@ def _refresh_source_overlays(context: _ClassicRegenerationContext) -> None:
                 context.canonical_operations_by_path[path] = tuple(output["ops"])
                 context.effective_bytes_by_path[path] = rendered_bytes
                 context.stale_paths[path] = str(output["clean"])
-                context.bind_stale(output.get("clean"), path)
+                if output.get("clean") != current_digest:
+                    # An operation-only edit keeps the clean digest valid everywhere
+                    # it is pinned; only a changed clean digest goes stale.
+                    context.bind_stale(output.get("clean"), path)
+                    context.record(name, f"{label} clean", str(output["clean"]), current_digest)
                 if output.get("effective") != new_effective:
                     context.bind_stale(output.get("effective"), path)
-                context.record(name, f"{label} clean", str(output["clean"]), current_digest)
                 context.record(name, f"{label} effective", str(output["effective"]), new_effective)
                 if output.get("size") != new_size:
                     context.record(name, f"{label} size", str(output.get("size")), str(new_size))
@@ -473,26 +490,22 @@ def _render_donor_relocation_batch(
     *,
     label: str,
 ) -> dict[str, str]:
-    """Render a donor's relocation-bound renderings together.
+    """Render every rendering of one donor together and return its digests.
 
-    Returns the freshly rendered digest per path, or an empty mapping when the
-    donor carries no relocation or nothing it renders has changed.  A
-    relocation moves bytes between two of the donor's own renderings, so both
-    sides must be rendered in one pass: the consumer's output depends on the
-    producer's clean bytes, and the renderer rejects a producer whose consumer
-    is absent from the same render.
+    Rendering is unconditional: a rendering's clean bytes may be unchanged
+    while the owning overlay's canonical operations, or the rendering's own
+    operations, were edited (a retuned carrier knob), and only a fresh render
+    decides whether the pinned ``rendered_sha256`` still holds.  The renderer
+    is deterministic and cheap, so an unchanged rendering simply reproduces
+    its pin.  Rendering in one pass also serves source relocations: a
+    relocation moves bytes between two of the donor's own renderings, the
+    consumer's output depends on the producer's clean bytes, and the renderer
+    rejects a producer whose consumer is absent from the same render.
     """
 
     from reprobit.classic.overlay_document import render_classic_overlay_proposal
 
-    relocated = any(
-        operation.get("gen", {}).get("k") == "reloc"
-        for item in prepared
-        for operation in item["operations"]
-        if isinstance(operation.get("gen"), dict)
-    )
-    stale = any(item["current_digest"] != item["pinned_clean"] for item in prepared)
-    if not relocated or not stale or len(prepared) < 2:
+    if not prepared:
         return {}
 
     declarations = [
@@ -565,18 +578,8 @@ def _refresh_donor_overlays(context: _ClassicRegenerationContext) -> None:
                 pinned_rendered = item["pinned_rendered"]
                 current_digest = item["current_digest"]
                 new_rendered = batch_digests.get(path)
-                if new_rendered is None and current_digest != pinned_clean:
-                    new_rendered, _size, _bytes = _render_single(
-                        context,
-                        {
-                            "path": path,
-                            "clean": current_digest,
-                            "effective": pinned_rendered,
-                            "ops": item["operations"],
-                        },
-                        item["current"],
-                        label=item["label"],
-                    )
+                if new_rendered is None:
+                    context.reject(f"{item['label']} was not rendered by its donor batch")
                 if current_digest != pinned_clean:
                     context.stale_paths[path] = pinned_clean
                     context.bind_stale(pinned_clean, path)

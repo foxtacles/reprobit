@@ -218,6 +218,23 @@ intermediate update without a build. It is not certification; after applying,
 the command points back to `rbit repair .` for the build and exact check. See
 [`rbit source regenerate`](cli.md#rbit-source-regenerate).
 
+## Repair reports unrecorded fallout it could not record
+
+`rbit repair .` compared the fresh objects with the composed-body ledger of the
+last accepted verify and found a function without any saved record whose
+linker-selected body moved. Such a function is normally recorded automatically:
+its translation unit is admitted to `reprobit/build-plan.json` when the plan
+did not list it, and carrier discovery searches fresh declaration-only compiler
+states for the verified body. Two errors remain. "could not admit the
+translation units" names a source the locked manifest does not contain or an
+identity that collides with the plan; lock the source first
+(`rbit source preview .`). "could not record unrecorded fallout" means no
+carrier state within the discovery budget carried the verified body; raise
+`--discovery-candidates` and `--donor-candidates`, or derive the record by
+hand. A "verified functions no longer defined by their fresh object" error
+names a function the edit removed outright; that is a semantic change the
+repair cannot restore.
+
 ## Bytes match but the command exits nonzero
 
 Read the independent verdict fields. Byte equality can coexist with a failed

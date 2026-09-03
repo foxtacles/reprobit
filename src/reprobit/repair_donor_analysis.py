@@ -109,6 +109,17 @@ def _bind_refusals_to_probe_units(
                 "classic donor repair cannot find freshly prepared translation unit "
                 f"{refusal.unit_id!r}"
             )
+        if refusal.synthetic:
+            # A census entry carries a placeholder unit: it binds to the fresh
+            # authority of its translation unit by id alone, and has no saved
+            # action or receipt to match.
+            if refusal.unit.plan.id != refusal.unit_id or fresh.plan.id != refusal.unit_id:
+                raise ClassicProjectError(
+                    "classic census entry does not name its freshly prepared translation "
+                    f"unit {refusal.unit_id!r}"
+                )
+            bound.append(replace(refusal, unit=fresh))
+            continue
         if refusal.unit.plan.id != refusal.unit_id or refusal.unit != fresh:
             # Prepared units contain canonical logical paths and byte payloads. Physical
             # run roots live on ClassicProbeExecution, so there are no ephemeral unit
@@ -379,6 +390,7 @@ def apply_classic_donor_repairs(
         spec,
         interventions=interventions,
         receipts=receipts,
+        additions=tuple(item for repair in repair_tuple for item in repair.additions),
     )
 
 

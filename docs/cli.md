@@ -240,7 +240,12 @@ rbit source regenerate . --apply  # apply only these mechanical changes
 ```
 
 It re-renders stale records against the current bytes and can propose changes
-for four record families:
+for four record families. Staleness is decided by rendering, not by the clean
+digest alone: an output whose clean bytes are unchanged but whose reviewed
+operations were edited (a retuned declaration-run count, a dropped declaration)
+is re-rendered and its effective digest re-derived, and every private donor
+rendering is rendered again so a change in the owning unit's canonical
+operations reaches the donor's pins too.
 
 * **Source-adjustment outputs** — the clean source and newly rendered output.
 * **Private donor renderings** — source prepared for one owning translation
@@ -587,6 +592,30 @@ For added or removed files, start with [`source preview`](#rbit-source-preview);
 it prints a safe next command when one is available. For a new project that
 builds but does not match yet, use [`discover grind`](#rbit-discover-grind)
 instead of repair.
+
+### Unrecorded fallout and the composed-body ledger
+
+A source edit can also move functions that carry no saved record at all. Every
+accepted `rbit verify` writes a ledger of the bodies the linker selected for
+each target (`.reprobit-state/ledger/composed-bodies.json`: per function, the
+providing object, its translation unit and the body digest). When that ledger
+exists, each clean repair pass also compiles every translation unit (cache
+hits when nothing changed), compares the fresh seed body of every function the
+linker took from that object with its verified body, and turns each moved,
+unrecorded function into a census entry. Carrier discovery then searches fresh
+declaration-only compiler states for that translation unit exactly as it does
+for a refused record, and a state that carries the verified body is recorded as
+a new donor plus function record; nothing is retired. Repair reports success
+only when the census is empty.
+
+A moved function in a translation unit the build plan does not list is admitted
+first: repair adds the unit to `reprobit/build-plan.json` with the identity a
+CMake import would give it, together with an empty intervention shard and proof
+shard, and the next pass records the function like any other. One finding stops
+the repair instead: a verified function the fresh object no longer defines at
+all, which is a semantic change no carrier state can restore. Without a ledger
+-- a project that has never verified since the ledger was introduced -- repair
+behaves as before and the final cold verify remains the only gate.
 
 ## rbit build
 

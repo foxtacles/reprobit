@@ -388,6 +388,9 @@ def _try_resolve(
                 ClassicDiscoveryResolution(action.id, symbol, donor.id, "reauthor", family.value),
                 ClassicRecordAddition(record.intervention, record.receipt),
             )
+    # A census entry has no saved record to move: only re-authoring settles it.
+    if refusal.synthetic:
+        return None
     # The record's own family may still compose from the new donor: a body that
     # is the goal but that no closed equal-body family can host (the seed changed
     # length, say), or a rewriting witness body, moves the saved record over.
@@ -439,9 +442,18 @@ def _unit_repair(entry: _UnitWork) -> ClassicDiscoveryRepair | None:
             continue
         resolution, product = settled
         resolutions.append(resolution)
-        previous = action.dependencies[0]
         symbol = action.symbol or ""
         donor_beneficiaries[resolution.donor_id].add(symbol)
+        if refusal.synthetic:
+            # Unrecorded fallout: the census entry never existed in the saved
+            # guidance, so its resolution only adds records and retires nothing.
+            if resolution.how != "reauthor" or not isinstance(product, ClassicRecordAddition):
+                raise ClassicDiscoveryProbeError(
+                    f"census entry {action.id!r} can only be settled by re-authoring"
+                )
+            additions.append(product)
+            continue
+        previous = action.dependencies[0]
         if resolution.how == "reauthor":
             assert isinstance(product, ClassicRecordAddition)
             additions.append(product)

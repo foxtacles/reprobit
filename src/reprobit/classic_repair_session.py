@@ -6,8 +6,10 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Lock
+from types import MappingProxyType
 from typing import cast
 
+from reprobit.classic_incremental_context import SeedObject
 from reprobit.classic_measured_pin_repair import (
     MeasuredPinRepairError,
     repair_measured_pins,
@@ -79,6 +81,9 @@ class ClassicRepairRefusal:
     unit: ClassicPreparedUnit
     reason: str
     unit_donor_objects: Mapping[str, bytes] = field(default_factory=dict)
+    # A census entry stands for a function that never had a record: nothing is
+    # retired when it settles, and the probe binds it to its fresh unit by id alone.
+    synthetic: bool = False
 
 
 def repoint_refusal_materials(
@@ -141,6 +146,18 @@ class ClassicRepairSession:
         self._lock = Lock()
         self._repairs: dict[str, ClassicReceiptRepair] = {}
         self._refusals: dict[tuple[str, int, str], ClassicRepairRefusal] = {}
+        self._seed_objects: dict[str, SeedObject] = {}
+
+    def record_seed_objects(self, objects: Mapping[str, SeedObject]) -> None:
+        """Keep the fresh compiled objects the analysis captured for the census."""
+
+        with self._lock:
+            self._seed_objects.update(objects)
+
+    @property
+    def seed_objects(self) -> Mapping[str, SeedObject]:
+        with self._lock:
+            return MappingProxyType(dict(self._seed_objects))
 
     @staticmethod
     def _refusal(
