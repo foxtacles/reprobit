@@ -927,7 +927,9 @@ def repair_measured_pins(
             followed = _followed_debug_delta(intervention, refreshed, seed, donor)
             if followed != refreshed:
                 refreshed = followed
-                changed_keys = (*changed_keys, _DEBUG_DELTA_KEY)
+                # The session compares the declaration with the sorted set of
+                # keys whose values differ (the delta may be a newly stated pin).
+                changed_keys = tuple(sorted((*changed_keys, _DEBUG_DELTA_KEY)))
         constraints = merge_candidate_constraints(intervention, refreshed).materialize()
     except MeasuredPinRepairError:
         raise

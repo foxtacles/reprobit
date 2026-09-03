@@ -189,6 +189,22 @@ def test_classic_receipt_repair_admits_only_the_debug_delta_as_an_added_pin() ->
     repair = ClassicReceiptRepair("tu_main", 0, before, with_delta, ("debug_representation_delta",))
 
     assert repair.changed_keys == ("debug_representation_delta",)
+    both = before.model_copy(
+        update={
+            "expected_values": {
+                "expected_body_length": 9,
+                "debug_representation_delta": [{"kind": "procedure_extent"}],
+            }
+        }
+    )
+    # The declaration is the sorted set of moved keys, the added pin included.
+    ClassicReceiptRepair(
+        "tu_main", 0, before, both, ("debug_representation_delta", "expected_body_length")
+    )
+    with pytest.raises(ClassicRepairSessionError, match="changed-key declaration differs"):
+        ClassicReceiptRepair(
+            "tu_main", 0, before, both, ("expected_body_length", "debug_representation_delta")
+        )
     with pytest.raises(ClassicRepairSessionError, match="changed-key declaration differs"):
         ClassicReceiptRepair("tu_main", 0, before, with_delta, ("expected_body_length",))
     other = before.model_copy(
