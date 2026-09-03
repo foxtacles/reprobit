@@ -22,7 +22,10 @@ from reprobit.classic_repair_authority import (
     ClassicReceiptEdit,
     apply_classic_authority_edits,
 )
-from reprobit.classic_repair_dispatch import ClassicMeasuredReceiptRepairRequest
+from reprobit.classic_repair_dispatch import (
+    ADMITTED_ADDED_PIN_KEYS,
+    ClassicMeasuredReceiptRepairRequest,
+)
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeIntervention,
@@ -32,10 +35,6 @@ from reprobit.schema import (
 
 class ClassicRepairSessionError(RuntimeError):
     """A proposed classic repair is ambiguous or cannot be persisted safely."""
-
-
-ADMITTED_ADDED_PIN_KEYS = frozenset({"debug_representation_delta"})
-"""Pins a measured repair may state on a receipt that never carried them."""
 
 
 @dataclass(frozen=True, slots=True)

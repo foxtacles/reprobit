@@ -21,6 +21,14 @@ from reprobit.schema import (
     ClassicTranslationUnitPlan,
 )
 
+ADMITTED_ADDED_PIN_KEYS = frozenset({"debug_representation_delta"})
+"""Pins a measured repair may state on a receipt that never carried them.
+
+The debug representation delta is an observation of the fresh seed/donor
+pair the same-slot validator consumes; every other pin is refreshed in
+place and never added or dropped.
+"""
+
 
 class _ClassicRepairUnit(Protocol):
     """Small unit view needed at the dispatch boundary."""
@@ -108,7 +116,9 @@ def dispatch_classic_action(
             repaired_receipt.id != receipt.id
             or repaired_receipt.intervention_id != receipt.intervention_id
             or repaired_receipt.family is not receipt.family
-            or repaired_receipt.expected_values.keys() != receipt.expected_values.keys()
+            or receipt.expected_values.keys() - repaired_receipt.expected_values.keys()
+            or (repaired_receipt.expected_values.keys() - receipt.expected_values.keys())
+            - ADMITTED_ADDED_PIN_KEYS
             or repaired_receipt.model_copy(update={"expected_values": receipt.expected_values})
             != receipt
         ):

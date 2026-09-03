@@ -153,3 +153,29 @@ def test_repair_cannot_change_the_receipt_shape() -> None:
 
     with pytest.raises(ClassicProjectError, match="changed more than expected values"):
         _dispatch(_Dispatcher(ClassicProjectError("stale")), broaden)
+
+
+def test_repair_may_state_the_debug_representation_delta_on_a_receipt_without_one() -> None:
+    candidate = cast(ClassicCandidate, object())
+    dispatcher = _Dispatcher(ClassicProjectError("stale"), candidate)
+
+    def follow(request: ClassicMeasuredReceiptRepairRequest) -> ClassicProofReceipt:
+        return request.receipt.model_copy(
+            update={
+                "expected_values": {
+                    **request.receipt.expected_values,
+                    "debug_representation_delta": [{"kind": "procedure_extent"}],
+                }
+            }
+        )
+
+    result, _receipt_value, _intervention_value = _dispatch(dispatcher, follow)
+
+    assert result.candidate is candidate
+    assert result.provisional_repair is True
+
+    def drop(request: ClassicMeasuredReceiptRepairRequest) -> ClassicProofReceipt:
+        return request.receipt.model_copy(update={"expected_values": {}})
+
+    with pytest.raises(ClassicProjectError, match="changed more than expected values"):
+        _dispatch(_Dispatcher(ClassicProjectError("stale")), drop)
