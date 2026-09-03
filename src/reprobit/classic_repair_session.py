@@ -34,6 +34,10 @@ class ClassicRepairSessionError(RuntimeError):
     """A proposed classic repair is ambiguous or cannot be persisted safely."""
 
 
+ADMITTED_ADDED_PIN_KEYS = frozenset({"debug_representation_delta"})
+"""Pins a measured repair may state on a receipt that never carried them."""
+
+
 @dataclass(frozen=True, slots=True)
 class ClassicReceiptRepair:
     """One ordinary-composer-validated measured receipt replacement."""
@@ -45,11 +49,18 @@ class ClassicReceiptRepair:
     changed_keys: tuple[str, ...]
 
     def __post_init__(self) -> None:
+        # A measured repair refreshes the values of saved pins; it never adds or
+        # drops a pin, with one closed exception: the debug representation delta
+        # is an observation of the fresh seed/donor pair that the same-slot
+        # validator consumes, so a repair may state it on a receipt that never
+        # carried one, and must then declare it among its changed keys.
+        added = self.after.expected_values.keys() - self.before.expected_values.keys()
         if (
             self.after.id != self.before.id
             or self.after.intervention_id != self.before.intervention_id
             or self.after.family is not self.before.family
-            or self.after.expected_values.keys() != self.before.expected_values.keys()
+            or self.before.expected_values.keys() - self.after.expected_values.keys()
+            or added - ADMITTED_ADDED_PIN_KEYS
             or self.after.model_copy(update={"expected_values": self.before.expected_values})
             != self.before
         ):
@@ -59,8 +70,9 @@ class ClassicReceiptRepair:
         actual = tuple(
             sorted(
                 key
-                for key in self.before.expected_values
-                if self.before.expected_values[key] != self.after.expected_values[key]
+                for key in self.after.expected_values
+                if key not in self.before.expected_values
+                or self.before.expected_values[key] != self.after.expected_values[key]
             )
         )
         if not actual or self.changed_keys != actual:

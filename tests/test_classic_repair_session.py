@@ -173,3 +173,29 @@ def test_classic_receipt_repair_fixture_uses_function_authority() -> None:
         symbol="?f@@YAXXZ",
     )
     assert intervention.id == _receipt("proof_saved", 8).intervention_id
+
+
+def test_classic_receipt_repair_admits_only_the_debug_delta_as_an_added_pin() -> None:
+    before = _receipt("proof_saved", 8)
+    with_delta = before.model_copy(
+        update={
+            "expected_values": {
+                "expected_body_length": 8,
+                "debug_representation_delta": [{"kind": "procedure_extent"}],
+            }
+        }
+    )
+
+    repair = ClassicReceiptRepair("tu_main", 0, before, with_delta, ("debug_representation_delta",))
+
+    assert repair.changed_keys == ("debug_representation_delta",)
+    with pytest.raises(ClassicRepairSessionError, match="changed-key declaration differs"):
+        ClassicReceiptRepair("tu_main", 0, before, with_delta, ("expected_body_length",))
+    other = before.model_copy(
+        update={"expected_values": {"expected_body_length": 8, "expected_seed_length": 9}}
+    )
+    with pytest.raises(ClassicRepairSessionError, match="more than expected values"):
+        ClassicReceiptRepair("tu_main", 0, before, other, ("expected_seed_length",))
+    dropped = before.model_copy(update={"expected_values": {}})
+    with pytest.raises(ClassicRepairSessionError, match="more than expected values"):
+        ClassicReceiptRepair("tu_main", 0, before, dropped, ())
