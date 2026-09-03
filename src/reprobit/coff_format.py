@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import struct
 from collections.abc import Mapping
+from contextlib import suppress
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError, require
 from reprobit.model import Digest
@@ -217,7 +218,22 @@ def coff_auxiliary(coff: CoffObject, symbol_index: int, symbol: CoffSymbol) -> b
     return coff.data[offset : offset + 18]
 
 
+_SECTION_DEFINITIONS_ATTRIBUTE = "_reprobit_section_definitions"
+
+
 def section_definitions(coff: CoffObject) -> dict[int, CoffSection]:
+    """Every COMDAT section definition record of the object, computed once per object."""
+
+    cached = getattr(coff, _SECTION_DEFINITIONS_ATTRIBUTE, None)
+    if cached is not None:
+        return cast(dict[int, CoffSection], cached)
+    result = _section_definitions(coff)
+    with suppress(AttributeError):
+        setattr(coff, _SECTION_DEFINITIONS_ATTRIBUTE, result)
+    return result
+
+
+def _section_definitions(coff: CoffObject) -> dict[int, CoffSection]:
     result: dict[int, CoffSection] = {}
     for index, symbol in coff.symbols.items():
         if not (

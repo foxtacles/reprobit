@@ -10,6 +10,7 @@ from typing import cast
 
 from reprobit.classic.overlay_document import render_classic_overlay_proposal
 from reprobit.classic_donor_retune_candidates import (
+    MAX_INSERTED_RUN_COUNT,
     MAX_RETUNE_RADIUS,
     DonorRetuneCandidate,
     DonorRetuneChange,
@@ -32,6 +33,19 @@ from reprobit.schema import (
     ClassicRecipeRole,
 )
 from reprobit.strict_json import JsonValue
+
+# Declaration carriers whose only derived pin is the generated-header digest the
+# enumeration already recomputed; they render no source and carry no receipt pins.
+_SELF_CONTAINED_DECLARATION_FAMILIES = frozenset(
+    {
+        ClassicRecipeFamily.DECLARATION_SHAPE,
+        ClassicRecipeFamily.DECLARATION_RUN_TRIPLE,
+        ClassicRecipeFamily.FORWARD_DECLARATION_RUN,
+        ClassicRecipeFamily.PAD_SHAPE,
+        ClassicRecipeFamily.EXTERN_RUN_PAIR,
+        ClassicRecipeFamily.FORWARD_RUN_WITH_SHAPE,
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,7 +97,14 @@ def _replace_candidate_path(
 
 
 def _saved_intervention(candidate: DonorRetuneCandidate) -> ClassicRecipeIntervention:
-    if type(candidate.distance) is not int or not 1 <= candidate.distance <= MAX_RETUNE_RADIUS:
+    # A boundary carrier insertion's distance is the run length, bounded by the
+    # run family rather than by the knob radius.
+    farthest = (
+        MAX_INSERTED_RUN_COUNT
+        if any(change.kind == "insert" for change in candidate.changes)
+        else MAX_RETUNE_RADIUS
+    )
+    if type(candidate.distance) is not int or not 1 <= candidate.distance <= farthest:
         raise DonorRetuneError("candidate distance is outside the bounded retune radius")
     if not candidate.changes:
         raise DonorRetuneError("candidate has no declared changes")
@@ -93,6 +114,9 @@ def _saved_intervention(candidate: DonorRetuneCandidate) -> ClassicRecipeInterve
     for change in reversed(candidate.changes):
         if type(change.before) not in {int, str} or type(change.after) not in {int, str}:
             raise DonorRetuneError("candidate changes must contain integer or string scalars")
+        if change.kind == "insert":
+            saved = _remove_inserted_operation(saved, change)
+            continue
         saved = _replace_candidate_path(
             saved,
             change.path,
@@ -100,6 +124,40 @@ def _saved_intervention(candidate: DonorRetuneCandidate) -> ClassicRecipeInterve
             replacement=change.before,
         )
     return saved
+
+
+def _remove_inserted_operation(
+    intervention: ClassicRecipeIntervention, change: DonorRetuneChange
+) -> ClassicRecipeIntervention:
+    """Undo one whole-operation insertion after checking it is exactly the declared one."""
+
+    path = change.path
+    if (
+        len(path) != 5
+        or path[:2] != ("parameters", "renderings")
+        or type(path[2]) is not int
+        or path[3] != "operations"
+        or type(path[4]) is not int
+        or change.before != ""
+        or not isinstance(change.after, str)
+    ):
+        raise DonorRetuneError("inserted operation change does not name one overlay operation")
+    parameters = _parameter_values(intervention)
+    renderings = parameters.get("renderings")
+    if not isinstance(renderings, list) or not 0 <= path[2] < len(renderings):
+        raise DonorRetuneError(f"candidate change path is absent: {path!r}")
+    rendering = renderings[path[2]]
+    operations = rendering.get("operations") if isinstance(rendering, dict) else None
+    if not isinstance(operations, list) or path[4] != len(operations) - 1:
+        raise DonorRetuneError("inserted operation must be the last operation of its rendering")
+    try:
+        declared = json.loads(change.after)
+    except ValueError as exc:
+        raise DonorRetuneError("inserted operation change is not canonical JSON") from exc
+    if operations[path[4]] != declared:
+        raise DonorRetuneError("inserted operation change does not describe its operation")
+    del operations[path[4]]
+    return _copy_with_parameters(intervention, parameters)
 
 
 def _validate_recipe(
@@ -154,6 +212,110 @@ def _derived_change(
     changes.append(DonorRetuneChange(path, before, after, "derived"))
 
 
+def _is_overlay_item_path(path: tuple[RetunePathPart, ...]) -> bool:
+    return (
+        len(path) >= 8
+        and path[0] == "parameters"
+        and path[1] == "renderings"
+        and type(path[2]) is int
+        and path[3] == "operations"
+        and type(path[4]) is int
+        and path[5] == "gen"
+        and path[6] == "items"
+        and type(path[7]) is int
+    )
+
+
+def _require_overlay_candidate_shape(candidate: DonorRetuneCandidate) -> None:
+    """Admit only bounded knob moves plus the layout they imply.
+
+    Knobs are sequence-item counts (``count``/``n``) or stem-expanded class
+    member counts; derived changes may only move later items' ``line`` seats or
+    a sequence's ``lines`` canvas.  The candidate distance is the total knob
+    movement.
+    """
+
+    knobs = [change for change in candidate.changes if change.kind == "knob"]
+    derived = [change for change in candidate.changes if change.kind == "derived"]
+    inserts = [change for change in candidate.changes if change.kind == "insert"]
+    if inserts:
+        if knobs or derived or len(inserts) != 1:
+            raise DonorRetuneError("overlay carrier insertion must be the candidate's only change")
+        _require_inserted_carrier(inserts[0], candidate.distance)
+        return
+    if not knobs or len(knobs) > 2:
+        raise DonorRetuneError("overlay retuning must change one or two admitted knobs")
+    movement = 0
+    for change in knobs:
+        path = change.path
+        item_knob = len(path) == 9 and _is_overlay_item_path(path) and path[8] in {"count", "n"}
+        member_knob = (
+            len(path) == 11
+            and _is_overlay_item_path(path)
+            and path[8] == "members"
+            and type(path[9]) is int
+            and path[10] == "count"
+        )
+        if (
+            not (item_knob or member_knob)
+            or type(change.before) is not int
+            or type(change.after) is not int
+        ):
+            raise DonorRetuneError("overlay candidate is not one bounded declaration-run count")
+        movement += abs(change.after - change.before)
+    if movement != candidate.distance:
+        raise DonorRetuneError("overlay candidate distance is not its total knob movement")
+    for change in derived:
+        path = change.path
+        line_seat = len(path) == 9 and _is_overlay_item_path(path) and path[8] == "line"
+        canvas = (
+            len(path) == 7
+            and path[:6] == ("parameters", "renderings", path[2], "operations", path[4], "gen")
+            and type(path[2]) is int
+            and type(path[4]) is int
+            and path[6] == "lines"
+        )
+        if (
+            not (line_seat or canvas)
+            or type(change.before) is not int
+            or type(change.after) is not int
+        ):
+            raise DonorRetuneError("overlay candidate carries a derived change outside its layout")
+
+
+def _require_inserted_carrier(change: DonorRetuneChange, distance: int) -> None:
+    """Admit only one anchored forward-declaration run of ``distance`` names."""
+
+    if not isinstance(change.after, str):
+        raise DonorRetuneError("inserted carrier must be described by its canonical JSON")
+    try:
+        operation = json.loads(change.after)
+    except ValueError as exc:
+        raise DonorRetuneError("inserted carrier is not canonical JSON") from exc
+    generator = operation.get("gen") if isinstance(operation, dict) else None
+    items = generator.get("items") if isinstance(generator, dict) else None
+    anchor = operation.get("anchor") if isinstance(operation, dict) else None
+    if (
+        not isinstance(operation, dict)
+        or operation.get("op") != "insert"
+        or not isinstance(anchor, dict)
+        or anchor.get("at") not in {"end", "start"}
+        or not isinstance(generator, dict)
+        or generator.get("k") != "seq"
+        or not isinstance(items, list)
+        or len(items) != 1
+        or not isinstance(items[0], dict)
+        or items[0].get("k") != "fwd_run"
+        or items[0].get("count") != distance
+        or generator.get("lines") != distance
+        or set(operation) != {"anchor", "gen", "id", "op"}
+    ):
+        raise DonorRetuneError(
+            "inserted carrier is not one boundary-anchored forward-declaration run of the "
+            "candidate distance"
+        )
+
+
 def _materialize_overlay_candidate(
     candidate: DonorRetuneCandidate,
     receipt: ClassicProofReceipt,
@@ -161,20 +323,7 @@ def _materialize_overlay_candidate(
     clean_sources: Mapping[str, bytes] | None,
     canonical_overlay_operations: Sequence[Mapping[str, object]] | None,
 ) -> MaterializedDonorRetuneCandidate:
-    if len(candidate.changes) != 1 or candidate.changes[0].kind != "knob":
-        raise DonorRetuneError("overlay retuning must change exactly one admitted knob")
-    knob = candidate.changes[0]
-    if (
-        len(knob.path) != 9
-        or knob.path[:3] != ("parameters", "renderings", knob.path[2])
-        or knob.path[3] != "operations"
-        or knob.path[5:8] != ("gen", "items", knob.path[7])
-        or knob.path[-1] != "count"
-        or type(knob.before) is not int
-        or type(knob.after) is not int
-        or abs(knob.after - knob.before) != candidate.distance
-    ):
-        raise DonorRetuneError("overlay candidate is not one bounded declaration-run count")
+    _require_overlay_candidate_shape(candidate)
 
     try:
         merged = merge_candidate_constraints(candidate.intervention, receipt).materialize()
@@ -340,10 +489,7 @@ def materialize_donor_retune_candidate(
         raise DonorRetuneError("retune candidate is not a donor")
     saved = _saved_intervention(candidate)
     _validate_recipe(saved, receipt, context="saved")
-    if candidate.intervention.family in {
-        ClassicRecipeFamily.DECLARATION_SHAPE,
-        ClassicRecipeFamily.DECLARATION_RUN_TRIPLE,
-    }:
+    if candidate.intervention.family in _SELF_CONTAINED_DECLARATION_FAMILIES:
         if clean_sources or canonical_overlay_operations is not None:
             raise DonorRetuneError("declaration materialization accepts no overlay inputs")
         _validate_recipe(candidate.intervention, receipt, context="candidate")

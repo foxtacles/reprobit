@@ -21,8 +21,16 @@ from reprobit.classic_redundant_action_repair import (
 )
 from reprobit.classic_repair_authority import apply_classic_authority_edits
 from reprobit.classic_repair_probe import (
-    MAX_RETUNE_PROBE_CANDIDATES,
+    DEFAULT_RETUNE_PROBE_CANDIDATES,
     ClassicDonorRetuneRefusal,
+)
+from reprobit.classic_repair_probe_cache import (
+    ClassicDonorCompileStore,
+    probe_store_directory,
+)
+from reprobit.classic_repair_reauthor import (
+    ClassicReauthorError,
+    plan_function_reauthoring,
 )
 from reprobit.classic_repair_session import (
     ClassicReceiptRepair,
@@ -45,7 +53,9 @@ from reprobit.repair import (
     stage_repair_project,
 )
 from reprobit.repair_donor_analysis import (
+    apply_classic_discovery_repairs,
     apply_classic_donor_repairs,
+    probe_classic_carrier_discovery,
     probe_classic_donor_repairs,
 )
 from reprobit.schema import (
@@ -67,7 +77,7 @@ from reprobit.strict_json import canonical_json
 from reprobit.transactions import TransactionResult
 
 MAX_REPAIR_ADJUSTMENT_ROUNDS = 24
-MAX_REPAIR_DONOR_CANDIDATES = MAX_RETUNE_PROBE_CANDIDATES
+MAX_REPAIR_DONOR_CANDIDATES = DEFAULT_RETUNE_PROBE_CANDIDATES
 
 
 class RepairWorkflowError(RuntimeError):
@@ -95,6 +105,10 @@ class RepairWorkflowResult:
     donor_retunes: int
     compiled_candidates: int
     passes: int
+    reauthored_actions: int = 0
+    discovered_actions: int = 0
+    replayed_candidates: int = 0
+    """Candidates settled from earlier compiles of the same seat instead of compiling."""
 
 
 class RepairAnalysisError(RuntimeError):
@@ -165,13 +179,21 @@ def _one_line(value: object) -> str:
     return " ".join(str(value).split())
 
 
-def _probe_refusal_error(refusal: ClassicDonorRetuneRefusal) -> RepairWorkflowError:
+def _probe_refusal_error(
+    refusal: ClassicDonorRetuneRefusal,
+    unresolved: tuple[tuple[str, str, str], ...] = (),
+) -> RepairWorkflowError:
     attempts = refusal.compiled_candidates
     setting = "setting" if attempts == 1 else "settings"
     lines = [
         f"No safe automatic repair restored `{refusal.unit_id}` after testing "
         f"{attempts} nearby compiler {setting}."
     ]
+    discovery_note = next(
+        (reason for unit_id, _action, reason in unresolved if unit_id == refusal.unit_id), None
+    )
+    if discovery_note:
+        lines.append(f"Fresh declaration shapes did not help either: {_one_line(discovery_note)}")
     best = refusal.best_attempt
     best_document: dict[str, object] | None = None
     if best is not None:
@@ -212,6 +234,11 @@ def _probe_refusal_error(refusal: ClassicDonorRetuneRefusal) -> RepairWorkflowEr
     )
 
 
+def _donor_group_key(refusal: ClassicRepairRefusal) -> tuple[str, str]:
+    dependencies = refusal.intervention.dependencies
+    return (refusal.unit_id, dependencies[0] if dependencies else "")
+
+
 def repair_classic_records(
     args: argparse.Namespace,
     output: CLIOutput,
@@ -220,19 +247,42 @@ def repair_classic_records(
     spec: ProjectSpec,
     cache_root: Path,
 ) -> RepairWorkflowResult:
-    """Repair measured, redundant, then nearby-donor fallout until composition is clean."""
+    """Repair measured, redundant, then nearby-donor fallout until composition is clean.
 
+    ``args.adjustment_rounds`` and ``args.donor_candidates`` raise the default
+    round and command-wide donor-candidate limits for large shared-header
+    repairs; the search stays bounded by whatever the command line declares.
+    """
+
+    adjustment_limit = getattr(args, "adjustment_rounds", None) or MAX_REPAIR_ADJUSTMENT_ROUNDS
+    candidate_limit = getattr(args, "donor_candidates", None) or MAX_REPAIR_DONOR_CANDIDATES
     changed_records: set[str] = set()
     affected_units: set[str] = set()
     measured_checks = 0
     retired_actions = 0
     removed_donors = 0
     donor_retunes = 0
+    reauthored_actions = 0
+    discovered_actions = 0
     compiled_candidates = 0
     seen_authority: set[str] = set()
     adjustment_rounds = 0
     initial_function_actions: int | None = None
     pass_number = 0
+    # Donor groups whose complete bounded candidate set already failed once in this
+    # command.  Their saved state has not changed, so they are deferred until every
+    # other group is settled and then given one final attempt, instead of burning
+    # the same thousands of compiles in every round.
+    exhausted_groups: set[tuple[str, str]] = set()
+    # Donor states this command saved and then moved away from; a later round
+    # must not return a donor to one of them (two consumers would otherwise
+    # trade it back and forth until the fingerprint guard stops the run).
+    abandoned_states: dict[tuple[str, str], set[str]] = {}
+    # Carrier states discovery already compiled per unit in this command.
+    discovered_shapes: dict[str, set[str]] = {}
+    # Donor compiles are pure functions of their seat and compile epoch: never
+    # compile one twice, in this command or in a later one.
+    compile_cache = ClassicDonorCompileStore(probe_store_directory(cache_root))
 
     while True:
         pass_number += 1
@@ -242,7 +292,7 @@ def repair_classic_records(
                 getattr(item, "role", None) is ClassicRecipeRole.FUNCTION
                 for item in bundle.interventions
             )
-        maximum_analyses = initial_function_actions + MAX_REPAIR_ADJUSTMENT_ROUNDS + 1
+        maximum_analyses = initial_function_actions + adjustment_limit + 1
         if pass_number > maximum_analyses:
             raise RepairWorkflowError("automatic repair exceeded its monotonic analysis bound")
         fingerprint = _authority_fingerprint(bundle)
@@ -261,10 +311,10 @@ def repair_classic_records(
         affected_units.update(item.unit_id for item in analysis.structural_refusals)
 
         if analysis.measured_repairs:
-            if adjustment_rounds >= MAX_REPAIR_ADJUSTMENT_ROUNDS:
+            if adjustment_rounds >= adjustment_limit:
                 raise RepairWorkflowError(
                     "automatic repair reached its limit of "
-                    f"{MAX_REPAIR_ADJUSTMENT_ROUNDS} saved-guidance adjustment rounds"
+                    f"{adjustment_limit} saved-guidance adjustment rounds"
                 )
             changed = apply_classic_receipt_repairs(
                 staged_root,
@@ -290,6 +340,9 @@ def repair_classic_records(
                 donor_retunes,
                 compiled_candidates,
                 pass_number,
+                reauthored_actions,
+                discovered_actions,
+                compile_cache.memory_hits + compile_cache.disk_hits,
             )
 
         receipts = _classic_receipts(bundle)
@@ -341,6 +394,38 @@ def repair_classic_records(
             removed_donors += len(plan.removed_donors)
             continue
 
+        # Before compiling anything: a refused function whose goal body another
+        # donor of its unit (or its own donor, under a cheaper family) already
+        # emits is re-authored onto that donor from the captured fresh objects.
+        try:
+            reauthor_plan = plan_function_reauthoring(analysis.structural_refusals)
+        except ClassicReauthorError as exc:
+            raise RepairWorkflowError(
+                "automatic repair could not plan function re-authoring: " + _one_line(exc)
+            ) from exc
+        if reauthor_plan.reauthorings:
+            if adjustment_rounds >= adjustment_limit:
+                raise RepairWorkflowError(
+                    "automatic repair reached its limit of "
+                    f"{adjustment_limit} saved-guidance adjustment rounds"
+                )
+            changed = apply_classic_authority_edits(
+                staged_root,
+                spec,
+                interventions=reauthor_plan.intervention_edits,
+                receipts=reauthor_plan.receipt_edits,
+                additions=reauthor_plan.additions,
+                dependencies=reauthor_plan.dependency_edits,
+            )
+            if not changed:
+                raise RepairWorkflowError(
+                    "function re-authoring reported success without changing saved guidance"
+                )
+            changed_records.update(changed)
+            reauthored_actions += len(reauthor_plan.reauthorings)
+            adjustment_rounds += 1
+            continue
+
         donor_refusals = tuple(
             refusal
             for refusal in analysis.structural_refusals
@@ -348,28 +433,58 @@ def repair_classic_records(
             and refusal.intervention.dependencies
         )
         if donor_refusals:
-            if adjustment_rounds >= MAX_REPAIR_ADJUSTMENT_ROUNDS:
+            if adjustment_rounds >= adjustment_limit:
                 raise RepairWorkflowError(
                     "automatic repair reached its limit of "
-                    f"{MAX_REPAIR_ADJUSTMENT_ROUNDS} saved-guidance adjustment rounds"
+                    f"{adjustment_limit} saved-guidance adjustment rounds"
                 )
-            remaining_candidates = MAX_REPAIR_DONOR_CANDIDATES - compiled_candidates
+            remaining_candidates = candidate_limit - compiled_candidates
             if remaining_candidates <= 0:
                 raise RepairWorkflowError(
                     "automatic repair exhausted its command-wide budget of "
-                    f"{MAX_REPAIR_DONOR_CANDIDATES} donor candidates"
+                    f"{candidate_limit} donor candidates"
                 )
+            fresh_refusals = tuple(
+                refusal
+                for refusal in donor_refusals
+                if _donor_group_key(refusal) not in exhausted_groups
+            )
+            frozen_abandoned = {key: frozenset(value) for key, value in abandoned_states.items()}
             probe = probe_classic_donor_repairs(
                 args,
                 output,
-                donor_refusals,
+                fresh_refusals or donor_refusals,
                 candidate_budget=remaining_candidates,
+                abandoned_states=frozen_abandoned,
+                compile_cache=compile_cache,
             )
             if not 0 <= probe.compiled_candidates <= remaining_candidates:
                 raise RepairWorkflowError(
                     "donor repair exceeded its remaining command-wide candidate budget"
                 )
             compiled_candidates += probe.compiled_candidates
+            exhausted_groups.update(
+                (refusal.unit_id, refusal.donor_id)
+                for refusal in probe.refusals
+                if getattr(refusal, "exhausted", False)
+            )
+            if not probe.repairs and fresh_refusals and len(fresh_refusals) < len(donor_refusals):
+                # Nothing fresh could be settled: give the deferred groups their final attempt.
+                remaining_candidates = candidate_limit - compiled_candidates
+                if remaining_candidates > 0:
+                    probe = probe_classic_donor_repairs(
+                        args,
+                        output,
+                        donor_refusals,
+                        candidate_budget=remaining_candidates,
+                        abandoned_states=frozen_abandoned,
+                        compile_cache=compile_cache,
+                    )
+                    if not 0 <= probe.compiled_candidates <= remaining_candidates:
+                        raise RepairWorkflowError(
+                            "donor repair exceeded its remaining command-wide candidate budget"
+                        )
+                    compiled_candidates += probe.compiled_candidates
             if probe.repairs:
                 changed = apply_classic_donor_repairs(staged_root, spec, probe.repairs)
                 if not changed:
@@ -377,11 +492,40 @@ def repair_classic_records(
                         "donor repair reported success without changing saved guidance"
                     )
                 changed_records.update(changed)
+                for repair in probe.repairs:
+                    if getattr(repair, "abandoned_state", ""):
+                        abandoned_states.setdefault((repair.unit_id, repair.donor_id), set()).add(
+                            repair.abandoned_state
+                        )
                 donor_retunes += len(probe.repairs)
                 adjustment_rounds += 1
                 continue
+            # No saved donor can be retuned: compile fresh carrier states for the
+            # affected units and accept any that carries a refused record's body.
+            remaining_candidates = candidate_limit - compiled_candidates
+            discovery = probe_classic_carrier_discovery(
+                args,
+                output,
+                donor_refusals,
+                candidate_budget=remaining_candidates,
+                tried_states={key: frozenset(value) for key, value in discovered_shapes.items()},
+                compile_cache=compile_cache,
+            )
+            compiled_candidates += discovery.compiled_candidates
+            for unit_id, digests in getattr(discovery, "tried_states", {}).items():
+                discovered_shapes.setdefault(unit_id, set()).update(digests)
+            if discovery.repairs:
+                changed = apply_classic_discovery_repairs(staged_root, spec, discovery.repairs)
+                if not changed:
+                    raise RepairWorkflowError(
+                        "carrier discovery reported success without changing saved guidance"
+                    )
+                changed_records.update(changed)
+                discovered_actions += sum(len(item.resolutions) for item in discovery.repairs)
+                adjustment_rounds += 1
+                continue
             if probe.best_refusal is not None:
-                raise _probe_refusal_error(probe.best_refusal)
+                raise _probe_refusal_error(probe.best_refusal, discovery.unresolved)
             probe_reasons: list[str] = []
         else:
             probe_reasons = []

@@ -1,15 +1,22 @@
-"""One-lifetime, windowed donor compiler probes for classic repair."""
+"""One-lifetime, streamed donor compiler probes for classic repair."""
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack
-from dataclasses import dataclass
+from hashlib import sha256
 
 from reprobit.classic_execution_records import ClassicActiveCompilerEpoch
 from reprobit.classic_orchestration import ClassicPreparedUnit
 from reprobit.classic_project import ClassicProjectError
+from reprobit.classic_repair_probe_cache import (
+    ClassicDonorCompileOutcome,
+    ClassicDonorCompileRefusal,
+    ClassicDonorCompileStore,
+    ProbeSeatKey,
+    compile_epoch_digest,
+)
 from reprobit.classic_runtime_files import _require_unchanged_tree, _tree_file_seal
 from reprobit.classic_runtime_probe import (
     ClassicDonorProbeInput,
@@ -26,18 +33,70 @@ from reprobit.process import (
     ProcessSupervisor,
     ProcessTimedOut,
 )
+from reprobit.strict_json import canonical_json
 
-
-@dataclass(frozen=True, slots=True)
-class ClassicDonorCompileRefusal:
-    """One expected candidate-specific compiler refusal, without a traceback."""
-
-    donor_id: str
-    reason: str
-
-
-ClassicDonorCompileOutcome = ClassicDonorProbeOutput | ClassicDonorCompileRefusal
 ClassicDonorWindowEvaluator = Callable[[tuple[ClassicDonorCompileOutcome, ...]], bool]
+ClassicDonorCompileCache = ClassicDonorCompileStore
+"""Replay store for seats compiled earlier; see :mod:`classic_repair_probe_cache`."""
+
+_EXPECTED_COMPILE_FAILURES = (
+    ClassicProjectError,
+    CommandFailed,
+    ProcessOutputLimitExceeded,
+    ProcessTimedOut,
+)
+
+
+def donor_request_identity(request: object) -> str:
+    """Digest every private compiler input of one donor request.
+
+    The compiler seat names the arena a carrier occupies, but two carriers can
+    share a seat while rendering different sources (a forward run placed before
+    or after the file, say).  A replayed compile must have read exactly the same
+    bytes, so the identity covers the rendered inputs, the staged files, the
+    include layout and the carrier identifiers as well as the seat.
+    """
+
+    additions = getattr(request, "compiler_additions", None)
+    projection = getattr(additions, "include_projection", "")
+    material = {
+        "build_target": str(getattr(request, "build_target", "")),
+        "carrier_identifiers": sorted(getattr(request, "carrier_identifiers", ()) or ()),
+        "compiler_seat": str(getattr(request, "compiler_seat", "")).casefold(),
+        "family": str(getattr(getattr(request, "family", ""), "value", "")),
+        "files": sorted(
+            (relative, sha256(payload).hexdigest())
+            for relative, payload in (getattr(request, "files", None) or {}).items()
+        ),
+        "force_includes": list(getattr(additions, "force_includes", ()) or ()),
+        "include_directories": list(getattr(additions, "include_directories", ()) or ()),
+        "include_projection": str(getattr(projection, "value", projection)),
+        "logical_outputs": sorted(
+            (path, sha256(payload).hexdigest())
+            for path, payload in (getattr(request, "logical_outputs", None) or {}).items()
+        ),
+        "logical_source": str(getattr(request, "logical_source", "")),
+        "staged_source": str(getattr(request, "staged_source", "")),
+    }
+    return sha256(canonical_json(material)).hexdigest()
+
+
+def _seat_key(unit: ClassicPreparedUnit, donor_index: int) -> ProbeSeatKey:
+    donor = unit.donors[donor_index]
+    return (
+        unit.plan.build_target.casefold(),
+        unit.plan.source.casefold(),
+        donor_request_identity(donor.request),
+    )
+
+
+def _arena_key(unit: ClassicPreparedUnit, donor_index: int) -> tuple[str, str, str]:
+    donor = unit.donors[donor_index]
+    return (
+        unit.plan.build_target.casefold(),
+        unit.plan.source.casefold(),
+        donor.request.compiler_seat.casefold(),
+    )
 
 
 def _prepared_donors(
@@ -50,11 +109,7 @@ def _prepared_donors(
             donor_id = donor.intervention.id
             if donor_id in prepared:
                 raise ClassicProjectError(f"classic prepared donor ID is ambiguous: {donor_id!r}")
-            seat = (
-                unit.plan.build_target.casefold(),
-                unit.plan.source.casefold(),
-                donor.request.compiler_seat.casefold(),
-            )
+            seat = _arena_key(unit, donor_index)
             previous = compiler_seats.get(seat)
             if previous is not None:
                 raise ClassicProjectError(
@@ -147,48 +202,87 @@ def _compile_output(
     return output
 
 
-def _compile_window(
+def _stream_compiles(
     probes: ClassicProbeExecution,
     prepared: dict[str, tuple[ClassicPreparedUnit, int]],
     supervisor: ProcessSupervisor,
     cancellation: CancellationToken,
     compiler_epoch: ClassicActiveCompilerEpoch,
-    window: tuple[str, ...],
+    windows: Iterable[tuple[str, ...]],
     *,
-    first_ordinal: int,
+    evaluate: ClassicDonorWindowEvaluator,
+    progress: ClassicDonorProbeProgress | None,
+    planned_candidates: int,
+    cache: ClassicDonorCompileStore | None,
+    epoch: str,
+    jobs: int,
 ) -> tuple[ClassicDonorCompileOutcome, ...]:
-    outcomes: list[ClassicDonorCompileOutcome | None] = [None] * len(window)
-    worker_count = min(probes.producer.jobs, len(window))
+    """Keep ``jobs`` compiles in flight and evaluate each outcome as it lands.
+
+    Candidates are pulled lazily from ``windows`` only when a worker is free, so
+    the window generator still sees every selection made so far when it builds
+    the next window.  Once ``evaluate`` reports completion no further candidate
+    is started; compiles already running finish and are recorded like any other.
+    """
+
+    candidates = (donor_id for window in windows for donor_id in window)
+    outcomes: list[ClassicDonorCompileOutcome] = []
+    running: dict[Future[ClassicDonorProbeOutput], tuple[str, ProbeSeatKey]] = {}
+    submitted = 0
+    settled = False
+    exhausted = False
+
+    def record(outcome: ClassicDonorCompileOutcome) -> None:
+        nonlocal settled
+        outcomes.append(outcome)
+        if progress is not None:
+            progress(len(outcomes), planned_candidates, outcome.donor_id)
+        if evaluate((outcome,)):
+            settled = True
+
+    worker_count = max(1, jobs)
     with ThreadPoolExecutor(
         max_workers=worker_count,
         thread_name_prefix="reprobit-repair-probe",
     ) as pool:
-        running: dict[Future[ClassicDonorProbeOutput], tuple[int, str]] = {
-            pool.submit(
-                _compile_output,
-                probes,
-                prepared,
-                supervisor,
-                cancellation,
-                compiler_epoch,
-                first_ordinal + index,
-                donor_id,
-            ): (index, donor_id)
-            for index, donor_id in enumerate(window)
-        }
-        for future, (index, donor_id) in running.items():
-            try:
-                outcomes[index] = future.result()
-            except (
-                ClassicProjectError,
-                CommandFailed,
-                ProcessOutputLimitExceeded,
-                ProcessTimedOut,
-            ) as exc:
-                outcomes[index] = ClassicDonorCompileRefusal(donor_id, str(exc))
-    if any(item is None for item in outcomes):
-        raise AssertionError("classic donor repair probe omitted a window outcome")
-    return tuple(item for item in outcomes if item is not None)
+        while True:
+            while not settled and not exhausted and len(running) < worker_count:
+                try:
+                    donor_id = next(candidates)
+                except StopIteration:
+                    exhausted = True
+                    break
+                key = _seat_key(*prepared[donor_id])
+                cached = None if cache is None else cache.get(epoch, key, donor_id=donor_id)
+                if cached is not None:
+                    record(cached)
+                    continue
+                future = pool.submit(
+                    _compile_output,
+                    probes,
+                    prepared,
+                    supervisor,
+                    cancellation,
+                    compiler_epoch,
+                    submitted,
+                    donor_id,
+                )
+                submitted += 1
+                running[future] = (donor_id, key)
+            if not running:
+                break
+            done, _pending = wait(running, return_when=FIRST_COMPLETED)
+            for future in done:
+                donor_id, key = running.pop(future)
+                outcome: ClassicDonorCompileOutcome
+                try:
+                    outcome = future.result()
+                except _EXPECTED_COMPILE_FAILURES as exc:
+                    outcome = ClassicDonorCompileRefusal(donor_id, str(exc))
+                if cache is not None:
+                    cache.put(epoch, key, outcome)
+                record(outcome)
+    return tuple(outcomes)
 
 
 def probe_donor_compile_windows(
@@ -199,15 +293,19 @@ def probe_donor_compile_windows(
     evaluate: ClassicDonorWindowEvaluator,
     progress: ClassicDonorProbeProgress | None = None,
     planned_candidates: int,
+    cache: ClassicDonorCompileStore | None = None,
 ) -> tuple[ClassicDonorCompileOutcome, ...]:
     """Compile lazy candidate windows inside one consumed non-certifying runtime.
 
+    ``cache`` replays outcomes of seats compiled earlier under the same compile
+    epoch instead of compiling them again; see :mod:`classic_repair_probe_cache`.
+
     Expected compiler failures are returned per candidate.  ``evaluate`` runs
-    on the coordinating thread after each complete window and may stop the
-    search before the next, more expensive window is requested from the lazy
-    iterable.  Progress is cumulative; its total is an upper bound because a
-    successful cheap tier stops early.  No runtime evidence, cache entry, or
-    report is issued.
+    on the coordinating thread for every completed candidate and may stop the
+    search before further candidates are requested from the lazy iterable.
+    Progress is cumulative; its total is an upper bound because a successful
+    cheap tier stops early.  Outcomes are returned in completion order.  No
+    runtime evidence, cache entry, or report is issued.
     """
 
     if type(planned_candidates) is not int or planned_candidates < 1:
@@ -216,8 +314,7 @@ def probe_donor_compile_windows(
     if not probes.producer.is_open:
         raise ClassicProjectError("classic donor repair probe requires one unused prepared run")
     probes.producer.begin_developer()
-    outcomes: list[ClassicDonorCompileOutcome] = []
-    completed = 0
+    outcomes: tuple[ClassicDonorCompileOutcome, ...] = ()
     try:
         source_seal = _tree_file_seal(probes.effective_root)
         if probes.overlay.overlay_witnesses:
@@ -243,25 +340,31 @@ def probe_donor_compile_windows(
                 source_seal,
                 bool(probes.overlay.generated_translation_units),
             )
-            cancellation = CancellationToken()
-            checked_windows = _validate_windows(windows, prepared)
-            for window in checked_windows:
-                window_outcomes = _compile_window(
-                    probes,
-                    prepared,
-                    supervisor,
-                    cancellation,
+            epoch = (
+                compile_epoch_digest(
+                    probes.graph,
+                    probes.producer.lane_pool.compiler_environment_digest,
                     compiler_epoch,
-                    window,
-                    first_ordinal=completed,
+                    effective_root=probes.effective_root,
                 )
-                outcomes.extend(window_outcomes)
-                for outcome in window_outcomes:
-                    completed += 1
-                    if progress is not None:
-                        progress(completed, planned_candidates, outcome.donor_id)
-                if evaluate(window_outcomes):
-                    break
+                if cache is not None
+                else ""
+            )
+            cancellation = CancellationToken()
+            outcomes = _stream_compiles(
+                probes,
+                prepared,
+                supervisor,
+                cancellation,
+                compiler_epoch,
+                _validate_windows(windows, prepared),
+                evaluate=evaluate,
+                progress=progress,
+                planned_candidates=planned_candidates,
+                cache=cache,
+                epoch=epoch,
+                jobs=probes.producer.jobs,
+            )
         _require_unchanged_tree(
             source_seal,
             root=probes.effective_root,
@@ -274,12 +377,12 @@ def probe_donor_compile_windows(
             original.add_note(f"classic donor repair probe cleanup also failed: {cleanup_error}")
         raise
     probes.close()
-    return tuple(outcomes)
+    return outcomes
 
 
 __all__ = [
-    "ClassicDonorCompileOutcome",
-    "ClassicDonorCompileRefusal",
+    "ClassicDonorCompileCache",
     "ClassicDonorWindowEvaluator",
+    "donor_request_identity",
     "probe_donor_compile_windows",
 ]

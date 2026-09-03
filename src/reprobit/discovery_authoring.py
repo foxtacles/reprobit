@@ -14,12 +14,21 @@ from typing import Any
 from pydantic import ValidationError
 
 from reprobit.binary import ByteIdentityError
-from reprobit.classic.composition import compose_equal_body_comdat, measure_composition_pins
+from reprobit.classic.composition import (
+    REPINNABLE_PIN_KEYS,
+    compose_equal_body_comdat,
+    measure_composition_pins,
+)
 from reprobit.classic_donors import (
     DonorSourceError,
     generate_declaration_shape,
     merge_candidate_constraints,
     validate_donor_recipe,
+)
+from reprobit.classic_project import (
+    ClassicDispatchMaterials,
+    ClassicFamilyDispatcher,
+    ClassicProjectError,
 )
 from reprobit.model import Digest, Scope
 from reprobit.schema import (
@@ -332,6 +341,94 @@ def build_declaration_shape_equal_body(
         ) from exc
 
 
+_REAUTHORED_FUNCTION_RATIONALE = (
+    "Exact-body COMDAT selection from a freshly compiled private donor of the same translation "
+    "unit; recorded by repair when the previous record stopped composing."
+)
+
+# The closed equal-body families repair may author from a donor whose fresh body already carries
+# a record's goal digest, cheapest first.  Relocation-divergent and rewriting families are never
+# authored here: they declare decisions no measurement can restate.
+REAUTHORABLE_FAMILIES: tuple[ClassicRecipeFamily, ...] = (
+    ClassicRecipeFamily.EQUAL_BODY_STRICT,
+    ClassicRecipeFamily.EQUAL_BODY_EH_STRUCTURAL_LOCAL,
+    ClassicRecipeFamily.EQUAL_BODY_EH_RELOC_LAYOUT,
+    ClassicRecipeFamily.SAME_SLOT_RESIZE,
+)
+
+
+def build_measured_function_record(
+    *,
+    target_id: str,
+    translation_unit_id: str,
+    build_target: str,
+    symbol: str,
+    family: ClassicRecipeFamily,
+    donor_id: str,
+    seed_object: bytes,
+    donor_object: bytes,
+) -> AuthoredClassicRecord:
+    """Author one function record of a repinnable family and prove it composes.
+
+    Every receipt pin is measured from the two fresh objects, then the family's
+    ordinary composer must accept the complete record; a family whose closed
+    checks reject the pair raises ``DiscoveryAuthoringError``.
+    """
+
+    if family not in REAUTHORABLE_FAMILIES:
+        raise DiscoveryAuthoringError(f"{family.value} records cannot be measured into existence")
+    if type(seed_object) is not bytes or not seed_object:
+        raise DiscoveryAuthoringError("seed_object must be non-empty immutable bytes")
+    if type(donor_object) is not bytes or not donor_object:
+        raise DiscoveryAuthoringError("donor_object must be non-empty immutable bytes")
+    template: dict[str, Any] = {key: None for key in REPINNABLE_PIN_KEYS[family.value]}
+    template.update(mangled=symbol, splice_class=family.value)
+    try:
+        expected_values = measure_composition_pins(
+            seed_object, donor_object, template, f"repair authoring for {symbol}"
+        )
+        if set(expected_values) != set(REPINNABLE_PIN_KEYS[family.value]):
+            raise DiscoveryAuthoringError(
+                f"{family.value} measurement returned an incomplete pin set"
+            )
+        scope = Scope(target=target_id, translation_unit=translation_unit_id, function=symbol)
+        intervention_id = _stable_id(
+            "function",
+            {
+                "build_target": build_target,
+                "dependency": donor_id,
+                "expected_values": expected_values,
+                "family": family.value,
+                "scope": scope.model_dump(mode="json"),
+            },
+        )
+        intervention = ClassicRecipeIntervention(
+            id=intervention_id,
+            scope=scope,
+            rationale=_REAUTHORED_FUNCTION_RATIONALE,
+            dependencies=(donor_id,),
+            family=family,
+            role=ClassicRecipeRole.FUNCTION,
+            build_target=build_target,
+            symbol=symbol,
+        )
+        receipt = _record_receipt(intervention, expected_values)
+        constraints = merge_candidate_constraints(intervention, receipt).materialize()
+        materials = ClassicDispatchMaterials(
+            seed_object=seed_object,
+            donor_object=donor_object,
+            candidate_constraints=constraints,
+        )
+        candidate = ClassicFamilyDispatcher().dispatch(intervention, materials)
+        if candidate.output == seed_object:
+            raise DiscoveryAuthoringError("composer did not change the seed object")
+        return AuthoredClassicRecord(intervention, receipt)
+    except DiscoveryAuthoringError:
+        raise
+    except (ByteIdentityError, ClassicProjectError, DonorSourceError, ValidationError) as exc:
+        raise DiscoveryAuthoringError(f"cannot author {family.value} record: {exc}") from exc
+
+
 def merge_authored_records(
     intervention_document: InterventionDocument,
     proof_document: ProofDocument,
@@ -436,11 +533,13 @@ def merge_authored_records(
 
 
 __all__ = [
+    "REAUTHORABLE_FAMILIES",
     "AuthoredClassicRecord",
     "DeclarationShapeEqualBodyAuthoring",
     "DiscoveryAuthoringError",
     "StrictEqualBodyCompositionProof",
     "build_declaration_shape_donor",
     "build_declaration_shape_equal_body",
+    "build_measured_function_record",
     "merge_authored_records",
 ]

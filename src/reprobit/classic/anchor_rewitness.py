@@ -10,7 +10,10 @@ recorded witnesses no longer resolve:
   token context still resolves uniquely;
 * a token-context digest records a window of significant tokens, so tokens
   moved out of the window invalidate the context even though the literal seat
-  line pair still identifies the seam uniquely.
+  line pair still identifies the seam uniquely;
+* a file-boundary seat (``start``/``end``) records the tokens beside the file
+  boundary, so an edit among those tokens invalidates the context even though
+  the boundary itself still identifies the seam uniquely.
 
 This module re-witnesses such anchors against the current clean bytes.  Every
 rescue requires a unique candidate; any ambiguity or unsupported drift leaves
@@ -158,6 +161,46 @@ def _rescue_context(
     return context_digest, digest_bytes(before_line), digest_bytes(after_line)
 
 
+def _rewitness_boundary_anchor(
+    anchor: Mapping[str, Any], index: _TokenIndex
+) -> dict[str, Any] | None:
+    """Re-witness a file-boundary seat whose token context drifted.
+
+    A ``start`` or ``end`` seat is fixed by the file boundary itself; its
+    context digest only witnesses the tokens beside that boundary.  When an
+    edit changed those tokens the seam is still unique by construction, so
+    the digest is recomputed at the same boundary and nothing else moves.
+    """
+
+    context_digest = anchor.get("ctx")
+    before_count = anchor.get("b", _DEFAULT_WINDOW)
+    after_count = anchor.get("a", _DEFAULT_WINDOW)
+    if (
+        not isinstance(context_digest, str)
+        or not isinstance(before_count, int)
+        or not isinstance(after_count, int)
+        or "line_before" in anchor
+        or "line_after" in anchor
+    ):
+        return None
+    if anchor.get("at") == "start":
+        if before_count:
+            return None  # nothing precedes the file start; not a boundary seat
+        token_boundary = 0
+    else:
+        if after_count:
+            return None  # nothing follows the file end; not a boundary seat
+        token_boundary = index.token_count
+    if token_boundary < before_count or token_boundary > index.token_count - after_count:
+        return None
+    fresh = _seat_digest_from_index(index, token_boundary, before_count, after_count)
+    if fresh == context_digest:
+        return None  # strict resolution succeeds; do not touch
+    updated = dict(anchor)
+    updated["ctx"] = fresh
+    return updated
+
+
 def _rewitness_anchor(
     anchor: Mapping[str, Any], data: bytes, index: _TokenIndex
 ) -> dict[str, Any] | None:
@@ -165,8 +208,11 @@ def _rewitness_anchor(
 
     if not isinstance(anchor, Mapping):
         return None
-    if anchor.get("at") is not None:
-        return None  # only default after-newline seats carry line witnesses
+    boundary_name = anchor.get("at")
+    if boundary_name in {"start", "end"}:
+        return _rewitness_boundary_anchor(anchor, index)
+    if boundary_name is not None:
+        return None  # token seats carry no second witness; never guess a seam
     context_digest = anchor.get("ctx")
     before_line_digest = anchor.get("line_before")
     after_line_digest = anchor.get("line_after")

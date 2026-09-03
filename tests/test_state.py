@@ -591,3 +591,24 @@ def test_state_gc_preserves_cache_by_default_and_explicit_gc_honors_leases(
     assert result.cache_removed_records == 1
     assert result.cache_removed_blobs == 1
     assert StateStore(state).status().cache_records == 0
+
+
+def test_state_gc_cache_cleanup_also_removes_the_probe_store(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    probe_store = state / "repair-probes" / "v1" / "ab"
+    probe_store.mkdir(parents=True)
+    (probe_store / "abcd.bin").write_bytes(b"x" * 100)
+
+    preview = StateStore(state).gc(dry_run=True, include_cache=True)
+    assert (state / "repair-probes").is_dir()
+    assert preview.reclaimed_bytes >= 100
+
+    kept = StateStore(state).gc()
+    assert (state / "repair-probes").is_dir()
+    assert kept.reclaimed_bytes == 0
+
+    result = StateStore(state).gc(include_cache=True)
+    assert not (state / "repair-probes").exists()
+    assert result.reclaimed_bytes >= 100
+    assert state / "repair-probes" in result.removed

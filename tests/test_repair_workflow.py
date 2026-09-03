@@ -10,12 +10,15 @@ import pytest
 import reprobit.repair_workflow as subject
 from reprobit.classic_donor_retune_candidates import DonorRetuneChange
 from reprobit.classic_redundant_action_repair import RedundantActionRepairError
+from reprobit.classic_repair_discovery import ClassicDiscoveryResult
 from reprobit.classic_repair_probe import (
     ClassicDonorRetuneAttemptRefusal,
     ClassicDonorRetuneProbeResult,
     ClassicDonorRetuneRefusal,
 )
 from reprobit.schema import ClassicRecipeRole
+
+_ORIGINAL_DISCOVERY = subject.probe_classic_carrier_discovery
 
 
 def _analysis(
@@ -62,6 +65,14 @@ def _run(
         "analyze_classic_repair",
         lambda *_args, **_kwargs: analyses.pop(0),
     )
+    if subject.probe_classic_carrier_discovery is _ORIGINAL_DISCOVERY:
+        # Fresh-shape discovery needs a compiler runtime; workflow tests mock it out
+        # unless a test installs its own double.
+        monkeypatch.setattr(
+            subject,
+            "probe_classic_carrier_discovery",
+            lambda *_args, **_kwargs: ClassicDiscoveryResult((), (), 0),
+        )
     return subject.repair_classic_records(
         argparse.Namespace(project=str(tmp_path)),
         cast(Any, object()),
@@ -262,6 +273,7 @@ def test_workflow_passes_one_cumulative_candidate_budget_to_donor_probes(
     def probe(
         *_args: object,
         candidate_budget: int,
+        **_kwargs: object,
     ) -> object:
         budgets.append(candidate_budget)
         compiled = 250 if len(budgets) == 1 else 6
@@ -592,3 +604,135 @@ def test_retirement_only_rounds_do_not_consume_the_adjustment_limit(
 
     assert result.retired_actions == 25
     assert result.passes == 26
+
+
+def test_workflow_defers_exhausted_donor_groups_until_the_final_attempt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def refusal(donor: str) -> object:
+        return SimpleNamespace(
+            unit_id="tu.shared",
+            intervention=SimpleNamespace(role=ClassicRecipeRole.FUNCTION, dependencies=(donor,)),
+            receipt=object(),
+            materials=object(),
+            reason="donor declaration shape moved",
+        )
+
+    stubborn = refusal("donor.stubborn")
+    easy = refusal("donor.easy")
+    later = refusal("donor.later")
+    monkeypatch.setattr(
+        subject,
+        "plan_redundant_action_retirements",
+        lambda *_args: (_ for _ in ()).throw(RedundantActionRepairError("not redundant")),
+    )
+    probed: list[tuple[str, ...]] = []
+
+    def probe(
+        _args: object, _output: object, refusals: tuple[Any, ...], **_kwargs: object
+    ) -> object:
+        donors = tuple(item.intervention.dependencies[0] for item in refusals)
+        probed.append(donors)
+        repairs = tuple(object() for donor in donors if donor != "donor.stubborn")
+        stubborn_refusal = (
+            ClassicDonorRetuneRefusal(
+                "tu.shared",
+                "donor.stubborn",
+                ("function.stubborn",),
+                2048,
+                "none of 2048 compiled candidates restored composition",
+                (),
+                exhausted=True,
+            ),
+        )
+        return ClassicDonorRetuneProbeResult(
+            cast(Any, repairs),
+            stubborn_refusal if "donor.stubborn" in donors else (),
+            len(donors),
+        )
+
+    monkeypatch.setattr(subject, "probe_classic_donor_repairs", probe)
+    monkeypatch.setattr(
+        subject,
+        "apply_classic_donor_repairs",
+        lambda *_args: ("reprobit/interventions/shared.json",),
+    )
+
+    with pytest.raises(subject.RepairWorkflowError, match="No safe automatic repair"):
+        _run(
+            tmp_path,
+            monkeypatch,
+            [
+                _analysis(completed=False, refusals=(stubborn, easy)),
+                _analysis(completed=False, refusals=(stubborn, later)),
+                _analysis(completed=False, refusals=(stubborn,)),
+            ],
+        )
+
+    # Round 1 probes everything and exhausts the stubborn donor; round 2 probes only the fresh
+    # group; round 3 has nothing fresh left, so the stubborn donor gets its final attempt.
+    assert probed == [
+        ("donor.stubborn", "donor.easy"),
+        ("donor.later",),
+        ("donor.stubborn",),
+    ]
+
+
+def test_workflow_reauthors_functions_from_captured_donors_before_probing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal = SimpleNamespace(
+        unit_id="tu.shared",
+        intervention=SimpleNamespace(role=ClassicRecipeRole.FUNCTION, dependencies=("donor",)),
+        receipt=object(),
+        materials=object(),
+        reason="fresh donor body no longer matches immutable expected_body_sha256 goal",
+    )
+    monkeypatch.setattr(
+        subject,
+        "plan_redundant_action_retirements",
+        lambda *_args: (_ for _ in ()).throw(RedundantActionRepairError("not redundant")),
+    )
+    plan = SimpleNamespace(
+        reauthorings=(object(),),
+        intervention_edits=("edit",),
+        receipt_edits=("receipt",),
+        additions=("addition",),
+        skipped=(),
+        dependency_edits=("dependency",),
+    )
+    applied: list[dict[str, object]] = []
+    monkeypatch.setattr(subject, "plan_function_reauthoring", lambda _refusals: plan)
+    monkeypatch.setattr(
+        subject,
+        "apply_classic_authority_edits",
+        lambda *_args, **kwargs: applied.append(kwargs) or ("reprobit/interventions/tu.json",),
+    )
+    monkeypatch.setattr(
+        subject,
+        "probe_classic_donor_repairs",
+        lambda *_args, **_kwargs: pytest.fail("re-authoring must run before any donor probe"),
+    )
+
+    result = _run(
+        tmp_path,
+        monkeypatch,
+        [
+            _analysis(completed=False, refusals=(refusal,)),
+            _analysis(completed=True),
+        ],
+    )
+
+    assert result.reauthored_actions == 1
+    assert result.donor_retunes == 0 and result.compiled_candidates == 0
+    assert applied == [
+        {
+            "interventions": ("edit",),
+            "receipts": ("receipt",),
+            "additions": ("addition",),
+            "dependencies": ("dependency",),
+        }
+    ]
+    assert result.changed_records == ("reprobit/interventions/tu.json",)

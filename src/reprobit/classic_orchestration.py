@@ -704,6 +704,18 @@ def prepare_classic_units(
             except ValueError as exc:
                 raise ClassicProjectError(f"cannot prepare donor {donor.id!r}: {exc}") from exc
             rendered_donors.append(ClassicPreparedDonor(donor, request))
+        seats: dict[str, str] = {}
+        for item in rendered_donors:
+            previous = seats.setdefault(item.request.compiler_seat.casefold(), item.intervention.id)
+            if previous != item.intervention.id:
+                # Two donors rendering identical declarations would compile in one
+                # private arena and overwrite each other's object; refuse the saved
+                # authority here instead of failing inside the compiler workspace.
+                raise ClassicProjectError(
+                    f"classic donors {previous!r} and {item.intervention.id!r} of translation "
+                    f"unit {plan.id!r} render the same declarations and would share one "
+                    "compiler arena"
+                )
         unit_receipts = tuple(
             item
             for item in receipts
@@ -783,6 +795,7 @@ def compose_classic_unit(
     quarantined_uses: dict[str, dict[str, Digest]] = {donor_id: {} for donor_id in expected_donors}
     dispatcher = ClassicFamilyDispatcher()
     provisional_repair = False
+    incomplete = False
     for action_index, action in enumerate(unit.actions):
         if isinstance(action, LegacyOracleInstallIntervention):
             if legacy_oracles is None or action.oracle_target not in legacy_oracles:
@@ -893,14 +906,16 @@ def compose_classic_unit(
             unit,
             action_index,
             measured_receipt_repair,
+            donor_objects if measured_receipt_repair is not None else None,
         )
         if dispatch.candidate is None:
-            return ClassicUnitComposition(
-                output,
-                tuple(witnesses),
-                provisional_repair=True,
-                incomplete=True,
-            )
+            # Repair analysis captured this refusal.  Leave the function as the
+            # seed emitted it and keep composing, so one analysis pass exposes
+            # every refused action of the unit instead of only the first; the
+            # unit stays incomplete and can never publish.  A later action that
+            # depended on this one is simply captured again next pass.
+            incomplete = True
+            continue
         candidate = dispatch.candidate
         provisional_repair = provisional_repair or dispatch.provisional_repair
         output = candidate.output
@@ -925,6 +940,13 @@ def compose_classic_unit(
                 output_digest=Digest.from_bytes(candidate.output),
                 output_size=len(candidate.output),
             )
+        )
+    if incomplete:
+        return ClassicUnitComposition(
+            output,
+            tuple(witnesses),
+            provisional_repair=True,
+            incomplete=True,
         )
     group_evidence: Digest | None = None
     group_input_digest: Digest | None = None

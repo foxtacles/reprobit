@@ -6,6 +6,12 @@ import argparse
 from io import StringIO
 from pathlib import Path
 
+from reprobit.classic_donor_retune_candidates import (
+    MAX_RETUNE_CANDIDATES,
+    MAX_RETUNE_RADIUS,
+)
+from reprobit.classic_repair_discovery import MAX_DISCOVERY_CANDIDATES
+from reprobit.classic_repair_probe import MAX_RETUNE_PROBE_CANDIDATES
 from reprobit.cli_build import command_verify
 from reprobit.cli_output import CLIOutput, count_phrase, human_command
 from reprobit.cli_paths import CLIError, project_root, safe_project_path
@@ -49,9 +55,29 @@ def _candidate_output(output: CLIOutput) -> CLIOutput:
     )
 
 
+_SEARCH_BOUNDS = (
+    ("retune_radius", "--retune-radius", MAX_RETUNE_RADIUS),
+    ("retune_candidates", "--retune-candidates", MAX_RETUNE_CANDIDATES),
+    ("donor_candidates", "--donor-candidates", MAX_RETUNE_PROBE_CANDIDATES),
+    ("adjustment_rounds", "--adjustment-rounds", None),
+    ("discovery_candidates", "--discovery-candidates", MAX_DISCOVERY_CANDIDATES),
+)
+
+
+def _check_search_bounds(args: argparse.Namespace) -> None:
+    for attribute, option, maximum in _SEARCH_BOUNDS:
+        value = getattr(args, attribute, None)
+        if value is None:
+            continue
+        if type(value) is not int or value < 1 or (maximum is not None and value > maximum):
+            ceiling = f" and at most {maximum}" if maximum is not None else ""
+            raise CLIError(f"{option} must be at least 1{ceiling}")
+
+
 def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
     """Repair in private, prove every target, then publish once."""
 
+    _check_search_bounds(args)
     root = project_root(args.project)
     entrypoint = root / "reprobit.toml"
     if entrypoint.is_symlink() or not entrypoint.is_file():
@@ -142,6 +168,8 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
                 repair_result.measured_checks,
                 repair_result.retired_actions,
                 repair_result.donor_retunes,
+                repair_result.reauthored_actions,
+                repair_result.discovered_actions,
             )
         )
         completion_lines = [
@@ -163,11 +191,27 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
                 )
             else:
                 completion_lines.append("Refreshed saved source guidance.")
-        if repair_result.compiled_candidates:
+        if repair_result.reauthored_actions:
             completion_lines.append(
-                "Tested "
-                f"{count_phrase(repair_result.compiled_candidates, 'nearby compiler setting')}."
+                "Re-authored "
+                + count_phrase(repair_result.reauthored_actions, "function record")
+                + " from donors the affected source files already had."
             )
+        if repair_result.discovered_actions:
+            completion_lines.append(
+                "Settled "
+                + count_phrase(repair_result.discovered_actions, "function record")
+                + " on freshly discovered declaration shapes."
+            )
+        if repair_result.compiled_candidates:
+            tested = (
+                "Tested "
+                f"{count_phrase(repair_result.compiled_candidates, 'nearby compiler setting')}"
+            )
+            replayed = repair_result.replayed_candidates
+            if replayed:
+                tested += f" ({count_phrase(replayed, 'replayed from an earlier compile')})"
+            completion_lines.append(tested + ".")
         completion_lines.append(f"Report: {report_html}")
         completion_message = "\n".join(completion_lines)
     else:
@@ -184,7 +228,10 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
         retired_actions=repair_result.retired_actions,
         removed_donors=repair_result.removed_donors,
         donor_retunes=repair_result.donor_retunes,
+        reauthored_actions=repair_result.reauthored_actions,
+        discovered_actions=repair_result.discovered_actions,
         donor_candidates=repair_result.compiled_candidates,
+        replayed_candidates=repair_result.replayed_candidates,
         repair_passes=repair_result.passes,
         changed_records=sorted(candidate.records),
         source_inputs=len(admitted_paths),

@@ -14,6 +14,20 @@ from reprobit.backends import (
     POSIX_WINE_BACKEND,
     WINDOWS_NATIVE_BACKEND,
 )
+from reprobit.classic_donor_retune_candidates import (
+    DEFAULT_REPAIR_RETUNE_RADIUS,
+    DEFAULT_RETUNE_CANDIDATES,
+    MAX_RETUNE_CANDIDATES,
+    MAX_RETUNE_RADIUS,
+)
+from reprobit.classic_repair_discovery import (
+    DEFAULT_DISCOVERY_CANDIDATES,
+    MAX_DISCOVERY_CANDIDATES,
+)
+from reprobit.classic_repair_probe import (
+    DEFAULT_RETUNE_PROBE_CANDIDATES,
+    MAX_RETUNE_PROBE_CANDIDATES,
+)
 from reprobit.cli_build import (
     command_build,
     command_verify,
@@ -39,6 +53,7 @@ from reprobit.cli_project import (
 from reprobit.cli_state import command_clean, command_state_status
 from reprobit.discovery_cli import command_discover, command_discover_clean
 from reprobit.model import AuthenticityPolicy
+from reprobit.repair_workflow import MAX_REPAIR_ADJUSTMENT_ROUNDS
 from reprobit.state import KeepWorkspace
 from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES
 
@@ -866,6 +881,63 @@ def _parser() -> argparse.ArgumentParser:
         "--report-dir",
         metavar="PROJECT_RELATIVE_DIRECTORY",
         help="write report.json and report.html beneath this project directory",
+    )
+    search = repair.add_argument_group(
+        "search bounds",
+        "Widen the bounded nearby-donor search for large shared-header edits; every "
+        "candidate still passes the ordinary composer and the final cold proof.",
+    )
+    search.add_argument(
+        "--retune-radius",
+        type=int,
+        default=None,
+        metavar="DISTANCE",
+        help=(
+            "farthest declaration-count distance tried per donor "
+            f"(default: {DEFAULT_REPAIR_RETUNE_RADIUS}; max: {MAX_RETUNE_RADIUS})"
+        ),
+    )
+    search.add_argument(
+        "--retune-candidates",
+        type=int,
+        default=None,
+        metavar="COUNT",
+        help=(
+            "maximum nearby settings tried per donor "
+            f"(default: {DEFAULT_RETUNE_CANDIDATES}; max: {MAX_RETUNE_CANDIDATES})"
+        ),
+    )
+    search.add_argument(
+        "--donor-candidates",
+        type=int,
+        default=None,
+        metavar="COUNT",
+        help=(
+            "maximum donor settings compiled by the whole command "
+            f"(default: {DEFAULT_RETUNE_PROBE_CANDIDATES}; max: {MAX_RETUNE_PROBE_CANDIDATES})"
+        ),
+    )
+    search.add_argument(
+        "--discovery-candidates",
+        type=int,
+        default=None,
+        metavar="COUNT",
+        help=(
+            "fresh carrier states (declaration shapes, then forward declaration runs) compiled "
+            "per affected source file once its saved donors cannot be retuned "
+            f"(default: {DEFAULT_DISCOVERY_CANDIDATES}; max: "
+            f"{MAX_DISCOVERY_CANDIDATES})"
+        ),
+    )
+    search.add_argument(
+        "--adjustment-rounds",
+        type=int,
+        default=None,
+        metavar="COUNT",
+        help=(
+            "maximum saved-guidance adjustment rounds before repair stops "
+            f"(default: {MAX_REPAIR_ADJUSTMENT_ROUNDS})"
+        ),
     )
     repair.set_defaults(
         handler=_lazy_repair,

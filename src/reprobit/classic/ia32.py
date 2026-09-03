@@ -12,8 +12,8 @@ from reprobit.model import is_identifier
 
 from .coff import _coff_table_bytes, function_symbol
 from .foundation import (
+    declared_symbol_kind,
     exact_audit_keys,
-    local_symbol_kind,
     require_exact_int,
     require_sha,
     sha256_bytes,
@@ -676,16 +676,17 @@ def require_declared_relocation_semantics(
         "target_storage",
     )
     for index, (record, expected) in enumerate(zip(donor_rows, oracle, strict=True)):
-        # `$L`/`$T`/`$done$` suffixes are compiler-local counters, not symbol
-        # semantics.  The COFF composer already pairs these names by their
-        # local kind; apply the same rule at this declarative boundary while
-        # retaining every offset, section, value, type, and storage pin.
+        # `$L`/`$T`/`$done$` suffixes and the `$S` serial of a file-static are
+        # compiler-local counters, not symbol semantics.  The COFF composer
+        # already pairs the locals by their kind; apply the same rule at this
+        # declarative boundary (a static by its base name) while retaining
+        # every offset, section, value, type, and storage pin.
         record_target = record["target"]
         expected_target = expected["target"]
-        record_local_kind = local_symbol_kind(record_target)
+        record_local_kind = declared_symbol_kind(record_target)
         target_matches = record_target == expected_target or (
             record_local_kind is not None
-            and record_local_kind == local_symbol_kind(expected_target)
+            and record_local_kind == declared_symbol_kind(expected_target)
         )
         require(
             target_matches and all(record[field] == expected[field] for field in fields),

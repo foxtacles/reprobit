@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable, Mapping
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
@@ -51,15 +52,33 @@ def _secure_remove_regular(path: Path) -> None:
 
 
 def _tree_file_seal(root: Path) -> Mapping[Path, tuple[int, Digest]]:
-    """Snapshot regular files beneath a producer-writable seat."""
+    """Snapshot regular files beneath a producer-writable seat.
+
+    The tree may not contain symlinks, so every regular file resolves to the
+    resolved root joined with its relative path; the root itself is resolved
+    once instead of once per file.
+    """
 
     sealed: dict[Path, tuple[int, Digest]] = {}
-    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix().casefold()):
-        if path.is_symlink():
-            raise ClassicProjectError(f"producer build tree contains a symlink: {path}")
-        if path.is_file():
-            resolved = path.resolve(strict=True)
-            sealed[resolved] = (path.stat().st_size, _digest_path(path))
+    if not root.is_dir():
+        return MappingProxyType(sealed)
+    resolved_root = root.resolve(strict=True)
+    entries: list[tuple[str, Path, os.DirEntry[str]]] = []
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        with os.scandir(directory) as listing:
+            for entry in listing:
+                path = Path(entry.path)
+                if entry.is_symlink():
+                    raise ClassicProjectError(f"producer build tree contains a symlink: {path}")
+                if entry.is_dir(follow_symlinks=False):
+                    pending.append(path)
+                elif entry.is_file(follow_symlinks=False):
+                    entries.append((path.as_posix().casefold(), path, entry))
+    for _key, path, entry in sorted(entries, key=lambda item: item[0]):
+        resolved = resolved_root.joinpath(path.relative_to(root))
+        sealed[resolved] = (entry.stat(follow_symlinks=False).st_size, _digest_path(path))
     return MappingProxyType(sealed)
 
 

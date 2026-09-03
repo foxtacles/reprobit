@@ -10,7 +10,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, cast
 
 from reprobit.classic.coff_evidence import (
     _coff_directive_receipt,
@@ -927,6 +927,102 @@ def _validate_compiler_invocation(
     return expected_path_profile
 
 
+@dataclass(frozen=True, slots=True)
+class _ArtifactSemanticsDecision:
+    """The closed runtime theorem one audited compiler product cites, if any."""
+
+    proven: bool
+    runtime_projection_theorem: str | None
+    runtime_projection_proof: Mapping[str, object] | None
+    artifact_semantics_theorem: str | None
+
+
+def _artifact_semantics_decision(
+    *,
+    projection_required: bool,
+    projection_equal: bool,
+    projection_byte_equal: bool,
+    projection_theorem: str | None,
+    projection_proof: Mapping[str, object] | None,
+    compiler_state_projection: object,
+    coff_trace: Mapping[str, object],
+    counterfactual_digest: object,
+    effective_digest: object,
+) -> _ArtifactSemanticsDecision:
+    """Decide which closed theorem certifies an audited product's artifact semantics.
+
+    A projection-required product cites a runtime projection theorem, the
+    typed MSVC 4.20 compiler-state code theorem over its changed code
+    sections, or exact byte equality.  When the declaration counterfactual
+    and the effective compile retain byte-identical code in every paired
+    section, there is no code delta left for a delta theorem to cover; the
+    closed COFF semantic envelope congruence the trace already proved is then
+    the complete artifact-semantics theorem (identical code is the strongest
+    case of a proven code delta, so this widens nothing).
+    """
+
+    compiler_state_theorem = (
+        compiler_state_projection.get("theorem")
+        if isinstance(compiler_state_projection, dict)
+        else None
+    )
+    changed_code_sections = coff_trace.get("changed_code_section_count")
+    identical_code = (
+        type(changed_code_sections) is int
+        and changed_code_sections == 0
+        and isinstance(coff_trace.get("theorem"), str)
+    )
+    runtime_projection_theorem: str | None
+    runtime_projection_proof: Mapping[str, object] | None
+    if projection_theorem is not None:
+        runtime_projection_theorem = projection_theorem
+        runtime_projection_proof = projection_proof
+    elif isinstance(compiler_state_theorem, str):
+        runtime_projection_theorem = compiler_state_theorem
+        runtime_projection_proof = (
+            projection_proof
+            if projection_proof is not None
+            else cast(Mapping[str, object], compiler_state_projection)
+        )
+    elif projection_byte_equal:
+        runtime_projection_theorem = "exact-runtime-projection-v1"
+        runtime_projection_proof = (
+            projection_proof
+            if projection_proof is not None
+            else {
+                "theorem": "exact-runtime-projection-v1",
+                "counterfactual_object": counterfactual_digest,
+                "effective_object": effective_digest,
+            }
+        )
+    elif identical_code:
+        runtime_projection_theorem = str(coff_trace["theorem"])
+        runtime_projection_proof = (
+            projection_proof
+            if projection_proof is not None
+            else {
+                "theorem": str(coff_trace["theorem"]),
+                "changed_code_section_count": 0,
+                "counterfactual_object": counterfactual_digest,
+                "effective_object": effective_digest,
+            }
+        )
+    else:
+        runtime_projection_theorem = None
+        runtime_projection_proof = projection_proof
+    proven = (
+        (projection_equal or isinstance(compiler_state_theorem, str) or identical_code)
+        if projection_required
+        else True
+    )
+    return _ArtifactSemanticsDecision(
+        proven,
+        runtime_projection_theorem,
+        runtime_projection_proof,
+        runtime_projection_theorem if projection_required else str(coff_trace["theorem"]),
+    )
+
+
 def _counterfactual_compiler_congruence_trace(
     *,
     bundle: ProjectBundle,
@@ -1321,41 +1417,21 @@ def _project_compiler_audit_trace(
         # runtime theorem.  The broader COFF envelope remains a useful
         # congruence check, but is not a substitute for that theorem.
         compiler_state_projection = coff_trace.get("compiler_state_projection_proof")
-        compiler_state_theorem = (
-            compiler_state_projection.get("theorem")
-            if isinstance(compiler_state_projection, dict)
-            else None
+        decision = _artifact_semantics_decision(
+            projection_required=projection_required,
+            projection_equal=projection_equal,
+            projection_byte_equal=projection_byte_equal,
+            projection_theorem=projection_theorem,
+            projection_proof=projection_equivalence.proof,
+            compiler_state_projection=compiler_state_projection,
+            coff_trace=coff_trace,
+            counterfactual_digest=counterfactual.digest.model_dump(mode="json"),
+            effective_digest=effective.digest.model_dump(mode="json"),
         )
-        runtime_projection_theorem = (
-            projection_theorem
-            if projection_theorem is not None
-            else str(compiler_state_theorem)
-            if isinstance(compiler_state_theorem, str)
-            else "exact-runtime-projection-v1"
-            if projection_byte_equal
-            else None
-        )
-        runtime_projection_proof: Mapping[str, object] | None = (
-            projection_equivalence.proof
-            if projection_equivalence.proof is not None
-            else compiler_state_projection
-            if isinstance(compiler_state_projection, dict)
-            else {
-                "theorem": "exact-runtime-projection-v1",
-                "counterfactual_object": counterfactual.digest.model_dump(mode="json"),
-                "effective_object": effective.digest.model_dump(mode="json"),
-            }
-            if projection_byte_equal
-            else None
-        )
-        artifact_semantics_proven = (
-            projection_equal or isinstance(compiler_state_theorem, str)
-            if projection_required
-            else True
-        )
-        artifact_semantics_theorem = (
-            runtime_projection_theorem if projection_required else str(coff_trace["theorem"])
-        )
+        runtime_projection_theorem = decision.runtime_projection_theorem
+        runtime_projection_proof: Mapping[str, object] | None = decision.runtime_projection_proof
+        artifact_semantics_proven = decision.proven
+        artifact_semantics_theorem = decision.artifact_semantics_theorem
         if projection_required and not artifact_semantics_proven:
             raise ClassicSemanticError(
                 f"effective compiler {node_id!r} ({source_ref}) lacks a closed "

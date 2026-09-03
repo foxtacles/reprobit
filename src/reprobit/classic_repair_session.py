@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Lock
 from typing import cast
@@ -14,6 +15,8 @@ from reprobit.classic_measured_pin_repair import (
 from reprobit.classic_orchestration import ClassicPreparedUnit
 from reprobit.classic_project import ClassicDispatchMaterials
 from reprobit.classic_repair_authority import (
+    DROPPABLE_MOVE_PARAMETERS,
+    ClassicDependencyEdit,
     ClassicReceiptEdit,
     apply_classic_authority_edits,
 )
@@ -75,6 +78,60 @@ class ClassicRepairRefusal:
     materials: ClassicDispatchMaterials
     unit: ClassicPreparedUnit
     reason: str
+    unit_donor_objects: Mapping[str, bytes] = field(default_factory=dict)
+
+
+def repoint_refusal_materials(
+    refusal: ClassicRepairRefusal, donor_id: str, payload: bytes
+) -> ClassicDispatchMaterials:
+    """The refusal's materials with ``payload`` standing in for its previous primary donor.
+
+    Every donor role the receipt resolved to the previous primary donor (the
+    target, complete or instruction donor) follows onto the new object; roles
+    naming another donor keep their captured objects.
+    """
+
+    materials = refusal.materials
+    values = refusal.receipt.expected_values
+    previous = refusal.intervention.dependencies[0] if refusal.intervention.dependencies else None
+    named = {
+        key: values.get(key) for key in ("target_donor", "complete_donor", "instruction_donor")
+    }
+    return replace(
+        materials,
+        donor_object=payload,
+        target_donor_object=(
+            payload if named["target_donor"] in {None, previous} else materials.target_donor_object
+        ),
+        complete_donor_object=(
+            payload if named["complete_donor"] == previous else materials.complete_donor_object
+        ),
+        instruction_donor_object=(
+            payload
+            if named["instruction_donor"] == previous
+            else materials.instruction_donor_object
+        ),
+    )
+
+
+def dropped_move_parameters(action: ClassicRecipeIntervention) -> tuple[str, ...]:
+    """The parameters a move of ``action`` onto another donor leaves behind."""
+
+    return tuple(
+        field.name for field in action.parameters if field.name in DROPPABLE_MOVE_PARAMETERS
+    )
+
+
+def repointed_action(action: ClassicRecipeIntervention, donor_id: str) -> ClassicRecipeIntervention:
+    """The saved record moved onto ``donor_id``.
+
+    A declared debug representation delta described the record's previous
+    donor against the seed; with another donor it is meaningless and is
+    dropped, so the measured-pin repair re-derives the delta from the fresh
+    pair and carries it in the receipt.  Every other parameter stays.
+    """
+
+    return ClassicDependencyEdit(action, donor_id, dropped_move_parameters(action)).after
 
 
 class ClassicRepairSession:
@@ -99,6 +156,7 @@ class ClassicRepairSession:
             request.materials,
             unit,
             reason,
+            dict(request.unit_donor_objects),
         )
 
     def __call__(self, request: ClassicMeasuredReceiptRepairRequest) -> ClassicProofReceipt | None:
@@ -192,4 +250,6 @@ __all__ = [
     "ClassicRepairSession",
     "ClassicRepairSessionError",
     "apply_classic_receipt_repairs",
+    "dropped_move_parameters",
+    "repoint_refusal_materials",
 ]

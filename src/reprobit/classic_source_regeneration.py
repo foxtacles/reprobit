@@ -186,10 +186,11 @@ def _render_or_rewitness(
 ) -> tuple[str, int, bytes]:
     """Render strictly; on anchor drift, re-witness once and render again.
 
-    Anchor re-witnessing only rescues the two mechanical drifts admitted by
+    Anchor re-witnessing only rescues the three mechanical drifts admitted by
     :mod:`reprobit.classic.anchor_rewitness` (blank lines at a recorded seat,
-    and a token move away from a seam whose literal seat pair still resolves
-    uniquely).  Anything else rejects with the original error.  A successful
+    a token move away from a seam whose literal seat pair still resolves
+    uniquely, and edited tokens beside a file-boundary seat).  Anything else
+    rejects with the original error.  A successful
     rescue persists the updated operations into the reviewed document and
     reports every changed witness digest.
     """

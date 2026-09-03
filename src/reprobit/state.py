@@ -576,6 +576,21 @@ class StateStore:
             cache_active_leases = cache_result.active_leases
             cache_skipped_recent_records = cache_result.skipped_recent_records
             reclaimed += cache_result.reclaimed_bytes
+        if include_cache:
+            from reprobit.classic_repair_probe_cache import (
+                probe_store_directory,
+                probe_store_usage,
+            )
+
+            probe_store = probe_store_directory(self.root)
+            if os.path.lexists(probe_store):
+                if probe_store.is_symlink() or not probe_store.is_dir():
+                    raise _StateError(f"probe store is not a real directory: {probe_store}")
+                _files, probe_bytes = probe_store_usage(self.root)
+                if not dry_run:
+                    shutil.rmtree(probe_store)
+                removed.append(probe_store)
+                reclaimed += probe_bytes
         if include_reports and os.path.lexists(self.root):
             with _maintenance_gate(self.root):
                 reports_removed = self._managed_report_paths()

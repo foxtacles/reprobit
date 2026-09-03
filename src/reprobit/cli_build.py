@@ -7,13 +7,14 @@ import os
 from collections.abc import Callable, Sequence
 from contextlib import ExitStack
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from reprobit.build import BuildPlan, BuildStep
 from reprobit.cli_environment import selected_backend
 from reprobit.cli_output import CLIOutput, count_phrase
 from reprobit.cli_paths import CLIError, project_root, resolve_program, safe_project_path
 from reprobit.cli_state import state_root
+from reprobit.composition_ledger import ComposedBodyLedger
 from reprobit.model import AuthenticityPolicy
 from reprobit.progress import ProgressKind
 from reprobit.project_loader import load_project_tree
@@ -373,6 +374,62 @@ def _command_build(
     return 0
 
 
+COMPOSED_BODY_LEDGER_RELATIVE = ("ledger", "composed-bodies.json")
+
+
+def _composed_body_ledger(run: object) -> tuple[ComposedBodyLedger | None, str | None]:
+    """Read the verified function bodies back from the run; never fail the verify over it."""
+
+    from reprobit.composition_ledger_runtime import FinishedRun, ledger_from_run
+
+    try:
+        return ledger_from_run(cast(FinishedRun, run)), None
+    except Exception as exc:
+        return None, f"{type(exc).__name__}: {exc}"
+
+
+def _publish_composed_body_ledger(
+    output: CLIOutput,
+    state: Path,
+    ledger: ComposedBodyLedger | None,
+    error: str | None,
+) -> None:
+    """Record the accepted build's linker-selected function bodies for later repairs."""
+
+    from reprobit.composition_ledger import write_ledger
+
+    path = state.joinpath(*COMPOSED_BODY_LEDGER_RELATIVE)
+    if ledger is None:
+        output.emit(
+            "composed_body_ledger",
+            f"verified function bodies were not recorded: {error}",
+            path=path,
+            outcome="skipped",
+            diagnostic=True,
+        )
+        return
+    try:
+        write_ledger(path, ledger)
+    except OSError as exc:
+        output.emit(
+            "composed_body_ledger",
+            f"verified function bodies were not recorded: {exc}",
+            path=path,
+            outcome="skipped",
+            diagnostic=True,
+        )
+        return
+    functions = sum(len(target.functions) for target in ledger.targets.values())
+    output.emit(
+        "composed_body_ledger",
+        f"recorded {functions} verified function bodies for later repairs: {path}",
+        path=path,
+        outcome="succeeded",
+        functions=functions,
+        diagnostic=True,
+    )
+
+
 def command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
     with _overlay_render_session() as overlay_session:
         return _command_verify(args, output, overlay_session=overlay_session)
@@ -494,6 +551,7 @@ def _command_verify(
                         build_executor=prepared.executor,
                     )
                     result = ReproductionEngine().run(request)
+                    ledger, ledger_error = _composed_body_ledger(prepared.executor)
         if action_receipt is not None and args.action_nonce is not None:
             from reprobit.action_summary import publish_action_completion
 
@@ -529,6 +587,8 @@ def _command_verify(
             diagnostic=True,
         )
     accepted = result.accepts(requested_policy)
+    if accepted:
+        _publish_composed_body_ledger(output, state, ledger, ledger_error)
     exact_targets = sum(item.comparison.byte_exact for item in result.targets)
     quarantine_actions = len(result.verdict.quarantines)
     quarantine_bytes = sum(item.byte_count for item in result.verdict.quarantines)

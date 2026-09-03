@@ -63,6 +63,26 @@ def local_symbol_kind(name: str) -> str | None:
     return None
 
 
+def declared_symbol_kind(name: str) -> str | None:
+    """Classify every compiler-numbered symbol a saved declaration may name.
+
+    Besides the locals of :func:`local_symbol_kind`, MSVC decorates file-static
+    data as ``<name>$S<serial>`` with a compile-order serial that restarts with
+    every declaration change.  Such a static keeps its identity through its
+    base name; only the serial is ignored.  Used where a saved declaration is
+    compared with a fresh compile of the same source, never to pair two
+    different objects' symbols with each other.
+    """
+
+    kind = local_symbol_kind(name)
+    if kind is not None:
+        return kind
+    base, separator, serial = name.rpartition("$S")
+    if separator and base and serial.isdigit():
+        return f"S:{base}"
+    return None
+
+
 def require_payload_free_declaration(value: object, context: str) -> None:
     """Refuse embedded byte payloads anywhere in clean recipe metadata.
 

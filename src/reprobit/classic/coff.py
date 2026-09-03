@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Callable
+from contextlib import suppress
 from typing import Any, cast
 
 from reprobit.binary import require
@@ -108,9 +109,50 @@ def function_multiset(coff: _CoffObject) -> Counter[str]:
     )
 
 
+_CENSUS_INDEX_ATTRIBUTE = "_reprobit_comdat_census_index"
+_CENSUS_MULTISET_ATTRIBUTE = "_reprobit_comdat_census_multiset"
+
+_CensusIndex = tuple[
+    dict[int, dict[str, Any]],
+    dict[int, list[dict[str, Any]]],
+    dict[int, tuple[str, ...]],
+]
+
+
+def _comdat_census_index(coff: _CoffObject) -> _CensusIndex:
+    """Index an object once for every COMDAT identity question asked of it.
+
+    The section definitions, the owner symbols of every section and the sorted
+    associative-child names of every parent are pure functions of the object
+    bytes, so they are computed on first use and kept on the parsed object.
+    """
+
+    cached = getattr(coff, _CENSUS_INDEX_ATTRIBUTE, None)
+    if cached is not None:
+        return cast(_CensusIndex, cached)
+    definitions = _section_definitions(coff)
+    owners_by_section: dict[int, list[dict[str, Any]]] = {}
+    for symbol in coff.symbols.values():
+        if symbol["value"] == 0 and symbol["storage"] in (2, 3):
+            owners_by_section.setdefault(int(symbol["section"]), []).append(symbol)
+    associated_names: dict[int, list[str]] = {}
+    for section in coff.sections:
+        definition = definitions.get(section["number"])
+        if definition is not None and definition.get("selection") == 5:
+            associated_names.setdefault(int(definition["associated"]), []).append(section["name"])
+    index: _CensusIndex = (
+        definitions,
+        owners_by_section,
+        {parent: tuple(sorted(names)) for parent, names in associated_names.items()},
+    )
+    with suppress(AttributeError):
+        setattr(coff, _CENSUS_INDEX_ATTRIBUTE, index)
+    return index
+
+
 def comdat_primary_identity(coff: _CoffObject, section: dict[str, Any]) -> tuple[Any, ...]:
     """Return one non-associative COMDAT group's structural identity."""
-    definitions = _section_definitions(coff)
+    definitions, owners_by_section, associated_names = _comdat_census_index(coff)
     definition = definitions.get(section["number"])
     require(
         definition is not None and definition["selection"] not in (0, 5),
@@ -119,11 +161,8 @@ def comdat_primary_identity(coff: _CoffObject, section: dict[str, Any]) -> tuple
     primary_definition = cast(dict[str, Any], definition)
     owners = [
         symbol
-        for symbol in coff.symbols.values()
-        if symbol["section"] == section["number"]
-        and symbol["value"] == 0
-        and (symbol["name"] != section["name"])
-        and (symbol["storage"] in (2, 3))
+        for symbol in owners_by_section.get(int(section["number"]), ())
+        if symbol["name"] != section["name"]
     ]
     external = [symbol for symbol in owners if symbol["storage"] == 2]
     owners = external or owners
@@ -135,9 +174,7 @@ def comdat_primary_identity(coff: _CoffObject, section: dict[str, Any]) -> tuple
         owner["storage"],
         section["name"],
         primary_definition["selection"],
-        tuple(
-            sorted((name for _, name in associated_sections(coff, definitions, section["number"])))
-        ),
+        associated_names.get(int(section["number"]), ()),
     )
 
 
@@ -147,15 +184,22 @@ def comdat_primary_identity_multiset(coff: _CoffObject) -> Counter[tuple[Any, ..
     Raw sizes are intentionally absent: the target function is allowed to
     resize.  Symbol identity, selection policy, section kind, and complete
     associative-child shape still prevent a donor from adding or exchanging
-    a code/data group under cover of an omitted function.
+    a code/data group under cover of an omitted function.  The multiset is a
+    pure function of the object bytes and is kept on the parsed object.
     """
-    definitions = _section_definitions(coff)
+    cached = getattr(coff, _CENSUS_MULTISET_ATTRIBUTE, None)
+    if cached is not None:
+        return Counter(cast(Counter[tuple[Any, ...]], cached))
+    definitions, _owners, _associated = _comdat_census_index(coff)
     identities = [
         comdat_primary_identity(coff, section)
         for section in coff.sections
         if definitions.get(section["number"], {}).get("selection") not in (None, 0, 5)
     ]
-    return Counter(identities)
+    result = Counter(identities)
+    with suppress(AttributeError):
+        setattr(coff, _CENSUS_MULTISET_ATTRIBUTE, Counter(result))
+    return result
 
 
 def canonical_identity_receipt_sha256(value: object) -> str:

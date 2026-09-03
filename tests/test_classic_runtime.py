@@ -5790,3 +5790,91 @@ def test_close_runtime_scrubs_recreated_wine_drives_after_server_reap(
     assert not os.path.lexists(dosdevices / "z:")
     if residual_kind == "symlink":
         assert tuple(dosdevices.iterdir()) == (c_drive,)
+
+
+def test_prepare_classic_units_refuses_donors_that_share_a_compiler_arena(
+    tmp_path: Path,
+) -> None:
+    from reprobit.classic_donors import generate_declaration_shape
+    from reprobit.model import Scope
+    from reprobit.schema import (
+        ClassicField,
+        ClassicProofReceipt,
+        ClassicRecipeFamily,
+        ClassicRecipeIntervention,
+        ClassicRecipeRole,
+        ProofDocument,
+    )
+
+    source = b"int fixture(void) { return 0; }\n"
+    plan = ClassicTranslationUnitPlan(
+        id="unit.fixture",
+        target_id="program",
+        build_target="program",
+        source="unit.cpp",
+        source_digest=Digest.from_bytes(source),
+    )
+
+    def donor(identifier: str) -> ClassicRecipeIntervention:
+        parameters = {
+            "classes": 1,
+            "emission_policy": "non_emitting_declarations_only",
+            "functions": 1,
+            "generated_header_sha256": Digest.from_bytes(generate_declaration_shape(1, 1)).value,
+        }
+        return ClassicRecipeIntervention(
+            id=identifier,
+            scope=Scope(target="program", translation_unit=plan.id),
+            rationale="Framework-generated declaration-only compiler-state shape for the fixture.",
+            beneficiaries=(),
+            family=ClassicRecipeFamily.DECLARATION_SHAPE,
+            role=ClassicRecipeRole.DONOR,
+            build_target="program",
+            parameters=tuple(
+                ClassicField(name=name, value=value) for name, value in sorted(parameters.items())
+            ),
+        )
+
+    # Two saved donors with different ids but identical declarations render the
+    # same arena; preparation must refuse before any compiler workspace exists.
+    donors = (donor("donor.first"), donor("donor.second"))
+    document = InterventionDocument(
+        schema_version=3,
+        target_id="program",
+        translation_unit_id=plan.id,
+        source=plan.source,
+        source_digest=plan.source_digest,
+        build_target=plan.build_target,
+        interventions=donors,
+    )
+    proofs = ProofDocument(
+        schema_version=3,
+        target_id="program",
+        translation_unit_id=plan.id,
+        expected_observations=tuple(
+            ClassicProofReceipt(
+                id=f"proof.{item.id}",
+                intervention_id=item.id,
+                family=item.family,
+                status="compiler_generated_current_source",
+                authenticity="synthetic_baseline_only",
+            )
+            for item in donors
+        ),
+    )
+    base = _prepare_bundle(tmp_path)
+    assert base.build_plan is not None
+    bundle = base.model_copy(
+        update={
+            "build_plan": base.build_plan.model_copy(update={"translation_units": (plan,)}),
+            "intervention_documents": (document,),
+            "proof_documents": (proofs,),
+        }
+    )
+
+    with pytest.raises(ClassicProjectError, match="share one compiler arena"):
+        prepare_classic_units(
+            bundle,
+            clean_sources={"unit.cpp": source},
+            effective_sources={"unit.cpp": source},
+        )

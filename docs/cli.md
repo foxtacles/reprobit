@@ -426,7 +426,8 @@ rbit clean . --cache --preview
 rbit clean . --reports --preview
 ```
 
-Use `--cache` only when you intend to clear the complete incremental cache. Use
+Use `--cache` only when you intend to clear the complete incremental cache and
+the donor probe replay store of `repair`. Use
 `--older-than-hours 24` to keep recent workspaces and selected cache records.
 Active runs are never removed. The `--keep-workspace` option of `build`, `verify`,
 `repair`, and `import cmake` changes which run workspaces are retained in the
@@ -489,6 +490,98 @@ header body used by several source files. ReproBit tries only a small,
 predictable set of safe adjustments and still requires the final binaries to
 match exactly. If an edit is not benign, repair stops without publishing a
 partial result.
+
+Each analysis pass records every refused adjustment in an affected source file,
+not only the first, so one pass exposes the whole fallout of a shared-header
+edit. Before any compiler runs, a refused function whose required body another
+donor of the same source file already emits -- or whose own donor still emits it,
+only under a cheaper record family -- is re-authored onto that donor from the
+fresh objects the pass compiled; its old record is retired and beneficiaries
+follow it. The nearby-donor search then retunes the declaration-only compiler-state
+carriers those adjustments depend on: declaration shapes, pad shapes, forward
+declaration runs, extern run pairs, forward runs with a shape, declaration run
+triples, and the declaration-run, padding-line and class-member counts inside
+donor source overlays (every one-knob move first, then two knobs of one rendering
+together, each rendered sequence's line canvas following its items). By default it
+tries settings up to a distance of 8 per donor and at most 256 settings per
+command. A header used by dozens of source files can need more; the search
+bounds can be raised explicitly, and every candidate still has to pass the
+ordinary composer and the final cold proof:
+
+```console
+rbit repair . --retune-radius 32 --retune-candidates 2048 \
+  --donor-candidates 20000 --adjustment-rounds 200
+```
+
+A donor source overlay is retuned through the declaration-run, padding and
+class-member counts of its rendered sequences; whether or not it has such a
+knob, repair also tries inserting a fresh forward-declaration run of
+`distance` names at the file end or start of its owning source, rendered
+together with the overlay's own operations, so an overlay that only rewrites
+source or swaps includes still has a nearby compiler state to move to.
+
+`--retune-radius` is the farthest declaration-count distance tried per donor
+(at most 64), `--retune-candidates` caps the settings tried per donor, and
+`--donor-candidates` caps the settings compiled by the whole command;
+`--adjustment-rounds` raises the number of saved-guidance adjustment rounds
+before repair gives up. Wider bounds only cost compile time; they never widen
+what a repair may change.
+
+When no saved donor of an affected source file can be retuned any further,
+repair compiles fresh carrier states for that file (`--discovery-candidates`
+per file, default 64) cheapest first — every declaration shape, then forward
+declaration runs of growing length at each placement — and inspects every
+compiled object against every refused record of the file: an object carrying a
+record's required body re-authors the record onto that new donor under the
+cheapest closed family; an object carrying a rewriting record's pinned donor body
+moves the saved record onto the new donor unchanged. Discovered donors are
+ordinary declaration-only carrier records and pass the same fresh compile and
+cold proof as every other adjustment.
+
+Records whose receipts pin a decision rather than a measurement — a web
+recolouring, an instruction mosaic, a cross-file complete-target resize —
+are repaired like the measured families when only their compiler
+observations moved: the seed and witness census, seats, line tables,
+metadata digests and seed body are restated from the fresh objects, every
+decision, program field and donor body a range is drawn from stays as saved,
+and the family producer must compose the retail body again before the
+refreshed receipt is accepted. Whatever the family, a receipt that recorded a
+retail match is accepted by repair only when the composed body is that retail
+body.
+
+Before any donor is retuned, a refused function whose required body another
+donor of its file already emits is moved onto that donor: under the cheapest
+closed equal-body family the composer proves, or, when no such family can host
+the body (the file's own compile of the function changed length, say), as the
+saved record itself with its dependency changed and its measurements
+refreshed. Fresh carrier states found by discovery are adopted the same way.
+
+Compiler-numbered names are followed, never pinned: `$L`/`$T` labels, `$done$`
+serials and the `$S` serial of a file-static are counters that restart with
+every declaration change, so a saved declaration that names one is matched by
+kind and base name, and its relocation seats and debug-stream references are
+restated from the fresh compile. Families that install a body under the
+same-slot rules (relocation-divergent, same-slot resize, donor rewriting)
+prove that the seed's and the donor's `.debug$S` streams describe the same
+function; repair re-derives that record-by-record description (procedure
+extent, label serials, one local's type index or location) from the fresh
+pair and carries it in the receipt, where the strict validator re-proves it.
+A delta the recipe itself declares describes one particular donor pair, so it
+is dropped when the record moves to another donor and re-derived there.
+
+Repair never compiles the same candidate twice. Every probe compile is a pure
+function of its compiler seat (the rendered private inputs) and its compile
+epoch (the producer graph with its toolchain lock, the compiler environment,
+the sealed include authority and the sealed source tree), so its object is
+kept in the project state under `repair-probes/` and replayed by later rounds
+and later commands whenever the epoch still matches; a source or record edit
+that changes what the compiler reads changes the epoch and misses. The store
+is diagnostic only: the repair's final cold proof, like `verify`, recompiles
+everything. `rbit clean . --cache` removes it. Candidates are compiled with
+`--jobs` workers continuously, each result is judged as soon as it lands, and
+once one donor is restored by some move (say `functions +1` of a declaration
+shape) the same move is tried next on every other donor of that family, since
+one source edit disturbs every affected file in the same way.
 
 For added or removed files, start with [`source preview`](#rbit-source-preview);
 it prints a safe next command when one is available. For a new project that
@@ -794,7 +887,7 @@ serialized as strings and JSON objects):
 | `producer_graph_extracted` | graph extract, import cmake | `certification_runtime`, `extractor`, `graph_digest`, `nodes`, `output`, `roles`, `skipped_translation_units`, `transaction_id`, `translation_units` |
 | `project_readiness` | status | `checks`, `completed`, `next_command`, `next_step`, `ready`, `total` |
 | `repair_cleanup_warning` | repair | `project`, `workspace` |
-| `repair_complete` | repair | `changed_records`, `cleanup_warning`, `donor_candidates`, `donor_retunes`, `exact`, `measured_checks`, `project`, `refreshed_checks`, `removed_donors`, `repair_passes`, `repaired_translation_units`, `report_html`, `report_json`, `retired_actions`, `source_inputs`, `transaction_id` |
+| `repair_complete` | repair | `changed_records`, `cleanup_warning`, `discovered_actions`, `donor_candidates`, `donor_retunes`, `exact`, `measured_checks`, `project`, `reauthored_actions`, `refreshed_checks`, `removed_donors`, `repair_passes`, `repaired_translation_units`, `report_html`, `report_json`, `retired_actions`, `source_inputs`, `transaction_id` |
 | `repair_refused` | repair | failure diagnostic fields, `phase` |
 | `report_written` | report | `clean`, `html`, `input`, `total_cost` |
 | `setup` | setup | `backend`, `backend_failures`, `environment_ready`, `next_command`, `next_step`, `profile`, `project_ready`, `readiness`, `toolchain_lock`, `toolchain_lock_created`, `toolchain_root` |

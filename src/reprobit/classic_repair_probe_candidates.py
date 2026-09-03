@@ -223,13 +223,97 @@ def _candidate_materials(
     )
 
 
+def _consumer_refusal(
+    unit: ClassicPreparedUnit,
+    consumer: ClassicRecipeIntervention,
+    template: ClassicRepairRefusal,
+) -> ClassicRepairRefusal:
+    """Describe a currently composing consumer of the retuned donor as a pseudo-refusal.
+
+    Its materials are rebuilt the way the unit composition builds them, from the
+    fresh donor objects captured with the sibling failure, so the candidate is
+    validated against every function the donor serves and not only against the
+    ones that happened to fail.
+    """
+
+    receipts = [item for item in unit.receipts if item.intervention_id == consumer.id]
+    if len(receipts) != 1:
+        raise ValueError(f"consumer {consumer.id!r} requires one proof receipt")
+    receipt = receipts[0]
+    objects = template.unit_donor_objects
+    values = matching_candidate_constraints(consumer, (receipt,)).materialize()
+    primary_id = consumer.dependencies[0]
+    if primary_id not in objects:
+        raise ValueError(f"consumer {consumer.id!r} donor object {primary_id!r} was not captured")
+
+    def named(key: str) -> bytes | None:
+        donor_id = values.get(key)
+        if donor_id is None:
+            return None
+        if not isinstance(donor_id, str) or donor_id not in objects:
+            raise ValueError(f"consumer {consumer.id!r} names an uncaptured {key}: {donor_id!r}")
+        return objects[donor_id]
+
+    additional: dict[str, bytes] = {}
+    variants = values.get("donor_variants", [])
+    if isinstance(variants, list):
+        for item in variants:
+            donor_id = item.get("donor") if isinstance(item, dict) else None
+            if not isinstance(donor_id, str) or donor_id not in objects:
+                raise ValueError(f"consumer {consumer.id!r} names an uncaptured donor variant")
+            additional[donor_id] = objects[donor_id]
+    sources = {
+        item.intervention.id: item.request.logical_outputs.get(unit.plan.source)
+        for item in unit.donors
+    }
+    target_id = values.get("target_donor")
+    instruction_id = values.get("instruction_donor")
+    materials = replace(
+        template.materials,
+        donor_object=objects[primary_id],
+        target_donor_object=named("target_donor") if target_id is not None else objects[primary_id],
+        complete_donor_object=named("complete_donor"),
+        instruction_donor_object=named("instruction_donor"),
+        donor_source=sources.get(primary_id),
+        target_donor_source=sources.get(target_id if isinstance(target_id, str) else primary_id),
+        instruction_donor_source=(
+            sources.get(instruction_id) if isinstance(instruction_id, str) else None
+        ),
+        additional_donor_objects=additional,
+        candidate_constraints=values,
+    )
+    return replace(template, intervention=consumer, receipt=receipt, materials=materials)
+
+
+def other_consumers(
+    unit: ClassicPreparedUnit,
+    donor_id: str,
+    failures: Sequence[ClassicRepairRefusal],
+) -> tuple[ClassicRepairRefusal, ...]:
+    """Pseudo-refusals for the donor's consumers that are not among the captured failures."""
+
+    if not failures or not failures[0].unit_donor_objects:
+        return ()
+    failed = {item.intervention.id for item in failures}
+    return tuple(
+        _consumer_refusal(unit, function, failures[0])
+        for function in unit.functions
+        if donor_id in function.dependencies and function.id not in failed
+    )
+
+
 def validate_retuned_actions(
     failures: Sequence[ClassicRepairRefusal],
     donor: ClassicPreparedDonor,
     materialized: MaterializedDonorRetuneCandidate,
     output: ClassicDonorProbeOutput,
 ) -> tuple[MeasuredPinRepair, ...]:
-    """Replay the ordinary composer for every captured consumer failure."""
+    """Replay the ordinary composer for every captured consumer failure.
+
+    Callers pass the captured failures followed by the donor's other consumers
+    (see :func:`other_consumers`), so a candidate that would break a function
+    the donor still serves is refused rather than traded for the failing one.
+    """
 
     repaired: list[MeasuredPinRepair] = []
     for failure in failures:
@@ -281,6 +365,7 @@ def retune_authority_edits(
 
 __all__ = [
     "clone_retune_probe_unit",
+    "other_consumers",
     "prepare_retune_candidate",
     "retune_authority_edits",
     "same_donor_compile_input",

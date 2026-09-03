@@ -4,7 +4,7 @@ import struct
 from collections import Counter
 from typing import Any, cast
 
-from reprobit.binary import require
+from reprobit.binary import ByteIdentityError, require
 from reprobit.coff_format import (
     CoffObject,
     coff_body,
@@ -208,6 +208,93 @@ def validate_debug_representation_delta(value: object, context: str) -> list[dic
             normalized_item["location"] = {key: bound}
         normalized.append(normalized_item)
     return normalized
+
+
+def derive_debug_representation_delta(
+    seed_stream: bytes, donor_stream: bytes, context: str
+) -> list[dict[str, Any]] | None:
+    """Describe how a fresh donor's `.debug$S` stream differs from the seed's.
+
+    The inverse of :func:`require_debug_symbol_representation_delta`: both
+    streams are parsed to exhaustion, paired record by record, and every
+    differing pair is classified into one closed delta kind -- the procedure
+    extent, a compiler-numbered label serial, or one named local whose type
+    index or location moved.  Any other difference, or a different record
+    count, returns ``None``: nothing is approximated.  An empty list means the
+    streams are identical.  The result is only ever handed back to the strict
+    validator, which re-proves every declared record against the same bytes.
+    """
+
+    try:
+        seed_records = parse_codeview_symbol_stream(seed_stream, f"{context} (seed)")
+        donor_records = parse_codeview_symbol_stream(donor_stream, f"{context} (donor)")
+    except ByteIdentityError:
+        return None
+    if len(seed_records) != len(donor_records):
+        return None
+    derived: list[dict[str, Any]] = []
+    for index, (seed_record, donor_record) in enumerate(
+        zip(seed_records, donor_records, strict=True)
+    ):
+        seed_payload = seed_stream[
+            seed_record["offset"] + 4 : seed_record["offset"] + seed_record["size"]
+        ]
+        donor_payload = donor_stream[
+            donor_record["offset"] + 4 : donor_record["offset"] + donor_record["size"]
+        ]
+        if seed_record["type"] == donor_record["type"] and seed_payload == donor_payload:
+            continue
+        record_type = seed_record["type"]
+        if (
+            record_type == donor_record["type"]
+            and record_type in CODEVIEW_PROCEDURE_RECORD_TYPES
+            and len(seed_payload) == len(donor_payload) >= 24
+            and seed_payload[:12] == donor_payload[:12]
+            and seed_payload[24:30] == donor_payload[24:30]
+            and seed_payload[32:] == donor_payload[32:]
+        ):
+            derived.append({"kind": "procedure_extent", "record_index": index})
+            continue
+        if (
+            record_type == donor_record["type"] == 521
+            and seed_payload[:7] == donor_payload[:7]
+            and local_symbol_kind(seed_record["name"]) == "L"
+            and local_symbol_kind(donor_record["name"]) == "L"
+        ):
+            derived.append({"kind": "compiler_label_number", "record_index": index})
+            continue
+        if (
+            record_type in CODEVIEW_LOCAL_LOCATION_RECORD_TYPES
+            and donor_record["type"] in CODEVIEW_LOCAL_LOCATION_RECORD_TYPES
+            and seed_record["name"] == donor_record["name"]
+            and seed_record["name"] != ""
+            and local_symbol_kind(seed_record["name"]) is None
+        ):
+            try:
+                seed_type, seed_location = _codeview_local_location(
+                    record_type, seed_payload, f"{context} (seed)"
+                )
+                donor_type, donor_location = _codeview_local_location(
+                    donor_record["type"], donor_payload, f"{context} (donor)"
+                )
+            except ByteIdentityError:
+                return None
+            if seed_type == donor_type and seed_location == donor_location:
+                return None  # Something other than the closed fields differs.
+            derived.append(
+                {
+                    "kind": "local_location",
+                    "record_index": index,
+                    "name": seed_record["name"],
+                    "seed_type": seed_type,
+                    "donor_type": donor_type,
+                    "seed_location": seed_location,
+                    "donor_location": donor_location,
+                }
+            )
+            continue
+        return None
+    return derived
 
 
 def require_debug_symbol_representation_delta(

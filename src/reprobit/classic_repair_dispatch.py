@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from collections.abc import Mapping
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 from reprobit.binary import ByteIdentityError
@@ -38,6 +39,8 @@ class ClassicMeasuredReceiptRepairRequest:
     failure: Exception
     unit: _ClassicRepairUnit
     action_index: int
+    unit_donor_objects: Mapping[str, bytes] = field(default_factory=dict)
+    """Every fresh donor object of the unit, so a repair may re-seat the action."""
 
 
 class ClassicMeasuredReceiptRepair(Protocol):
@@ -72,6 +75,7 @@ def dispatch_classic_action(
     unit: _ClassicRepairUnit,
     action_index: int,
     measured_receipt_repair: ClassicMeasuredReceiptRepair | None,
+    unit_donor_objects: Mapping[str, bytes] | None = None,
 ) -> ClassicActionDispatchResult:
     """Dispatch normally, then retry one narrowly repaired receipt when authorized."""
 
@@ -87,6 +91,7 @@ def dispatch_classic_action(
                     exc,
                     unit,
                     action_index,
+                    dict(unit_donor_objects or {}),
                 )
             )
             if measured_receipt_repair is not None

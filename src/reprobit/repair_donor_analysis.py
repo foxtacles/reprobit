@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
+from typing import TypeVar
 
+from reprobit.classic_donor_retune_candidates import (
+    DEFAULT_REPAIR_RETUNE_RADIUS,
+    DEFAULT_RETUNE_CANDIDATES,
+)
 from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
     canonical_overlay_operations,
@@ -17,13 +22,21 @@ from reprobit.classic_repair_authority import (
     ClassicReceiptEdit,
     apply_classic_authority_edits,
 )
+from reprobit.classic_repair_discovery import (
+    DEFAULT_DISCOVERY_CANDIDATES,
+    ClassicDiscoveryRepair,
+    ClassicDiscoveryResult,
+    probe_carrier_discovery,
+)
 from reprobit.classic_repair_probe import (
-    MAX_RETUNE_PROBE_CANDIDATES,
+    DEFAULT_RETUNE_PROBE_CANDIDATES,
     ClassicDonorRetuneProbeResult,
     ClassicDonorRetuneRepair,
     probe_bounded_donor_retunes,
 )
+from reprobit.classic_repair_probe_execution import ClassicDonorCompileCache
 from reprobit.classic_repair_session import ClassicRepairRefusal
+from reprobit.classic_runtime_probe import ClassicDonorProbeProgress, ClassicProbeExecution
 from reprobit.cli_build import prepare_producer_graph_run
 from reprobit.cli_environment import (
     resolve_classic_execution_inputs,
@@ -36,6 +49,8 @@ from reprobit.progress import ProgressKind
 from reprobit.project_loader import load_project_tree
 from reprobit.schema import ProjectBundle, ProjectSpec
 from reprobit.state import KeepWorkspace, RunArena
+
+_ProbeResult = TypeVar("_ProbeResult", ClassicDonorRetuneProbeResult, ClassicDiscoveryResult)
 
 
 def _ignore_preparation_progress(
@@ -130,19 +145,130 @@ def probe_classic_donor_repairs(
     output: CLIOutput,
     refusals: tuple[ClassicRepairRefusal, ...],
     *,
-    candidate_budget: int = MAX_RETUNE_PROBE_CANDIDATES,
+    candidate_budget: int = DEFAULT_RETUNE_PROBE_CANDIDATES,
+    abandoned_states: Mapping[tuple[str, str], frozenset[str]] | None = None,
+    compile_cache: ClassicDonorCompileCache | None = None,
 ) -> ClassicDonorRetuneProbeResult:
-    """Search bounded donor retunes without issuing evidence or publishing authority."""
+    """Search bounded donor retunes without issuing evidence or publishing authority.
+
+    ``args.retune_radius`` and ``args.retune_candidates`` (per donor) widen the
+    bounded search when the command line asks for it; their defaults are the
+    probe's own.
+    """
 
     if not refusals:
         return ClassicDonorRetuneProbeResult((), (), 0)
+    radius = getattr(args, "retune_radius", None) or DEFAULT_REPAIR_RETUNE_RADIUS
+    limit = getattr(args, "retune_candidates", None) or DEFAULT_RETUNE_CANDIDATES
+
+    def run(
+        probes: ClassicProbeExecution,
+        bound: tuple[ClassicRepairRefusal, ...],
+        clean: Mapping[str, bytes],
+        effective: Mapping[str, bytes],
+        operations: Mapping[str, Sequence[Mapping[str, object]]],
+        progress: ClassicDonorProbeProgress,
+    ) -> ClassicDonorRetuneProbeResult:
+        return probe_bounded_donor_retunes(
+            probes,
+            bound,
+            clean_sources=clean,
+            effective_sources=effective,
+            canonical_overlay_operations=operations,
+            radius=radius,
+            limit=limit,
+            candidate_budget=candidate_budget,
+            progress=progress,
+            abandoned_states=abandoned_states,
+            compile_cache=compile_cache,
+        )
+
+    return _probe_with_runtime(
+        args,
+        output,
+        refusals,
+        kind="repairprobe",
+        activity="trying nearby donor settings (the shown total is an upper bound)",
+        run=run,
+    )
+
+
+def probe_classic_carrier_discovery(
+    args: argparse.Namespace,
+    output: CLIOutput,
+    refusals: tuple[ClassicRepairRefusal, ...],
+    *,
+    candidate_budget: int,
+    tried_states: Mapping[str, frozenset[str]] | None = None,
+    compile_cache: ClassicDonorCompileCache | None = None,
+) -> ClassicDiscoveryResult:
+    """Compile fresh carrier states for units whose donors cannot be retuned further.
+
+    ``args.discovery_candidates`` bounds the shapes tried per unit; the
+    command-wide ``candidate_budget`` still caps the total.
+    """
+
+    if not refusals or candidate_budget < 1:
+        return ClassicDiscoveryResult((), (), 0)
+    per_unit = getattr(args, "discovery_candidates", None) or DEFAULT_DISCOVERY_CANDIDATES
+
+    def run(
+        probes: ClassicProbeExecution,
+        bound: tuple[ClassicRepairRefusal, ...],
+        clean: Mapping[str, bytes],
+        effective: Mapping[str, bytes],
+        _operations: Mapping[str, Sequence[Mapping[str, object]]],
+        progress: ClassicDonorProbeProgress,
+    ) -> ClassicDiscoveryResult:
+        return probe_carrier_discovery(
+            probes,
+            bound,
+            clean_sources=clean,
+            effective_sources=effective,
+            per_unit=per_unit,
+            candidate_budget=candidate_budget,
+            progress=progress,
+            tried_states=tried_states,
+            compile_cache=compile_cache,
+        )
+
+    return _probe_with_runtime(
+        args,
+        output,
+        refusals,
+        kind="discoveryprobe",
+        activity="trying fresh carrier states (the shown total is an upper bound)",
+        run=run,
+    )
+
+
+def _probe_with_runtime(
+    args: argparse.Namespace,
+    output: CLIOutput,
+    refusals: tuple[ClassicRepairRefusal, ...],
+    *,
+    kind: str,
+    activity: str,
+    run: Callable[
+        [
+            ClassicProbeExecution,
+            tuple[ClassicRepairRefusal, ...],
+            Mapping[str, bytes],
+            Mapping[str, bytes],
+            Mapping[str, Sequence[Mapping[str, object]]],
+            ClassicDonorProbeProgress,
+        ],
+        _ProbeResult,
+    ],
+) -> _ProbeResult:
+    """Prepare one non-certifying probe runtime, bind the refusals to it, and run ``run``."""
 
     root = project_root(args.project)
     bundle = load_project_tree(root)
     operations = canonical_overlay_operations(bundle)
     arena = RunArena(
         state_root(root, bundle.spec),
-        kind="repairprobe",
+        kind=kind,
         keep=KeepWorkspace.NEVER,
     )
     with arena:
@@ -177,9 +303,7 @@ def probe_classic_donor_repairs(
                 effective_root=prepared.probes.effective_root,
                 overlay_outputs=prepared.donors.overlay_effective_outputs,
             )
-            with output.producer_activity(
-                "trying nearby donor settings (the shown total is an upper bound)"
-            ) as progress:
+            with output.producer_activity(activity) as progress:
 
                 def report_candidate(completed: int, total: int, donor_id: str) -> None:
                     progress(
@@ -191,14 +315,13 @@ def probe_classic_donor_repairs(
                         None,
                     )
 
-                result = probe_bounded_donor_retunes(
+                result = run(
                     prepared.probes,
                     bound_refusals,
-                    clean_sources=clean_sources,
-                    effective_sources=effective_sources,
-                    canonical_overlay_operations=operations,
-                    candidate_budget=candidate_budget,
-                    progress=report_candidate,
+                    clean_sources,
+                    effective_sources,
+                    operations,
+                    report_candidate,
                 )
         except BaseException as original:
             if prepared.producer.is_open:
@@ -213,6 +336,26 @@ def probe_classic_donor_repairs(
         if prepared.producer.is_open:
             prepared.close()
         return result
+
+
+def apply_classic_discovery_repairs(
+    root: Path,
+    spec: ProjectSpec,
+    repairs: Sequence[ClassicDiscoveryRepair],
+) -> tuple[str, ...]:
+    """Apply discovered-carrier repairs (new donors, re-authored and re-pointed records) at once."""
+
+    repair_tuple = tuple(repairs)
+    if not repair_tuple:
+        return ()
+    return apply_classic_authority_edits(
+        root,
+        spec,
+        interventions=tuple(e for r in repair_tuple for e in r.intervention_edits),
+        receipts=tuple(e for r in repair_tuple for e in r.receipt_edits),
+        additions=tuple(a for r in repair_tuple for a in r.additions),
+        dependencies=tuple(d for r in repair_tuple for d in r.dependency_edits),
+    )
 
 
 def apply_classic_donor_repairs(
@@ -240,6 +383,8 @@ def apply_classic_donor_repairs(
 
 
 __all__ = [
+    "apply_classic_discovery_repairs",
     "apply_classic_donor_repairs",
+    "probe_classic_carrier_discovery",
     "probe_classic_donor_repairs",
 ]

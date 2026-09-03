@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from reprobit.classic_donors import generate_declaration_shape
 from reprobit.costs import calculate_cost
 from reprobit.discovery_authoring import (
     AuthoredClassicRecord,
@@ -38,11 +39,15 @@ from reprobit.discovery_project import (
     stage_grind_project,
 )
 from reprobit.execution import classic_semantic_obligation_name
+from reprobit.model import Digest
 from reprobit.msvc_discovery_coff import qualify_msvc_reference_object
 from reprobit.progress import ProgressKind
 from reprobit.project_loader import load_project_tree
 from reprobit.report import Report
 from reprobit.schema import (
+    ClassicRecipeFamily,
+    ClassicRecipeIntervention,
+    ClassicRecipeRole,
     InterventionDocument,
     LegacyOracleInstallIntervention,
     ProofDocument,
@@ -305,6 +310,27 @@ def require_single_acceptance(
         raise error(message)
 
 
+def _shape_digest(state: DeclarationState) -> str:
+    classes, functions = _state_shape(state)
+    return Digest.from_bytes(generate_declaration_shape(classes, functions)).value
+
+
+def _saved_shape_digests(document: InterventionDocument) -> frozenset[str]:
+    """Generated-header digests of the unit's saved declaration-shape donors."""
+
+    digests: set[str] = set()
+    for intervention in document.interventions:
+        if (
+            isinstance(intervention, ClassicRecipeIntervention)
+            and intervention.role is ClassicRecipeRole.DONOR
+            and intervention.family is ClassicRecipeFamily.DECLARATION_SHAPE
+        ):
+            for field in intervention.parameters:
+                if field.name == "generated_header_sha256" and isinstance(field.value, str):
+                    digests.add(field.value)
+    return frozenset(digests)
+
+
 def run_project_grind(
     project_root: Path,
     *,
@@ -367,6 +393,13 @@ def run_project_grind(
             states = enumerate_declaration_states(context.config.plan)
         except DiscoveryError as exc:
             raise GrindError(f"invalid bounded grind plan: {exc}") from exc
+        # A state one of the unit's saved donors already renders would share
+        # that donor's compiler arena; it is that donor's, not a fresh cell.
+        states = tuple(
+            state
+            for state in states
+            if _shape_digest(state) not in _saved_shape_digests(context.intervention_document)
+        )
         # Each state has one compatibility disposition and one cold-trial
         # disposition. States that cannot qualify consume the latter as an
         # explicit skip, keeping one honest and monotonic progress total.

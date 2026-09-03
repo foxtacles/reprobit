@@ -346,7 +346,7 @@ rbit explain [-h] [--intervention ID] [project]
 Use this after editing a source file that is already part of the project, including a shared header used by many source files. ReproBit repairs the saved build guidance in private, rebuilds, and publishes only after every target matches exactly. For added or removed files, start with source preview; it prints a safe next command when one is available.
 
 ```
-rbit repair [-h] [--jobs COUNT] [--keep-workspace {never,on-failure,always}] [--backend {auto,posix_wine_v1,windows_native_v1}] [--wine PATH_OR_NAME] [--wineserver PATH_OR_NAME] [--toolchain-root DIRECTORY] [--compiler-transport PATH] [--resource-transport PATH] [--initialization-timeout SECONDS] [--compile-timeout SECONDS] [--link-timeout SECONDS] [--cleanup-timeout SECONDS] [--policy {clean,allow-quarantine}] [--report-dir PROJECT_RELATIVE_DIRECTORY] [project]
+rbit repair [-h] [--jobs COUNT] [--keep-workspace {never,on-failure,always}] [--backend {auto,posix_wine_v1,windows_native_v1}] [--wine PATH_OR_NAME] [--wineserver PATH_OR_NAME] [--toolchain-root DIRECTORY] [--compiler-transport PATH] [--resource-transport PATH] [--initialization-timeout SECONDS] [--compile-timeout SECONDS] [--link-timeout SECONDS] [--cleanup-timeout SECONDS] [--policy {clean,allow-quarantine}] [--report-dir PROJECT_RELATIVE_DIRECTORY] [--retune-radius DISTANCE] [--retune-candidates COUNT] [--donor-candidates COUNT] [--discovery-candidates COUNT] [--adjustment-rounds COUNT] [project]
 ```
 
 | Argument | Default | Description |
@@ -361,6 +361,18 @@ rbit repair [-h] [--jobs COUNT] [--keep-workspace {never,on-failure,always}] [--
 | `--report-dir` `PROJECT_RELATIVE_DIRECTORY` |  | write report.json and report.html beneath this project directory |
 
 Shared: see [advanced execution options](#advanced-execution-options).
+
+**search bounds**
+
+Widen the bounded nearby-donor search for large shared-header edits; every candidate still passes the ordinary composer and the final cold proof.
+
+| Argument | Default | Description |
+|---|---|---|
+| `--retune-radius` `DISTANCE` |  | farthest declaration-count distance tried per donor (default: 8; max: 64) |
+| `--retune-candidates` `COUNT` |  | maximum nearby settings tried per donor (default: 64; max: 4096) |
+| `--donor-candidates` `COUNT` |  | maximum donor settings compiled by the whole command (default: 256; max: 65536) |
+| `--discovery-candidates` `COUNT` |  | fresh carrier states (declaration shapes, then forward declaration runs) compiled per affected source file once its saved donors cannot be retuned (default: 64; max: 2005) |
+| `--adjustment-rounds` `COUNT` |  | maximum saved-guidance adjustment rounds before repair stops (default: 24) |
 
 ### `rbit build`
 

@@ -472,6 +472,21 @@ def linker_input_sequence(node: ProducerNode) -> tuple[str, ...]:
     return tuple(references)
 
 
+def librarian_input_sequence(node: ProducerNode) -> tuple[str, ...]:
+    """Return a librarian's ordered positional object references (its archive member order)."""
+
+    if node.role is not ProducerRole.LIBRARIAN:
+        raise ProducerGraphError("librarian input sequence is defined only for librarian nodes")
+    references: list[str] = []
+    for value in node.arguments:
+        if value.startswith(("/", "-")):
+            continue
+        if PurePosixPath(value.replace("\\", "/")).suffix.casefold() != ".obj":
+            continue
+        references.append(_argument_reference(value))
+    return tuple(references)
+
+
 def linker_library_sequence(node: ProducerNode) -> tuple[str, ...]:
     """Return the linker's ordered positional archive references, including repeats."""
 

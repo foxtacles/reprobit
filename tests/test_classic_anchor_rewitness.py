@@ -155,18 +155,96 @@ def test_unrelated_edit_is_not_rescued() -> None:
     assert rewitness_operations(_SEAM_OPS, edited) is None
 
 
-def test_non_default_boundaries_are_left_alone() -> None:
+_START_OPS: list[dict[str, object]] = [
+    {
+        "op": "insert",
+        "anchor": {
+            "ctx": _seat_digest(["<SEAT>", "int", "alpha", ";"]),
+            "b": 0,
+            "a": 3,
+            "at": "start",
+        },
+        "gen": {"k": "fwd", "id": "Spare"},
+    }
+]
+
+
+def test_unchanged_boundary_context_needs_no_rewitness() -> None:
+    edited = b"\nint alpha;\nint omega;\n"
+    assert b"class Spare;" in _render(edited, _START_OPS)
+    assert rewitness_operations(_START_OPS, edited) is None
+
+
+def test_edited_tokens_beside_file_start_are_rewitnessed() -> None:
+    # A declaration added inside the start window: the boundary is still the
+    # file start, so the context is re-witnessed there and nothing else moves.
+    edited = b"int beta;\nint alpha;\nint omega;\n"
+    with pytest.raises(SourceEditError):
+        _render(edited, _START_OPS)
+
+    rescued = rewitness_operations(_START_OPS, edited)
+    assert rescued is not None
+    updated_ops, changes = rescued
+    anchor = updated_ops[0]["anchor"]
+    assert anchor["ctx"] == _seat_digest(["<SEAT>", "int", "beta", ";"])
+    assert anchor["at"] == "start" and anchor["b"] == 0 and anchor["a"] == 3
+    assert {location for location, _, _ in changes} == {"0 anchor.ctx"}
+
+    rendered = _render(edited, updated_ops)
+    assert rendered.index(b"class Spare;") < rendered.index(b"int beta;")
+
+
+def test_edited_tokens_beside_file_end_are_rewitnessed() -> None:
     ops: list[dict[str, object]] = [
         {
             "op": "insert",
             "anchor": {
-                "ctx": _seat_digest(["<SEAT>", "int", "alpha", ";"]),
-                "b": 0,
-                "a": 3,
-                "at": "start",
+                "ctx": _seat_digest(["int", "omega", ";", "<SEAT>"]),
+                "b": 3,
+                "a": 0,
+                "at": "end",
             },
             "gen": {"k": "fwd", "id": "Spare"},
         }
     ]
-    edited = b"\nint alpha;\nint omega;\n"
+    assert b"class Spare;" in _render(_ORIGINAL, ops)
+    edited = b"int alpha;\nint omega;\nint zeta;\n"
+    with pytest.raises(SourceEditError):
+        _render(edited, ops)
+
+    rescued = rewitness_operations(ops, edited)
+    assert rescued is not None
+    updated_ops, changes = rescued
+    assert updated_ops[0]["anchor"]["ctx"] == _seat_digest(["int", "zeta", ";", "<SEAT>"])
+    assert {location for location, _, _ in changes} == {"0 anchor.ctx"}
+    rendered = _render(edited, updated_ops)
+    assert rendered.index(b"int zeta;") < rendered.index(b"class Spare;")
+
+
+def test_boundary_seat_with_tokens_on_the_wrong_side_is_left_alone() -> None:
+    # A start seat that claims tokens before it is not a boundary seat at all.
+    ops: list[dict[str, object]] = [
+        {
+            "op": "insert",
+            "anchor": {"ctx": "0" * 64, "b": 1, "a": 3, "at": "start"},
+            "gen": {"k": "fwd", "id": "Spare"},
+        }
+    ]
+    assert rewitness_operations(ops, b"int beta;\nint alpha;\n") is None
+
+
+def test_token_seats_are_left_alone() -> None:
+    ops: list[dict[str, object]] = [
+        {
+            "op": "insert",
+            "anchor": {
+                "ctx": _seat_digest(["int", "alpha", ";", "<SEAT>", "int", "omega", ";"]),
+                "b": 3,
+                "a": 3,
+                "at": "before_token",
+            },
+            "gen": {"k": "fwd", "id": "Spare"},
+        }
+    ]
+    edited = b"int beta;\nint alpha;\nint omega;\n"
     assert rewitness_operations(ops, edited) is None
