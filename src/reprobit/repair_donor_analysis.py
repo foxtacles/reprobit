@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import argparse
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
-from typing import TypeVar, cast
+from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
 from reprobit.classic_donor_retune_candidates import (
     DEFAULT_REPAIR_RETUNE_RADIUS,
@@ -40,23 +39,225 @@ from reprobit.classic_repair_probe import (
     ClassicDonorRetuneRepair,
     probe_bounded_donor_retunes,
 )
-from reprobit.classic_repair_probe_execution import ClassicDonorCompileCache
+from reprobit.classic_repair_probe_execution import (
+    ClassicDonorCompileCache,
+    ClassicDonorSourceSeal,
+    prepare_donor_probe_source_epoch,
+)
 from reprobit.classic_repair_session import ClassicRepairRefusal, RepairRefusal
 from reprobit.classic_runtime_probe import ClassicDonorProbeProgress, ClassicProbeExecution
-from reprobit.cli_build import prepare_producer_graph_run
-from reprobit.cli_environment import (
-    resolve_classic_execution_inputs,
-    selected_backend,
+from reprobit.cli_build import (
+    ExecutionProgress,
+    ProjectExecutionOptions,
+    prepare_producer_graph_run,
 )
-from reprobit.cli_output import CLIOutput
-from reprobit.cli_paths import project_root
+from reprobit.cli_environment import resolve_classic_execution_inputs
 from reprobit.cli_state import state_root
 from reprobit.progress import ProgressKind
 from reprobit.project_loader import load_project_tree
 from reprobit.schema import ProjectBundle, ProjectSpec
 from reprobit.state import KeepWorkspace, RunArena
 
+if TYPE_CHECKING:
+    from reprobit.classic_runtime_preparation import ClassicProducerGraphPreparedRun
+
 _ProbeResult = TypeVar("_ProbeResult", ClassicDonorRetuneProbeResult, ClassicDiscoveryResult)
+
+
+@dataclass(frozen=True, slots=True)
+class RepairProbeOptions:
+    """Project, runtime, and bounded search choices for private repair probes."""
+
+    project: Path
+    execution: ProjectExecutionOptions
+    retune_radius: int = DEFAULT_REPAIR_RETUNE_RADIUS
+    retune_candidates: int = DEFAULT_RETUNE_CANDIDATES
+    discovery_candidates: int = DEFAULT_DISCOVERY_CANDIDATES
+
+
+class ClassicRepairProbeSession:
+    """Reuse one private probe runtime until the caller changes project authority."""
+
+    def __init__(self, options: RepairProbeOptions, progress: ExecutionProgress) -> None:
+        self._options = options
+        self._progress = progress
+        self._root: Path | None = None
+        self._bundle: ProjectBundle | None = None
+        self._operations: Mapping[str, Sequence[Mapping[str, object]]] | None = None
+        self._arena: RunArena | None = None
+        self._prepared: ClassicProducerGraphPreparedRun | None = None
+        self._clean_sources: dict[str, bytes] | None = None
+        self._effective_sources: dict[str, bytes] | None = None
+        self._source_seal: ClassicDonorSourceSeal | None = None
+        self._wave = 0
+
+    def __enter__(self) -> ClassicRepairProbeSession:
+        return self
+
+    def __exit__(self, error_type: object, error: object, traceback: object) -> Literal[False]:
+        del error_type, traceback
+        if error is None:
+            self.close()
+        else:
+            try:
+                self.close()
+            except BaseException as cleanup_error:
+                if isinstance(error, BaseException):
+                    error.add_note(f"classic donor repair cleanup also failed: {cleanup_error}")
+        return False
+
+    def _prepare(self, kind: str) -> bool:
+        if self._prepared is not None:
+            if not self._prepared.producer.is_open:
+                raise ClassicProjectError("classic repair probe session is already closed")
+            return False
+        root = self._options.project
+        bundle = load_project_tree(root)
+        arena = RunArena(
+            state_root(root, bundle.spec),
+            kind=kind,
+            keep=KeepWorkspace.NEVER,
+        )
+        arena.__enter__()
+        prepared: ClassicProducerGraphPreparedRun | None = None
+        try:
+            with self._progress.activity(
+                "preparing the repair search",
+                phase="repair-probe-prepare",
+            ):
+                execution = resolve_classic_execution_inputs(
+                    profile=bundle.spec.toolchain.profile,
+                    explicit_toolchain_root=self._options.execution.toolchain_root,
+                    backend=self._options.execution.backend,
+                    compiler_transport=self._options.execution.compiler_transport,
+                    resource_transport=self._options.execution.resource_transport,
+                )
+                prepared = prepare_producer_graph_run(
+                    self._options.execution,
+                    bundle,
+                    project_root=root,
+                    session_root=arena.path / "classic",
+                    execution=execution,
+                    progress=_ignore_preparation_progress,
+                )
+            prepared.producer.begin_developer()
+            source_seal = prepare_donor_probe_source_epoch(prepared.probes)
+            clean, effective = _source_payloads(
+                root,
+                bundle,
+                effective_root=prepared.probes.effective_root,
+                overlay_outputs=prepared.donors.overlay_effective_outputs,
+            )
+        except BaseException as original:
+            if prepared is not None and prepared.producer.is_open:
+                try:
+                    prepared.close()
+                except BaseException as cleanup_error:
+                    original.add_note(f"classic donor repair cleanup also failed: {cleanup_error}")
+            try:
+                arena.__exit__(type(original), original, original.__traceback__)
+            except BaseException as cleanup_error:
+                original.add_note(f"classic repair arena cleanup also failed: {cleanup_error}")
+            raise
+        assert prepared is not None
+        self._root = root
+        self._bundle = bundle
+        self._operations = canonical_overlay_operations(bundle)
+        self._arena = arena
+        self._prepared = prepared
+        self._clean_sources = clean
+        self._effective_sources = effective
+        self._source_seal = source_seal
+        return True
+
+    def probe(
+        self,
+        refusals: tuple[RepairRefusal, ...],
+        *,
+        kind: str,
+        activity: str,
+        run: Callable[
+            [
+                ClassicProbeExecution,
+                tuple[RepairRefusal, ...],
+                Mapping[str, bytes],
+                Mapping[str, bytes],
+                Mapping[str, Sequence[Mapping[str, object]]],
+                ClassicDonorProbeProgress,
+                ClassicDonorSourceSeal,
+                str,
+            ],
+            _ProbeResult,
+        ],
+    ) -> _ProbeResult:
+        fresh = self._prepare(kind)
+        assert self._root is not None
+        assert self._bundle is not None
+        assert self._operations is not None
+        assert self._prepared is not None
+        assert self._clean_sources is not None
+        assert self._effective_sources is not None
+        assert self._source_seal is not None
+        if not fresh:
+            current_clean, current_effective = _source_payloads(
+                self._root,
+                self._bundle,
+                effective_root=self._prepared.probes.effective_root,
+                overlay_outputs=self._prepared.donors.overlay_effective_outputs,
+            )
+            if current_clean != self._clean_sources or current_effective != self._effective_sources:
+                raise ClassicProjectError("classic repair probe source authority changed")
+        bound_refusals = _bind_refusals_to_probe_units(
+            refusals,
+            self._prepared.probes.units,
+        )
+        self._wave += 1
+        namespace_id = f"noncertifying-donor-repair-probe.{self._wave:04d}"
+        with self._progress.producer_activity(activity) as progress:
+
+            def report_candidate(completed: int, total: int, donor_id: str) -> None:
+                progress(
+                    completed,
+                    total,
+                    "repair-probe",
+                    donor_id,
+                    ProgressKind.UNIT_FINISHED,
+                    None,
+                )
+
+            result = run(
+                self._prepared.probes,
+                bound_refusals,
+                self._clean_sources,
+                self._effective_sources,
+                self._operations,
+                report_candidate,
+                self._source_seal,
+                namespace_id,
+            )
+        return result
+
+    def close(self) -> None:
+        prepared = self._prepared
+        arena = self._arena
+        self._prepared = None
+        self._arena = None
+        cleanup_error: BaseException | None = None
+        try:
+            if prepared is not None and prepared.producer.is_open:
+                prepared.close()
+        except BaseException as error:
+            cleanup_error = error
+        try:
+            if arena is not None:
+                arena.__exit__(None, None, None)
+        except BaseException as error:
+            if cleanup_error is None:
+                cleanup_error = error
+            else:
+                cleanup_error.add_note(f"classic repair arena cleanup also failed: {error}")
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 def _ignore_preparation_progress(
@@ -158,26 +359,26 @@ def _bind_refusals_to_probe_units(
 
 
 def probe_classic_donor_repairs(
-    args: argparse.Namespace,
-    output: CLIOutput,
+    options: RepairProbeOptions,
+    progress: ExecutionProgress,
     refusals: tuple[RepairRefusal, ...],
     *,
     candidate_budget: int = DEFAULT_RETUNE_PROBE_CANDIDATES,
     abandoned_states: Mapping[tuple[str, str], frozenset[str]] | None = None,
     compile_cache: ClassicDonorCompileCache | None = None,
     excluded_groups: frozenset[tuple[str, str]] = frozenset(),
+    session: ClassicRepairProbeSession | None = None,
 ) -> ClassicDonorRetuneProbeResult:
     """Search bounded donor retunes without issuing evidence or publishing authority.
 
-    ``args.retune_radius`` and ``args.retune_candidates`` (per donor) widen the
-    bounded search when the command line asks for it; their defaults are the
-    probe's own.
+    The explicit radius and per-donor limit may widen the bounded search; the
+    command-wide candidate budget still caps total compilation.
     """
 
     if not refusals:
         return ClassicDonorRetuneProbeResult((), (), 0)
-    radius = getattr(args, "retune_radius", None) or DEFAULT_REPAIR_RETUNE_RADIUS
-    limit = getattr(args, "retune_candidates", None) or DEFAULT_RETUNE_CANDIDATES
+    radius = options.retune_radius
+    limit = options.retune_candidates
 
     def run(
         probes: ClassicProbeExecution,
@@ -186,6 +387,8 @@ def probe_classic_donor_repairs(
         effective: Mapping[str, bytes],
         operations: Mapping[str, Sequence[Mapping[str, object]]],
         progress: ClassicDonorProbeProgress,
+        source_seal: ClassicDonorSourceSeal,
+        namespace_id: str,
     ) -> ClassicDonorRetuneProbeResult:
         return probe_bounded_donor_retunes(
             probes,
@@ -200,36 +403,42 @@ def probe_classic_donor_repairs(
             abandoned_states=abandoned_states,
             compile_cache=compile_cache,
             excluded_groups=excluded_groups,
+            close_runtime=False,
+            materialize_source_epoch=False,
+            source_seal=source_seal,
+            namespace_id=namespace_id,
         )
 
     return _probe_with_runtime(
-        args,
-        output,
+        options,
+        progress,
         refusals,
         kind="repairprobe",
         activity="trying nearby compiler choices (the shown total is an upper bound)",
         run=run,
+        session=session,
     )
 
 
 def probe_classic_carrier_discovery(
-    args: argparse.Namespace,
-    output: CLIOutput,
+    options: RepairProbeOptions,
+    progress: ExecutionProgress,
     refusals: tuple[ClassicRepairRefusal, ...],
     *,
     candidate_budget: int,
     tried_states: Mapping[str, frozenset[str]] | None = None,
     compile_cache: ClassicDonorCompileCache | None = None,
+    session: ClassicRepairProbeSession | None = None,
 ) -> ClassicDiscoveryResult:
     """Compile fresh carrier states for units whose donors cannot be retuned further.
 
-    ``args.discovery_candidates`` bounds the shapes tried per unit; the
-    command-wide ``candidate_budget`` still caps the total.
+    The per-unit option bounds shapes tried per unit; the command-wide
+    ``candidate_budget`` still caps the total.
     """
 
     if not refusals or candidate_budget < 1:
         return ClassicDiscoveryResult((), (), 0)
-    per_unit = getattr(args, "discovery_candidates", None) or DEFAULT_DISCOVERY_CANDIDATES
+    per_unit = options.discovery_candidates
 
     def run(
         probes: ClassicProbeExecution,
@@ -238,6 +447,8 @@ def probe_classic_carrier_discovery(
         effective: Mapping[str, bytes],
         _operations: Mapping[str, Sequence[Mapping[str, object]]],
         progress: ClassicDonorProbeProgress,
+        source_seal: ClassicDonorSourceSeal,
+        namespace_id: str,
     ) -> ClassicDiscoveryResult:
         if any(not isinstance(item, ClassicRepairRefusal) for item in bound):
             raise ClassicProjectError("carrier discovery cannot replace a legacy action")
@@ -251,21 +462,26 @@ def probe_classic_carrier_discovery(
             progress=progress,
             tried_states=tried_states,
             compile_cache=compile_cache,
+            close_runtime=False,
+            materialize_source_epoch=False,
+            source_seal=source_seal,
+            namespace_id=namespace_id,
         )
 
     return _probe_with_runtime(
-        args,
-        output,
+        options,
+        progress,
         refusals,
         kind="discoveryprobe",
         activity="trying fresh compiler choices (the shown total is an upper bound)",
         run=run,
+        session=session,
     )
 
 
 def probe_classic_project_overlay_repairs(
-    args: argparse.Namespace,
-    output: CLIOutput,
+    options: RepairProbeOptions,
+    progress: ExecutionProgress,
     *,
     candidate_budget: int,
     settle_target_ids: frozenset[str] = frozenset(),
@@ -273,7 +489,7 @@ def probe_classic_project_overlay_repairs(
 ) -> ClassicProjectOverlayRepairResult:
     """Check the dual source epoch and try bounded inert layout adjustments."""
 
-    root = project_root(args.project)
+    root = options.project
     bundle = load_project_tree(root)
     arena = RunArena(
         state_root(root, bundle.spec),
@@ -281,19 +497,19 @@ def probe_classic_project_overlay_repairs(
         keep=KeepWorkspace.NEVER,
     )
     with arena:
-        with output.activity(
+        with progress.activity(
             "preparing the source-layout check",
             phase="repair-source-prepare",
         ):
             execution = resolve_classic_execution_inputs(
                 profile=bundle.spec.toolchain.profile,
-                explicit_toolchain_root=args.toolchain_root,
-                backend=selected_backend(args),
-                compiler_transport=args.compiler_transport,
-                resource_transport=args.resource_transport,
+                explicit_toolchain_root=options.execution.toolchain_root,
+                backend=options.execution.backend,
+                compiler_transport=options.execution.compiler_transport,
+                resource_transport=options.execution.resource_transport,
             )
             prepared = prepare_producer_graph_run(
-                args,
+                options.execution,
                 bundle,
                 project_root=root,
                 session_root=arena.path / "classic",
@@ -305,12 +521,12 @@ def probe_classic_project_overlay_repairs(
             for entry in (bundle.source_manifest.entries if bundle.source_manifest else ())
         }
         try:
-            with output.producer_activity(
+            with progress.producer_activity(
                 "checking nearby source layouts (the shown total is an upper bound)"
-            ) as progress:
+            ) as report_progress:
 
                 def report_candidate(completed: int, total: int, candidate_id: str) -> None:
-                    progress(
+                    report_progress(
                         completed,
                         total,
                         "repair-source-probe",
@@ -324,10 +540,8 @@ def probe_classic_project_overlay_repairs(
                     bundle,
                     clean_sources=clean_sources,
                     candidate_budget=candidate_budget,
-                    radius=(getattr(args, "retune_radius", None) or DEFAULT_REPAIR_RETUNE_RADIUS),
-                    candidate_limit=(
-                        getattr(args, "retune_candidates", None) or DEFAULT_RETUNE_CANDIDATES
-                    ),
+                    radius=options.retune_radius,
+                    candidate_limit=options.retune_candidates,
                     settle_target_ids=settle_target_ids,
                     link_layout_hint=link_layout_hint,
                     progress=report_candidate,
@@ -347,8 +561,8 @@ def probe_classic_project_overlay_repairs(
 
 
 def _probe_with_runtime(
-    args: argparse.Namespace,
-    output: CLIOutput,
+    options: RepairProbeOptions,
+    progress: ExecutionProgress,
     refusals: tuple[RepairRefusal, ...],
     *,
     kind: str,
@@ -361,85 +575,19 @@ def _probe_with_runtime(
             Mapping[str, bytes],
             Mapping[str, Sequence[Mapping[str, object]]],
             ClassicDonorProbeProgress,
+            ClassicDonorSourceSeal,
+            str,
         ],
         _ProbeResult,
     ],
+    session: ClassicRepairProbeSession | None = None,
 ) -> _ProbeResult:
-    """Prepare one non-certifying probe runtime, bind the refusals to it, and run ``run``."""
+    """Run one probe, optionally sharing its private runtime with later probes."""
 
-    root = project_root(args.project)
-    bundle = load_project_tree(root)
-    operations = canonical_overlay_operations(bundle)
-    arena = RunArena(
-        state_root(root, bundle.spec),
-        kind=kind,
-        keep=KeepWorkspace.NEVER,
-    )
-    with arena:
-        with output.activity(
-            "preparing the repair search",
-            phase="repair-probe-prepare",
-        ):
-            execution = resolve_classic_execution_inputs(
-                profile=bundle.spec.toolchain.profile,
-                explicit_toolchain_root=args.toolchain_root,
-                backend=selected_backend(args),
-                compiler_transport=args.compiler_transport,
-                resource_transport=args.resource_transport,
-            )
-            prepared = prepare_producer_graph_run(
-                args,
-                bundle,
-                project_root=root,
-                session_root=arena.path / "classic",
-                execution=execution,
-                progress=_ignore_preparation_progress,
-            )
-
-        try:
-            bound_refusals = _bind_refusals_to_probe_units(
-                refusals,
-                prepared.probes.units,
-            )
-            clean_sources, effective_sources = _source_payloads(
-                root,
-                bundle,
-                effective_root=prepared.probes.effective_root,
-                overlay_outputs=prepared.donors.overlay_effective_outputs,
-            )
-            with output.producer_activity(activity) as progress:
-
-                def report_candidate(completed: int, total: int, donor_id: str) -> None:
-                    progress(
-                        completed,
-                        total,
-                        "repair-probe",
-                        donor_id,
-                        ProgressKind.UNIT_FINISHED,
-                        None,
-                    )
-
-                result = run(
-                    prepared.probes,
-                    bound_refusals,
-                    clean_sources,
-                    effective_sources,
-                    operations,
-                    report_candidate,
-                )
-        except BaseException as original:
-            if prepared.producer.is_open:
-                try:
-                    prepared.close()
-                except BaseException as cleanup_error:
-                    original.add_note(f"classic donor repair cleanup also failed: {cleanup_error}")
-            raise
-        # Current probes close their runtime when they consume it. Checking the
-        # live producer is the durable contract: it also covers no-candidate
-        # results and future probes that choose to leave cleanup to this owner.
-        if prepared.producer.is_open:
-            prepared.close()
-        return result
+    if session is not None:
+        return session.probe(refusals, kind=kind, activity=activity, run=run)
+    with ClassicRepairProbeSession(options, progress) as owned:
+        return owned.probe(refusals, kind=kind, activity=activity, run=run)
 
 
 def apply_classic_discovery_repairs(
@@ -502,6 +650,7 @@ def apply_classic_project_overlay_repair(
 
 
 __all__ = [
+    "RepairProbeOptions",
     "apply_classic_discovery_repairs",
     "apply_classic_donor_repairs",
     "apply_classic_project_overlay_repair",

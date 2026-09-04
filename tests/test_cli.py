@@ -8,6 +8,7 @@ import sys
 import time
 from collections.abc import Iterator
 from contextlib import contextmanager
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -15,6 +16,7 @@ from typing import Any
 
 import pytest
 
+import reprobit.cli_cmake_import as cli_cmake_import
 import reprobit.cmake_graph as cmake_graph
 import reprobit.cmake_import as cmake_import
 from reprobit.backends import NativeWindowsBackend, PosixWineBackend
@@ -28,12 +30,35 @@ from reprobit.cli import (
     main,
     usable_cpu_count,
 )
-from reprobit.cli_build import _quarantine_oracle_targets
-from reprobit.cli_cmake_import import _cmake_import_workspace
-from reprobit.cli_output import CLIOutput, _friendly_incremental_phase, human_command
+from reprobit.cli_build import (
+    ProjectExecutionOptions,
+    _check_report_outputs,
+    _quarantine_oracle_targets,
+)
+from reprobit.cli_cmake_import import (
+    _cmake_import_workspace,
+    _command_cmake_refresh,
+    _resolve_import_recipe,
+)
+from reprobit.cli_output import (
+    CLIOutput,
+    NextStep,
+    _friendly_incremental_phase,
+    human_command,
+    next_step_fields,
+)
 from reprobit.cli_paths import CLIError
-from reprobit.cli_project import _human_intervention_detail
+from reprobit.cli_project import (
+    _human_intervention_detail,
+    _source_preview_message,
+    command_source_preview,
+)
 from reprobit.cmake_configure import effective_source_digest
+from reprobit.composition_ledger import (
+    COMPOSED_BODY_LEDGER_RELATIVE,
+    ComposedBodyLedger,
+    read_ledger,
+)
 from reprobit.costs import (
     calculate_cost,
     calculate_intervention_cost,
@@ -65,7 +90,13 @@ from reprobit.model import (
     Verdict,
 )
 from reprobit.producer_graph import (
+    CMakeImportRecipe,
+    ProducerGraphDocument,
     ProducerGraphError,
+    ProducerNode,
+    ProducerRole,
+    producer_graph_digest,
+    toolchain_document_digest,
 )
 from reprobit.progress import ProgressEvent, ProgressKind
 from reprobit.project_loader import load_project, load_project_tree
@@ -86,6 +117,7 @@ from reprobit.schema import (
     AuthenticitySettings,
     BuildPlanDocument,
     ClassicField,
+    ClassicGroupOrderPlan,
     ClassicProofReceipt,
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
@@ -520,7 +552,9 @@ def test_fresh_source_lock_prints_the_actual_setup_next_step(
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert event["event"] == "source_locked"
     assert event["next_command"] == f"rbit setup {tmp_path}"
-    assert event["next_step"] == f"rbit setup {tmp_path}"
+    assert event["next_argv"] == ["rbit", "setup", str(tmp_path)]
+    assert event["next_instruction"] == f"rbit setup {tmp_path}"
+    assert "next_step" not in event
 
 
 @pytest.mark.parametrize(
@@ -546,6 +580,26 @@ def test_source_preview_explains_how_to_select_files_when_git_cannot(
     assert expected in message
     assert "git init and git add" in message
     assert "--path PATH" in message
+
+
+def test_source_preview_keeps_long_human_lists_bounded() -> None:
+    paths = tuple(f"src/unit-{index}.cpp" for index in range(12))
+
+    message = _source_preview_message(
+        added=paths,
+        removed=(),
+        changed=(),
+        entries=len(paths),
+        graph_invalidation_required=False,
+        membership_transition_blocked=False,
+        authority_checked=True,
+        authority_error=None,
+        stale_units=(),
+    )
+
+    assert "src/unit-7.cpp" in message
+    assert "src/unit-8.cpp" not in message
+    assert "... and 4 more" in message
 
 
 def test_default_source_lock_omits_intentionally_deleted_tracked_file(
@@ -598,6 +652,7 @@ def test_fresh_source_preview_does_not_report_the_unreviewed_project_file_as_rem
     assert event["added"] == ["src/unit.cpp"]
     assert event["removed"] == []
     assert event["next_command"] == f"rbit source lock {tmp_path}"
+    assert event["next_argv"] == ["rbit", "source", "lock", str(tmp_path)]
     assert event["cmake_import_command"] is None
 
 
@@ -637,6 +692,7 @@ def test_source_preview_checks_authority_before_reporting_up_to_date(
     assert event["authority_checked"] is True
     assert event["classic_preflight_checked"] is True
     assert event["next_command"] is None
+    assert event["next_argv"] == []
 
 
 def test_source_preview_does_not_hide_stale_authority_when_source_is_unchanged(
@@ -685,6 +741,7 @@ def test_source_preview_does_not_hide_stale_authority_when_source_is_unchanged(
     assert event["repair_required"] is True
     assert "donor.overlay" in event["authority_error"]
     assert "rbit repair" in event["next_command"]
+    assert event["next_command"] == human_command(event["next_argv"])
 
 
 def test_source_preview_reports_stale_tu_and_lock_preserves_reviewed_authority(
@@ -762,6 +819,7 @@ def test_source_preview_does_not_loop_when_a_compiled_source_is_removed(
     assert event["removed"] == ["src/unit.cpp"]
     assert event["membership_transition_blocked"] is True
     assert event["next_command"] is None
+    assert event["next_argv"] == []
     assert event["cmake_import_command"] is None
 
     assert main(["source", "lock", str(project), *paths]) == 2
@@ -873,6 +931,8 @@ def test_source_regenerate_heals_stale_translation_unit_pins(
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert event["event"] == "source_regenerated"
     assert event["applied"] is False
+    assert event["next_command"] is None
+    assert event["next_argv"] == []
     assert {change["after"] for change in event["changes"]} == {Digest.from_bytes(edited).value}
     assert all(path.read_bytes() == data for path, data in before.items())
 
@@ -892,6 +952,7 @@ def test_source_regenerate_heals_stale_translation_unit_pins(
     event = json.loads(capsys.readouterr().out.splitlines()[-1])
     assert event["applied"] is True
     assert event["next_command"] == f"rbit repair {project}"
+    assert event["next_argv"] == ["rbit", "repair", str(project)]
     assert sorted(event["documents"]) == [
         "reprobit/build-plan.json",
         "reprobit/interventions/unit.json",
@@ -1434,9 +1495,9 @@ def test_source_export_materializes_the_reviewed_effective_view(
                 "ndjson",
                 "source",
                 "export",
-                "build/comparison-source",
-                "--project",
                 str(project),
+                "--destination",
+                "build/comparison-source",
             ]
         )
         == 0
@@ -1450,8 +1511,65 @@ def test_source_export_materializes_the_reviewed_effective_view(
     assert Path(event["path"]) == destination
 
     (destination / "stale.txt").write_bytes(b"not part of the source lock")
-    assert main(["source", "export", str(destination), "--project", str(project)]) == 0
+    assert (
+        main(
+            [
+                "source",
+                "export",
+                str(project),
+                "--destination",
+                "build/comparison-source",
+            ]
+        )
+        == 0
+    )
     assert not (destination / "stale.txt").exists()
+
+
+def test_source_export_emits_success_with_a_cleanup_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    from reprobit.source_export import SourceExportResult
+
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    preserved = project / "build/.rbit-source-backup-fixture"
+    monkeypatch.setattr(
+        "reprobit.source_export.refresh_effective_source_export",
+        lambda *_args, **_kwargs: SourceExportResult(
+            (),
+            "previous source export cleanup was refused",
+            (preserved,),
+        ),
+    )
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "source",
+                "export",
+                str(project),
+                "--destination",
+                "build/comparison-source",
+            ]
+        )
+        == 0
+    )
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert event["event"] == "source_exported"
+    assert event["cleanup_warning"] == "previous source export cleanup was refused"
+    assert event["preserved_paths"] == [str(preserved)]
+    assert "Warning:" in event["message"]
+
+    original_source = (project / "src/unit.cpp").read_bytes()
+    assert main(["source", "export", str(project), "--destination", "src"]) == 2
+    assert "source export destination overlaps locked source input" in capsys.readouterr().err
+    assert (project / "src/unit.cpp").read_bytes() == original_source
 
 
 def test_validate_rejects_current_manifest_with_stale_effective_tu_pin(
@@ -2311,7 +2429,6 @@ def test_graph_configure_exposes_closed_import_receipt(
                 "ndjson",
                 "graph",
                 "configure",
-                "--project",
                 str(project),
                 "--workspace-root",
                 str(workspace),
@@ -2325,6 +2442,8 @@ def test_graph_configure_exposes_closed_import_receipt(
                 sys.executable,
                 "--timeout",
                 "30",
+                "--cmake-define",
+                "FEATURE_SET=classic",
             ]
         )
         == 0
@@ -2336,8 +2455,32 @@ def test_graph_configure_exposes_closed_import_receipt(
     assert event["certification_runtime"] is False
     assert event["configured_build_root"] == str(workspace / "build")
     assert event["effective_source_digest"] == Digest.from_bytes(b"effective source").value
+    assert event["next_argv"] == [
+        "rbit",
+        "graph",
+        "extract",
+        str(project),
+        "--configured-build-root",
+        str(workspace / "build"),
+        "--effective-source-root",
+        str(workspace / "source"),
+        "--effective-source-digest",
+        Digest.from_bytes(b"effective source").value,
+        "--toolchain-root",
+        str(toolchain),
+        "--configuration",
+        "RelWithDebInfo",
+        "--cmake",
+        sys.executable,
+        "--timeout",
+        "30.0",
+        "--cmake-define",
+        "FEATURE_SET=classic",
+    ]
+    assert event["next_command"] == human_command(event["next_argv"])
     assert captured["timeout_seconds"] == 30.0
     assert captured["workspace_root"] == workspace
+    assert captured["cmake_defines"] == ["FEATURE_SET=classic"]
 
 
 def _fresh_cmake_import_project(root: Path) -> None:
@@ -2347,6 +2490,898 @@ def _fresh_cmake_import_project(root: Path) -> None:
         for document in authority.glob("*.json"):
             document.unlink()
         authority.rmdir()
+
+
+def _cmake_tu_id(source: str) -> str:
+    identity = Digest.from_bytes(
+        canonical_json(
+            {
+                "schema": 1,
+                "target": "program",
+                "build_target": "program",
+                "source": source,
+            }
+        )
+    ).value
+    return f"tu.{identity[:24]}"
+
+
+def _cmake_refresh_graph(
+    bundle: ProjectBundle,
+    sources: tuple[str, ...],
+    *,
+    recipe: CMakeImportRecipe | None = None,
+) -> ProducerGraphDocument:
+    compilers = tuple(
+        ProducerNode(
+            id=f"compiler.program.{index:04d}",
+            role=ProducerRole.COMPILER,
+            owner="program",
+            arguments=(
+                "/c",
+                f"${{SOURCE}}/{source}",
+                f"/Fo${{BUILD}}/obj/{index:04d}.obj",
+            ),
+            inputs=(f"source/{source}",),
+            outputs=(f"build/obj/{index:04d}.obj",),
+        )
+        for index, source in enumerate(sources)
+    )
+    linker = ProducerNode(
+        id="linker.program.0000",
+        role=ProducerRole.LINKER,
+        owner="program",
+        target_id="program",
+        arguments=(
+            *(f"${{BUILD}}/obj/{index:04d}.obj" for index in range(len(compilers))),
+            "/out:${BUILD}/program.exe",
+        ),
+        inputs=tuple(item.outputs[0] for item in compilers),
+        outputs=("build/program.exe",),
+        depends_on=tuple(item.id for item in compilers),
+    )
+    return ProducerGraphDocument(
+        schema_version=3,
+        toolchain_lock_digest=toolchain_document_digest(bundle.toolchain_lock),
+        path_profile_id=bundle.spec.paths.id,
+        extractor="cmake-makefiles-v1",
+        import_recipe=recipe or CMakeImportRecipe(),
+        nodes=(*compilers, linker),
+    )
+
+
+def _cmake_refresh_project(
+    root: Path,
+    *,
+    adjusted_removed_unit: bool = False,
+    recipe: CMakeImportRecipe | None = None,
+) -> bytes:
+    _complete_project(root)
+    project_file = root / "reprobit.toml"
+    project_file.write_text(
+        project_file.read_text(encoding="utf-8").replace(
+            'artifact = "out/program.bin"',
+            'artifact = "build/program.exe"',
+        ),
+        encoding="utf-8",
+    )
+    (root / "CMakeLists.txt").write_text(
+        "add_executable(program src/keep.c src/remove.c)\n",
+        encoding="utf-8",
+    )
+    source_root = root / "src"
+    source_root.mkdir()
+    (source_root / "keep.c").write_text("int keep(void) { return 1; }\n", encoding="utf-8")
+    (source_root / "remove.c").write_text("int remove(void) { return 2; }\n", encoding="utf-8")
+    spec = load_project(root)
+    source_paths = ("CMakeLists.txt", "project-input.txt", "src/keep.c", "src/remove.c")
+    manifest = build_source_manifest(root, source_paths, spec=spec)
+    (root / spec.layout.source_manifest).write_bytes(canonical_json(manifest))
+    units = tuple(
+        ClassicTranslationUnitPlan(
+            id=_cmake_tu_id(source),
+            target_id="program",
+            build_target="program",
+            source=source,
+            source_digest=Digest.from_path(root / source),
+            group_order=(
+                ClassicGroupOrderPlan(
+                    operation="restore_comdat_group_order",
+                    orders=(("_first", "_second"),),
+                )
+                if source == "src/keep.c"
+                else None
+            ),
+        )
+        for source in ("src/keep.c", "src/remove.c")
+    )
+    plan = BuildPlanDocument(
+        schema_version=3,
+        source_manifest_digest=source_manifest_digest(manifest),
+        translation_units=units,
+        source_overlay_digest=Digest.from_bytes(b"no source overlays"),
+        source_overlay_interventions=(),
+        archives=(),
+        target_gates=(ClassicTargetGate(target_id="program", build_target="program"),),
+    )
+    (root / spec.layout.build_plan).write_bytes(canonical_json(plan))
+    keep_action = StateCarrierIntervention(
+        id="keep.state",
+        scope=Scope(target="program", translation_unit=units[0].id),
+        rationale="retain one compatible saved adjustment",
+        carrier="keep.carrier",
+    )
+    kept_payload = b""
+    for unit in units:
+        actions = (keep_action,) if unit.source == "src/keep.c" else ()
+        if adjusted_removed_unit and unit.source == "src/remove.c":
+            actions = (
+                StateCarrierIntervention(
+                    id="remove.state",
+                    scope=Scope(target="program", translation_unit=unit.id),
+                    rationale="fixture adjustment that cannot be retired silently",
+                    carrier="remove.carrier",
+                ),
+            )
+        intervention_payload = canonical_json(
+            InterventionDocument(
+                schema_version=3,
+                target_id="program",
+                translation_unit_id=unit.id,
+                source=unit.source,
+                source_digest=unit.source_digest,
+                build_target=unit.build_target,
+                interventions=actions,
+            )
+        )
+        intervention_path = root / spec.layout.interventions / f"{unit.id}.json"
+        intervention_path.write_bytes(intervention_payload)
+        (root / spec.layout.proofs / f"{unit.id}.json").write_bytes(
+            canonical_json(
+                ProofDocument(
+                    schema_version=3,
+                    target_id="program",
+                    translation_unit_id=unit.id,
+                )
+            )
+        )
+        if unit.source == "src/keep.c":
+            kept_payload = intervention_payload
+    graph = _cmake_refresh_graph(
+        load_project_tree(root, include_producer_graph=False),
+        ("src/keep.c", "src/remove.c"),
+        recipe=recipe,
+    )
+    (root / spec.layout.producer_graph).write_bytes(canonical_json(graph))
+    load_project_tree(root)
+    return kept_payload
+
+
+def _write_refreshed_graph(
+    root: Path,
+    *,
+    skipped_translation_units: int = 0,
+) -> cmake_graph.CMakeGraphResult:
+    bundle = load_project_tree(root, include_producer_graph=False)
+    graph = _cmake_refresh_graph(bundle, ("src/keep.c", "src/add.c"))
+    authority = cmake_import.imported_translation_unit_authority(root, bundle, graph)
+    for relative, payload in authority.files.items():
+        destination = root.joinpath(*relative.parts)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+    graph_path = root / bundle.spec.layout.producer_graph
+    graph_path.write_bytes(canonical_json(graph))
+    load_project_tree(root)
+    return cmake_graph.CMakeGraphResult(
+        graph=graph,
+        output=Path(bundle.spec.layout.producer_graph),
+        transaction_id="fixture-transaction",
+        translation_units=len(graph.nodes) - 1,
+        skipped_translation_units=skipped_translation_units,
+    )
+
+
+def _write_cmake_refresh_evidence(root: Path) -> SimpleNamespace:
+    artifact = root / "build/program.exe"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"verified program")
+    reports = root / ".reprobit-state/reports"
+    reports.mkdir(parents=True, exist_ok=True)
+    report_json = reports / "report.json"
+    report_html = reports / "report.html"
+    report_json.write_bytes(b'{"verified":true}\n')
+    report_html.write_bytes(b"<html>verified</html>\n")
+    report_json_payload = report_json.read_bytes()
+    report_html_payload = report_html.read_bytes()
+    bundle = load_project_tree(root)
+    assert bundle.producer_graph is not None
+    ledger_path = (root / bundle.spec.state_dir).joinpath(*COMPOSED_BODY_LEDGER_RELATIVE)
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_payload = canonical_json(
+        ComposedBodyLedger(graph_digest=producer_graph_digest(bundle.producer_graph).value)
+    )
+    ledger_path.write_bytes(ledger_payload)
+    digest = Digest.from_path(artifact)
+    receipt = SimpleNamespace(path=artifact, size=artifact.stat().st_size, digest=digest)
+    target = SimpleNamespace(
+        target_id="program",
+        artifact=artifact,
+        comparison=SimpleNamespace(
+            candidate_size=artifact.stat().st_size,
+            candidate_digest=digest.value,
+        ),
+    )
+    return SimpleNamespace(
+        accepted=True,
+        project=root,
+        report_json=report_json,
+        report_html=report_html,
+        report_json_payload=report_json_payload,
+        report_html_payload=report_html_payload,
+        ledger=SimpleNamespace(
+            path=ledger_path,
+            outcome="succeeded",
+            payload=ledger_payload,
+        ),
+        engine=SimpleNamespace(
+            build=SimpleNamespace(outputs=(receipt,)),
+            targets=(target,),
+            report=SimpleNamespace(proof=SimpleNamespace(supplemental_outputs=())),
+            report_payloads={
+                report_json: report_json_payload,
+                report_html: report_html_payload,
+            },
+        ),
+    )
+
+
+def test_source_preview_guides_cmake_refresh_with_the_exact_curated_selection(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project with spaces"
+    _cmake_refresh_project(
+        project,
+        recipe=CMakeImportRecipe(
+            cmake="tools/cmake",
+            configuration="Release",
+            timeout_seconds=123.0,
+            cmake_defines=("FEATURE_SET=classic", "SDK_LABEL=value with spaces"),
+            directive_inputs=("program=mfcs42",),
+        ),
+    )
+    (project / "src/remove.c").unlink()
+    (project / "src/add.c").write_text("int add(void) { return 3; }\n", encoding="utf-8")
+    (project / "CMakeLists.txt").write_text(
+        "add_executable(program src/keep.c src/add.c)\n",
+        encoding="utf-8",
+    )
+    capsys.readouterr()
+
+    selected = ("CMakeLists.txt", "project-input.txt", "src")
+    arguments = ["--format", "ndjson", "source", "preview", str(project)]
+    for path in selected:
+        arguments.extend(("--path", path))
+    assert main(arguments) == 0
+
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    expected = human_command(
+        (
+            "rbit",
+            "import",
+            "cmake",
+            project,
+            "--refresh",
+            "--path",
+            "CMakeLists.txt",
+            "--path",
+            "project-input.txt",
+            "--path",
+            "src",
+            "--cmake",
+            "tools/cmake",
+            "--configuration",
+            "Release",
+            "--timeout",
+            "123.0",
+            "--cmake-define",
+            "FEATURE_SET=classic",
+            "--cmake-define",
+            "SDK_LABEL=value with spaces",
+            "--directive-input",
+            "program=mfcs42",
+        )
+    )
+    assert event["membership_transition_blocked"] is False
+    assert event["cmake_refresh_required"] is True
+    assert event["repair_required"] is False
+    assert event["next_command"] == expected
+    assert event["next_argv"] == [
+        "rbit",
+        "import",
+        "cmake",
+        str(project),
+        "--refresh",
+        "--path",
+        "CMakeLists.txt",
+        "--path",
+        "project-input.txt",
+        "--path",
+        "src",
+        "--cmake",
+        "tools/cmake",
+        "--configuration",
+        "Release",
+        "--timeout",
+        "123.0",
+        "--cmake-define",
+        "FEATURE_SET=classic",
+        "--cmake-define",
+        "SDK_LABEL=value with spaces",
+        "--directive-input",
+        "program=mfcs42",
+    ]
+    assert event["cmake_import_command"] == expected
+
+
+def test_cmake_refresh_refuses_a_graph_without_a_recorded_import_recipe(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _cmake_refresh_project(project)
+    graph_path = project / "reprobit/producer-graph.json"
+    graph_value = json.loads(graph_path.read_bytes())
+    del graph_value["import_recipe"]
+    graph_path.write_bytes(canonical_json(graph_value))
+    assert load_project_tree(project).producer_graph is not None
+
+    (project / "src/remove.c").unlink()
+    (project / "src/add.c").write_text("int add(void) { return 3; }\n", encoding="utf-8")
+    (project / "CMakeLists.txt").write_text(
+        "add_executable(program src/keep.c src/add.c)\n",
+        encoding="utf-8",
+    )
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "source",
+                "preview",
+                str(project),
+                "--path",
+                "CMakeLists.txt",
+                "--path",
+                "project-input.txt",
+                "--path",
+                "src",
+            ]
+        )
+        == 0
+    )
+    preview = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert preview["cmake_refresh_required"] is False
+    assert preview["membership_transition_blocked"] is True
+    assert preview["next_argv"] == []
+    assert "will not guess" in preview["message"]
+    assert "once with those options" in preview["message"]
+
+    assert (
+        main(
+            [
+                "import",
+                "cmake",
+                str(project),
+                "--refresh",
+                "--cmake",
+                sys.executable,
+                "--configuration",
+                "Release",
+                "--timeout",
+                "30",
+            ]
+        )
+        == 2
+    )
+    error = capsys.readouterr().err
+    assert "needs the original import options" in error
+    assert "will not guess" in error
+
+
+def test_cmake_import_path_selection_requires_refresh(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _initialize(project)
+    capsys.readouterr()
+
+    assert main(["import", "cmake", str(project), "--path", "src"]) == 2
+    assert "--path requires --refresh" in capsys.readouterr().err
+
+
+def test_cmake_refresh_can_replace_saved_optional_lists_with_empty(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    recipe = CMakeImportRecipe(
+        cmake_defines=("FEATURE_SET=classic",),
+        directive_inputs=("program=mfcs42.lib",),
+    )
+    _cmake_refresh_project(project, recipe=recipe)
+    args = _parser().parse_args(
+        [
+            "import",
+            "cmake",
+            str(project),
+            "--refresh",
+            "--clear-cmake-defines",
+            "--clear-directive-inputs",
+        ]
+    )
+
+    _resolve_import_recipe(args, root=project, refresh=True)
+
+    assert args.cmake_define == []
+    assert args.directive_input == []
+
+    initial = _parser().parse_args(["import", "cmake", str(project), "--clear-cmake-defines"])
+    with pytest.raises(CLIError, match="requires --refresh"):
+        _resolve_import_recipe(initial, root=project, refresh=False)
+
+    with pytest.raises(SystemExit):
+        _parser().parse_args(
+            [
+                "import",
+                "cmake",
+                str(project),
+                "--refresh",
+                "--cmake-define",
+                "FEATURE_SET=modern",
+                "--clear-cmake-defines",
+            ]
+        )
+
+
+@pytest.mark.parametrize(
+    (
+        "verification_fails",
+        "changed_retained_unit",
+        "post_verify_mutation",
+        "cleanup_failure",
+    ),
+    (
+        (False, False, None, False),
+        (False, True, None, False),
+        (True, False, None, False),
+        (False, False, "authority", False),
+        (False, False, "output", False),
+        (False, False, "report", False),
+        (False, False, "ledger", False),
+        (False, False, None, True),
+    ),
+    ids=(
+        "publish",
+        "reset-changed-unit",
+        "verification-refusal",
+        "authority-mutated-after-verify",
+        "output-mutated-after-verify",
+        "report-path-mutated-after-verify",
+        "ledger-path-mutated-after-verify",
+        "cleanup-failure-after-publication",
+    ),
+)
+def test_cmake_refresh_reconciles_source_membership_only_after_cold_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    verification_fails: bool,
+    changed_retained_unit: bool,
+    post_verify_mutation: str | None,
+    cleanup_failure: bool,
+) -> None:
+    project = tmp_path / "project"
+    kept_payload = _cmake_refresh_project(project)
+    before = {
+        path.relative_to(project).as_posix(): path.read_bytes()
+        for path in project.rglob("*")
+        if path.is_file() and ".reprobit-" not in path.as_posix()
+    }
+    (project / "src/remove.c").unlink()
+    (project / "src/add.c").write_text("int add(void) { return 3; }\n", encoding="utf-8")
+    if changed_retained_unit:
+        (project / "src/keep.c").write_text("int keep(void) { return 9; }\n", encoding="utf-8")
+    (project / "CMakeLists.txt").write_text(
+        "add_executable(program src/keep.c src/add.c)\n",
+        encoding="utf-8",
+    )
+    before_refresh = {
+        path.relative_to(project).as_posix(): path.read_bytes()
+        for path in project.rglob("*")
+        if path.is_file() and ".reprobit-" not in path.as_posix()
+    }
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import.validate_toolchain_installation",
+        lambda *args, **kwargs: SimpleNamespace(require_ok=lambda: None),
+    )
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import._configure_and_record",
+        lambda *args, **kwargs: _write_refreshed_graph(kwargs["root"]),
+    )
+    verified = False
+
+    def verify(root: Path, output: CLIOutput, **kwargs: object) -> SimpleNamespace:
+        nonlocal verified
+        del output, kwargs
+        verified = True
+        assert {
+            path.relative_to(project).as_posix(): path.read_bytes()
+            for path in project.rglob("*")
+            if path.is_file() and ".reprobit-" not in path.as_posix()
+        } == before_refresh
+        load_project_tree(root)
+        evidence = _write_cmake_refresh_evidence(root)
+        if post_verify_mutation == "authority":
+            plan_path = root / "reprobit/build-plan.json"
+            plan_path.write_bytes(plan_path.read_bytes() + b" ")
+        elif post_verify_mutation == "output":
+            (root / "build/program.exe").write_bytes(b"changed after verify")
+        elif post_verify_mutation == "report":
+            evidence.report_json.write_bytes(b'{"changed":true}\n')
+        elif post_verify_mutation == "ledger":
+            evidence.ledger.path.write_bytes(
+                canonical_json(ComposedBodyLedger(graph_digest="f" * 64))
+            )
+        if verification_fails:
+            raise CLIError("fixture cold verification failed")
+        return evidence
+
+    monkeypatch.setattr("reprobit.cli_cmake_import._verify_refreshed_project", verify)
+    if cleanup_failure:
+        real_stage = cli_cmake_import.stage_cmake_refresh
+        real_publish = cli_cmake_import.publish_cmake_refresh
+
+        class CleanupFailure:
+            def __init__(self, staged: object) -> None:
+                self.staged = staged
+                self.arena = staged.arena
+                self.retained_path = staged.retained_path
+
+            def __enter__(self) -> Path:
+                return self.staged.__enter__()
+
+            def __exit__(self, *args: object) -> None:
+                self.staged.__exit__(*args)
+                raise OSError("fixture cleanup refused")
+
+        monkeypatch.setattr(
+            cli_cmake_import,
+            "stage_cmake_refresh",
+            lambda *args, **kwargs: CleanupFailure(real_stage(*args, **kwargs)),
+        )
+
+        def publish_with_cleanup_warning(*args: object, **kwargs: object) -> object:
+            result = real_publish(*args, **kwargs)
+            return replace(
+                result,
+                transaction=replace(
+                    result.transaction,
+                    cleanup_warning="private transaction cleanup was refused",
+                ),
+            )
+
+        monkeypatch.setattr(
+            cli_cmake_import,
+            "publish_cmake_refresh",
+            publish_with_cleanup_warning,
+        )
+    selection = ["CMakeLists.txt", "project-input.txt", "src"]
+    preview_machine = StringIO()
+    command_source_preview(
+        SimpleNamespace(project=str(project), path=selection),
+        CLIOutput("ndjson", preview_machine, StringIO()),
+    )
+    preview = json.loads(preview_machine.getvalue().splitlines()[-1])
+    args = _parser().parse_args(preview["next_argv"][1:])
+    args.keep_workspace = KeepWorkspace.NEVER.value
+    args.timeout = 30.0
+    machine = StringIO()
+    output = CLIOutput("ndjson", machine, StringIO())
+
+    def call() -> int:
+        return _command_cmake_refresh(
+            args,
+            output,
+            root=project,
+            toolchain_root=tmp_path,
+            installation=SimpleNamespace(
+                doctor=lambda lock: SimpleNamespace(require_ok=lambda: None)
+            ),
+            toolchain_report=None,
+            jobs=1,
+            backend=PosixWineBackend(wine=sys.executable, wineserver=sys.executable),
+            cmake=Path(sys.executable),
+            compiler_transport=Path(sys.executable),
+            resource_transport=Path(sys.executable),
+            generator="Unix Makefiles",
+            make_program=None,
+        )
+
+    refuses_publication = verification_fails or post_verify_mutation in {"authority", "output"}
+    if refuses_publication:
+        with pytest.raises(CLIError):
+            call()
+        assert {
+            path.relative_to(project).as_posix(): path.read_bytes()
+            for path in project.rglob("*")
+            if path.is_file() and ".reprobit-" not in path.as_posix()
+        } == before_refresh
+        assert verified
+        return
+
+    assert call() == 0
+    assert verified
+    event = json.loads(machine.getvalue().splitlines()[-1])
+    assert event["event"] == "cmake_refreshed"
+    assert event["cold_verified"] is True
+    assert event["next_command"] is None
+    assert event["next_argv"] == []
+    assert "verified from scratch" in event["message"]
+    if cleanup_failure:
+        assert event["cleanup_warning"] == (
+            "private transaction cleanup was refused; "
+            "private workspace cleanup failed: fixture cleanup refused"
+        )
+        assert "private workspace cleanup failed" in event["message"]
+    else:
+        assert event["cleanup_warning"] is None
+    final = load_project_tree(project)
+    assert final.source_manifest is not None
+    assert {entry.path for entry in final.source_manifest.entries} == {
+        "CMakeLists.txt",
+        "project-input.txt",
+        "src/add.c",
+        "src/keep.c",
+    }
+    assert final.build_plan is not None
+    assert {unit.source for unit in final.build_plan.translation_units} == {
+        "src/add.c",
+        "src/keep.c",
+    }
+    keep_id = _cmake_tu_id("src/keep.c")
+    kept_unit = next(unit for unit in final.build_plan.translation_units if unit.id == keep_id)
+    kept_authority = InterventionDocument.model_validate_json(
+        (project / f"reprobit/interventions/{keep_id}.json").read_bytes()
+    )
+    if changed_retained_unit:
+        assert kept_unit.group_order is None
+        assert not kept_authority.interventions
+        assert event["preserved_translation_units"] == 0
+        assert event["reset_translation_units"] == 1
+    else:
+        assert kept_unit.group_order is not None
+        assert kept_unit.group_order.orders == (("_first", "_second"),)
+        assert (project / f"reprobit/interventions/{keep_id}.json").read_bytes() == kept_payload
+        assert event["preserved_translation_units"] == 1
+        assert event["reset_translation_units"] == 0
+    assert not (project / f"reprobit/interventions/{_cmake_tu_id('src/remove.c')}.json").exists()
+    assert (project / f"reprobit/interventions/{_cmake_tu_id('src/add.c')}.json").is_file()
+    assert (
+        before["reprobit/toolchain.lock.json"]
+        == (project / "reprobit/toolchain.lock.json").read_bytes()
+    )
+    assert (project / "build/program.exe").read_bytes() == b"verified program"
+    assert (project / ".reprobit-state/reports/report.json").read_bytes() == (
+        b'{"verified":true}\n'
+    )
+    assert (project / ".reprobit-state/reports/report.html").read_bytes() == (
+        b"<html>verified</html>\n"
+    )
+    assert event["outputs"] == [str(project / "build/program.exe")]
+    assert event["report_json"] == str(project / ".reprobit-state/reports/report.json")
+    assert event["report_html"] == str(project / ".reprobit-state/reports/report.html")
+    assert final.producer_graph is not None
+    published_ledger = (project / final.spec.state_dir).joinpath(*COMPOSED_BODY_LEDGER_RELATIVE)
+    assert (
+        read_ledger(published_ledger).graph_digest
+        == producer_graph_digest(final.producer_graph).value
+    )
+
+
+def test_cmake_refresh_refuses_an_ambiguous_compiler_lane_without_writes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _cmake_refresh_project(project)
+    (project / "src/remove.c").unlink()
+    (project / "src/add.c").write_text("int add(void) { return 3; }\n", encoding="utf-8")
+    (project / "CMakeLists.txt").write_text(
+        "add_executable(program src/keep.c src/add.c)\n",
+        encoding="utf-8",
+    )
+    before = {
+        path.relative_to(project).as_posix(): path.read_bytes()
+        for path in project.rglob("*")
+        if path.is_file() and ".reprobit-" not in path.as_posix()
+    }
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import.validate_toolchain_installation",
+        lambda *args, **kwargs: SimpleNamespace(require_ok=lambda: None),
+    )
+
+    def configure(*args: object, **kwargs: object) -> SimpleNamespace:
+        del args
+        return _write_refreshed_graph(
+            kwargs["root"],
+            skipped_translation_units=1,
+        )
+
+    monkeypatch.setattr("reprobit.cli_cmake_import._configure_and_record", configure)
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import._verify_refreshed_project",
+        lambda *args, **kwargs: pytest.fail("ambiguous refresh must not verify"),
+    )
+    args = SimpleNamespace(
+        target=[],
+        path=["CMakeLists.txt", "project-input.txt", "src"],
+        keep_workspace=KeepWorkspace.NEVER.value,
+        configuration="RelWithDebInfo",
+        timeout=30.0,
+        cmake_define=[],
+        directive_input=[],
+    )
+    with pytest.raises(CLIError, match="compiler steps that do not map"):
+        _command_cmake_refresh(
+            args,
+            CLIOutput("ndjson", StringIO(), StringIO()),
+            root=project,
+            toolchain_root=tmp_path,
+            installation=SimpleNamespace(
+                doctor=lambda lock: SimpleNamespace(require_ok=lambda: None)
+            ),
+            toolchain_report=None,
+            jobs=1,
+            backend=PosixWineBackend(wine=sys.executable, wineserver=sys.executable),
+            cmake=Path(sys.executable),
+            compiler_transport=Path(sys.executable),
+            resource_transport=Path(sys.executable),
+            generator="Unix Makefiles",
+            make_program=None,
+        )
+    assert {
+        path.relative_to(project).as_posix(): path.read_bytes()
+        for path in project.rglob("*")
+        if path.is_file() and ".reprobit-" not in path.as_posix()
+    } == before
+
+
+def test_cmake_refresh_cas_preserves_a_concurrent_source_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _cmake_refresh_project(project)
+    (project / "src/remove.c").unlink()
+    (project / "src/add.c").write_text("int add(void) { return 3; }\n", encoding="utf-8")
+    (project / "CMakeLists.txt").write_text(
+        "add_executable(program src/keep.c src/add.c)\n",
+        encoding="utf-8",
+    )
+    authority_before = {
+        path.relative_to(project).as_posix(): path.read_bytes()
+        for path in (project / "reprobit").rglob("*")
+        if path.is_file()
+    }
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import.validate_toolchain_installation",
+        lambda *args, **kwargs: SimpleNamespace(require_ok=lambda: None),
+    )
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import._configure_and_record",
+        lambda *args, **kwargs: _write_refreshed_graph(kwargs["root"]),
+    )
+
+    concurrent_payload = b"int keep(void) { return 99; }\n"
+
+    def verify(root: Path, *args: object, **kwargs: object) -> SimpleNamespace:
+        del args, kwargs
+        evidence = _write_cmake_refresh_evidence(root)
+        (project / "src/keep.c").write_bytes(concurrent_payload)
+        return evidence
+
+    monkeypatch.setattr("reprobit.cli_cmake_import._verify_refreshed_project", verify)
+    args = SimpleNamespace(
+        target=[],
+        path=["CMakeLists.txt", "project-input.txt", "src"],
+        keep_workspace=KeepWorkspace.NEVER.value,
+        configuration="RelWithDebInfo",
+        timeout=30.0,
+        cmake_define=[],
+        directive_input=[],
+    )
+    with pytest.raises(TransactionConflict, match="preimage conflict"):
+        _command_cmake_refresh(
+            args,
+            CLIOutput("ndjson", StringIO(), StringIO()),
+            root=project,
+            toolchain_root=tmp_path,
+            installation=SimpleNamespace(
+                doctor=lambda lock: SimpleNamespace(require_ok=lambda: None)
+            ),
+            toolchain_report=None,
+            jobs=1,
+            backend=PosixWineBackend(wine=sys.executable, wineserver=sys.executable),
+            cmake=Path(sys.executable),
+            compiler_transport=Path(sys.executable),
+            resource_transport=Path(sys.executable),
+            generator="Unix Makefiles",
+            make_program=None,
+        )
+    assert (project / "src/keep.c").read_bytes() == concurrent_payload
+    assert {
+        path.relative_to(project).as_posix(): path.read_bytes()
+        for path in (project / "reprobit").rglob("*")
+        if path.is_file()
+    } == authority_before
+
+
+def test_cmake_refresh_retires_removed_translation_unit_with_saved_guidance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    _cmake_refresh_project(project, adjusted_removed_unit=True)
+    (project / "src/remove.c").unlink()
+    (project / "src/add.c").write_text("int add(void) { return 3; }\n", encoding="utf-8")
+    (project / "CMakeLists.txt").write_text(
+        "add_executable(program src/keep.c src/add.c)\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import.validate_toolchain_installation",
+        lambda *args, **kwargs: SimpleNamespace(require_ok=lambda: None),
+    )
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import._configure_and_record",
+        lambda *args, **kwargs: _write_refreshed_graph(kwargs["root"]),
+    )
+    monkeypatch.setattr(
+        "reprobit.cli_cmake_import._verify_refreshed_project",
+        lambda root, *args, **kwargs: _write_cmake_refresh_evidence(root),
+    )
+    args = SimpleNamespace(
+        target=[],
+        path=["CMakeLists.txt", "project-input.txt", "src"],
+        keep_workspace=KeepWorkspace.NEVER.value,
+        configuration="RelWithDebInfo",
+        timeout=30.0,
+        cmake_define=[],
+        directive_input=[],
+    )
+    assert (
+        _command_cmake_refresh(
+            args,
+            CLIOutput("ndjson", StringIO(), StringIO()),
+            root=project,
+            toolchain_root=tmp_path,
+            installation=SimpleNamespace(
+                doctor=lambda lock: SimpleNamespace(require_ok=lambda: None)
+            ),
+            toolchain_report=None,
+            jobs=1,
+            backend=PosixWineBackend(wine=sys.executable, wineserver=sys.executable),
+            cmake=Path(sys.executable),
+            compiler_transport=Path(sys.executable),
+            resource_transport=Path(sys.executable),
+            generator="Unix Makefiles",
+            make_program=None,
+        )
+        == 0
+    )
+    removed_id = _cmake_tu_id("src/remove.c")
+    assert not (project / f"reprobit/interventions/{removed_id}.json").exists()
+    assert not (project / f"reprobit/proofs/{removed_id}.json").exists()
 
 
 def test_cmake_scaffold_source_guidance_uses_the_supplied_project_path(
@@ -2391,17 +3426,14 @@ def test_cmake_scaffold_binds_every_prevalidated_input(
     assert not (project / "reprobit/build-plan.json").exists()
 
 
-def _mock_cmake_graph_result(project: Path) -> SimpleNamespace:
-    return SimpleNamespace(
-        graph=SimpleNamespace(nodes=("compile", "link"), extractor="fixture"),
+def _mock_cmake_graph_result(project: Path) -> cmake_graph.CMakeGraphResult:
+    graph = _cmake_refresh_graph(
+        load_project_tree(project, include_producer_graph=False),
+        ("src/main.c",),
+    )
+    return cmake_graph.CMakeGraphResult(
+        graph=graph,
         output=Path("reprobit/producer-graph.json"),
-        role_counts={
-            "compiler": 1,
-            "resource-compiler": 0,
-            "librarian": 0,
-            "linker": 1,
-        },
-        graph_digest=Digest.from_bytes(b"fixture graph"),
         transaction_id="fixture-transaction",
         translation_units=1,
         skipped_translation_units=0,
@@ -2495,6 +3527,10 @@ def test_cmake_import_scaffolds_and_runs_the_guided_graph_path(
                 sys.executable,
                 "--cmake",
                 sys.executable,
+                "--cmake-define",
+                "FEATURE_SET=classic",
+                "--cmake-define",
+                "SDK_LABEL=value with spaces",
             ]
         )
         == 0
@@ -2503,7 +3539,17 @@ def test_cmake_import_scaffolds_and_runs_the_guided_graph_path(
     assert events[-1]["event"] == "cmake_imported"
     assert events[-1]["nodes"] == 2
     assert events[-1]["translation_units"] == 1
+    assert events[-1]["next_argv"] == ["rbit", "build", str(project)]
+    assert events[-1]["next_command"] == human_command(events[-1]["next_argv"])
     assert captured["defer_project_plan"] is True
+    assert captured["cmake_defines"] == ["FEATURE_SET=classic", "SDK_LABEL=value with spaces"]
+    assert extracted["configuration"] == "RelWithDebInfo"
+    assert extracted["cmake"] == sys.executable
+    assert extracted["timeout_seconds"] == 600.0
+    assert extracted["cmake_defines"] == [
+        "FEATURE_SET=classic",
+        "SDK_LABEL=value with spaces",
+    ]
     assert extracted["directive_inputs"] == []
     plan = BuildPlanDocument.model_validate_json(
         (project / "reprobit/build-plan.json").read_bytes()
@@ -2940,6 +3986,8 @@ def test_init_is_transactional_and_emits_stable_ndjson(
     assert len(events) == 1
     event = events[-1]
     assert event["event"] == "initialized"
+    assert event["next_argv"] == ["rbit", "setup", str(root)]
+    assert event["next_command"] == human_command(event["next_argv"])
     initialized = load_project(root)
     assert initialized.project_id == "sample"
     assert initialized.build.kind == "producer-graph"
@@ -3047,7 +4095,6 @@ def test_single_target_init_rejects_a_mistyped_path_mapping(
 
 @pytest.mark.skipif(os.name != "posix", reason="Wine backend is supported only on POSIX")
 def test_doctor_never_executes_wine_without_probe(
-    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
@@ -3058,7 +4105,6 @@ def test_doctor_never_executes_wine_without_probe(
         main(
             [
                 "doctor",
-                str(tmp_path),
                 "--backend",
                 "posix_wine_v1",
                 "--wine",
@@ -3071,7 +4117,10 @@ def test_doctor_never_executes_wine_without_probe(
     )
 
 
-def test_toolchain_lock_commits_only_schema_v3(tmp_path: Path) -> None:
+def test_toolchain_lock_commits_only_schema_v3(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
     project = tmp_path / "project"
     _initialize(project)
     lock_path = project / "reprobit" / "toolchain.lock.json"
@@ -3106,9 +4155,8 @@ def test_toolchain_lock_commits_only_schema_v3(tmp_path: Path) -> None:
             [
                 "toolchain",
                 "lock",
-                "--project",
                 str(project),
-                "--root",
+                "--toolchain-root",
                 str(installation),
                 "--runtime-file",
                 "wine/x86/cl",
@@ -3132,6 +4180,85 @@ def test_toolchain_lock_commits_only_schema_v3(tmp_path: Path) -> None:
     }
     assert "wine/x86/cl" not in assigned_paths
     assert len(document["input_trees"]) == len(profile.include_roots + profile.library_roots)
+
+    alternate_lock = project / "alternate-lock.json"
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "toolchain",
+                "lock",
+                str(project),
+                "--toolchain-root",
+                str(installation),
+                "--output",
+                alternate_lock.name,
+            ]
+        )
+        == 2
+    )
+    assert "cannot change an existing project's configured" in capsys.readouterr().err
+    assert not alternate_lock.exists()
+
+    config = project / "reprobit.toml"
+    config_before = config.read_bytes()
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "toolchain",
+                "lock",
+                str(project),
+                "--toolchain-root",
+                str(installation),
+                "--runtime-file",
+                "wine/x86/cl",
+                "--output",
+                "reprobit.toml",
+            ]
+        )
+        == 2
+    )
+    assert "cannot change an existing project's configured" in capsys.readouterr().err
+    assert config.read_bytes() == config_before
+
+    source = project / "locked-source.txt"
+    source.write_bytes(b"source input\n")
+    manifest = SourceManifestDocument(
+        schema_version=3,
+        complete=True,
+        entries=(
+            SourceManifestEntry(
+                path=source.name,
+                size=source.stat().st_size,
+                digest=Digest.from_path(source),
+            ),
+        ),
+    )
+    (project / "reprobit/source-manifest.json").write_bytes(canonical_json(manifest))
+    configured = config.read_text(encoding="utf-8")
+    replacement = configured.replace(
+        'lock_file = "reprobit/toolchain.lock.json"',
+        f'lock_file = "{source.name}"',
+    )
+    assert replacement != configured
+    config.write_text(replacement, encoding="utf-8")
+
+    capsys.readouterr()
+    assert (
+        main(
+            [
+                "toolchain",
+                "lock",
+                str(project),
+                "--toolchain-root",
+                str(installation),
+            ]
+        )
+        == 2
+    )
+    assert "compiler lock output overlaps locked source input" in capsys.readouterr().err
+    assert source.read_bytes() == b"source input\n"
 
 
 def test_graph_extract_commits_closed_direct_producer_authority(
@@ -3233,7 +4360,6 @@ def test_graph_extract_commits_closed_direct_producer_authority(
                 "ndjson",
                 "graph",
                 "extract",
-                "--project",
                 str(project),
                 "--configured-build-root",
                 str(configured),
@@ -3243,6 +4369,10 @@ def test_graph_extract_commits_closed_direct_producer_authority(
                 effective_source_digest(effective).value,
                 "--toolchain-root",
                 str(toolchain),
+                "--configuration",
+                "Release",
+                "--cmake-define",
+                "FEATURE_SET=classic",
                 "--directive-input",
                 "program=MFCS42",
             ]
@@ -3264,6 +4394,13 @@ def test_graph_extract_commits_closed_direct_producer_authority(
     terminal = next(node for node in bundle.producer_graph.nodes if node.target_id == "program")
     assert terminal.outputs == ("build/APP.EXE",)
     assert terminal.directive_inputs == ("system-library/mfcs42.lib",)
+    assert bundle.producer_graph.import_recipe == CMakeImportRecipe(
+        cmake="cmake",
+        configuration="Release",
+        timeout_seconds=600.0,
+        cmake_defines=("FEATURE_SET=classic",),
+        directive_inputs=("program=MFCS42",),
+    )
 
     graph_path = project / "reprobit/producer-graph.json"
     committed_graph = graph_path.read_bytes()
@@ -3287,7 +4424,6 @@ def test_graph_extract_commits_closed_direct_producer_authority(
             [
                 "graph",
                 "extract",
-                "--project",
                 str(project),
                 "--configured-build-root",
                 str(configured),
@@ -3322,7 +4458,6 @@ def test_graph_extract_commits_closed_direct_producer_authority(
                 [
                     "graph",
                     "extract",
-                    "--project",
                     str(project),
                     "--configured-build-root",
                     str(configured),
@@ -3349,7 +4484,6 @@ def test_graph_extract_commits_closed_direct_producer_authority(
             [
                 "graph",
                 "extract",
-                "--project",
                 str(project),
                 "--configured-build-root",
                 str(configured),
@@ -3763,6 +4897,8 @@ def test_state_status_and_clean_expose_retained_workspace_lifecycle(
 
         assert main(["state", "status", str(project)]) == 0
         human_status = capsys.readouterr().out
+        assert "build: succeeded" in human_status
+        assert str(retained) in human_status
         assert "repair search cache: 1 file, 100 B" in human_status
         assert "saved repair data: 1 file, 7 B" in human_status
 
@@ -3825,6 +4961,34 @@ def test_state_status_and_clean_expose_retained_workspace_lifecycle(
     cleaned = capsys.readouterr().out
     assert "Removed 1 cache record" in cleaned
     assert cache.status().records == 0
+
+
+def test_state_status_bounds_human_runs_but_keeps_machine_details(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_project(project)
+    state = project / ".reprobit-state"
+    state.mkdir()
+    for index in range(10):
+        with RunArena(
+            state,
+            kind=f"fixture{index}",
+            run_id=f"retained-{index}",
+            keep=KeepWorkspace.ALWAYS,
+        ):
+            pass
+    capsys.readouterr()
+
+    assert main(["state", "status", str(project)]) == 0
+    human = capsys.readouterr().out
+    assert human.count("    fixture") == 8
+    assert "... and 2 more runs" in human
+
+    assert main(["--format", "ndjson", "state", "status", str(project)]) == 0
+    event = json.loads(capsys.readouterr().out.splitlines()[-1])
+    assert len(event["runs"]) == 10
 
 
 def test_state_status_guides_safe_obsolete_cache_cleanup(
@@ -3960,6 +5124,33 @@ def test_clean_preview_does_not_recommend_a_no_op(
 def test_execution_timeouts_must_be_positive_and_finite(value: str) -> None:
     with pytest.raises(argparse.ArgumentTypeError, match=r"number|greater than zero"):
         _positive_seconds(value)
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "initialization_timeout",
+        "compile_timeout",
+        "link_timeout",
+        "cleanup_timeout",
+    ),
+)
+@pytest.mark.parametrize("value", (float("nan"), float("inf"), float("-inf")))
+def test_project_execution_options_require_finite_timeouts(field: str, value: float) -> None:
+    timeouts = {
+        "initialization_timeout": 1.0,
+        "compile_timeout": 1.0,
+        "link_timeout": 1.0,
+        "cleanup_timeout": 1.0,
+    }
+    timeouts[field] = value
+
+    with pytest.raises(ValueError, match="finite and positive"):
+        ProjectExecutionOptions(
+            jobs=1,
+            backend=PosixWineBackend(wine=sys.executable, wineserver=sys.executable),
+            **timeouts,
+        )
 
 
 def test_validate_explain_cost_build_and_cold_verify_refusal(
@@ -4159,7 +5350,21 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
         verdict = SimpleNamespace(clean=True, quarantined=False, quarantines=())
         evidence = SimpleNamespace(origin_integrity=True)
         report = SimpleNamespace(costs=SimpleNamespace(project_total=0))
-        targets = (SimpleNamespace(comparison=SimpleNamespace(byte_exact=True)),)
+        targets = (
+            SimpleNamespace(
+                target_id="program",
+                comparison=SimpleNamespace(byte_exact=True),
+            ),
+        )
+
+        def __init__(self, report_json: Path, report_html: Path) -> None:
+            self.report_payloads = {
+                report_json: b'{"fixture":"verified"}\n',
+                report_html: b"<html>verified</html>\n",
+            }
+            for path, payload in self.report_payloads.items():
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(payload)
 
         @staticmethod
         def accepts(_policy: object) -> bool:
@@ -4168,7 +5373,12 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
     def verify_run(_engine: object, request: object) -> FakeVerificationResult:
         assert request.cold is True  # type: ignore[attr-defined]
         cold_requests.append(request.cold)  # type: ignore[attr-defined]
-        return FakeVerificationResult()
+        result = FakeVerificationResult(  # type: ignore[attr-defined]
+            request.reports.json,
+            request.reports.html,
+        )
+        assert all(path.read_bytes() == payload for path, payload in result.report_payloads.items())
+        return result
 
     monkeypatch.setattr("reprobit.cache.IncrementalCache", CacheBomb)
     monkeypatch.setattr("reprobit.cli_build.load_project_tree", load)
@@ -4292,6 +5502,7 @@ def test_plain_build_loads_worktree_authority_before_state_and_emits_warm_summar
                 elapsed_seconds=0.25,
                 runtime_init_count=0,
             ),
+            seed_objects={},
         )
 
     monkeypatch.setattr("reprobit.cli_build.load_project_tree", load)
@@ -4382,6 +5593,40 @@ def test_verify_rejects_redundant_cold_profile_and_individual_report_flags(
         assert "unrecognized arguments" in capsys.readouterr().err
 
 
+def test_verify_report_outputs_stay_in_the_managed_report_area(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    _complete_project(project)
+    bundle = load_project_tree(project)
+    reports = project / ".reprobit-state" / "reports"
+
+    _check_report_outputs(
+        project,
+        bundle,
+        (("JSON report", reports / "report.json"), ("HTML report", reports / "report.html")),
+    )
+
+    with pytest.raises(CLIError, match="JSON report overlaps local state"):
+        _check_report_outputs(
+            project,
+            bundle,
+            (
+                ("JSON report", project / ".reprobit-state" / "cache" / "report.json"),
+                ("HTML report", reports / "report.html"),
+            ),
+        )
+    with pytest.raises(CLIError, match="JSON report overlaps program reference"):
+        _check_report_outputs(
+            project,
+            bundle,
+            (
+                ("JSON report", project / "reference" / "program.bin"),
+                ("HTML report", reports / "report.html"),
+            ),
+        )
+
+
 def test_report_help_explains_the_input_and_output_paths(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
@@ -4392,6 +5637,24 @@ def test_report_help_explains_the_input_and_output_paths(
     help_text = capsys.readouterr().out
     assert "canonical report.json to validate and render" in help_text
     assert "replace the input suffix with .html" in help_text
+
+
+def test_explain_reports_when_no_interventions_are_saved(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_project(project)
+    (project / "reprobit/interventions/program.json").unlink()
+    capsys.readouterr()
+
+    assert main(["explain", str(project)]) == 0
+    assert capsys.readouterr().out == "No saved interventions.\n"
+
+    assert main(["--format", "ndjson", "explain", str(project)]) == 0
+    event = json.loads(capsys.readouterr().out)
+    assert event["event"] == "intervention_summary"
+    assert event["interventions"] == 0
 
 
 def test_primary_help_uses_human_terms_for_common_workflows(
@@ -4413,7 +5676,6 @@ def test_primary_help_uses_human_terms_for_common_workflows(
 @pytest.mark.parametrize(
     "arguments",
     (
-        ("doctor", "--help"),
         ("status", "--help"),
         ("build", "--help"),
         ("verify", "--help"),
@@ -4430,6 +5692,16 @@ def test_project_command_help_states_the_default_directory(
 
     assert stopped.value.code == 0
     assert "project directory (default: .)" in capsys.readouterr().out
+
+
+def test_doctor_help_explains_its_host_only_default(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        main(["doctor", "--help"])
+
+    assert stopped.value.code == 0
+    assert "omit it to check only this machine" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -4656,6 +5928,11 @@ def test_report_and_cmake_module_commands(
     write_report_json(report, report_json)
     report_html = tmp_path / "report.html"
 
+    original_report = report_json.read_bytes()
+    assert main(["report", str(report_json), "--html", str(report_json)]) == 2
+    assert "must differ" in capsys.readouterr().err
+    assert report_json.read_bytes() == original_report
+
     assert main(["report", str(report_json), "--html", str(report_html)]) == 0
     assert "<!doctype html>" in report_html.read_text()
     assert main(["cmake-module", "--file"]) == 0
@@ -4692,12 +5969,12 @@ def test_source_lock_never_admits_host_ci_configuration(tmp_path: Path) -> None:
     [
         ("init",),
         ("toolchain", "lock"),
-        ("source", "export", "build/reprobit-source"),
+        ("source", "export"),
         ("graph", "configure", "--workspace-root", "w", "--toolchain-root", "t"),
         ("graph", "extract"),
     ],
 )
-def test_project_is_positional_everywhere_and_project_option_stays_an_alias(
+def test_project_is_positional_everywhere(
     prefix: tuple[str, ...],
 ) -> None:
     parser = _parser()
@@ -4717,21 +5994,48 @@ def test_project_is_positional_everywhere_and_project_option_stays_an_alias(
         ]
     assert parser.parse_args([*prefix, *required]).project == "."
     assert parser.parse_args([*prefix, *required, "elsewhere"]).project == "elsewhere"
-    if prefix != ("init",):
-        alias = parser.parse_args([*prefix, *required, "--project", "elsewhere"])
-        assert alias.project == "elsewhere"
-        subparser = next(
-            action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    subparser = next(
+        action for action in parser._actions if isinstance(action, argparse._SubParsersAction)
+    )
+    command = subparser.choices[prefix[0]]
+    if len(prefix) > 1 and prefix[1] in ("lock", "export", "configure", "extract"):
+        nested = next(
+            action for action in command._actions if isinstance(action, argparse._SubParsersAction)
         )
-        command = subparser.choices[prefix[0]]
-        if len(prefix) > 1 and prefix[1] in ("lock", "export", "configure", "extract"):
-            nested = next(
-                action
-                for action in command._actions
-                if isinstance(action, argparse._SubParsersAction)
-            )
-            command = nested.choices[prefix[1]]
-        assert "--project" not in command.format_help()
+        command = nested.choices[prefix[1]]
+    assert all("--project" not in action.option_strings for action in command._actions)
+
+
+def test_toolchain_option_names_are_consistent() -> None:
+    parser = _parser()
+    init = parser.parse_args(["init", "--profile", "msvc_5_0_rtm"])
+    doctor = parser.parse_args(["doctor", "--profile", "msvc_5_0_rtm", "--toolchain-root", "tc"])
+    lock = parser.parse_args(
+        ["toolchain", "lock", "--profile", "msvc_5_0_rtm", "--toolchain-root", "tc"]
+    )
+
+    assert init.profile == doctor.toolchain_profile == lock.profile == "msvc_5_0_rtm"
+    assert doctor.toolchain_root == lock.toolchain_root == "tc"
+
+
+def test_toolchain_provision_lists_only_profiles_it_can_install(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        main(["toolchain", "provision", "msvc_5_0_rtm"])
+
+    assert stopped.value.code == 2
+    assert "invalid choice" in capsys.readouterr().err
+
+
+def test_next_step_keeps_human_and_machine_commands_together(tmp_path: Path) -> None:
+    step = NextStep(("rbit", "source", "preview", tmp_path / "path with spaces"))
+
+    assert step.fields() == {
+        "next_argv": ("rbit", "source", "preview", str(tmp_path / "path with spaces")),
+        "next_command": human_command(step.argv),
+    }
+    assert next_step_fields(None) == {"next_argv": (), "next_command": None}
 
 
 def test_default_jobs_follows_the_usable_cpus_up_to_the_ceiling(monkeypatch: Any) -> None:
@@ -4975,6 +6279,69 @@ def test_os_errors_name_the_path_and_the_system_explanation(
     event = json.loads(capsys.readouterr().out)
     assert event["error_type"] == "FileNotFoundError"
     assert event["message"].startswith(f"error: cannot read {missing}: ")
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    (
+        ("--format", "ndjson", "build", "--jobs", "not-a-number"),
+        ("build", "--format", "ndjson", "--jobs", "not-a-number"),
+    ),
+)
+def test_ndjson_argument_errors_are_machine_readable(
+    arguments: tuple[str, ...],
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert main(list(arguments)) == 2
+
+    captured = capsys.readouterr()
+    event = json.loads(captured.out)
+    assert event["event"] == "error"
+    assert event["error_type"] == "ArgumentError"
+    assert event["exit_code"] == 2
+    assert "--jobs" in event["message"]
+    assert captured.err == ""
+
+
+def test_ndjson_help_remains_human_readable(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as stopped:
+        main(["--format", "ndjson", "build", "--help"])
+
+    captured = capsys.readouterr()
+    assert stopped.value.code == 0
+    assert captured.out.startswith("usage: rbit build")
+    assert captured.err == ""
+
+
+def test_exception_notes_are_bounded_in_text_and_machine_errors(
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def failing_handler(_args: argparse.Namespace, _output: CLIOutput) -> int:
+        error = RuntimeError("primary failure")
+        for index in range(6):
+            error.add_note(f"cleanup {index} also failed")
+        raise error
+
+    monkeypatch.setattr("reprobit.cli._command_cmake_module", failing_handler)
+    assert main(["cmake-module"]) == 2
+    rendered = capsys.readouterr().err
+    assert "error: primary failure" in rendered
+    assert "Note: cleanup 0 also failed" in rendered
+    assert "cleanup 4" not in rendered
+    assert "... and 2 more diagnostic notes" in rendered
+
+    assert main(["--format", "ndjson", "cmake-module"]) == 2
+    event = json.loads(capsys.readouterr().out)
+    assert event["notes"] == [
+        "cleanup 0 also failed",
+        "cleanup 1 also failed",
+        "cleanup 2 also failed",
+        "cleanup 3 also failed",
+        "... and 2 more diagnostic notes",
+    ]
 
 
 def test_report_rejects_a_missing_input_before_reading(tmp_path: Path, capsys: Any) -> None:

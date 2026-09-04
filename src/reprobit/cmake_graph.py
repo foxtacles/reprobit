@@ -7,14 +7,16 @@ import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 
 from reprobit.authority_snapshot import resolve_project_path
 from reprobit.cli_paths import CLIError, real_directory, relative_output, safe_project_path
 from reprobit.cmake import CMakeExportPlan
-from reprobit.cmake_configure import effective_source_digest
+from reprobit.cmake_configure import cmake_define_arguments, effective_source_digest
 from reprobit.cmake_import import imported_translation_unit_authority
 from reprobit.model import Digest
 from reprobit.producer_graph import (
+    CMakeImportRecipe,
     ProducerGraphDocument,
     graph_reference,
     producer_graph_digest,
@@ -31,6 +33,9 @@ from reprobit.schema import (
 from reprobit.strict_json import canonical_json, strict_load
 from reprobit.transactions import CASTransaction
 
+if TYPE_CHECKING:
+    from reprobit.toolchains import ToolchainDoctorReport
+
 
 class CMakeGraphError(ValueError):
     """Configured CMake metadata cannot become closed build authority."""
@@ -43,6 +48,7 @@ class CMakeGraphResult:
     transaction_id: str
     translation_units: int | None
     skipped_translation_units: int | None
+    source_toolchain_report: ToolchainDoctorReport | None = None
 
     @property
     def role_counts(self) -> dict[str, int]:
@@ -258,6 +264,10 @@ def record_cmake_graph(
     expected_effective_source_digest: Digest,
     toolchain_root: Path,
     target_plan: Path | None = None,
+    cmake: str = "cmake",
+    configuration: str = "RelWithDebInfo",
+    timeout_seconds: float = 600.0,
+    cmake_defines: Sequence[str] = (),
     directive_inputs: Sequence[str] = (),
     derive_translation_units: bool = False,
 ) -> CMakeGraphResult:
@@ -299,6 +309,7 @@ def record_cmake_graph(
         raise CMakeGraphError("toolchain lock profile differs from reprobit.toml")
 
     outputs = _target_outputs(spec, configured, target_plan)
+    cmake_define_arguments(cmake_defines)
     directives = _directive_inputs(
         directive_inputs,
         project_targets={target.id for target in spec.targets},
@@ -311,6 +322,17 @@ def record_cmake_graph(
         path_profile_id=spec.paths.id,
         target_outputs=outputs,
         directive_inputs=directives,
+    )
+    graph = graph.model_copy(
+        update={
+            "import_recipe": CMakeImportRecipe(
+                cmake=cmake,
+                configuration=configuration,
+                timeout_seconds=timeout_seconds,
+                cmake_defines=tuple(cmake_defines),
+                directive_inputs=tuple(directive_inputs),
+            )
+        }
     )
     graph_relative = relative_output(root, spec.layout.producer_graph)
     graph_data = canonical_json(graph)

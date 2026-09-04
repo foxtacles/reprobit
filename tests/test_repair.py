@@ -3,12 +3,16 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 from test_cli import _complete_translation_unit_project
 
 from reprobit.cli import main
+from reprobit.cli_build import VerifyRequest, VerifyResult
 from reprobit.cli_output import CLIOutput
 from reprobit.cli_paths import CLIError
 from reprobit.composition_ledger import (
@@ -17,10 +21,12 @@ from reprobit.composition_ledger import (
     read_ledger,
     write_ledger,
 )
+from reprobit.model import Digest
 from reprobit.project_loader import load_project, load_project_tree
 from reprobit.repair import RepairError, capture_repair_snapshot, collect_repair_candidate
 from reprobit.repair_workflow import RepairWorkflowError, RepairWorkflowResult
 from reprobit.schema import classic_debug_companion_paths
+from reprobit.strict_json import canonical_json
 
 
 def _authority_bytes(project: Path) -> dict[Path, bytes]:
@@ -30,8 +36,8 @@ def _authority_bytes(project: Path) -> dict[Path, bytes]:
     }
 
 
-def _write_candidate_reports(args: argparse.Namespace) -> None:
-    project = Path(args.project)
+def _write_candidate_reports(request: VerifyRequest) -> None:
+    project = request.project
     bundle = load_project_tree(project)
     for relative in (
         *(target.artifact for target in bundle.spec.targets),
@@ -44,10 +50,99 @@ def _write_candidate_reports(args: argparse.Namespace) -> None:
         output = project / relative
         output.parent.mkdir(parents=True, exist_ok=True)
         output.write_bytes(f"verified:{relative}\n".encode())
-    report_directory = project / args.report_dir
+    assert request.report_directory is not None
+    report_directory = project / request.report_directory
     report_directory.mkdir(parents=True, exist_ok=True)
     (report_directory / "report.json").write_bytes(b"{}\n")
     (report_directory / "report.html").write_bytes(b"<!doctype html>\n")
+
+
+def _verify_service(
+    callback: Callable[[VerifyRequest, CLIOutput], int],
+) -> Callable[[VerifyRequest, CLIOutput], VerifyResult]:
+    """Adapt focused test behavior to the typed verification service result."""
+
+    def verify(request: VerifyRequest, output: CLIOutput) -> VerifyResult:
+        accepted = callback(request, output) == 0
+        project = request.project
+        bundle = load_project_tree(project)
+        receipts: list[SimpleNamespace] = []
+        targets: list[SimpleNamespace] = []
+        target_relatives = {target.artifact for target in bundle.spec.targets}
+        output_relatives = {
+            *target_relatives,
+            *(
+                relative
+                for companion in classic_debug_companion_paths(bundle)
+                for relative in (companion.image, companion.pdb)
+            ),
+        }
+        for relative in sorted(output_relatives):
+            path = project / relative
+            if not path.is_file():
+                continue
+            payload = path.read_bytes()
+            digest = Digest.from_bytes(payload)
+            receipts.append(SimpleNamespace(path=path, size=len(payload), digest=digest))
+            if relative in target_relatives:
+                target_id = next(
+                    target.id for target in bundle.spec.targets if target.artifact == relative
+                )
+                targets.append(
+                    SimpleNamespace(
+                        target_id=target_id,
+                        artifact=path,
+                        comparison=SimpleNamespace(
+                            candidate_size=len(payload),
+                            candidate_digest=digest.value,
+                        ),
+                    )
+                )
+        report = SimpleNamespace(
+            verdict=SimpleNamespace(cold=False, logic_certified=False, byte_exact=False),
+            targets=(),
+            proof=SimpleNamespace(supplemental_outputs=()),
+        )
+        assert request.report_directory is not None
+        report_root = project / request.report_directory
+        report_json = report_root / "report.json"
+        report_html = report_root / "report.html"
+        spec = load_project(project)
+        ledger_path = (project / spec.state_dir).joinpath(*COMPOSED_BODY_LEDGER_RELATIVE)
+        ledger = (
+            SimpleNamespace(
+                path=ledger_path,
+                outcome="succeeded",
+                payload=ledger_path.read_bytes(),
+            )
+            if ledger_path.is_file()
+            else None
+        )
+        report_json_payload = report_json.read_bytes() if report_json.is_file() else b""
+        report_html_payload = report_html.read_bytes() if report_html.is_file() else b""
+        return cast(
+            VerifyResult,
+            SimpleNamespace(
+                accepted=accepted,
+                project=project,
+                engine=SimpleNamespace(
+                    report=report,
+                    build=SimpleNamespace(outputs=tuple(receipts)),
+                    targets=tuple(targets),
+                    report_payloads={
+                        report_json: report_json_payload,
+                        report_html: report_html_payload,
+                    },
+                ),
+                report_json=report_json,
+                report_html=report_html,
+                report_json_payload=report_json_payload,
+                report_html_payload=report_html_payload,
+                ledger=ledger,
+            ),
+        )
+
+    return verify
 
 
 def _write_composed_body_ledger(project: Path, graph_digest: str) -> Path:
@@ -117,7 +212,7 @@ def test_repair_preserves_the_locked_source_set_when_git_tracks_another_file(
         _write_candidate_reports(args)
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 0
@@ -142,7 +237,7 @@ def test_repair_explains_a_removed_locked_source_before_staging(
         verified = True
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 2
@@ -152,7 +247,7 @@ def test_repair_explains_a_removed_locked_source_before_staging(
     assert "Removed: notes.txt" in message
     assert "cannot seal repair input" not in message
     assert "rbit source preview" in message
-    assert "Follow only the safe next command printed by preview" in message
+    assert "Follow the safe next command printed by preview" in message
     assert not verified
 
 
@@ -174,7 +269,7 @@ def test_repair_refreshes_source_records_and_verifies_once(
         _write_candidate_reports(args)
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 0
@@ -199,7 +294,7 @@ def test_repair_noop_reports_that_exact_verification_passed(
         _write_candidate_reports(args)
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 0
@@ -228,7 +323,7 @@ def test_repair_quiet_reaches_private_workflow_progress(
         return 0
 
     monkeypatch.setattr("reprobit.cli_repair.repair_classic_records", repair)
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert main(["--quiet", "repair", str(project)]) == 0
@@ -264,7 +359,7 @@ def test_repair_completion_omits_zero_counters_and_uses_plain_pluralization(
         _write_candidate_reports(args)
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 0
@@ -308,7 +403,7 @@ def test_repair_machine_summary_names_all_compiler_candidates(
         _write_candidate_reports(args)
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert main(["--format", "ndjson", "repair", str(project)]) == 0
@@ -316,7 +411,7 @@ def test_repair_machine_summary_names_all_compiler_candidates(
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     completion = next(event for event in events if event["event"] == "repair_complete")
     assert completion["compiler_candidates"] == 3
-    assert completion["donor_candidates"] == 3
+    assert completion["compiler_candidates"] == 3
     assert completion["admitted_translation_units"] == 2
     assert completion["source_retunes"] == 1
 
@@ -402,7 +497,7 @@ def test_repair_publishes_reports_to_the_requested_project_directory(
         _write_candidate_reports(args)
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert main(["repair", str(project), "--report-dir", "build/repair-report"]) == 0
@@ -427,7 +522,7 @@ def test_repair_restores_authority_when_exact_verification_fails(
     def reject(_args: argparse.Namespace, _output: CLIOutput) -> int:
         raise CLIError("candidate output differs")
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", reject)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(reject))
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 2
@@ -453,7 +548,10 @@ def test_repair_restores_authority_when_verification_returns_failure(
     public_ledger = _write_composed_body_ledger(project, "1" * 64)
     ledger_before = public_ledger.read_bytes()
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", lambda *_args: 1)
+    monkeypatch.setattr(
+        "reprobit.cli_repair.execute_verify",
+        _verify_service(lambda *_args: 1),
+    )
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 2
@@ -503,7 +601,7 @@ def test_source_layout_fallback_stays_private_when_final_verification_fails(
         return 1
 
     monkeypatch.setattr("reprobit.cli_repair.repair_classic_records", accept_private_layout)
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", reject)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(reject))
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 2
@@ -528,7 +626,10 @@ def test_repair_never_overwrites_concurrent_authority_edits(
         _write_candidate_reports(args)
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", edit_then_accept)
+    monkeypatch.setattr(
+        "reprobit.cli_repair.execute_verify",
+        _verify_service(edit_then_accept),
+    )
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 2
@@ -556,7 +657,10 @@ def test_repair_never_overwrites_concurrent_public_output(
         artifact.write_bytes(b"concurrent output\n")
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", edit_then_accept)
+    monkeypatch.setattr(
+        "reprobit.cli_repair.execute_verify",
+        _verify_service(edit_then_accept),
+    )
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 2
@@ -583,7 +687,10 @@ def test_repair_never_overwrites_concurrent_report(
         live_report.write_bytes(b"concurrent report\n")
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", edit_then_accept)
+    monkeypatch.setattr(
+        "reprobit.cli_repair.execute_verify",
+        _verify_service(edit_then_accept),
+    )
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 2
@@ -609,11 +716,65 @@ def test_repair_publishes_the_verified_composed_body_ledger(
         _write_composed_body_ledger(staged, "2" * 64)
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 0
 
+    assert read_ledger(public_ledger).graph_digest == "2" * 64
+
+
+@pytest.mark.parametrize(
+    "post_verify_mutation",
+    ("authority", "output", "report", "ledger"),
+)
+def test_repair_binds_publication_to_the_finished_verification_result(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    post_verify_mutation: str,
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
+    public_ledger = _write_composed_body_ledger(project, "1" * 64)
+    authority_before = _authority_bytes(project)
+
+    def verify_candidate(request: VerifyRequest, _output: CLIOutput) -> int:
+        _write_candidate_reports(request)
+        _write_composed_body_ledger(request.project, "2" * 64)
+        return 0
+
+    sealed_verify = _verify_service(verify_candidate)
+
+    def mutate_after_verify(request: VerifyRequest, output: CLIOutput) -> VerifyResult:
+        verified = sealed_verify(request, output)
+        if post_verify_mutation == "authority":
+            plan = request.project / "reprobit/build-plan.json"
+            plan.write_bytes(plan.read_bytes() + b" ")
+        elif post_verify_mutation == "output":
+            (request.project / "out/program.bin").write_bytes(b"changed after verify")
+        elif post_verify_mutation == "report":
+            verified.report_json.write_bytes(b'{"changed":true}\n')
+        else:
+            assert verified.ledger is not None
+            verified.ledger.path.write_bytes(
+                canonical_json(ComposedBodyLedger(graph_digest="f" * 64))
+            )
+        return verified
+
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", mutate_after_verify)
+    capsys.readouterr()
+
+    result = main(["repair", str(project)])
+    if post_verify_mutation in {"authority", "output"}:
+        assert result == 2
+        assert _authority_bytes(project) == authority_before
+        assert read_ledger(public_ledger).graph_digest == "1" * 64
+        return
+
+    assert result == 0
+    assert (project / ".reprobit-state/reports/report.json").read_bytes() == b"{}\n"
     assert read_ledger(public_ledger).graph_digest == "2" * 64
 
 
@@ -630,7 +791,7 @@ def test_repair_removes_an_old_ledger_when_the_verified_run_has_none(
         _write_candidate_reports(args)
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 0
@@ -657,7 +818,7 @@ def test_repair_refuses_a_concurrent_public_ledger_change_without_partial_public
         _write_composed_body_ledger(project, "3" * 64)
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 2
@@ -687,7 +848,7 @@ def test_repair_refuses_malformed_verified_repair_data(
         ledger.write_bytes(b"{}\n")
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert main(["repair", str(project)]) == 2
@@ -710,7 +871,7 @@ def test_repair_refuses_report_directory_inside_saved_authority(
         called = True
         return 0
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     capsys.readouterr()
 
     assert (
@@ -726,6 +887,39 @@ def test_repair_refuses_report_directory_inside_saved_authority(
     )
 
     assert "enters saved authority" in capsys.readouterr().err
+    assert not called
+
+
+def test_repair_refuses_report_directory_inside_managed_cache(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    called = False
+
+    def verify(_args: argparse.Namespace, _output: CLIOutput) -> int:
+        nonlocal called
+        called = True
+        return 0
+
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
+    capsys.readouterr()
+
+    assert (
+        main(
+            [
+                "repair",
+                str(project),
+                "--report-dir",
+                ".reprobit-state/cache/reports",
+            ]
+        )
+        == 2
+    )
+
+    assert "overlaps local state" in capsys.readouterr().err
     assert not called
 
 
@@ -819,7 +1013,7 @@ def test_repair_reports_cleanup_failure_after_success_truthfully(
         original_exit(self, *args)  # type: ignore[arg-type]
         raise OSError("simulated cleanup failure")
 
-    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    monkeypatch.setattr("reprobit.cli_repair.execute_verify", _verify_service(verify))
     monkeypatch.setattr(StagedProject, "__exit__", fail_cleanup)
     capsys.readouterr()
 

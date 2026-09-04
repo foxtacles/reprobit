@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 import re
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,7 +23,7 @@ from reprobit.classic_repair_probe import (
     ClassicDonorRetuneRefusal,
 )
 from reprobit.classic_repair_session import LegacyRepairRefusal
-from reprobit.model import ByteRange, Digest, Scope
+from reprobit.model import AuthenticityPolicy, ByteRange, Digest, Scope
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeFamily,
@@ -35,6 +34,13 @@ from reprobit.schema import (
 )
 
 _ORIGINAL_DISCOVERY = subject.probe_classic_carrier_discovery
+
+
+def _options(**changes: object) -> subject.RepairWorkflowOptions:
+    return subject.RepairWorkflowOptions(
+        execution=cast(Any, object()),
+        **changes,
+    )
 
 
 def _analysis(
@@ -96,7 +102,7 @@ def _run(
             lambda *_args, **_kwargs: ClassicDiscoveryResult((), (), 0),
         )
     return subject.repair_classic_records(
-        argparse.Namespace(project=str(tmp_path)),
+        _options(),
         cast(Any, object()),
         staged_root=tmp_path,
         spec=cast(Any, object()),
@@ -332,7 +338,7 @@ def test_workflow_names_shared_budget_when_source_layout_search_exhausts_it(
 
     with pytest.raises(
         subject.RepairWorkflowError,
-        match="command-wide --donor-candidates limit after testing 256 repair choices",
+        match="reached --candidate-limit after testing 256 repair choices",
     ):
         _run(
             tmp_path,
@@ -510,6 +516,75 @@ def test_workflow_applies_bounded_donor_repairs_and_rechecks_composition(
         "repair pass 1: checking affected source files",
         "repair pass 2: checking again (adjusted 1 compiler choice)",
     ]
+
+
+def test_workflow_closes_each_probe_session_before_authority_changes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal = SimpleNamespace(
+        unit_id="tu.shared",
+        intervention=SimpleNamespace(role=ClassicRecipeRole.FUNCTION, dependencies=("donor",)),
+        receipt=object(),
+        materials=object(),
+        reason="donor declaration shape moved",
+    )
+    monkeypatch.setattr(
+        subject,
+        "plan_redundant_action_retirements",
+        lambda *_args: (_ for _ in ()).throw(RedundantActionRepairError("not redundant")),
+    )
+    events: list[tuple[str, int]] = []
+
+    class ProbeSession:
+        def __init__(self, *_args: object) -> None:
+            self.identity = 1 + sum(event[0] == "enter" for event in events)
+
+        def __enter__(self) -> ProbeSession:
+            events.append(("enter", self.identity))
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            events.append(("close", self.identity))
+
+    monkeypatch.setattr(subject, "ClassicRepairProbeSession", ProbeSession)
+
+    def probe(*_args: object, **kwargs: object) -> object:
+        session = cast(ProbeSession, kwargs["session"])
+        events.append(("probe", session.identity))
+        return SimpleNamespace(repairs=(object(),), refusals=(), compiled_candidates=1)
+
+    monkeypatch.setattr(subject, "probe_classic_donor_repairs", probe)
+
+    def apply(*_args: object) -> tuple[str, ...]:
+        identity = sum(event[0] == "close" for event in events)
+        assert events[-1] == ("close", identity)
+        events.append(("apply", identity))
+        return ("reprobit/interventions/shared.json",)
+
+    monkeypatch.setattr(subject, "apply_classic_donor_repairs", apply)
+
+    result = _run(
+        tmp_path,
+        monkeypatch,
+        [
+            _analysis(completed=False, refusals=(refusal,)),
+            _analysis(completed=False, refusals=(refusal,)),
+            _analysis(completed=True),
+        ],
+    )
+
+    assert events == [
+        ("enter", 1),
+        ("probe", 1),
+        ("close", 1),
+        ("apply", 1),
+        ("enter", 2),
+        ("probe", 2),
+        ("close", 2),
+        ("apply", 2),
+    ]
+    assert result.donor_retunes == 2
 
 
 def test_legacy_fallback_is_published_only_after_donor_search_finds_no_improvement(
@@ -778,7 +853,7 @@ def test_workflow_passes_one_cumulative_candidate_budget_to_donor_probes(
 
     with pytest.raises(
         subject.RepairWorkflowError,
-        match="command-wide --donor-candidates limit after testing 256 repair choices",
+        match="reached --candidate-limit after testing 256 repair choices",
     ):
         _run(
             tmp_path,
@@ -984,7 +1059,7 @@ def test_workflow_stops_when_authority_state_repeats(
 
     with pytest.raises(subject.RepairWorkflowError, match="previously checked"):
         subject.repair_classic_records(
-            argparse.Namespace(project=str(tmp_path)),
+            _options(),
             cast(Any, object()),
             staged_root=tmp_path,
             spec=cast(Any, object()),
@@ -1392,9 +1467,13 @@ def _census_run(
     monkeypatch: pytest.MonkeyPatch,
     analyses: list[Any],
     censuses: list[Any],
+    *,
+    graph_digests: list[str] | None = None,
 ) -> tuple[subject.RepairWorkflowResult, list[dict[str, object]]]:
     cache_root = _ledger_root(tmp_path)
     bundle_counter = iter(range(100))
+    graph = object()
+    digests = iter(graph_digests or ["0" * 64] * 100)
     monkeypatch.setattr(
         subject,
         "load_project_tree",
@@ -1404,7 +1483,13 @@ def _census_run(
             ),
             proof_documents=(),
             interventions=(),
+            producer_graph=graph,
         ),
+    )
+    monkeypatch.setattr(
+        subject,
+        "producer_graph_digest",
+        lambda received: Digest(value=next(digests)) if received is graph else pytest.fail(),
     )
     analyze_calls: list[dict[str, object]] = []
 
@@ -1415,13 +1500,29 @@ def _census_run(
     monkeypatch.setattr(subject, "analyze_classic_repair", analyze)
     monkeypatch.setattr(subject, "plan_repair_census", lambda *_args, **_kwargs: censuses.pop(0))
     result = subject.repair_classic_records(
-        argparse.Namespace(project=str(tmp_path)),
+        _options(),
         cast(Any, object()),
         staged_root=tmp_path,
         spec=cast(Any, object()),
         cache_root=cache_root,
     )
     return result, analyze_calls
+
+
+def test_workflow_ignores_a_composed_body_ledger_from_another_graph(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result, analyze_calls = _census_run(
+        tmp_path,
+        monkeypatch,
+        [_analysis(completed=True)],
+        [],
+        graph_digests=["1" * 64],
+    )
+
+    assert result.passes == 1
+    assert [call["seed_census"] for call in analyze_calls] == [False]
 
 
 def test_workflow_records_unrecorded_fallout_found_by_the_ledger_census(
@@ -1456,11 +1557,16 @@ def test_workflow_records_unrecorded_fallout_found_by_the_ledger_census(
     result, analyze_calls = _census_run(
         tmp_path,
         monkeypatch,
-        [_analysis(completed=True), _analysis(completed=True)],
+        [
+            _analysis(completed=True),
+            _analysis(completed=True),
+            _analysis(completed=True),
+            _analysis(completed=True),
+        ],
         censuses,
     )
 
-    assert [call["seed_census"] for call in analyze_calls] == [True, True]
+    assert [call["seed_census"] for call in analyze_calls] == [False, True, False, True]
     assert discovered == [(refusal,)]
     assert result.passes == 2
     assert result.discovered_actions == 1
@@ -1468,6 +1574,33 @@ def test_workflow_records_unrecorded_fallout_found_by_the_ledger_census(
     assert result.changed_records == ("reprobit/interventions/tus/one.json",)
     assert result.affected_units == ("tu.one",)
     assert censuses == []
+
+
+def test_workflow_defers_ledger_census_until_focused_adjustments_settle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repair = SimpleNamespace(unit_id="tu.one")
+    monkeypatch.setattr(
+        subject,
+        "apply_classic_receipt_repairs",
+        lambda *_args: ("reprobit/proofs/one.json",),
+    )
+
+    result, analyze_calls = _census_run(
+        tmp_path,
+        monkeypatch,
+        [
+            _analysis(completed=True, measured=(repair,)),
+            _analysis(completed=True),
+            _analysis(completed=True),
+        ],
+        [SimpleNamespace(refusals=(), unplanned=(), missing=())],
+    )
+
+    assert [call["seed_census"] for call in analyze_calls] == [False, False, True]
+    assert result.passes == 2
+    assert result.measured_checks == 1
 
 
 def test_workflow_names_shared_budget_when_census_search_exhausts_it(
@@ -1496,12 +1629,17 @@ def test_workflow_names_shared_budget_when_census_search_exhausts_it(
 
     with pytest.raises(
         subject.RepairWorkflowError,
-        match="command-wide --donor-candidates limit after testing 256 repair choices",
+        match="reached --candidate-limit after testing 256 repair choices",
     ):
         _census_run(
             tmp_path,
             monkeypatch,
-            [_analysis(completed=True), _analysis(completed=True)],
+            [
+                _analysis(completed=True),
+                _analysis(completed=True),
+                _analysis(completed=True),
+                _analysis(completed=True),
+            ],
             censuses,
         )
 
@@ -1530,7 +1668,7 @@ def test_workflow_rejects_invalid_census_discovery_candidate_count(
         _census_run(
             tmp_path,
             monkeypatch,
-            [_analysis(completed=True)],
+            [_analysis(completed=True), _analysis(completed=True)],
             [SimpleNamespace(refusals=(refusal,), unplanned=(), missing=())],
         )
 
@@ -1559,7 +1697,12 @@ def test_workflow_admits_units_with_unplanned_census_fallout(
     result, _calls = _census_run(
         tmp_path,
         monkeypatch,
-        [_analysis(completed=True), _analysis(completed=True)],
+        [
+            _analysis(completed=True),
+            _analysis(completed=True),
+            _analysis(completed=True),
+            _analysis(completed=True),
+        ],
         censuses,
     )
 
@@ -1587,7 +1730,12 @@ def test_workflow_reports_a_unit_it_cannot_admit(
     monkeypatch.setattr(subject, "plan_translation_unit_admissions", refuse)
 
     with pytest.raises(subject.RepairWorkflowError, match=re.escape("src/other.cpp:?f@@YAXXZ")):
-        _census_run(tmp_path, monkeypatch, [_analysis(completed=True)], censuses)
+        _census_run(
+            tmp_path,
+            monkeypatch,
+            [_analysis(completed=True), _analysis(completed=True)],
+            censuses,
+        )
 
 
 def test_workflow_refuses_census_fallout_no_carrier_state_settles(
@@ -1607,7 +1755,12 @@ def test_workflow_refuses_census_fallout_no_carrier_state_settles(
     with pytest.raises(
         subject.RepairWorkflowError, match="could not restore newly affected functions"
     ):
-        _census_run(tmp_path, monkeypatch, [_analysis(completed=True)], censuses)
+        _census_run(
+            tmp_path,
+            monkeypatch,
+            [_analysis(completed=True), _analysis(completed=True)],
+            censuses,
+        )
 
 
 def test_workflow_without_a_ledger_does_not_census(
@@ -1636,7 +1789,7 @@ def test_workflow_without_a_ledger_does_not_census(
     )
 
     result = subject.repair_classic_records(
-        argparse.Namespace(project=str(tmp_path)),
+        _options(),
         cast(Any, object()),
         staged_root=tmp_path,
         spec=cast(Any, object()),
@@ -1708,7 +1861,8 @@ def _wire_attempt(
     )
     monkeypatch.setattr(subject, "plan_source_regeneration", lambda *_args, **_kwargs: regeneration)
     monkeypatch.setattr(subject, "apply_source_regeneration", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(subject, "command_source_lock", lambda *_args, **_kwargs: 0)
+    monkeypatch.setattr(subject, "plan_source_lock", lambda *_args, **_kwargs: object())
+    monkeypatch.setattr(subject, "apply_source_lock", lambda *_args, **_kwargs: None)
 
     def capture(*_args: object, **_kwargs: object) -> tuple[object, ...]:
         paths = frozenset(cast(set[str], _args[2]))
@@ -1721,12 +1875,11 @@ def _wire_attempt(
 
     def publish(*_args: object, **_kwargs: object) -> object:
         calls["publishes"].append(object())
-        return SimpleNamespace(changed_paths=())
+        return SimpleNamespace(changed_paths=(), cleanup_warning=None)
 
     monkeypatch.setattr(subject, "capture_repair_record_postimages", capture)
     monkeypatch.setattr(subject, "collect_repair_candidate", collect)
     monkeypatch.setattr(subject, "publish_repair_candidate", publish)
-    monkeypatch.setattr(subject, "read_report_json", lambda *_args, **_kwargs: report)
     monkeypatch.setattr(subject, "_cold_link_layout_hint", lambda *_args, **_kwargs: None)
     return snapshot, calls
 
@@ -1754,21 +1907,32 @@ def test_attempt_retries_only_the_targets_failed_by_private_cold_verification(
             ),
         )
     )
-    repair_args: list[argparse.Namespace] = []
+    repair_options: list[subject.RepairWorkflowOptions] = []
     repair_targets: list[frozenset[str]] = []
     repair_hints: list[object] = []
     hint = object()
     monkeypatch.setattr(subject, "_cold_link_layout_hint", lambda *_args: hint)
 
-    def repair(args: argparse.Namespace, *_args: object, **kwargs: object) -> object:
-        repair_args.append(args)
+    def repair(
+        options: subject.RepairWorkflowOptions,
+        *_args: object,
+        **kwargs: object,
+    ) -> object:
+        repair_options.append(options)
         repair_targets.append(cast(frozenset[str], kwargs["settle_target_ids"]))
         repair_hints.append(kwargs["link_layout_hint"])
         return next(workflows)
 
     statuses = iter((1, 0))
+
+    def verify(*_args: object) -> object:
+        return SimpleNamespace(
+            accepted=next(statuses) == 0,
+            engine=SimpleNamespace(report=report),
+        )
+
     result = subject.execute_repair_attempt(
-        argparse.Namespace(donor_candidates=10, adjustment_rounds=5),
+        _options(candidate_limit=10, adjustment_rounds=5),
         cast(Any, object()),
         snapshot=cast(Any, snapshot),
         selected_paths=("src/unit.cpp",),
@@ -1777,13 +1941,13 @@ def test_attempt_retries_only_the_targets_failed_by_private_cold_verification(
         final_report_directory="final-report",
         report_preimages=(),
         keep=subject.KeepWorkspace.NEVER,
-        verify_command=lambda *_args: next(statuses),
+        verify_project=cast(Any, verify),
         repair_records=cast(Any, repair),
     )
 
-    assert len(repair_args) == 2
-    assert repair_args[1].donor_candidates == 6
-    assert repair_args[1].adjustment_rounds == 3
+    assert len(repair_options) == 2
+    assert repair_options[1].candidate_limit == 6
+    assert repair_options[1].adjustment_rounds == 3
     assert repair_targets == [frozenset(), frozenset({"program"})]
     assert repair_hints == [None, hint]
     assert result.workflow.changed_records == ("first.json", "settled.json")
@@ -1792,6 +1956,69 @@ def test_attempt_retries_only_the_targets_failed_by_private_cold_verification(
     assert result.workflow.source_retunes == 1
     assert len(calls["captures"]) == 2
     assert len(calls["collects"]) == 2
+    assert len(calls["publishes"]) == 1
+
+
+def test_attempt_reports_success_when_cleanup_is_interrupted_after_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = SimpleNamespace(
+        verdict=SimpleNamespace(cold=True, logic_certified=True, byte_exact=True),
+        targets=(SimpleNamespace(id="program", byte_exact=True),),
+    )
+    snapshot, calls = _wire_attempt(tmp_path, monkeypatch, report=report)
+    staged_root = tmp_path / "staged"
+
+    class InterruptingStage(_AttemptStage):
+        def __exit__(self, *_args: object) -> None:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr(
+        subject,
+        "stage_repair_project",
+        lambda *_args, **_kwargs: InterruptingStage(staged_root),
+    )
+
+    def publish(*_args: object, **_kwargs: object) -> object:
+        calls["publishes"].append(object())
+        return SimpleNamespace(
+            changed_paths=(),
+            cleanup_warning="private transaction cleanup was refused",
+        )
+
+    monkeypatch.setattr(subject, "publish_repair_candidate", publish)
+
+    result = subject.execute_repair_attempt(
+        _options(),
+        cast(Any, object()),
+        snapshot=cast(Any, snapshot),
+        selected_paths=(),
+        cache_root=tmp_path / "cache",
+        candidate_report_directory="candidate-report",
+        final_report_directory="final-report",
+        report_preimages=(),
+        keep=subject.KeepWorkspace.NEVER,
+        verify_project=cast(
+            Any,
+            lambda *_args: SimpleNamespace(
+                accepted=True,
+                engine=SimpleNamespace(report=report),
+            ),
+        ),
+        repair_records=cast(
+            Any,
+            lambda *_args, **_kwargs: _attempt_workflow(
+                "first.json",
+                candidates=1,
+                rounds=1,
+            ),
+        ),
+    )
+
+    assert result.cleanup_warning == (
+        "private transaction cleanup was refused; private workspace cleanup was interrupted"
+    )
     assert len(calls["publishes"]) == 1
 
 
@@ -1824,7 +2051,7 @@ def test_attempt_does_not_retry_without_certified_cold_byte_fallout(
 
     with pytest.raises(subject.RepairAttemptFailure) as raised:
         subject.execute_repair_attempt(
-            argparse.Namespace(donor_candidates=10, adjustment_rounds=5),
+            _options(candidate_limit=10, adjustment_rounds=5),
             cast(Any, object()),
             snapshot=cast(Any, snapshot),
             selected_paths=(),
@@ -1833,13 +2060,65 @@ def test_attempt_does_not_retry_without_certified_cold_byte_fallout(
             final_report_directory="final-report",
             report_preimages=(),
             keep=subject.KeepWorkspace.NEVER,
-            verify_command=lambda *_args: 1,
+            verify_project=cast(
+                Any,
+                lambda *_args: SimpleNamespace(
+                    accepted=False,
+                    engine=SimpleNamespace(report=report),
+                ),
+            ),
             repair_records=cast(Any, repair),
         )
 
     assert isinstance(raised.value.error, subject.RepairError)
     assert repair_calls == 1
     assert len(calls["collects"]) == 1
+    assert calls["publishes"] == []
+
+
+def test_attempt_applies_a_stricter_clean_policy_to_final_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    report = SimpleNamespace(
+        verdict=SimpleNamespace(cold=True, logic_certified=True, byte_exact=True),
+        targets=(SimpleNamespace(id="program", byte_exact=True),),
+    )
+    snapshot, calls = _wire_attempt(tmp_path, monkeypatch, report=report)
+    seen_policies: list[AuthenticityPolicy | None] = []
+
+    def verify(request: subject.VerifyRequest, *_args: object) -> object:
+        seen_policies.append(request.policy)
+        # The fixture models a byte-exact project accepted by its committed
+        # quarantine policy but refused by an explicit clean override.
+        return SimpleNamespace(
+            accepted=request.policy is None,
+            engine=SimpleNamespace(report=report),
+        )
+
+    with pytest.raises(subject.RepairAttemptFailure):
+        subject.execute_repair_attempt(
+            _options(policy=AuthenticityPolicy.CLEAN),
+            cast(Any, object()),
+            snapshot=cast(Any, snapshot),
+            selected_paths=(),
+            cache_root=tmp_path / "cache",
+            candidate_report_directory="candidate-report",
+            final_report_directory="final-report",
+            report_preimages=(),
+            keep=subject.KeepWorkspace.NEVER,
+            verify_project=cast(Any, verify),
+            repair_records=cast(
+                Any,
+                lambda *_args, **_kwargs: _attempt_workflow(
+                    "first.json",
+                    candidates=1,
+                    rounds=1,
+                ),
+            ),
+        )
+
+    assert seen_policies == [AuthenticityPolicy.CLEAN]
     assert calls["publishes"] == []
 
 
@@ -1860,14 +2139,17 @@ def test_attempt_requires_real_source_progress_before_rechecking_cold_output(
     )
     verifies = 0
 
-    def verify(*_args: object) -> int:
+    def verify(*_args: object) -> object:
         nonlocal verifies
         verifies += 1
-        return 1
+        return SimpleNamespace(
+            accepted=False,
+            engine=SimpleNamespace(report=report),
+        )
 
     with pytest.raises(subject.RepairAttemptFailure, match="no safe automatic source adjustment"):
         subject.execute_repair_attempt(
-            argparse.Namespace(donor_candidates=10, adjustment_rounds=5),
+            _options(candidate_limit=10, adjustment_rounds=5),
             cast(Any, object()),
             snapshot=cast(Any, snapshot),
             selected_paths=(),
@@ -1876,7 +2158,7 @@ def test_attempt_requires_real_source_progress_before_rechecking_cold_output(
             final_report_directory="final-report",
             report_preimages=(),
             keep=subject.KeepWorkspace.NEVER,
-            verify_command=verify,
+            verify_project=cast(Any, verify),
             repair_records=cast(Any, lambda *_args, **_kwargs: next(workflows)),
         )
 

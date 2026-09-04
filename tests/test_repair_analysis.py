@@ -1,19 +1,23 @@
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
 import reprobit.repair_workflow as subject
 from reprobit.classic_project import ClassicProjectError
 from reprobit.cli_output import CLIOutput
-from reprobit.repair_workflow import RepairAnalysisError, analyze_classic_repair
+from reprobit.repair_workflow import (
+    RepairAnalysisError,
+    RepairWorkflowOptions,
+    analyze_classic_repair,
+)
 
 
-def _args() -> argparse.Namespace:
-    return argparse.Namespace(cold=True, keep_workspace="always")
+def _options() -> RepairWorkflowOptions:
+    return RepairWorkflowOptions(cast(Any, object()))
 
 
 def _output() -> CLIOutput:
@@ -26,36 +30,41 @@ def test_analysis_uses_private_warm_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed: list[argparse.Namespace] = []
+    observed: list[object] = []
 
-    def build(args: argparse.Namespace, _output: CLIOutput) -> int:
-        observed.append(args)
-        return 0
+    def build(request: object, _output: CLIOutput) -> object:
+        observed.append(request)
+        return SimpleNamespace(seed_objects={})
 
-    monkeypatch.setattr("reprobit.repair_workflow.command_build", build)
+    monkeypatch.setattr("reprobit.repair_workflow.execute_build", build)
 
     cache_root = tmp_path / "shared-state"
-    result = analyze_classic_repair(_args(), _output(), cache_root=cache_root)
+    result = analyze_classic_repair(
+        _options(),
+        _output(),
+        staged_root=tmp_path,
+        cache_root=cache_root,
+    )
 
     assert result.completed is True
-    assert observed[0].cold is False
-    assert observed[0].keep_workspace == "never"
-    assert callable(observed[0]._classic_measured_receipt_repair)
-    assert observed[0]._classic_repair_analysis_only is True
-    assert observed[0]._incremental_cache_root == cache_root
-    assert observed[0]._incremental_progress_description == "checking affected source files"
+    request = cast(Any, observed[0])
+    assert request.cold is False
+    assert request.keep_workspace.value == "never"
+    assert callable(request.repair_analysis.receipt_repair)
+    assert request.cache_root == cache_root
+    assert request.progress_description == "checking affected source files"
 
 
 def test_analysis_never_misclassifies_an_unrelated_runtime_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def build(_args: argparse.Namespace, _output: CLIOutput) -> int:
+    def build(_request: object, _output: CLIOutput) -> object:
         raise ClassicProjectError("compiler environment failed")
 
-    monkeypatch.setattr("reprobit.repair_workflow.command_build", build)
+    monkeypatch.setattr("reprobit.repair_workflow.execute_build", build)
 
     with pytest.raises(RepairAnalysisError, match="compiler environment failed"):
-        analyze_classic_repair(_args(), _output())
+        analyze_classic_repair(_options(), _output(), staged_root=Path.cwd())
 
 
 def test_analysis_discards_results_after_each_units_first_refusal(
@@ -72,12 +81,19 @@ def test_analysis_discards_results_after_each_units_first_refusal(
     session = SimpleNamespace(
         repairs=(before_first, after_first, before_second, after_second, unaffected),
         refusals=(first_refusal, downstream_refusal, second_refusal),
-        seed_objects={},
     )
     monkeypatch.setattr(subject, "ClassicRepairSession", lambda: session)
-    monkeypatch.setattr(subject, "command_build", lambda *_args: 0)
+    monkeypatch.setattr(
+        subject,
+        "execute_build",
+        lambda *_args: SimpleNamespace(seed_objects={}),
+    )
 
-    result = subject.analyze_classic_repair(_args(), _output())
+    result = subject.analyze_classic_repair(
+        _options(),
+        _output(),
+        staged_root=Path.cwd(),
+    )
 
     assert result.measured_repairs == (before_first, before_second, unaffected)
     assert result.structural_refusals == (first_refusal, second_refusal)

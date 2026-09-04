@@ -27,6 +27,7 @@ from reprobit.toolchains import (
     ClassicMSVCToolchain,
     ToolchainError,
     ToolchainSourcePin,
+    validate_toolchain_installation,
     validate_toolchain_lock,
 )
 
@@ -96,6 +97,27 @@ def test_toolchain_lock_detects_producer_drift(tmp_path: Path) -> None:
     report = toolchain.doctor(lock)
     assert not report.ok
     assert any(check.detail == "digest differs" for check in report.checks)
+
+
+def test_toolchain_doctor_result_is_reused_only_for_the_same_root_and_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    toolchain = fake_installation(tmp_path, MSVC_42)
+    lock = toolchain.create_lock(include_trees=True)
+    report = toolchain.doctor(lock)
+    other_toolchain = fake_installation(tmp_path / "other", MSVC_42)
+
+    def unexpected_doctor(
+        _installation: ClassicMSVCToolchain,
+        _lock: SchemaToolchainLock | None = None,
+    ) -> object:
+        raise AssertionError("same-epoch validation repeated its filesystem scan")
+
+    monkeypatch.setattr(ClassicMSVCToolchain, "doctor", unexpected_doctor)
+
+    assert validate_toolchain_installation(toolchain, lock, previous=report) is report
+    assert not report.reusable_for(other_toolchain, lock)
 
 
 def test_create_lock_returns_the_sole_schema_v3_document(

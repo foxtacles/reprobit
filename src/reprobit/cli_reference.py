@@ -14,7 +14,7 @@ from pathlib import Path
 from reprobit.cli import _parser
 
 _SHARED_GROUPS = ("advanced execution options",)
-_HIDDEN_FLAGS = frozenset({"--format", "--quiet", "--project"})
+_HIDDEN_FLAGS = frozenset({"--format", "--quiet"})
 
 
 def _flag_cell(action: argparse.Action) -> str:

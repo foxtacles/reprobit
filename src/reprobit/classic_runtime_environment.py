@@ -38,6 +38,8 @@ from reprobit.process import (
 )
 from reprobit.producer_graph import ProducerRole
 from reprobit.schema import ProjectBundle
+from reprobit.secure_path_contracts import SecurePathError
+from reprobit.secure_paths import atomic_copy_new_relative, stat_relative_file
 from reprobit.strict_json import canonical_json
 from reprobit.toolchains import ClassicMSVCToolchain
 from reprobit.toolchains import profile as toolchain_profile
@@ -413,13 +415,14 @@ def _project_locked_toolchain(
     if destination.exists():
         raise ClassicProjectError("locked toolchain projection destination already exists")
     destination.mkdir(parents=True)
-    relatives: set[PurePosixPath] = {
-        PurePosixPath(item.path)
+    locked_files = {
+        PurePosixPath(item.path): item
         for item in (
             *bundle.toolchain_lock.tools,
             *bundle.toolchain_lock.runtime_files,
         )
     }
+    relatives = set(locked_files)
     for tree in bundle.toolchain_lock.input_trees:
         relative_root = PurePosixPath(tree.path)
         physical_root = source_root.joinpath(*relative_root.parts)
@@ -439,20 +442,30 @@ def _project_locked_toolchain(
         raise ClassicProjectError("locked toolchain closure has DOS-case collisions")
     originals: list[Path] = []
     for relative in sorted(relatives, key=lambda item: item.as_posix().casefold()):
-        source = source_root.joinpath(*relative.parts)
-        if source.is_symlink() or not source.is_file():
-            raise ClassicProjectError(
-                f"locked toolchain file is absent or redirected: {relative.as_posix()!r}"
+        relative_text = relative.as_posix()
+        receipt = locked_files.get(relative)
+        try:
+            source = stat_relative_file(source_root, relative_text)
+            executable = bool(source.mode & stat.S_IXUSR)
+            projected = atomic_copy_new_relative(
+                source_root,
+                relative_text,
+                destination,
+                relative_text,
+                executable=executable,
+                expected_digest=None if receipt is None else receipt.digest,
+                expected_size=(
+                    source.size if receipt is None or receipt.size is None else receipt.size
+                ),
+                expected_source=source,
             )
-        target = destination.joinpath(*relative.parts)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-        target.chmod(stat.S_IMODE(source.stat().st_mode))
-        if target.is_symlink() or _digest_path(target) != _digest_path(source):
+        except SecurePathError as exc:
             raise ClassicProjectError(
-                f"locked toolchain projection differs: {relative.as_posix()!r}"
-            )
-        originals.append(source.resolve(strict=True))
+                f"locked toolchain projection failed: {relative_text!r}: {exc}"
+            ) from exc
+        if os.name != "nt" and bool(projected.mode & stat.S_IXUSR) != executable:
+            raise ClassicProjectError(f"locked toolchain mode differs: {relative_text!r}")
+        originals.append(source.path)
     return tuple(originals)
 
 

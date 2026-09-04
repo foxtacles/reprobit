@@ -20,6 +20,7 @@ from reprobit.project_loader import (
     validate_project_files,
 )
 from reprobit.schema import (
+    CLASSIC_RECIPE_FAMILIES_BY_ROLE,
     BuildPlanDocument,
     ClassicArchiveAuthority,
     ClassicDebugCompanionPaths,
@@ -43,6 +44,7 @@ from reprobit.schema import (
     SourceManifestEntry,
     _ProtectedPathClaims,
     classic_debug_companion_paths,
+    classic_recipe_family_role,
     project_document_schemas,
     schema_catalog,
     source_manifest_digest,
@@ -394,6 +396,129 @@ def create_tree(root: Path) -> None:
     )
 
 
+def test_project_bundle_reports_cross_domain_errors_in_stable_order(tmp_path: Path) -> None:
+    """The coordinator must keep the established first-failure contract."""
+
+    create_tree(tmp_path)
+    baseline = load_project_tree(tmp_path)
+    assert baseline.source_manifest is not None
+
+    def assert_first(message: str, **changes: object) -> None:
+        values = {
+            "root": baseline.root,
+            "spec": baseline.spec,
+            "toolchain_lock": baseline.toolchain_lock,
+            "source_manifest": baseline.source_manifest,
+            "build_plan": baseline.build_plan,
+            "producer_graph": baseline.producer_graph,
+            "intervention_documents": baseline.intervention_documents,
+            "proof_documents": baseline.proof_documents,
+            "oracle_documents": baseline.oracle_documents,
+            **changes,
+        }
+        with pytest.raises(ValidationError) as caught:
+            ProjectBundle.model_validate(values)
+        assert caught.value.errors(include_url=False)[0]["msg"] == f"Value error, {message}"
+
+    mismatched_lock = baseline.toolchain_lock.model_copy(update={"profile": "compiler-other"})
+    mismatched_oracle = baseline.oracle_documents[0].model_copy(update={"target_id": "other"})
+    incomplete_source = baseline.source_manifest.model_copy(update={"complete": False})
+    invalid_plan = _build_plan_with_link_options()
+    invalid_graph = ProducerGraphDocument(
+        schema_version=3,
+        toolchain_lock_digest=Digest.from_bytes(b"different toolchain"),
+        path_profile_id=baseline.spec.paths.id,
+        extractor="cmake-makefiles-v1",
+        nodes=(
+            ProducerNode(
+                id="linker.program",
+                role=ProducerRole.LINKER,
+                owner="program",
+                target_id="program",
+                arguments=("/out:${BUILD}/program.exe",),
+                inputs=(),
+                outputs=("build/program.exe",),
+            ),
+        ),
+    )
+    duplicate = LinkOrderingIntervention(
+        id="duplicate",
+        scope=Scope(target="program"),
+        rationale="characterize bundle validation order",
+        item_ids=("first", "second"),
+    )
+    duplicate_documents = (
+        InterventionDocument(
+            schema_version=3,
+            target_id="program",
+            interventions=(duplicate,),
+        ),
+        InterventionDocument(
+            schema_version=3,
+            target_id="program",
+            interventions=(duplicate,),
+        ),
+    )
+    valid_plan_with_bad_records = BuildPlanDocument(
+        schema_version=3,
+        source_manifest_digest=source_manifest_digest(baseline.source_manifest),
+        translation_units=(),
+        source_overlay_digest=Digest.from_bytes(b"overlay"),
+        source_overlay_interventions=("missing",),
+        archives=(),
+        target_gates=(ClassicTargetGate(target_id="program", build_target="program"),),
+    )
+    orphan_receipt = ClassicProofReceipt(
+        id="orphan-proof",
+        intervention_id="orphan",
+        family=ClassicRecipeFamily.DECLARATION_SHAPE,
+    )
+    orphan_proofs = (
+        ProofDocument(
+            schema_version=3,
+            target_id="program",
+            expected_observations=(orphan_receipt,),
+        ),
+    )
+
+    assert_first(
+        "toolchain lock profile does not match project profile",
+        toolchain_lock=mismatched_lock,
+        oracle_documents=(mismatched_oracle,),
+    )
+    assert_first(
+        "oracle target mismatch; missing=['program'], extra=['other']",
+        oracle_documents=(mismatched_oracle,),
+        source_manifest=incomplete_source,
+    )
+    assert_first(
+        "certifiable bundles require a complete portable source manifest",
+        source_manifest=incomplete_source,
+        build_plan=invalid_plan,
+    )
+    assert_first(
+        "build-plan source manifest digest does not match its document",
+        build_plan=invalid_plan,
+        producer_graph=invalid_graph,
+    )
+    assert_first(
+        "producer graph toolchain-lock binding differs",
+        producer_graph=invalid_graph,
+        intervention_documents=duplicate_documents,
+    )
+    assert_first(
+        "duplicate intervention id: duplicate",
+        build_plan=valid_plan_with_bad_records,
+        intervention_documents=duplicate_documents,
+    )
+    assert_first(
+        "build-plan source overlay interventions do not match authority; "
+        "missing=[], extra=['missing']",
+        build_plan=valid_plan_with_bad_records,
+        proof_documents=orphan_proofs,
+    )
+
+
 def test_project_tree_rejects_entrypoint_as_source_authority(tmp_path: Path) -> None:
     create_tree(tmp_path)
     entrypoint = (tmp_path / "reprobit.toml").read_bytes()
@@ -466,6 +591,50 @@ def test_classic_recipe_role_requires_its_authoritative_scope(
             role=role,
             build_target="program",
             symbol=symbol,
+        )
+
+
+def test_classic_family_roles_cover_only_runtime_supported_families() -> None:
+    supported = set().union(*CLASSIC_RECIPE_FAMILIES_BY_ROLE.values())
+    assert supported == set(ClassicRecipeFamily) - {
+        ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION,
+        ClassicRecipeFamily.ARCHIVE_ADMISSION,
+    }
+    assert sum(len(families) for families in CLASSIC_RECIPE_FAMILIES_BY_ROLE.values()) == len(
+        supported
+    )
+    for role, families in CLASSIC_RECIPE_FAMILIES_BY_ROLE.items():
+        assert all(classic_recipe_family_role(family) is role for family in families)
+    assert classic_recipe_family_role(ClassicRecipeFamily.ARCHIVE_ADMISSION) is None
+
+
+def test_classic_recipe_rejects_a_family_without_runtime_support() -> None:
+    with pytest.raises(
+        ValidationError,
+        match=r"archive_admission.*not supported by the runtime",
+    ):
+        ClassicRecipeIntervention(
+            id="classic",
+            scope=Scope(target="program"),
+            rationale="unsupported family fixture",
+            family=ClassicRecipeFamily.ARCHIVE_ADMISSION,
+            role=ClassicRecipeRole.PROJECT,
+            build_target="program",
+        )
+
+
+def test_classic_recipe_rejects_a_family_from_another_role() -> None:
+    with pytest.raises(
+        ValidationError,
+        match=r"equal_body_strict.*requires role 'function'.*not 'donor'",
+    ):
+        ClassicRecipeIntervention(
+            id="classic",
+            scope=Scope(target="program", translation_unit="main"),
+            rationale="cross-role family fixture",
+            family=ClassicRecipeFamily.EQUAL_BODY_STRICT,
+            role=ClassicRecipeRole.DONOR,
+            build_target="program",
         )
 
 
@@ -677,7 +846,7 @@ def test_load_project_is_v3_only_and_forbids_unknown_fields(tmp_path: Path) -> N
         load_project(path)
 
     path.write_text(PROJECT_TOML.replace("schema_version = 3", "schema_version = 2"))
-    with pytest.raises(SchemaVersionError, match="only schema 3"):
+    with pytest.raises(SchemaVersionError, match="do not edit schema_version by hand"):
         load_project(path)
 
     path.write_text(PROJECT_TOML + '\nunknown = "field"\n')

@@ -5,7 +5,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path, PurePosixPath
 
-from reprobit.cli_output import CLIOutput, count_phrase, human_command
+from reprobit.cli_output import (
+    CLIOutput,
+    NextStep,
+    bounded_items,
+    count_phrase,
+    human_command,
+    next_step_fields,
+)
 from reprobit.cli_paths import CLIError, project_root, safe_project_path
 from reprobit.project_loader import load_project
 from reprobit.schema import ProjectSpec
@@ -49,33 +56,47 @@ def command_state_status(args: argparse.Namespace, output: CLIOutput) -> int:
         f"state: {human_bytes(status.total_bytes)} in {count_phrase(status.total_files, 'file')}",
         f"  runs: {len(status.runs)} ({active} active, {retained} retained), "
         f"{human_bytes(status.run_bytes)}",
-        f"  incremental cache: {count_phrase(status.cache_records, 'record')}, "
-        f"{count_phrase(status.cache_blobs, 'blob')}, "
-        f"{human_bytes(status.cache_bytes)}",
-        "  repair search cache: "
-        f"{count_phrase(status.repair_probe_cache_files, 'file')}, "
-        f"{human_bytes(status.repair_probe_cache_bytes)}",
-        "  saved repair data: "
-        f"{count_phrase(status.repair_ledger_files, 'file')}, "
-        f"{human_bytes(status.repair_ledger_bytes)}",
-        f"  cache leases: {status.cache_active_leases} active, {status.cache_stale_leases} stale",
-        f"  reports: {status.report_files} managed "
-        f"{'file' if status.report_files == 1 else 'files'}, "
-        f"{human_bytes(status.report_bytes)}",
     ]
+    ordered_runs = tuple(sorted(status.runs, key=lambda item: (-item.modified_ns, str(item.path))))
+    visible_runs, hidden_runs = bounded_items(ordered_runs)
+    for item in visible_runs:
+        outcome = "active" if item.active else item.outcome
+        lines.append(f"    {item.kind}: {outcome}, {human_bytes(item.bytes)} — {item.path}")
+    if hidden_runs:
+        lines.append(f"    ... and {count_phrase(hidden_runs, 'more run')}")
+    lines.extend(
+        [
+            f"  incremental cache: {count_phrase(status.cache_records, 'record')}, "
+            f"{count_phrase(status.cache_blobs, 'blob')}, "
+            f"{human_bytes(status.cache_bytes)}",
+        ]
+    )
     if status.cache_current_records or status.cache_obsolete_records:
-        lines.insert(
-            4,
+        lines.append(
             "  incremental build records: "
             f"{status.cache_current_records} current, "
-            f"{status.cache_obsolete_records} obsolete",
+            f"{status.cache_obsolete_records} obsolete"
         )
     if status.cache_obsolete_records:
-        lines.insert(
-            5,
+        lines.append(
             "  preview workspace + obsolete cache cleanup: "
-            f"{human_command(('rbit', 'clean', root, '--obsolete-cache', '--preview'))}",
+            f"{human_command(('rbit', 'clean', root, '--obsolete-cache', '--preview'))}"
         )
+    lines.extend(
+        [
+            "  repair search cache: "
+            f"{count_phrase(status.repair_probe_cache_files, 'file')}, "
+            f"{human_bytes(status.repair_probe_cache_bytes)}",
+            "  saved repair data: "
+            f"{count_phrase(status.repair_ledger_files, 'file')}, "
+            f"{human_bytes(status.repair_ledger_bytes)}",
+            f"  cache leases: {status.cache_active_leases} active, "
+            f"{status.cache_stale_leases} stale",
+            f"  reports: {status.report_files} managed "
+            f"{'file' if status.report_files == 1 else 'files'}, "
+            f"{human_bytes(status.report_bytes)}",
+        ]
+    )
     output.emit(
         "state_status",
         "\n".join(lines),
@@ -165,7 +186,7 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             or result.repair_probe_cache_files
             or result.reports_removed
         )
-        next_command = human_command(next_argv) if has_selection else None
+        next_step = NextStep(next_argv) if has_selection else None
         if not args.cache and not args.obsolete_cache:
             cache_summary = "The reusable incremental cache will be kept."
         elif result.cache_active_leases:
@@ -210,9 +231,9 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             if args.reports
             else "Saved reports will be kept."
         )
-        next_step = (
-            f"Run {next_command} to perform this cleanup."
-            if next_command is not None
+        next_message = (
+            f"Run {next_step.command} to perform this cleanup."
+            if next_step is not None
             else "Nothing to remove."
         )
         output.emit(
@@ -222,7 +243,7 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             f"{cache_summary} "
             f"{repair_cache_summary} "
             f"{report_summary} "
-            f"{next_step}",
+            f"{next_message}",
             candidates=result.removed,
             cache_requested=args.cache or args.obsolete_cache,
             obsolete_cache_requested=args.obsolete_cache,
@@ -237,8 +258,7 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             reports=result.reports_removed,
             reclaimable_bytes=result.reclaimed_bytes,
             older_than_hours=age_hours,
-            next_command=next_command,
-            next_argv=next_argv if next_command is not None else (),
+            **next_step_fields(next_step),
         )
         return 0
     if not args.cache and not args.obsolete_cache:

@@ -37,6 +37,7 @@ from reprobit.classic.semantic_contracts import (
 from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.model import Digest, SemanticProof
 from reprobit.schema import (
+    CLASSIC_RECIPE_FAMILIES_BY_ROLE,
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ClassicRecipeRole,
@@ -84,32 +85,10 @@ class FamilyCoverage:
 
 
 def _coverage() -> Mapping[ClassicRecipeFamily, FamilyCoverage]:
-    donor = {
-        ClassicRecipeFamily.DECLARATION_SHAPE,
-        ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
-        ClassicRecipeFamily.FORWARD_DECLARATION_RUN,
-        ClassicRecipeFamily.PAD_SHAPE,
-        ClassicRecipeFamily.EXTERN_RUN_PAIR,
-        ClassicRecipeFamily.FORWARD_RUN_WITH_SHAPE,
-        ClassicRecipeFamily.DECLARATION_RUN_TRIPLE,
-        ClassicRecipeFamily.PREFIX_FORWARD_AFTER_INCLUDES_EXTERN,
-    }
-    candidate = {
-        ClassicRecipeFamily.EQUAL_BODY_STRICT,
-        ClassicRecipeFamily.EQUAL_BODY_EH_STRUCTURAL_LOCAL,
-        ClassicRecipeFamily.SAME_SLOT_RESIZE,
-        ClassicRecipeFamily.EQUAL_BODY_EH_RELOC_LAYOUT,
-        ClassicRecipeFamily.RETAIL_EXACT_RELOC_DIVERGENT,
-        ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING,
-        ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC,
-        ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION,
-        ClassicRecipeFamily.RETAIL_EXACT_SOURCE_EQUAL_BODY,
-        ClassicRecipeFamily.RETAIL_EXACT_COMPOSED_REWRITING,
-        ClassicRecipeFamily.RETAIL_EXACT_WEB_RECOLOUR,
-        ClassicRecipeFamily.RETAIL_EXACT_CROSS_TU_COMPLETE_TARGET_RESIZE,
-        ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION_REENCODING,
-        ClassicRecipeFamily.RETAIL_EXACT_SAME_TU_INSTRUCTION_HYBRID_RESIZE,
-        ClassicRecipeFamily.RETAIL_EXACT_SOURCE_TARGET_CLOSURE,
+    donor = CLASSIC_RECIPE_FAMILIES_BY_ROLE[ClassicRecipeRole.DONOR]
+    candidate = CLASSIC_RECIPE_FAMILIES_BY_ROLE[ClassicRecipeRole.FUNCTION]
+    link_or_postlink = CLASSIC_RECIPE_FAMILIES_BY_ROLE[ClassicRecipeRole.PROJECT] - {
+        ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
     }
     result: dict[ClassicRecipeFamily, FamilyCoverage] = {}
     for family in ClassicRecipeFamily:
@@ -137,11 +116,7 @@ def _coverage() -> Mapping[ClassicRecipeFamily, FamilyCoverage]:
                 False,
                 "must be represented and executed by the quarantined simulated-elision composer",
             )
-        elif family in {
-            ClassicRecipeFamily.IMAGE_BINARY_REPACK,
-            ClassicRecipeFamily.IMAGE_METADATA,
-            ClassicRecipeFamily.IMAGE_LINK_ORDER,
-        }:
+        elif family in link_or_postlink:
             result[family] = FamilyCoverage(
                 FamilyExecutionMode.LINK_OR_POSTLINK,
                 True,

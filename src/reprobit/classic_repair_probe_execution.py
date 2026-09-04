@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack
 from hashlib import sha256
+from pathlib import Path
 
 from reprobit.classic_execution_records import ClassicActiveCompilerEpoch
 from reprobit.classic_orchestration import ClassicPreparedUnit
@@ -38,6 +39,7 @@ from reprobit.strict_json import canonical_json
 ClassicDonorWindowEvaluator = Callable[[tuple[ClassicDonorCompileOutcome, ...]], bool]
 ClassicDonorCompileCache = ClassicDonorCompileStore
 """Replay store for seats compiled earlier; see :mod:`classic_repair_probe_cache`."""
+ClassicDonorSourceSeal = Mapping[Path, tuple[int, Digest]]
 
 _EXPECTED_COMPILE_FAILURES = (
     ClassicProjectError,
@@ -45,6 +47,24 @@ _EXPECTED_COMPILE_FAILURES = (
     ProcessOutputLimitExceeded,
     ProcessTimedOut,
 )
+
+
+def prepare_donor_probe_source_epoch(
+    probes: ClassicProbeExecution,
+) -> ClassicDonorSourceSeal:
+    """Materialize one reusable probe runtime's effective source tree once."""
+
+    source_seal = _tree_file_seal(probes.effective_root)
+    if probes.overlay.overlay_witnesses:
+        _, source_seal = probes.overlay.materialize_certified_project_overlay_epoch(source_seal)
+        if probes.overlay.generated_translation_units:
+            _, source_seal = probes.overlay.materialize_generated_input_epoch(source_seal)
+    _require_unchanged_tree(
+        source_seal,
+        root=probes.effective_root,
+        label="donor repair probe source epoch",
+    )
+    return source_seal
 
 
 def donor_request_identity(request: object) -> str:
@@ -294,11 +314,16 @@ def probe_donor_compile_windows(
     progress: ClassicDonorProbeProgress | None = None,
     planned_candidates: int,
     cache: ClassicDonorCompileStore | None = None,
+    close_runtime: bool = True,
+    materialize_source_epoch: bool = True,
+    source_seal: ClassicDonorSourceSeal | None = None,
+    namespace_id: str = "noncertifying-donor-repair-probe",
 ) -> tuple[str, ...]:
     """Compile lazy candidate windows inside one consumed non-certifying runtime.
 
     ``cache`` replays outcomes of seats compiled earlier under the same compile
     epoch instead of compiling them again; see :mod:`classic_repair_probe_cache`.
+    A supplied ``source_seal`` reuses an epoch already prepared by the caller.
 
     ``evaluate`` receives each full outcome on the coordinating thread and may
     stop the search before more candidates are requested.  Only completed
@@ -315,21 +340,17 @@ def probe_donor_compile_windows(
     probes.producer.begin_developer()
     donor_ids: tuple[str, ...] = ()
     try:
-        source_seal = _tree_file_seal(probes.effective_root)
-        if probes.overlay.overlay_witnesses:
-            _, source_seal = probes.overlay.materialize_certified_project_overlay_epoch(source_seal)
-            if probes.overlay.generated_translation_units:
-                _, source_seal = probes.overlay.materialize_generated_input_epoch(source_seal)
-        _require_unchanged_tree(
-            source_seal,
-            root=probes.effective_root,
-            label="donor repair probe source epoch",
-        )
+        if source_seal is None:
+            source_seal = (
+                prepare_donor_probe_source_epoch(probes)
+                if materialize_source_epoch
+                else _tree_file_seal(probes.effective_root)
+            )
         with ExitStack() as stack, ProcessSupervisor() as supervisor:
             authority = stack.enter_context(probes.producer.authority_namespace_lease())
             source = stack.enter_context(probes.producer.source_namespace_lease())
             namespace = probes.producer.capture_compiler_namespace(
-                "noncertifying-donor-repair-probe",
+                namespace_id,
                 source=source.snapshot,
                 authority=authority.snapshot,
             )
@@ -375,13 +396,16 @@ def probe_donor_compile_windows(
         except BaseException as cleanup_error:
             original.add_note(f"classic donor repair probe cleanup also failed: {cleanup_error}")
         raise
-    probes.close()
+    if close_runtime:
+        probes.close()
     return donor_ids
 
 
 __all__ = [
     "ClassicDonorCompileCache",
+    "ClassicDonorSourceSeal",
     "ClassicDonorWindowEvaluator",
     "donor_request_identity",
+    "prepare_donor_probe_source_epoch",
     "probe_donor_compile_windows",
 ]

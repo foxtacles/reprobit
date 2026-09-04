@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+import test_classic_fpo_mosaic_identity as fixture
 
 from reprobit import composition_ledger_runtime as subject
 from reprobit.model import Digest
@@ -14,7 +16,7 @@ from reprobit.producer_graph import (
     ProducerRole,
     producer_graph_digest,
 )
-from tests import test_classic_fpo_mosaic_identity as fixture
+from reprobit.publication_evidence import collect_verified_publication_evidence
 
 SYMBOL = fixture.TARGET_SYMBOL
 
@@ -169,12 +171,6 @@ def test_verify_records_the_ledger_only_when_it_could_be_derived(
     from reprobit import cli_build
     from reprobit.composition_ledger import read_ledger
 
-    emitted: list[tuple[str, str, dict[str, object]]] = []
-
-    class Output:
-        def emit(self, kind: str, message: str, **fields: object) -> None:
-            emitted.append((kind, message, fields))
-
     leases: list[Path] = []
 
     @contextmanager
@@ -189,10 +185,10 @@ def test_verify_records_the_ledger_only_when_it_could_be_derived(
     stale = tmp_path / "ledger" / "composed-bodies.json"
     stale.parent.mkdir()
     stale.write_bytes(b"old ledger\n")
-    cli_build._publish_composed_body_ledger(Output(), tmp_path, ledger, error)  # type: ignore[arg-type]
-    assert emitted[-1][0] == "composed_body_ledger"
-    assert emitted[-1][2]["outcome"] == "skipped"
-    assert "removed the older saved repair data" in emitted[-1][1]
+    publication = cli_build._publish_composed_body_ledger(tmp_path, ledger, error)
+    assert publication.outcome == "skipped"
+    assert publication.functions is None
+    assert "removed the older saved repair data" in publication.message
     assert not stale.exists()
 
     graph = _graph("a.obj", "core.lib")
@@ -206,18 +202,85 @@ def test_verify_records_the_ledger_only_when_it_could_be_derived(
         ),
         unit_by_object={},
     )
-    cli_build._publish_composed_body_ledger(Output(), tmp_path, derived, None)  # type: ignore[arg-type]
-    assert emitted[-1][2]["outcome"] == "succeeded"
-    assert emitted[-1][2]["functions"] == 1
+    publication = cli_build._publish_composed_body_ledger(tmp_path, derived, None)
+    assert publication.outcome == "succeeded"
+    assert publication.functions == 1
+    assert next(iter(derived.targets["program"].functions.values())).translation_unit_id is None
+    assert publication.payload == (tmp_path / "ledger" / "composed-bodies.json").read_bytes()
     assert read_ledger(tmp_path / "ledger" / "composed-bodies.json") == derived
 
     def fail_write(*_args: object, **_kwargs: object) -> None:
         raise OSError("disk full")
 
     monkeypatch.setattr(cli_build, "write_ledger", fail_write)
-    cli_build._publish_composed_body_ledger(Output(), tmp_path, derived, None)  # type: ignore[arg-type]
-    assert emitted[-1][2]["outcome"] == "skipped"
-    assert "disk full" in emitted[-1][1]
-    assert "removed the older saved repair data" in emitted[-1][1]
+    publication = cli_build._publish_composed_body_ledger(tmp_path, derived, None)
+    assert publication.outcome == "skipped"
+    assert publication.functions is None
+    assert "disk full" in publication.message
+    assert "removed the older saved repair data" in publication.message
     assert not stale.exists()
     assert leases == [tmp_path, tmp_path, tmp_path]
+
+
+def test_verified_evidence_accepts_the_exact_ledger_payload_with_a_null_unit(
+    tmp_path: Path,
+) -> None:
+    from reprobit.composition_ledger import (
+        ComposedBodyLedger,
+        ComposedTargetLedger,
+        LedgerFunction,
+        canonical_ledger_payload,
+    )
+
+    ledger = ComposedBodyLedger(
+        graph_digest="0" * 64,
+        targets={
+            "program": ComposedTargetLedger(
+                functions={
+                    "function": LedgerFunction(
+                        provider="build/library.lib",
+                        translation_unit_id=None,
+                        body_sha256="1" * 64,
+                        body_length=1,
+                    )
+                }
+            )
+        },
+    )
+    ledger_payload = canonical_ledger_payload(ledger)
+    report_json = tmp_path / "reports/report.json"
+    report_html = tmp_path / "reports/report.html"
+    verified = SimpleNamespace(
+        project=tmp_path,
+        report_json=report_json,
+        report_html=report_html,
+        report_json_payload=b"{}\n",
+        report_html_payload=b"<html></html>\n",
+        ledger=SimpleNamespace(
+            path=tmp_path / "ledger/composed-bodies.json",
+            outcome="succeeded",
+            payload=ledger_payload,
+        ),
+        engine=SimpleNamespace(
+            build=SimpleNamespace(outputs=()),
+            targets=(),
+            report=SimpleNamespace(proof=SimpleNamespace(supplemental_outputs=())),
+            report_payloads={
+                report_json: b"{}\n",
+                report_html: b"<html></html>\n",
+            },
+        ),
+    )
+
+    evidence = collect_verified_publication_evidence(
+        verified,
+        staged_root=tmp_path,
+        output_paths=(),
+        target_paths=(),
+        report_json=report_json,
+        report_html=report_html,
+        ledger_path=tmp_path / "ledger/composed-bodies.json",
+    )
+
+    assert b'"translation_unit_id":null' in ledger_payload
+    assert evidence.composed_body_ledger == ledger_payload

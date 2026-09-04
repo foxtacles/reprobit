@@ -12,6 +12,7 @@ from __future__ import annotations
 import math
 import os
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePath, PurePosixPath
 
@@ -31,6 +32,45 @@ from reprobit.strict_json import canonical_json
 
 class CMakeConfigureError(ClassicProjectError):
     """A CMake import boundary was incomplete or unsafe."""
+
+
+_REPROBIT_CMAKE_DEFINES = frozenset(
+    {
+        "CMAKE_AR",
+        "CMAKE_BUILD_TYPE",
+        "CMAKE_C_COMPILER",
+        "CMAKE_CXX_COMPILER",
+        "CMAKE_EXPORT_COMPILE_COMMANDS",
+        "CMAKE_GENERATOR",
+        "CMAKE_LINKER",
+        "CMAKE_MAKE_PROGRAM",
+        "CMAKE_PROJECT_INCLUDE",
+        "CMAKE_RC_COMPILER",
+        "CMAKE_RULE_MESSAGES",
+        "CMAKE_SYSTEM_NAME",
+        "CMAKE_TRY_COMPILE_PLATFORM_VARIABLES",
+    }
+)
+
+
+def cmake_define_arguments(declarations: Sequence[str]) -> tuple[str, ...]:
+    """Validate explicit cache definitions and render their exact CMake arguments."""
+
+    arguments: list[str] = []
+    seen: set[str] = set()
+    for declaration in declarations:
+        name, separator, value = declaration.partition("=")
+        if not separator or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name) is None:
+            raise CMakeConfigureError("--cmake-define must use NAME=VALUE")
+        if any(character in value for character in ("\0", "\n", "\r")):
+            raise CMakeConfigureError(f"--cmake-define {name!r} contains a control character")
+        if name in seen:
+            raise CMakeConfigureError(f"--cmake-define repeats {name!r}")
+        if name in _REPROBIT_CMAKE_DEFINES or name.startswith("REPROBIT_"):
+            raise CMakeConfigureError(f"--cmake-define cannot replace ReproBit setting {name!r}")
+        seen.add(name)
+        arguments.append(f"-D{name}={value}")
+    return tuple(arguments)
 
 
 def effective_source_digest(root: Path) -> Digest:
@@ -147,6 +187,7 @@ def configure_cmake_project(
     defer_project_plan: bool = False,
     generator: str = "Unix Makefiles",
     make_program: Path | None = None,
+    cmake_defines: Sequence[str] = (),
 ) -> CMakeConfiguration:
     """Create one fresh Makefile tree for graph extraction.
 
@@ -173,6 +214,7 @@ def configure_cmake_project(
         raise CMakeConfigureError(f"unsupported CMake import generator: {generator!r}")
     if generator == "NMake Makefiles" and make_program is None:
         raise CMakeConfigureError("NMake Makefiles requires an explicit NMAKE program")
+    define_arguments = cmake_define_arguments(cmake_defines)
 
     project_root = project_root.resolve(strict=True)
     if project_root.is_symlink() or not project_root.is_dir():
@@ -282,6 +324,7 @@ def configure_cmake_project(
         _cmake_path(configured_root),
         "-G",
         generator,
+        *define_arguments,
         f"-DCMAKE_BUILD_TYPE={configuration}",
         "-DCMAKE_SYSTEM_NAME=Windows",
         f"-DCMAKE_C_COMPILER={_cmake_path(compiler)}",
@@ -378,6 +421,7 @@ def configure_cmake_project(
 __all__ = [
     "CMakeConfiguration",
     "CMakeConfigureError",
+    "cmake_define_arguments",
     "configure_cmake_project",
     "effective_source_digest",
 ]

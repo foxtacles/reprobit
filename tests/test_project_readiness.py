@@ -20,6 +20,7 @@ def test_readiness_points_an_empty_directory_to_init(tmp_path: Path) -> None:
     assert not readiness.ready
     assert readiness.items[0].id == "project"
     assert readiness.next_command == f"rbit init {tmp_path}"
+    assert readiness.next_argv == ("rbit", "init", str(tmp_path))
 
 
 def test_fresh_init_reports_all_remaining_authority_at_once(
@@ -58,6 +59,7 @@ def test_fresh_init_reports_all_remaining_authority_at_once(
     assert build_plan.next_command is None
     source_lock = next(item for item in readiness.items if item.id == "source_manifest")
     assert source_lock.next_command == f"rbit source preview {project}"
+    assert source_lock.next_argv == ("rbit", "source", "preview", str(project))
     assert "Build graph" in rendered
     assert "Reference metadata" in rendered
     assert "Protected references" in rendered
@@ -75,6 +77,7 @@ def test_fresh_init_reports_all_remaining_authority_at_once(
         "detail": "project ID fresh-project",
         "id": "project",
         "label": "Project",
+        "next_argv": [],
         "next_command": None,
         "ready": True,
     }
@@ -85,6 +88,7 @@ def test_fresh_init_reports_all_remaining_authority_at_once(
     with_reference = inspect_project_readiness(project)
     build_plan = next(item for item in with_reference.items if item.id == "build_plan")
     assert build_plan.next_command == f"rbit import cmake {project}"
+    assert build_plan.next_argv == ("rbit", "import", "cmake", str(project))
 
 
 def test_valid_project_can_have_no_intervention_or_proof_documents(

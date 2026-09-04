@@ -8,12 +8,13 @@ from typing import cast
 import pytest
 
 import reprobit.discovery_grind as grind
+from reprobit.authority_snapshot import (
+    JsonAuthorityDirectorySnapshot,
+    capture_json_authority_directories,
+)
 from reprobit.discovery_authoring import DeclarationShapeEqualBodyAuthoring
 from reprobit.discovery_grind import ColdTrialEvidence
-from reprobit.discovery_project import (
-    ProjectDirectorySnapshot,
-    ProjectGrindContext,
-)
+from reprobit.discovery_project import ProjectGrindContext
 from reprobit.execution import classic_semantic_obligation_name
 from reprobit.model import Digest
 from reprobit.report import Report
@@ -267,24 +268,16 @@ def _write_and_snapshot(root: Path, relative: str, payload: bytes) -> ProjectFil
     )
 
 
-def _authority_directories(root: Path) -> tuple[ProjectDirectorySnapshot, ...]:
-    result: list[ProjectDirectorySnapshot] = []
-    for relative in (
+def _authority_directories(root: Path) -> tuple[JsonAuthorityDirectorySnapshot, ...]:
+    relatives = (
         "reprobit/interventions",
         "reprobit/proofs",
         "reprobit/oracles",
-    ):
+    )
+    for relative in relatives:
         directory = root / relative
         directory.mkdir(parents=True, exist_ok=True)
-        members = tuple(
-            sorted(
-                path.relative_to(directory).as_posix()
-                for path in directory.rglob("*.json")
-                if path.is_file()
-            )
-        )
-        result.append(ProjectDirectorySnapshot(relative, members))
-    return tuple(result)
+    return capture_json_authority_directories(root, relatives)
 
 
 @pytest.mark.parametrize(
@@ -292,6 +285,7 @@ def _authority_directories(root: Path) -> tuple[ProjectDirectorySnapshot, ...]:
     (
         "reprobit/interventions/sample.json",
         "reprobit/proofs/sample.json",
+        "reprobit/oracles/sample.json",
         "reprobit/project.json",
         "src/sample.cpp",
     ),
@@ -318,6 +312,7 @@ def test_publication_conflict_never_partially_writes_authority(
     original = {
         intervention_relative: canonical_json(old_interventions),
         proof_relative: canonical_json(old_proofs),
+        "reprobit/oracles/sample.json": b"sealed oracle authority\n",
         "reprobit/project.json": b"sealed project authority\n",
         "src/sample.cpp": b"int sample() { return 1; }\n",
     }

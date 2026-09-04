@@ -67,7 +67,11 @@ from reprobit.schema import (
     ProducerGraphBuildAdapter,
     ProjectBundle,
 )
-from reprobit.toolchains import ClassicMSVCToolchain
+from reprobit.toolchains import (
+    ClassicMSVCToolchain,
+    ToolchainDoctorReport,
+    validate_toolchain_installation,
+)
 
 if TYPE_CHECKING:
     from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
@@ -266,6 +270,7 @@ def prepare_classic_producer_graph_run(
     jobs: int,
     compiler_transport: Path | None = None,
     resource_transport: Path | None = None,
+    source_toolchain_report: ToolchainDoctorReport | None = None,
     initialization_timeout: float = 600.0,
     compile_timeout: float = 600.0,
     link_timeout: float = 900.0,
@@ -351,7 +356,11 @@ def prepare_classic_producer_graph_run(
         logical_root=bundle.spec.paths.toolchain,
     )
     toolchain_lock = bundle.toolchain_lock
-    source_installation.doctor(toolchain_lock).require_ok()
+    validate_toolchain_installation(
+        source_installation,
+        toolchain_lock,
+        previous=source_toolchain_report,
+    ).require_ok()
     original_toolchain_inputs = _project_locked_toolchain(
         bundle,
         source_root=source_installation.root,

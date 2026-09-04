@@ -50,6 +50,7 @@ from reprobit.classic_repair_probe_candidates import (
 )
 from reprobit.classic_repair_probe_execution import (
     ClassicDonorCompileCache,
+    ClassicDonorSourceSeal,
     probe_donor_compile_windows,
 )
 from reprobit.classic_repair_session import ClassicRepairRefusal, RepairRefusal
@@ -534,6 +535,10 @@ def _probe_bounded_donor_retunes(
     abandoned_states: Mapping[tuple[str, str], frozenset[str]] | None = None,
     compile_cache: ClassicDonorCompileCache | None = None,
     excluded_groups: frozenset[tuple[str, str]] = frozenset(),
+    close_runtime: bool = True,
+    materialize_source_epoch: bool = True,
+    source_seal: ClassicDonorSourceSeal | None = None,
+    namespace_id: str = "noncertifying-donor-repair-probe",
 ) -> ClassicDonorRetuneProbeResult:
     """Compile deterministic distance tiers and select ordinarily valid retunes.
 
@@ -832,6 +837,10 @@ def _probe_bounded_donor_retunes(
         progress=progress,
         planned_candidates=min(len(canonical_attempts), candidate_budget),
         cache=compile_cache,
+        close_runtime=close_runtime,
+        materialize_source_epoch=materialize_source_epoch,
+        source_seal=source_seal,
+        namespace_id=namespace_id,
     )
     compiled_probe_id_set = set(compiled_probe_ids)
 
@@ -889,6 +898,10 @@ def probe_bounded_donor_retunes(
     abandoned_states: Mapping[tuple[str, str], frozenset[str]] | None = None,
     compile_cache: ClassicDonorCompileCache | None = None,
     excluded_groups: frozenset[tuple[str, str]] = frozenset(),
+    close_runtime: bool = True,
+    materialize_source_epoch: bool = True,
+    source_seal: ClassicDonorSourceSeal | None = None,
+    namespace_id: str = "noncertifying-donor-repair-probe",
 ) -> ClassicDonorRetuneProbeResult:
     """Consume one prepared runtime while attempting bounded donor retunes."""
 
@@ -907,6 +920,10 @@ def probe_bounded_donor_retunes(
             abandoned_states=abandoned_states,
             compile_cache=compile_cache,
             excluded_groups=excluded_groups,
+            close_runtime=close_runtime,
+            materialize_source_epoch=materialize_source_epoch,
+            source_seal=source_seal,
+            namespace_id=namespace_id,
         )
     except BaseException as original:
         try:
@@ -915,7 +932,7 @@ def probe_bounded_donor_retunes(
         except BaseException as cleanup_error:
             original.add_note(f"classic donor retune cleanup also failed: {cleanup_error}")
         raise
-    if probes.producer.is_open:
+    if close_runtime and probes.producer.is_open:
         probes.close()
     return result
 

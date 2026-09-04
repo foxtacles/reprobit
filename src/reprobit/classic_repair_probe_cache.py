@@ -17,21 +17,27 @@ can only cost a recompile.
 from __future__ import annotations
 
 import json
+import os
+import time
 import zlib
 from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from hashlib import sha256
+from io import BytesIO
 from pathlib import Path
 
 from reprobit.classic_execution_records import ClassicActiveCompilerEpoch
 from reprobit.classic_runtime_probe import ClassicDonorProbeInput, ClassicDonorProbeOutput
+from reprobit.exact_tree import remove_exact_empty_directory
 from reprobit.execution import StepExecutionReceipt
 from reprobit.model import Digest
 from reprobit.producer_graph import ProducerGraphDocument, producer_graph_digest
 from reprobit.secure_paths import (
-    atomic_publish_relative,
+    atomic_publish_new_relative_from_stream,
+    digest_relative_file,
     read_relative_file,
+    remove_published_relative,
     remove_regular_relative,
     split_absolute,
     stat_relative_file,
@@ -59,6 +65,13 @@ class ClassicDonorCompileRefusal:
 
 
 ClassicDonorCompileOutcome = ClassicDonorProbeOutput | ClassicDonorCompileRefusal
+
+
+@dataclass(frozen=True, slots=True)
+class ProbeStoreGCResult:
+    removed_files: int
+    reclaimed_bytes: int
+    skipped_recent_files: int
 
 
 def _output_payload_bytes(output: ClassicDonorProbeOutput) -> int:
@@ -147,7 +160,13 @@ def _encode_output(epoch: str, key: ProbeSeatKey, output: ClassicDonorProbeOutpu
     encoded_header = canonical_json(header)
     if len(encoded_header) > _MAX_PROBE_HEADER_BYTES:
         return None
-    encoded = encoded_header + zlib.compress(b"".join(payloads), 6)
+    compressor = zlib.compressobj(6)
+    encoded_parts = [encoded_header]
+    for payload in payloads:
+        if compressed := compressor.compress(payload):
+            encoded_parts.append(compressed)
+    encoded_parts.append(compressor.flush())
+    encoded = b"".join(encoded_parts)
     return encoded if len(encoded) <= _MAX_PROBE_ENTRY_BYTES else None
 
 
@@ -304,7 +323,13 @@ def _read_entry(path: Path) -> bytes | None:
 def _publish_entry(path: Path, data: bytes) -> bool:
     try:
         root, relative = split_absolute(path)
-        atomic_publish_relative(root, relative, data)
+        atomic_publish_new_relative_from_stream(
+            root,
+            relative,
+            BytesIO(data),
+            expected_digest=Digest.from_bytes(data),
+            expected_size=len(data),
+        )
     except OSError:
         return False
     return True
@@ -448,6 +473,80 @@ def probe_store_usage(state_root: Path) -> tuple[int, int]:
     return files, total
 
 
+def gc_probe_store(
+    state_root: Path,
+    *,
+    older_than_seconds: float,
+    dry_run: bool = False,
+    now_ns: int | None = None,
+) -> ProbeStoreGCResult:
+    """Remove only repair-probe entries old enough for the requested cleanup."""
+
+    if older_than_seconds < 0:
+        raise ValueError("probe-store GC age cannot be negative")
+    directory = probe_store_directory(state_root)
+    if not os.path.lexists(directory):
+        return ProbeStoreGCResult(0, 0, 0)
+    if directory.is_symlink() or not directory.is_dir():
+        raise OSError(f"probe store is not a real directory: {directory}")
+    cutoff_ns = (time.time_ns() if now_ns is None else now_ns) - int(
+        older_than_seconds * 1_000_000_000
+    )
+    removed_files = 0
+    reclaimed_bytes = 0
+    skipped_recent_files = 0
+    for path in sorted(directory.rglob("*"), key=lambda item: item.as_posix()):
+        if path.is_symlink():
+            raise OSError(f"probe store contains a redirected entry: {path}")
+        if not path.is_file():
+            continue
+        root, relative = split_absolute(path)
+        identity = stat_relative_file(root, relative)
+        if identity.mtime_ns > cutoff_ns:
+            skipped_recent_files += 1
+            continue
+        if dry_run:
+            removed_files += 1
+            reclaimed_bytes += identity.size
+            continue
+        snapshot = digest_relative_file(root, relative)
+        if snapshot.mtime_ns > cutoff_ns:
+            skipped_recent_files += 1
+            continue
+        if not remove_published_relative(
+            root,
+            relative,
+            expected=snapshot,
+        ):
+            continue
+        removed_files += 1
+        reclaimed_bytes += snapshot.size
+    if not dry_run:
+        descendants = sorted(
+            (path for path in directory.rglob("*") if path.is_dir() and not path.is_symlink()),
+            key=lambda item: len(item.parts),
+            reverse=True,
+        )
+        for path in descendants:
+            try:
+                metadata = path.stat(follow_symlinks=False)
+                remove_exact_empty_directory(
+                    path,
+                    (metadata.st_dev, metadata.st_ino),
+                )
+            except OSError:
+                pass
+        try:
+            metadata = directory.stat(follow_symlinks=False)
+            remove_exact_empty_directory(
+                directory,
+                (metadata.st_dev, metadata.st_ino),
+            )
+        except OSError:
+            pass
+    return ProbeStoreGCResult(removed_files, reclaimed_bytes, skipped_recent_files)
+
+
 __all__ = [
     "PROBE_STORE_DIRECTORY",
     "PROBE_STORE_FORMAT",
@@ -455,7 +554,9 @@ __all__ = [
     "ClassicDonorCompileRefusal",
     "ClassicDonorCompileStore",
     "ProbeSeatKey",
+    "ProbeStoreGCResult",
     "compile_epoch_digest",
+    "gc_probe_store",
     "probe_store_directory",
     "probe_store_usage",
     "replayed",

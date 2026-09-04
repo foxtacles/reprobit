@@ -5,10 +5,17 @@ from pathlib import Path
 
 import pytest
 
+import reprobit.onboarding as onboarding
+from reprobit.backends import BackendDoctorReport
 from reprobit.cli import main
 from reprobit.cli_output import human_command
 from reprobit.project_loader import load_project
-from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES
+from reprobit.toolchains import (
+    MSVC_42,
+    TOOLCHAIN_PROFILES,
+    ClassicMSVCToolchain,
+    ToolchainDoctorReport,
+)
 
 
 def _fake_toolchain(root: Path) -> Path:
@@ -36,6 +43,18 @@ def test_setup_creates_and_rechecks_the_project_toolchain_lock(
         "reprobit.onboarding._backend_failures",
         lambda _backend, *, execute_probe: (),
     )
+    doctor_calls = 0
+    real_doctor = ClassicMSVCToolchain.doctor
+
+    def counted_doctor(
+        installation: ClassicMSVCToolchain,
+        lock: object = None,
+    ) -> object:
+        nonlocal doctor_calls
+        doctor_calls += 1
+        return real_doctor(installation, lock)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(ClassicMSVCToolchain, "doctor", counted_doctor)
 
     assert main(["init", str(project)]) == 0
     capsys.readouterr()
@@ -64,13 +83,177 @@ def test_setup_creates_and_rechecks_the_project_toolchain_lock(
     assert setup["event"] == "setup"
     assert setup["environment_ready"] is True
     assert setup["project_ready"] is False
+    assert setup["next_argv"] == ["rbit", "source", "preview", str(project)]
+    assert setup["next_command"] == human_command(setup["next_argv"])
     assert setup["readiness"][0] == {
         "detail": "project ID sample",
         "id": "project",
         "label": "Project",
+        "next_argv": [],
         "next_command": None,
         "ready": True,
     }
+    # The first setup validates once before creating the lock and once against
+    # the new lock. Later setup runs validate only once; readiness reuses it.
+    assert doctor_calls == 4
+
+
+def test_doctor_checks_the_compiler_remembered_for_the_project(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "sample"
+    toolchain = _fake_toolchain(tmp_path / "toolchain")
+    monkeypatch.setattr("reprobit.onboarding.verify_msvc42", lambda _root: None)
+    monkeypatch.setattr(
+        "reprobit.onboarding._backend_failures",
+        lambda _backend, *, execute_probe: (),
+    )
+    assert main(["init", str(project)]) == 0
+    assert (
+        main(
+            [
+                "setup",
+                str(project),
+                "--toolchain-root",
+                str(toolchain),
+                "--skip-probe",
+            ]
+        )
+        == 0
+    )
+    capsys.readouterr()
+
+    class PassingBackend:
+        identifier = "fixture"
+
+        @staticmethod
+        def doctor(*, execute_probe: bool = False) -> BackendDoctorReport:
+            return BackendDoctorReport("fixture", "fixture", (), execute_probe)
+
+    monkeypatch.setattr(onboarding, "selected_backend", lambda _args: PassingBackend())
+    explicit_roots: list[object] = []
+    real_resolve = onboarding.resolve_toolchain_root
+
+    def observed_resolve(profile: object, explicit: object = None) -> Path:
+        explicit_roots.append(explicit)
+        return real_resolve(profile, explicit)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(onboarding, "resolve_toolchain_root", observed_resolve)
+
+    assert main(["doctor", str(project)]) == 0
+
+    rendered = capsys.readouterr().out
+    assert explicit_roots == [None]
+    assert "ok project/schema: sample" in rendered
+    assert "doctor checks passed" in rendered
+
+
+def test_doctor_without_a_project_is_explicitly_host_only(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class PassingBackend:
+        identifier = "fixture"
+
+        @staticmethod
+        def doctor(*, execute_probe: bool = False) -> BackendDoctorReport:
+            return BackendDoctorReport("fixture", "fixture", (), execute_probe)
+
+    monkeypatch.setattr(onboarding, "selected_backend", lambda _args: PassingBackend())
+
+    assert main(["doctor"]) == 0
+    assert "host checks passed; no project compiler was checked" in capsys.readouterr().out
+
+
+def test_projectless_doctor_checks_the_compiler_remembered_for_a_profile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class PassingBackend:
+        identifier = "fixture"
+
+        @staticmethod
+        def doctor(*, execute_probe: bool = False) -> BackendDoctorReport:
+            return BackendDoctorReport("fixture", "fixture", (), execute_probe)
+
+    remembered = tmp_path / "remembered-toolchain"
+    remembered.mkdir()
+    observed: list[tuple[object, object]] = []
+
+    def resolve(profile: object, explicit: object = None) -> Path:
+        observed.append((profile, explicit))
+        return remembered
+
+    monkeypatch.setattr(onboarding, "selected_backend", lambda _args: PassingBackend())
+    monkeypatch.setattr(onboarding, "resolve_toolchain_root", resolve)
+    monkeypatch.setattr(
+        ClassicMSVCToolchain,
+        "doctor",
+        lambda installation: ToolchainDoctorReport(
+            installation.profile.identifier,
+            installation.root,
+            (),
+        ),
+    )
+
+    assert main(["doctor", "--profile", MSVC_42]) == 0
+
+    assert observed == [(MSVC_42, None)]
+    rendered = capsys.readouterr().out
+    assert "doctor checks passed" in rendered
+    assert "no project compiler was checked" not in rendered
+
+
+def test_projectless_doctor_reports_a_missing_toolchain_as_a_failed_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class PassingBackend:
+        identifier = "fixture"
+
+        @staticmethod
+        def doctor(*, execute_probe: bool = False) -> BackendDoctorReport:
+            return BackendDoctorReport("fixture", "fixture", (), execute_probe)
+
+    monkeypatch.setattr(onboarding, "selected_backend", lambda _args: PassingBackend())
+    missing = tmp_path / "missing-toolchain"
+
+    assert (
+        main(
+            [
+                "--format",
+                "ndjson",
+                "doctor",
+                "--profile",
+                MSVC_42,
+                "--toolchain-root",
+                str(missing),
+            ]
+        )
+        == 1
+    )
+
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    failure = next(event for event in events if event["event"] == "doctor_check")
+    assert failure["component"] == "toolchain"
+    assert failure["name"] == "root"
+    assert failure["passed"] is False
+    assert events[-1]["event"] == "doctor_result"
+    assert events[-1]["passed"] is False
+
+
+def test_doctor_rejects_an_explicit_non_project(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    missing = tmp_path / "not-a-project"
+
+    assert main(["doctor", str(missing)]) == 2
+    assert f"no ReproBit project found at {missing / 'reprobit.toml'}" in capsys.readouterr().err
 
 
 def test_setup_requires_init_first(

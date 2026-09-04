@@ -8,7 +8,7 @@ import posixpath
 from pathlib import Path, PurePosixPath
 from typing import cast
 
-from reprobit.cli_output import CLIOutput, human_command
+from reprobit.cli_output import CLIOutput, NextStep, human_command, next_step_fields
 from reprobit.cli_paths import (
     CLIError,
     canonical_project_relative,
@@ -297,7 +297,8 @@ def _project_grind_reports(
         next_kind = None
         next_argv = ()
         next_label = None
-    next_command = human_command(next_argv) if next_argv else None
+    next_step = NextStep(next_argv) if next_argv else None
+    next_command = None if next_step is None else next_step.command
 
     summary = dict(project_auto_grind_summary(result))
     outcome_rows = cast(list[dict[str, JsonValue]], summary["outcomes"])
@@ -435,6 +436,7 @@ def command_discover_project_grind(
             error_type=error_type,
             error=error_message,
             nonfatal=True,
+            diagnostic=True,
         )
     try:
         (
@@ -463,6 +465,7 @@ def command_discover_project_grind(
             error_type=type(exc).__name__,
             error=str(exc),
             nonfatal=True,
+            diagnostic=True,
         )
     report_warning = "; ".join(report_warnings) or None
 
@@ -572,8 +575,7 @@ def command_discover_project_grind(
             else (progress_approval_argv if result.qualified and not result.accepted else ())
         ),
         verify_argv=verify_argv,
-        next_argv=next_argv,
-        next_command=human_command(next_argv) if next_argv else None,
+        **next_step_fields(NextStep(next_argv) if next_argv else None),
         outcomes=[
             {
                 "target": outcome.item.target_id,

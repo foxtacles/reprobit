@@ -11,6 +11,35 @@ from enum import StrEnum
 from types import TracebackType
 from typing import Self
 
+_MAX_EXCEPTION_NOTES = 4
+_MAX_EXCEPTION_NOTE_LENGTH = 240
+
+
+def bounded_exception_notes(error: BaseException) -> tuple[str, ...]:
+    """Return concise diagnostic notes without exposing an unbounded exception payload."""
+
+    raw_notes = tuple(getattr(error, "__notes__", ()))
+    notes: list[str] = []
+    for raw in raw_notes[:_MAX_EXCEPTION_NOTES]:
+        note = " ".join(str(raw).replace("\0", r"\0").split()) or "additional failure"
+        if len(note) > _MAX_EXCEPTION_NOTE_LENGTH:
+            note = note[: _MAX_EXCEPTION_NOTE_LENGTH - 3] + "..."
+        notes.append(note)
+    hidden = len(raw_notes) - len(notes)
+    if hidden:
+        notes.append(f"... and {hidden} more diagnostic note{'s' if hidden != 1 else ''}")
+    return tuple(notes)
+
+
+def exception_detail(error: BaseException) -> str:
+    """Render an exception and its bounded notes for human diagnostics."""
+
+    detail = str(error) or type(error).__name__
+    notes = bounded_exception_notes(error)
+    if notes:
+        detail += "\n" + "\n".join(f"Note: {note}" for note in notes)
+    return detail.replace("\0", r"\0")
+
 
 class ProgressKind(StrEnum):
     """Stable event kinds emitted by ReproBit workflows."""
@@ -349,10 +378,7 @@ class ProgressPhase:
                 elapsed_seconds=self._elapsed(),
             )
         else:
-            detail = str(exc) if exc is not None else exc_type.__name__
-            if not detail:
-                detail = exc_type.__name__
-            detail = detail.replace("\x00", r"\0")
+            detail = exception_detail(exc) if exc is not None else exc_type.__name__
             self._emitter.emit(
                 ProgressKind.PHASE_FAILED,
                 phase,
@@ -371,4 +397,6 @@ __all__ = [
     "ProgressKind",
     "ProgressObserver",
     "ProgressPhase",
+    "bounded_exception_notes",
+    "exception_detail",
 ]

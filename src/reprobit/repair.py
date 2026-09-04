@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
+from typing import TYPE_CHECKING
 
 from reprobit.authority_snapshot import (
     AuthoritySnapshotError,
@@ -13,9 +16,17 @@ from reprobit.authority_snapshot import (
     json_authority_members,
     resolve_project_path,
 )
-from reprobit.composition_ledger import COMPOSED_BODY_LEDGER_RELATIVE, read_ledger
+from reprobit.cli_paths import report_output_conflict
+from reprobit.composition_ledger import COMPOSED_BODY_LEDGER_RELATIVE
 from reprobit.model import Digest
 from reprobit.project_loader import load_project
+from reprobit.publication_evidence import (
+    PublicationEvidenceError,
+    SealedProjectPostimage,
+    capture_project_postimage,
+    collect_verified_publication_evidence,
+    require_project_postimage,
+)
 from reprobit.schema import BuildPlanDocument, ProjectSpec, SourceManifestDocument
 from reprobit.source_lock import (
     SourceLockError,
@@ -23,8 +34,10 @@ from reprobit.source_lock import (
 )
 from reprobit.staged_project import ProjectFileSnapshot, StagedProject
 from reprobit.state import KeepWorkspace, report_publication_lease
-from reprobit.strict_json import canonical_json
 from reprobit.transactions import CASTransaction, TransactionResult
+
+if TYPE_CHECKING:
+    from reprobit.cli_build import VerifyResult
 
 
 class RepairError(RuntimeError):
@@ -39,12 +52,16 @@ class RepairOutputSnapshot:
     digest: Digest | None
 
 
-@dataclass(frozen=True, slots=True)
-class RepairRecordPostimage:
-    """One explicitly authorized staged record state sealed before verification."""
+RepairRecordPostimage = SealedProjectPostimage
 
-    relative_path: str
-    digest: Digest | None
+
+@dataclass(frozen=True, slots=True)
+class RepairRecordSeal:
+    """All staged authority bytes and memberships sealed before verification."""
+
+    postimages: tuple[RepairRecordPostimage, ...]
+    authority_members: tuple[tuple[str, tuple[str, ...]], ...]
+    authorized_paths: frozenset[str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,11 +85,17 @@ class RepairSnapshot:
 class RepairCandidate:
     """Verified project-record and report bytes ready for one CAS publish."""
 
-    records: dict[str, bytes | None]
-    outputs: dict[str, bytes]
+    records: Mapping[str, bytes | None]
+    record_digests: Mapping[str, Digest | None]
+    outputs: Mapping[str, bytes]
     report_json: bytes
     report_html: bytes
     composed_body_ledger: bytes | None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "records", MappingProxyType(dict(self.records)))
+        object.__setattr__(self, "record_digests", MappingProxyType(dict(self.record_digests)))
+        object.__setattr__(self, "outputs", MappingProxyType(dict(self.outputs)))
 
 
 def _safe_path(root: Path, relative: str) -> Path:
@@ -138,9 +161,8 @@ def _require_stable_source_membership(
     details.extend(
         (
             "From the project root, review this list with: rbit source preview .",
-            "Follow only the safe next command printed by preview. If it says the change "
-            "affects which files the project builds, restore the missing file; that "
-            "automatic update is not supported yet.",
+            "Follow the safe next command printed by preview to update the source and "
+            "build records together.",
         )
     )
     raise RepairError(
@@ -278,36 +300,62 @@ def collect_repair_candidate(
     staged_root: Path,
     *,
     report_directory: str,
-    record_postimages: tuple[RepairRecordPostimage, ...] = (),
+    verified: VerifyResult | None = None,
+    record_postimages: RepairRecordSeal | None = None,
 ) -> RepairCandidate:
     """Collect only verified records and reports, refusing other input mutation."""
 
     by_path = snapshot.files_by_path
     publishable = set(_publishable_paths(snapshot, staged_root))
-    records: dict[str, bytes | None] = {}
-    for relative in sorted(publishable, key=lambda item: (item.casefold(), item)):
-        candidate = _safe_path(staged_root, relative)
-        payload = candidate.read_bytes() if candidate.is_file() else None
-        before = by_path.get(relative)
-        if payload != (before.payload if before is not None else None):
-            records[relative] = payload
-
-    postimages = {item.relative_path: item.digest for item in record_postimages}
-    if len(postimages) != len(record_postimages):
-        raise RepairError("repair record postimages repeat a path")
-    unknown_postimages = set(postimages) - publishable
-    if unknown_postimages:
-        raise RepairError(f"repair authorized unknown staged records: {sorted(unknown_postimages)}")
-    unauthorized = set(records) - set(postimages)
-    if unauthorized:
-        raise RepairError(
-            f"repair modified records outside its mutation ledger: {sorted(unauthorized)}"
-        )
-    for relative, expected in postimages.items():
-        candidate_path = _safe_path(staged_root, relative)
-        actual = Digest.from_path(candidate_path) if candidate_path.is_file() else None
-        if actual != expected:
-            raise RepairError(f"repair record changed after it was authorized: {relative!r}")
+    if record_postimages is None:
+        # Direct boundary tests may intentionally fail before a verifier exists.
+        records: dict[str, bytes | None] = {}
+        record_digests: dict[str, Digest | None] = {}
+        for relative in sorted(publishable, key=lambda item: (item.casefold(), item)):
+            try:
+                postimage = capture_project_postimage(staged_root, relative)
+            except PublicationEvidenceError as exc:
+                raise RepairError(str(exc)) from exc
+            before = by_path.get(relative)
+            if postimage.payload != (before.payload if before is not None else None):
+                records[relative] = postimage.payload
+                record_digests[relative] = postimage.digest
+        if records:
+            raise RepairError(
+                f"repair modified records outside its mutation ledger: {sorted(records)}"
+            )
+    else:
+        sealed = {item.relative_path: item for item in record_postimages.postimages}
+        if len(sealed) != len(record_postimages.postimages):
+            raise RepairError("repair record postimages repeat a path")
+        if set(sealed) != publishable:
+            raise RepairError("repair authority membership changed after verification")
+        for relative, members in record_postimages.authority_members:
+            try:
+                actual_members = json_authority_members(staged_root, relative)
+            except AuthoritySnapshotError as exc:
+                raise RepairError(f"cannot recheck staged repair authority: {exc}") from exc
+            if actual_members != members:
+                raise RepairError(
+                    f"repair authority membership changed after verification: {relative!r}"
+                )
+        try:
+            for postimage in record_postimages.postimages:
+                require_project_postimage(staged_root, postimage)
+        except PublicationEvidenceError as exc:
+            raise RepairError(str(exc).replace("publication", "repair record", 1)) from exc
+        records = {}
+        record_digests = {}
+        for relative, postimage in sealed.items():
+            before = by_path.get(relative)
+            if postimage.payload != (before.payload if before is not None else None):
+                records[relative] = postimage.payload
+                record_digests[relative] = postimage.digest
+        unauthorized = set(records) - record_postimages.authorized_paths
+        if unauthorized:
+            raise RepairError(
+                f"repair modified records outside its mutation ledger: {sorted(unauthorized)}"
+            )
 
     for snapshot_file in snapshot.files:
         if snapshot_file.relative_path in publishable:
@@ -316,34 +364,28 @@ def collect_repair_candidate(
         if not candidate.is_file() or Digest.from_path(candidate) != snapshot_file.digest:
             raise RepairError(f"repair modified a sealed input: {snapshot_file.relative_path!r}")
 
+    if verified is None:
+        raise RepairError("repair candidate has no verification result")
     report_root = _safe_path(staged_root, report_directory)
-    report_json = report_root / "report.json"
-    report_html = report_root / "report.html"
-    if not report_json.is_file() or not report_html.is_file():
-        raise RepairError("exact verification did not produce both repair reports")
-    outputs: dict[str, bytes] = {}
-    for output in snapshot.outputs:
-        candidate = _safe_path(staged_root, output.relative_path)
-        if not candidate.is_file():
-            raise RepairError(f"exact verification did not produce {output.relative_path!r}")
-        outputs[output.relative_path] = candidate.read_bytes()
-    ledger_path = _safe_path(staged_root, snapshot.ledger.relative_path)
-    if not os.path.lexists(ledger_path):
-        composed_body_ledger = None
-    else:
-        if ledger_path.is_symlink() or not ledger_path.is_file():
-            raise RepairError("verified repair data is not a regular file")
-        try:
-            ledger = read_ledger(ledger_path)
-        except (OSError, ValueError) as exc:
-            raise RepairError(f"verified repair data is invalid: {exc}") from exc
-        composed_body_ledger = canonical_json(ledger.model_dump(mode="json"))
+    try:
+        evidence = collect_verified_publication_evidence(
+            verified,
+            staged_root=staged_root,
+            output_paths=tuple(item.relative_path for item in snapshot.outputs),
+            target_paths=tuple(target.artifact for target in snapshot.spec.targets),
+            report_json=report_root / "report.json",
+            report_html=report_root / "report.html",
+            ledger_path=_safe_path(staged_root, snapshot.ledger.relative_path),
+        )
+    except PublicationEvidenceError as exc:
+        raise RepairError(str(exc)) from exc
     return RepairCandidate(
         records=records,
-        outputs=outputs,
-        report_json=report_json.read_bytes(),
-        report_html=report_html.read_bytes(),
-        composed_body_ledger=composed_body_ledger,
+        record_digests=record_digests,
+        outputs=evidence.outputs,
+        report_json=evidence.report_json,
+        report_html=evidence.report_html,
+        composed_body_ledger=evidence.composed_body_ledger,
     )
 
 
@@ -351,7 +393,7 @@ def capture_repair_record_postimages(
     snapshot: RepairSnapshot,
     staged_root: Path,
     relative_paths: set[str],
-) -> tuple[RepairRecordPostimage, ...]:
+) -> RepairRecordSeal:
     """Seal the exact postimages that typed staged repair steps may publish."""
 
     publishable = set(_publishable_paths(snapshot, staged_root))
@@ -359,17 +401,28 @@ def capture_repair_record_postimages(
     if unknown:
         raise RepairError(f"repair mutation ledger names unknown records: {sorted(unknown)}")
     postimages: list[RepairRecordPostimage] = []
-    for relative in sorted(relative_paths, key=lambda item: (item.casefold(), item)):
-        path = _safe_path(staged_root, relative)
-        if path.exists() and (path.is_symlink() or not path.is_file()):
-            raise RepairError(f"repair record postimage is not a regular file: {relative!r}")
-        postimages.append(
-            RepairRecordPostimage(
-                relative,
-                Digest.from_path(path) if path.is_file() else None,
-            )
+    for relative in sorted(publishable, key=lambda item: (item.casefold(), item)):
+        try:
+            postimages.append(capture_project_postimage(staged_root, relative))
+        except PublicationEvidenceError as exc:
+            raise RepairError(str(exc)) from exc
+    by_path = snapshot.files_by_path
+    changed = {
+        item.relative_path
+        for item in postimages
+        if item.payload
+        != (by_path[item.relative_path].payload if item.relative_path in by_path else None)
+    }
+    unauthorized = changed - relative_paths
+    if unauthorized:
+        raise RepairError(
+            f"repair modified records outside its mutation ledger: {sorted(unauthorized)}"
         )
-    return tuple(postimages)
+    members = tuple(
+        (directory.relative_path, json_authority_members(staged_root, directory.relative_path))
+        for directory in snapshot.authority_directories
+    )
+    return RepairRecordSeal(tuple(postimages), members, frozenset(relative_paths))
 
 
 def publish_repair_candidate(
@@ -384,6 +437,9 @@ def publish_repair_candidate(
     by_path = snapshot.files_by_path
     transaction = CASTransaction(snapshot.root)
     for relative, payload in sorted(candidate.records.items()):
+        digest = candidate.record_digests.get(relative)
+        if (Digest.from_bytes(payload) if payload is not None else None) != digest:
+            raise RepairError(f"repair record payload differs from its seal: {relative!r}")
         original = by_path.get(relative)
         expected = original.digest.value if original is not None else None
         if payload is None:
@@ -405,6 +461,8 @@ def publish_repair_candidate(
         )
 
     output_preimages = {item.relative_path: item.digest for item in snapshot.outputs}
+    if set(candidate.outputs) != set(output_preimages):
+        raise RepairError("cold verification produced a different repair output set")
     for relative, payload in sorted(candidate.outputs.items()):
         output_preimage = output_preimages[relative]
         transaction.write(
@@ -483,6 +541,17 @@ def validate_repair_report_directory(snapshot: RepairSnapshot, relative: str) ->
     protected_files.update(item.relative_path.casefold() for item in snapshot.outputs)
     if report_files & protected_files:
         raise RepairError("repair report files overlap a protected project input or output")
+    conflict = report_output_conflict(
+        snapshot.root,
+        snapshot.spec,
+        (
+            ("JSON report", _safe_path(snapshot.root, (report_root / "report.json").as_posix())),
+            ("HTML report", _safe_path(snapshot.root, (report_root / "report.html").as_posix())),
+        ),
+        source_paths=(entry.path for entry in snapshot.source_manifest.entries),
+    )
+    if conflict is not None:
+        raise RepairError(conflict)
 
 
 def capture_repair_report_preimages(
@@ -504,6 +573,7 @@ __all__ = [
     "RepairError",
     "RepairOutputSnapshot",
     "RepairRecordPostimage",
+    "RepairRecordSeal",
     "RepairSnapshot",
     "capture_repair_record_postimages",
     "capture_repair_report_preimages",

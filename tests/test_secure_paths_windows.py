@@ -10,6 +10,7 @@ import pytest
 
 from reprobit.secure_path_contracts import SecurePathError
 from reprobit.secure_paths import (
+    atomic_copy_new_relative,
     atomic_publish_new_relative_from_stream,
     atomic_publish_relative,
     atomic_publish_relative_if_current,
@@ -152,6 +153,85 @@ def test_windows_stream_publication_and_promotion_return_settled_snapshots(
     assert reseal_relative_file(root, "blobs/object", expected=promoted) == promoted
 
 
+def test_windows_atomic_copy_binds_source_and_destination_roots(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    moved = tmp_path / "destination-original"
+    source.mkdir()
+    destination.mkdir()
+    (source / "input.bin").write_bytes(b"input")
+    source_metadata = source.stat(follow_symlinks=False)
+    destination_metadata = destination.stat(follow_symlinks=False)
+
+    published = atomic_copy_new_relative(
+        source,
+        "input.bin",
+        destination,
+        "output.bin",
+        expected_source_directories={
+            ".": (source_metadata.st_dev, source_metadata.st_ino),
+        },
+        expected_destination_directories={
+            ".": (destination_metadata.st_dev, destination_metadata.st_ino),
+        },
+    )
+    assert published.digest == digest_relative_file(destination, "output.bin").digest
+
+    os.replace(destination, moved)
+    destination.mkdir()
+    with pytest.raises(SecurePathError, match="root changed before use"):
+        atomic_copy_new_relative(
+            source,
+            "input.bin",
+            destination,
+            "second.bin",
+            expected_source_directories={
+                ".": (source_metadata.st_dev, source_metadata.st_ino),
+            },
+            expected_destination_directories={
+                ".": (destination_metadata.st_dev, destination_metadata.st_ino),
+            },
+        )
+
+    assert not (destination / "second.bin").exists()
+
+
+def test_windows_expected_directory_identity_blocks_a_replacement_seat(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "state"
+    seat = root / "seat"
+    moved = root / "moved"
+    (seat / "incoming").mkdir(parents=True)
+    (seat / "incoming" / "object").write_bytes(b"staged")
+    staged = digest_relative_file(root, "seat/incoming/object")
+    metadata = seat.stat(follow_symlinks=False)
+    expected_directories = {"seat": (metadata.st_dev, metadata.st_ino)}
+    os.replace(seat, moved)
+    seat.mkdir()
+    (seat / "keep.txt").write_bytes(b"replacement")
+
+    with pytest.raises(SecurePathError, match="directory changed"):
+        atomic_publish_new_relative_from_stream(
+            root,
+            "seat/staged/new",
+            io.BytesIO(b"new"),
+            expected_directories=expected_directories,
+        )
+    with pytest.raises(SecurePathError, match="directory changed"):
+        promote_relative_new(
+            root,
+            "seat/incoming/object",
+            "published/object",
+            expected=staged,
+            expected_directories=expected_directories,
+        )
+
+    assert tuple(path.name for path in seat.iterdir()) == ("keep.txt",)
+    assert (moved / "incoming" / "object").read_bytes() == b"staged"
+    assert not (root / "published").exists()
+
+
 def test_windows_handle_relative_paths_reject_reparse_ancestor(
     tmp_path: Path,
 ) -> None:
@@ -209,6 +289,49 @@ def test_windows_conditional_publication_applies_attributes_and_rolls_back(
     assert reseal_relative_file(root, relative, expected=replacement) == replacement
     assert remove_published_relative(root, relative, expected=replacement)
     assert not target.exists()
+
+
+def test_windows_replace_preserves_a_target_created_after_quarantine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    relative = "build/APP.EXE"
+    target = root / relative
+    expected = atomic_publish_relative(root, relative, b"original")
+    original_rename = _WindowsHandles.rename
+    raced = False
+
+    def create_peer_before_publish(
+        api: _WindowsHandles,
+        handle: Any,
+        parent: Any,
+        name: str,
+        *,
+        replace: bool,
+    ) -> None:
+        nonlocal raced
+        if name == "APP.EXE" and not raced:
+            target.write_bytes(b"peer")
+            raced = True
+        original_rename(api, handle, parent, name, replace=replace)
+
+    monkeypatch.setattr(_WindowsHandles, "rename", create_peer_before_publish)
+
+    with pytest.raises(SecurePathError, match="private guard"):
+        atomic_publish_relative_if_current(
+            root,
+            relative,
+            b"candidate",
+            expected=expected,
+        )
+
+    assert raced
+    assert target.read_bytes() == b"peer"
+    guards = tuple(target.parent.glob(".APP.EXE.reprobit-guard-*"))
+    assert len(guards) == 1
+    assert guards[0].read_bytes() == b"original"
 
 
 def test_windows_readonly_publication_can_be_removed_and_rolled_back(

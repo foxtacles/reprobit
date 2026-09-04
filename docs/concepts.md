@@ -2,7 +2,7 @@
 
 This page explains what ReproBit is protecting against and what its verdicts
 mean. It is background reading; [Getting started](getting-started.md) is the
-hands-on path and the [command-line reference](cli.md) documents each command.
+hands-on path and the [command-line guide](cli.md) explains each command.
 The [glossary](glossary.md) defines the terms used here.
 
 ## Why exact rebuilds are difficult

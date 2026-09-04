@@ -140,11 +140,15 @@ def capture_json_authority_directories(
 def assert_json_authority_unchanged(
     transaction: CASTransaction,
     snapshots: tuple[JsonAuthorityDirectorySnapshot, ...],
+    *,
+    mutable_paths: frozenset[str] = frozenset(),
 ) -> None:
     """Attach every captured file and directory membership as CAS preconditions."""
 
     for snapshot in snapshots:
         for relative, digest in snapshot.file_digests:
+            if relative in mutable_paths:
+                continue
             transaction.assert_unchanged(relative, expected_sha256=digest)
         transaction.assert_json_members(
             snapshot.relative_path,

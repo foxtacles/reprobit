@@ -23,13 +23,13 @@ Run all four before every commit; CI (`.github/workflows`) runs the same
 commands plus `python -m build` and `python -m pip check`:
 
 ```console
-ruff check && ruff format --check && mypy && pytest -q
+ruff check && ruff format --check && mypy && python -m pytest -q
 ```
 
 - `ruff check` / `ruff format --check`: lint and formatting (line length 100,
   configuration in `pyproject.toml`).
 - `mypy`: strict typing of `src/reprobit` and the CI helpers in `scripts/`.
-- `pytest -q`: the full suite from `tests/` (`testpaths` in `pyproject.toml`;
+- `python -m pytest -q`: the full suite from `tests/` (`testpaths` in `pyproject.toml`;
   `-ra --strict-config --strict-markers` are always on).
 
 Several generated files are checked into the repository and each has a test
@@ -68,6 +68,11 @@ When a test asserts exact CLI wording and you change that wording on purpose,
 update the assertion to the new text. Do not delete assertions, loosen
 matchers, or add skips to make a test pass.
 
+A project-schema bump must include concise upgrade notes and one tested,
+version-specific conversion or regeneration path from the immediately
+preceding schema. Keep that path explicit; do not add a generic migration
+framework that guesses how to handle unknown versions.
+
 ## Module map
 
 `src/reprobit/` is one flat package plus the `classic/` subpackage. Families
@@ -83,7 +88,7 @@ by filename prefix:
 | Classic algorithms | `classic/` | The MSVC recipe families' pure algorithms: COFF and CodeView projection, candidate composers, rewriting and scheduling certificates, semantic contracts, source overlays. A leaf: it imports only the model, format, path and toolchain-profile foundations, never a `classic_*` module. `classic` is the label for that older MSVC family (see [docs/architecture.md](docs/architecture.md)). |
 | Classic runtime | `classic_*` | Everything that runs the package against a project: donor rendering (`classic_donors`), family dispatch (`classic_project`), execution (`classic_runtime_*`, `classic_orchestration`), warm builds (`classic_incremental_*`), quarantine handling, and the repair and retune steps (`classic_repair_*`, `classic_measured_pin_repair`, `classic_redundant_action_repair`, `classic_donor_retune_*`, `classic_source_regeneration`). |
 | Discovery | `discovery_*`, `declaration_shapes` | `rbit discover grind` and `rbit discover run`, the bounded declaration generators, their reports. |
-| CMake import | `cmake_*`, `producer_graph`, `producer_graph_cmake` | The one-time import that extracts the committed producer graph. |
+| CMake import | `cmake_*`, `producer_graph`, `producer_graph_cmake` | Import and source-list refresh for the committed producer graph. |
 | Repair | `repair*` | `rbit repair`: analysing an edit, re-issuing guidance, publishing. |
 | Reports | `report*`, `action_summary` | The JSON report model and the HTML renderer, GitHub Action summary. |
 | CLI | `cli*` | argparse tree (`cli._parser`), `CLIOutput` text/NDJSON events, one `cli_<area>` module per command group, `cli_reference` (docs generator). |

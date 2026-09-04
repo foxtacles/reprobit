@@ -6,14 +6,14 @@ from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
 import reprobit.discovery_grind_cli as grind_cli
 import reprobit.discovery_grind_report as grind_report
 import reprobit.discovery_project_grind_cli as project_grind_cli
-from reprobit.cli_output import CLIOutput
+from reprobit.cli_output import CLIOutput, human_command
 from reprobit.discovery_contracts import (
     DeclarationFamily,
     DeclarationParameter,
@@ -118,11 +118,10 @@ def test_discovery_probe_passes_resolved_execution_inputs_to_runtime(
     bundle = SimpleNamespace(spec=SimpleNamespace(toolchain=SimpleNamespace(profile="msvc_4_2")))
     backend = object()
     execution = object()
-    args = SimpleNamespace(
+    options = grind_cli.ProjectExecutionOptions(
+        jobs=3,
+        backend=cast(Any, backend),
         toolchain_root=tmp_path / "toolchain",
-        backend="auto",
-        wine=None,
-        wineserver=None,
         compiler_transport=None,
         resource_transport=None,
     )
@@ -130,15 +129,14 @@ def test_discovery_probe_passes_resolved_execution_inputs_to_runtime(
     prepared: dict[str, object] = {}
 
     monkeypatch.setattr(grind_cli, "load_project_tree", lambda _root: bundle)
-    monkeypatch.setattr(grind_cli, "selected_backend", lambda _args: backend)
 
     def resolve_execution(**values: object) -> object:
         resolved.update(values)
         return execution
 
-    def prepare_run(*values: object, **options: object) -> object:
+    def prepare_run(*values: object, **run_options: object) -> object:
         prepared["args"] = values
-        prepared.update(options)
+        prepared.update(run_options)
         return "prepared"
 
     monkeypatch.setattr(
@@ -146,12 +144,12 @@ def test_discovery_probe_passes_resolved_execution_inputs_to_runtime(
         "resolve_classic_execution_inputs",
         resolve_execution,
     )
+    monkeypatch.setattr(grind_cli, "prepare_producer_graph_run", prepare_run)
 
     result, session = grind_cli._prepare_probe(
-        args,
+        options,
         staged_root=tmp_path,
         label="seed",
-        prepare_run=prepare_run,
     )
 
     assert result == "prepared"
@@ -163,7 +161,7 @@ def test_discovery_probe_passes_resolved_execution_inputs_to_runtime(
         "compiler_transport": None,
         "resource_transport": None,
     }
-    assert prepared["args"] == (args, bundle)
+    assert prepared["args"] == (options, bundle)
     assert prepared["project_root"] == tmp_path
     assert prepared["session_root"] == session
     assert prepared["execution"] is execution
@@ -288,6 +286,17 @@ def _args(
         plan="reprobit/discovery.json",
         accept_exact=accept_exact,
         accept_progress=accept_progress,
+        jobs=1,
+        backend="auto",
+        wine="wine",
+        wineserver="wineserver",
+        toolchain_root=None,
+        compiler_transport=None,
+        resource_transport=None,
+        initialization_timeout=600.0,
+        compile_timeout=600.0,
+        link_timeout=900.0,
+        cleanup_timeout=10.0,
     )
 
 
@@ -321,8 +330,6 @@ def test_cli_writes_a_human_grind_report_for_no_solution(
     status = grind_cli.command_discover_grind(
         _args(tmp_path, accept_exact=False),
         CLIOutput("ndjson", machine, StringIO()),
-        prepare_run=lambda *_args, **_kwargs: None,
-        verify_command=lambda *_args, **_kwargs: 0,
     )
 
     report = tmp_path / ".reprobit-state/reports/grind/report.html"
@@ -339,6 +346,8 @@ def test_cli_writes_a_human_grind_report_for_no_solution(
     )
     assert complete["grind_report_html"] == str(report)
     assert complete["cold_verification_report_html"] is None
+    assert complete["next_command"] is None
+    assert complete["next_argv"] == []
 
 
 def test_cli_cold_report_links_its_actual_json_sibling(
@@ -358,8 +367,6 @@ def test_cli_cold_report_links_its_actual_json_sibling(
     status = grind_cli.command_discover_grind(
         _args(tmp_path, accept_exact=False),
         CLIOutput("ndjson", StringIO(), StringIO()),
-        prepare_run=lambda *_args, **_kwargs: None,
-        verify_command=lambda *_args, **_kwargs: 0,
     )
 
     assert status == 0
@@ -390,8 +397,6 @@ def test_report_failure_after_publication_is_an_explicit_nonfatal_event(
     status = grind_cli.command_discover_grind(
         _args(tmp_path, accept_exact=True),
         CLIOutput("ndjson", machine, StringIO()),
-        prepare_run=lambda *_args, **_kwargs: None,
-        verify_command=lambda *_args, **_kwargs: 0,
     )
 
     events = [json.loads(line) for line in machine.getvalue().splitlines()]
@@ -404,6 +409,8 @@ def test_report_failure_after_publication_is_an_explicit_nonfatal_event(
     assert complete["published"] is True
     assert complete["grind_report_html"] is None
     assert "report disk unavailable" in complete["report_warning"]
+    assert complete["next_argv"] == ["rbit", "verify", str(tmp_path)]
+    assert complete["next_command"] == human_command(complete["next_argv"])
 
 
 def test_cold_report_failure_still_writes_the_human_grind_report(
@@ -422,8 +429,6 @@ def test_cold_report_failure_still_writes_the_human_grind_report(
     status = grind_cli.command_discover_grind(
         _args(tmp_path, accept_exact=False),
         CLIOutput("ndjson", machine, StringIO()),
-        prepare_run=lambda *_args, **_kwargs: None,
-        verify_command=lambda *_args, **_kwargs: 0,
     )
 
     report = tmp_path / ".reprobit-state/reports/grind/report.html"
@@ -438,6 +443,8 @@ def test_cold_report_failure_still_writes_the_human_grind_report(
     assert complete["grind_report_html"] == str(report)
     assert complete["cold_verification_report_html"] is None
     assert "cold report unavailable" in complete["report_warning"]
+    assert complete["next_argv"] == complete["approval_argv"]
+    assert complete["next_command"] == human_command(complete["next_argv"])
 
 
 @pytest.mark.parametrize(
@@ -474,8 +481,6 @@ def test_save_exit_status_reports_whether_the_requested_publication_happened(
             accept_progress=accept_progress,
         ),
         CLIOutput("ndjson", machine, StringIO()),
-        prepare_run=lambda *_args, **_kwargs: None,
-        verify_command=lambda *_args, **_kwargs: 0,
     )
 
     assert status == expected_status

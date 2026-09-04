@@ -124,7 +124,7 @@ jobs:
       - name: Probe the Wine transport and toolchain
         run: >-
           rbit doctor
-          --toolchain-profile msvc_4_2
+          --profile msvc_4_2
           --toolchain-root "$RUNNER_TEMP/archaic-msvc42"
           --execute-probe
       - name: Run the full suite with the authenticated compiler
@@ -194,7 +194,7 @@ jobs:
         run: >-
           rbit doctor
           --backend windows_native_v1
-          --toolchain-profile msvc_4_2
+          --profile msvc_4_2
           --toolchain-root "$env:REPROBIT_MSVC_4_2_ROOT"
           --execute-probe
       - name: Run the full suite with the authenticated compiler

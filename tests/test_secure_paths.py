@@ -8,6 +8,7 @@ from typing import BinaryIO
 import pytest
 
 import reprobit.secure_paths as secure_paths
+import reprobit.secure_paths_posix as secure_paths_posix
 import reprobit.secure_paths_windows as secure_paths_windows
 from reprobit.model import Digest
 from reprobit.secure_path_contracts import SecureFileSnapshot, SecurePathError
@@ -56,6 +57,110 @@ def test_secure_read_and_digest_snapshots_have_identical_mode_receipts(
     assert read_snapshot.mode != 0
 
 
+def test_expected_directory_identity_blocks_a_replacement_seat(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    seat = root / "state" / "seat"
+    moved = root / "state" / "moved"
+    (seat / "incoming").mkdir(parents=True)
+    (seat / "journal.json").write_bytes(b"journal")
+    (seat / "incoming" / "object").write_bytes(b"staged")
+    journal = digest_relative_file(root, "state/seat/journal.json")
+    staged = digest_relative_file(root, "state/seat/incoming/object")
+    metadata = seat.stat(follow_symlinks=False)
+    expected_directories = {"state/seat": (metadata.st_dev, metadata.st_ino)}
+    os.replace(seat, moved)
+    seat.mkdir()
+    (seat / "keep.txt").write_bytes(b"replacement")
+
+    with pytest.raises(SecurePathError, match="directory changed"):
+        read_relative_file(
+            root,
+            "state/seat/journal.json",
+            expected_directories=expected_directories,
+        )
+    with pytest.raises(SecurePathError, match="directory changed"):
+        digest_relative_file(
+            root,
+            "state/seat/journal.json",
+            expected_directories=expected_directories,
+        )
+    with pytest.raises(SecurePathError, match="directory changed"):
+        atomic_publish_relative_if_current(
+            root,
+            "state/seat/journal.json",
+            b"replacement journal",
+            expected=journal,
+            expected_directories=expected_directories,
+        )
+    with pytest.raises(SecurePathError, match="directory changed"):
+        atomic_publish_new_relative_from_stream(
+            root,
+            "state/seat/staged/new",
+            io.BytesIO(b"new"),
+            expected_directories=expected_directories,
+        )
+    with pytest.raises(SecurePathError, match="directory changed"):
+        promote_relative_new(
+            root,
+            "state/seat/incoming/object",
+            "build/object",
+            expected=staged,
+            expected_directories=expected_directories,
+        )
+    with pytest.raises(SecurePathError, match="directory changed"):
+        remove_published_relative(
+            root,
+            "state/seat/journal.json",
+            expected=journal,
+            expected_directories=expected_directories,
+        )
+
+    assert tuple(path.name for path in seat.iterdir()) == ("keep.txt",)
+    assert (moved / "journal.json").read_bytes() == b"journal"
+    assert (moved / "incoming" / "object").read_bytes() == b"staged"
+    assert not (root / "build").exists()
+
+
+def test_expected_directory_identity_must_name_a_path_ancestor(tmp_path: Path) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+
+    with pytest.raises(ValueError, match="canonical path ancestor"):
+        atomic_publish_new_relative_from_stream(
+            root,
+            "state/value",
+            io.BytesIO(b"value"),
+            expected_directories={"unrelated": (1, 2)},
+        )
+
+    assert not (root / "state").exists()
+
+
+def test_promotion_checks_source_change_time_when_size_and_mtime_are_restored(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    source = root / "staged"
+    source.write_bytes(b"first")
+    expected = digest_relative_file(root, "staged")
+    source.write_bytes(b"other")
+    os.utime(source, ns=(expected.mtime_ns, expected.mtime_ns))
+
+    with pytest.raises(SecurePathError, match="promotion source changed"):
+        promote_relative_new(
+            root,
+            "staged",
+            "published",
+            expected=expected,
+        )
+
+    assert source.read_bytes() == b"other"
+    assert not (root / "published").exists()
+
+
 def test_atomic_publication_replaces_only_regular_targets_and_reseals(
     tmp_path: Path,
 ) -> None:
@@ -92,6 +197,100 @@ def test_conditional_publication_preserves_a_changed_preimage(tmp_path: Path) ->
     assert (root / "build/APP.EXE").read_bytes() == b"peer"
 
 
+def test_conditional_publication_preserves_a_replacement_raced_at_quarantine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    target = root / "build/APP.EXE"
+    moved = root / "build/original.exe"
+    expected = atomic_publish_relative(root, "build/APP.EXE", b"original")
+    original_rename = secure_paths_posix._rename_noreplace_at
+    raced = False
+
+    def replace_before_quarantine(parent: int, source: str, destination: str) -> None:
+        nonlocal raced
+        if source == "APP.EXE" and ".reprobit-guard-" in destination and not raced:
+            os.replace(target, moved)
+            target.write_bytes(b"peer")
+            raced = True
+        original_rename(parent, source, destination)
+
+    monkeypatch.setattr(
+        secure_paths_posix,
+        "_rename_noreplace_at",
+        replace_before_quarantine,
+    )
+
+    with pytest.raises(SecurePathError, match="preimage changed"):
+        atomic_publish_relative_if_current(
+            root,
+            "build/APP.EXE",
+            b"candidate",
+            expected=expected,
+        )
+
+    assert raced
+    assert target.read_bytes() == b"peer"
+    assert moved.read_bytes() == b"original"
+
+
+def test_replace_never_restores_a_changed_private_guard_to_the_public_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    target = root / "build/APP.EXE"
+    saved = root / "build/saved-original.exe"
+    expected = atomic_publish_relative(root, "build/APP.EXE", b"original")
+    real_discard = secure_paths_posix._discard_quarantine_if_exact
+    raced = False
+
+    def replace_guard_before_discard(
+        parent: int,
+        quarantine: str,
+        descriptor: int,
+        metadata: os.stat_result,
+        *,
+        digest: Digest,
+    ) -> None:
+        nonlocal raced
+        guard = target.parent / quarantine
+        os.replace(guard, saved)
+        guard.write_bytes(b"peer")
+        raced = True
+        real_discard(
+            parent,
+            quarantine,
+            descriptor,
+            metadata,
+            digest=digest,
+        )
+
+    monkeypatch.setattr(
+        secure_paths_posix,
+        "_discard_quarantine_if_exact",
+        replace_guard_before_discard,
+    )
+
+    with pytest.raises(SecurePathError, match="preimage guard changed"):
+        atomic_publish_relative_if_current(
+            root,
+            "build/APP.EXE",
+            b"candidate",
+            expected=expected,
+        )
+
+    assert raced
+    assert not target.exists()
+    assert saved.read_bytes() == b"original"
+    guards = tuple(target.parent.glob(".APP.EXE.reprobit-guard-*"))
+    assert len(guards) == 1
+    assert guards[0].read_bytes() == b"peer"
+
+
 def test_byte_publication_rejects_commit_time_chmod(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -99,13 +298,14 @@ def test_byte_publication_rejects_commit_time_chmod(
     root = tmp_path / "project"
     target = root / "build/APP.EXE"
     root.mkdir()
-    original_replace = secure_paths.os.replace
+    original_rename = secure_paths_posix._rename_noreplace_at
 
-    def replace_then_chmod(*args: object, **kwargs: object) -> None:
-        original_replace(*args, **kwargs)
-        target.chmod(0o755)
+    def rename_then_chmod(parent: int, source: str, destination: str) -> None:
+        original_rename(parent, source, destination)
+        if destination == "APP.EXE":
+            target.chmod(0o755)
 
-    monkeypatch.setattr(secure_paths.os, "replace", replace_then_chmod)
+    monkeypatch.setattr(secure_paths_posix, "_rename_noreplace_at", rename_then_chmod)
     with pytest.raises(SecurePathError, match="attributes changed during commit"):
         atomic_publish_relative(root, "build/APP.EXE", b"candidate")
 
@@ -117,13 +317,14 @@ def test_stream_publication_rejects_commit_time_chmod(
     root = tmp_path / "project"
     target = root / "cache/object"
     root.mkdir()
-    original_link = secure_paths.os.link
+    original_rename = secure_paths_posix._rename_noreplace_at
 
-    def link_then_chmod(*args: object, **kwargs: object) -> None:
-        original_link(*args, **kwargs)
-        target.chmod(0o755)
+    def rename_then_chmod(parent: int, source: str, destination: str) -> None:
+        original_rename(parent, source, destination)
+        if destination == "object":
+            target.chmod(0o755)
 
-    monkeypatch.setattr(secure_paths.os, "link", link_then_chmod)
+    monkeypatch.setattr(secure_paths_posix, "_rename_noreplace_at", rename_then_chmod)
     with pytest.raises(SecurePathError, match="attributes changed during commit"):
         atomic_publish_new_relative_from_stream(
             root,
@@ -278,6 +479,58 @@ def test_secure_digest_and_copy_stream_without_hardlinking(tmp_path: Path) -> No
     assert digest_relative_file(destination_root, "objects/large.bin").digest == (receipt.digest)
 
 
+def test_atomic_copy_rejects_a_replaced_source_root(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    moved = tmp_path / "source-original"
+    destination_root = tmp_path / "destination"
+    source_root.mkdir()
+    destination_root.mkdir()
+    (source_root / "input.bin").write_bytes(b"input")
+    metadata = source_root.stat(follow_symlinks=False)
+    os.replace(source_root, moved)
+    source_root.mkdir()
+    (source_root / "input.bin").write_bytes(b"replacement")
+
+    with pytest.raises(SecurePathError, match="root changed before use"):
+        atomic_copy_new_relative(
+            source_root,
+            "input.bin",
+            destination_root,
+            "output.bin",
+            expected_source_directories={".": (metadata.st_dev, metadata.st_ino)},
+        )
+
+    assert not (destination_root / "output.bin").exists()
+    assert (moved / "input.bin").read_bytes() == b"input"
+
+
+def test_atomic_copy_rejects_a_replaced_destination_root(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    destination_root = tmp_path / "destination"
+    moved = tmp_path / "destination-original"
+    source_root.mkdir()
+    destination_root.mkdir()
+    (source_root / "input.bin").write_bytes(b"input")
+    metadata = destination_root.stat(follow_symlinks=False)
+    os.replace(destination_root, moved)
+    destination_root.mkdir()
+    (destination_root / "keep.bin").write_bytes(b"replacement")
+
+    with pytest.raises(SecurePathError, match="root changed before use"):
+        atomic_copy_new_relative(
+            source_root,
+            "input.bin",
+            destination_root,
+            "output.bin",
+            expected_destination_directories={
+                ".": (metadata.st_dev, metadata.st_ino),
+            },
+        )
+
+    assert tuple(path.name for path in destination_root.iterdir()) == ("keep.bin",)
+    assert moved.is_dir()
+
+
 def test_atomic_create_if_absent_rejects_final_symlink(tmp_path: Path) -> None:
     root = tmp_path / "project"
     outside = tmp_path / "outside"
@@ -296,13 +549,18 @@ def test_atomic_create_if_absent_loses_race_without_overwrite(
 ) -> None:
     root = tmp_path / "project"
     root.mkdir()
-    original_link = secure_paths.os.link
+    original_rename = secure_paths_posix._rename_noreplace_at
 
-    def publish_racer_then_link(*args: object, **kwargs: object) -> None:
-        (root / "cache/object").write_bytes(b"racer")
-        original_link(*args, **kwargs)
+    def publish_racer_then_rename(parent: int, source: str, destination: str) -> None:
+        if destination == "object":
+            (root / "cache/object").write_bytes(b"racer")
+        original_rename(parent, source, destination)
 
-    monkeypatch.setattr(secure_paths.os, "link", publish_racer_then_link)
+    monkeypatch.setattr(
+        secure_paths_posix,
+        "_rename_noreplace_at",
+        publish_racer_then_rename,
+    )
     with pytest.raises(SecurePathError, match="cannot atomically create"):
         atomic_publish_new_relative(root, "cache/object", b"candidate")
     assert (root / "cache/object").read_bytes() == b"racer"
@@ -330,18 +588,18 @@ def test_atomic_publication_rejects_concurrent_ancestor_swap(
     outside = tmp_path / "outside"
     output.mkdir(parents=True)
     outside.mkdir()
-    original_replace = secure_paths.os.replace
+    original_rename = secure_paths_posix._rename_noreplace_at
     swapped = False
 
-    def swap_then_replace(*args: object, **kwargs: object) -> None:
+    def swap_then_rename(parent: int, source: str, destination: str) -> None:
         nonlocal swapped
-        if not swapped:
+        if destination == "APP.EXE" and not swapped:
             output.rename(held_output)
             output.symlink_to(outside, target_is_directory=True)
             swapped = True
-        original_replace(*args, **kwargs)
+        original_rename(parent, source, destination)
 
-    monkeypatch.setattr(secure_paths.os, "replace", swap_then_replace)
+    monkeypatch.setattr(secure_paths_posix, "_rename_noreplace_at", swap_then_rename)
     with pytest.raises(SecurePathError, match="component changed while held"):
         atomic_publish_relative(root, "build/APP.EXE", b"candidate")
 
@@ -357,19 +615,19 @@ def test_failed_publication_cleanup_preserves_competing_final_replacement(
     target = root / "build/APP.EXE"
     target.parent.mkdir(parents=True)
     target.write_bytes(b"previous")
-    original_replace = secure_paths.os.replace
+    original_rename = secure_paths_posix._rename_noreplace_at
     raced = False
 
-    def replace_then_compete(*args: object, **kwargs: object) -> None:
+    def rename_then_compete(parent: int, source: str, destination: str) -> None:
         nonlocal raced
-        original_replace(*args, **kwargs)
-        if not raced:
+        original_rename(parent, source, destination)
+        if destination == "APP.EXE" and not raced:
             target.unlink()
             target.write_bytes(b"competing replacement")
             raced = True
 
-    monkeypatch.setattr(secure_paths.os, "replace", replace_then_compete)
-    with pytest.raises(SecurePathError, match="changed during commit"):
+    monkeypatch.setattr(secure_paths_posix, "_rename_noreplace_at", rename_then_compete)
+    with pytest.raises(SecurePathError, match=r"changed during commit|original entry"):
         atomic_publish_relative(root, "build/APP.EXE", b"candidate")
 
     assert target.read_bytes() == b"competing replacement"
@@ -382,18 +640,18 @@ def test_failed_stream_publication_preserves_competing_final_replacement(
     root = tmp_path / "project"
     root.mkdir()
     target = root / "cache/object"
-    original_link = secure_paths.os.link
+    original_rename = secure_paths_posix._rename_noreplace_at
     raced = False
 
-    def link_then_compete(*args: object, **kwargs: object) -> None:
+    def rename_then_compete(parent: int, source: str, destination: str) -> None:
         nonlocal raced
-        original_link(*args, **kwargs)
-        if not raced:
+        original_rename(parent, source, destination)
+        if destination == "object" and not raced:
             target.unlink()
             target.write_bytes(b"competing replacement")
             raced = True
 
-    monkeypatch.setattr(secure_paths.os, "link", link_then_compete)
+    monkeypatch.setattr(secure_paths_posix, "_rename_noreplace_at", rename_then_compete)
     with pytest.raises(SecurePathError, match="changed during commit"):
         atomic_publish_new_relative_from_stream(
             root,
@@ -415,19 +673,33 @@ def test_failed_promotion_preserves_competing_final_replacement(
     source.write_bytes(b"candidate")
     expected = digest_relative_file(root, "incoming/object")
     target = root / "blobs/object"
-    original_link = secure_paths.os.link
+    original_rename = secure_paths_posix._rename_noreplace_between
     raced = False
 
-    def link_then_compete(*args: object, **kwargs: object) -> None:
+    def rename_then_compete(
+        source_parent: int,
+        source_name: str,
+        destination_parent: int,
+        destination_name: str,
+    ) -> None:
         nonlocal raced
-        original_link(*args, **kwargs)
-        if not raced:
+        original_rename(
+            source_parent,
+            source_name,
+            destination_parent,
+            destination_name,
+        )
+        if destination_name == "object" and not raced:
             target.unlink()
             target.write_bytes(b"competing replacement")
             raced = True
 
-    monkeypatch.setattr(secure_paths.os, "link", link_then_compete)
-    with pytest.raises(SecurePathError, match="promotion target changed"):
+    monkeypatch.setattr(
+        secure_paths_posix,
+        "_rename_noreplace_between",
+        rename_then_compete,
+    )
+    with pytest.raises(SecurePathError, match="competing entry preserved"):
         promote_relative_new(
             root,
             "incoming/object",
@@ -435,8 +707,60 @@ def test_failed_promotion_preserves_competing_final_replacement(
             expected=expected,
         )
 
-    assert source.read_bytes() == b"candidate"
-    assert target.read_bytes() == b"competing replacement"
+    assert not source.exists()
+    assert not target.exists()
+    guards = tuple(target.parent.glob(".object.reprobit-guard-*"))
+    assert len(guards) == 1
+    assert guards[0].read_bytes() == b"competing replacement"
+
+
+def test_promotion_preserves_a_source_replacement_raced_at_move(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "state"
+    source = root / "incoming/object"
+    moved = root / "incoming/original"
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"candidate")
+    expected = digest_relative_file(root, "incoming/object")
+    original_rename = secure_paths_posix._rename_noreplace_between
+    raced = False
+
+    def replace_before_move(
+        source_parent: int,
+        name: str,
+        destination_parent: int,
+        destination: str,
+    ) -> None:
+        nonlocal raced
+        if name == "object" and destination == "object" and not raced:
+            os.replace(source, moved)
+            source.write_bytes(b"peer")
+            raced = True
+        original_rename(source_parent, name, destination_parent, destination)
+
+    monkeypatch.setattr(
+        secure_paths_posix,
+        "_rename_noreplace_between",
+        replace_before_move,
+    )
+
+    with pytest.raises(SecurePathError, match="competing entry preserved"):
+        promote_relative_new(
+            root,
+            "incoming/object",
+            "published/object",
+            expected=expected,
+        )
+
+    assert raced
+    assert not source.exists()
+    assert moved.read_bytes() == b"candidate"
+    assert not (root / "published/object").exists()
+    guards = tuple((root / "published").glob(".object.reprobit-guard-*"))
+    assert len(guards) == 1
+    assert guards[0].read_bytes() == b"peer"
 
 
 def test_atomic_publication_rejects_redirected_final_parent(tmp_path: Path) -> None:
@@ -463,6 +787,38 @@ def test_publication_rollback_removes_only_the_exact_snapshot(tmp_path: Path) ->
     (root / "reports/report.json").write_bytes(b"attacker replacement")
     assert not remove_published_relative(root, "reports/report.json", expected=snapshot)
     assert (root / "reports/report.json").read_bytes() == b"attacker replacement"
+
+
+def test_publication_rollback_preserves_a_replacement_raced_at_quarantine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "project"
+    root.mkdir()
+    target = root / "reports/report.json"
+    moved = root / "reports/original.json"
+    snapshot = atomic_publish_relative(root, "reports/report.json", b"report")
+    original_rename = secure_paths_posix._rename_noreplace_at
+    raced = False
+
+    def replace_before_quarantine(parent: int, source: str, destination: str) -> None:
+        nonlocal raced
+        if source == "report.json" and ".reprobit-guard-" in destination and not raced:
+            os.replace(target, moved)
+            target.write_bytes(b"peer")
+            raced = True
+        original_rename(parent, source, destination)
+
+    monkeypatch.setattr(
+        secure_paths_posix,
+        "_rename_noreplace_at",
+        replace_before_quarantine,
+    )
+
+    assert not remove_published_relative(root, "reports/report.json", expected=snapshot)
+    assert raced
+    assert target.read_bytes() == b"peer"
+    assert moved.read_bytes() == b"report"
 
 
 def test_publication_rollback_preserves_same_inode_mode_mutation(tmp_path: Path) -> None:

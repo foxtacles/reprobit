@@ -14,7 +14,7 @@ import reprobit.cli_build as cli_build_module
 import reprobit.engine as engine_module
 from reprobit.action_summary import main, publish_action_completion
 from reprobit.build import BuildPlan
-from reprobit.cli_build import _command_verify, command_verify
+from reprobit.cli_build import _execute_verify, command_verify
 from reprobit.cli_output import CLIOutput
 from reprobit.costs import (
     calculate_cost,
@@ -501,9 +501,9 @@ def test_composite_action_preserves_reports_when_verification_fails() -> None:
 
 
 def test_action_completion_is_outside_prepared_cleanup_scope() -> None:
-    # ``command_verify`` only owns the overlay render session; the run body
-    # that publishes the completion lives in ``_command_verify``.
-    tree = ast.parse(inspect.getsource(_command_verify))
+    # The typed execution service publishes completion after the prepared run
+    # and arena are both closed.
+    tree = ast.parse(inspect.getsource(_execute_verify))
     parents: dict[ast.AST, ast.AST] = {
         child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
     }
@@ -542,13 +542,25 @@ def test_prepared_cleanup_failure_never_publishes_action_completion(
         oracle="reference.bin",
     )
     bundle = SimpleNamespace(
+        source_manifest=SimpleNamespace(entries=()),
         spec=SimpleNamespace(
             build=ProducerGraphBuildAdapter(),
             authenticity=SimpleNamespace(policy=AuthenticityPolicy.CLEAN),
             state_dir=".reprobit-state",
             targets=(target,),
-            toolchain=SimpleNamespace(profile="msvc_4_2"),
-        )
+            toolchain=SimpleNamespace(
+                profile="msvc_4_2",
+                lock_file="reprobit/toolchain.lock.json",
+            ),
+            layout=SimpleNamespace(
+                source_manifest="reprobit/source-manifest.json",
+                build_plan="reprobit/build-plan.json",
+                producer_graph="reprobit/producer-graph.json",
+                interventions="reprobit/interventions",
+                proofs="reprobit/proofs",
+                oracles="reprobit/oracles",
+            ),
+        ),
     )
 
     class Executor:
@@ -599,6 +611,10 @@ def test_prepared_cleanup_failure_never_publishes_action_completion(
         toolchain_root=None,
         compiler_transport=None,
         resource_transport=None,
+        initialization_timeout=600.0,
+        compile_timeout=600.0,
+        link_timeout=900.0,
+        cleanup_timeout=10.0,
     )
     monkeypatch.setattr(
         "reprobit.cli_environment.resolve_classic_execution_inputs",

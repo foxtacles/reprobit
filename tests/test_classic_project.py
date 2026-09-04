@@ -228,15 +228,11 @@ def test_source_export_refreshes_a_real_overlay_and_removes_stale_files(
     project = tmp_path / "project"
     bundle, generated = _bundle(project)
     destination = project / "build/comparison-source"
-    destination.mkdir(parents=True)
-    (destination / "stale.cpp").write_bytes(b"remove me")
 
-    witnesses = refresh_effective_source_export(bundle, project, destination)
+    result = refresh_effective_source_export(bundle, project, destination)
 
-    assert tuple(item.intervention_id for item in witnesses) == ("overlay.graph",)
+    assert tuple(item.intervention_id for item in result.witnesses) == ("overlay.graph",)
     assert (destination / "generated.cpp").read_bytes() == generated
-    assert not (destination / "stale.cpp").exists()
-
     (destination / "generated.cpp").write_bytes(b"stale generated source")
     (destination / "removed-on-refresh.txt").write_bytes(b"stale")
     refresh_effective_source_export(bundle, project, destination)
@@ -246,7 +242,200 @@ def test_source_export_refreshes_a_real_overlay_and_removes_stale_files(
     assert not tuple(destination.parent.glob(".rbit-source-*-*"))
 
 
-def test_source_export_failed_promotion_restores_the_previous_complete_export(
+def test_source_export_reports_success_when_old_backup_cleanup_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    bundle, generated = _bundle(project)
+    destination = project / "build/comparison-source"
+    refresh_effective_source_export(bundle, project, destination)
+    real_remove = source_export._remove_owned_tree
+
+    def refuse_backup_cleanup(
+        path: Path,
+        expected: tuple[int, int],
+        *,
+        expected_parent: tuple[int, int],
+        require_marker: bool = False,
+    ) -> None:
+        if require_marker:
+            raise SourceExportError("fixture cleanup refusal")
+        real_remove(
+            path,
+            expected,
+            expected_parent=expected_parent,
+            require_marker=require_marker,
+        )
+
+    monkeypatch.setattr(source_export, "_remove_owned_tree", refuse_backup_cleanup)
+
+    result = refresh_effective_source_export(bundle, project, destination)
+
+    assert (destination / "generated.cpp").read_bytes() == generated
+    assert result.cleanup_warning is not None
+    assert "previous source export cleanup was refused" in result.cleanup_warning
+    assert len(result.preserved_paths) == 1
+    assert result.preserved_paths[0].is_dir()
+
+
+def test_source_export_reports_success_when_private_final_cleanup_is_refused(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    bundle, generated = _bundle(project)
+    destination = project / "build/comparison-source"
+    real_remove = source_export._remove_owned_tree
+
+    def refuse_materialized_cleanup(
+        path: Path,
+        expected: tuple[int, int],
+        *,
+        expected_parent: tuple[int, int],
+        require_marker: bool = False,
+    ) -> None:
+        if path.name.startswith("rbit-source-materialize-"):
+            raise SourceExportError("fixture cleanup refusal")
+        real_remove(
+            path,
+            expected,
+            expected_parent=expected_parent,
+            require_marker=require_marker,
+        )
+
+    monkeypatch.setattr(source_export, "_remove_owned_tree", refuse_materialized_cleanup)
+
+    result = refresh_effective_source_export(bundle, project, destination)
+
+    assert (destination / "generated.cpp").read_bytes() == generated
+    assert result.cleanup_warning is not None
+    assert "private source materialization cleanup was refused" in result.cleanup_warning
+    assert len(result.preserved_paths) == 1
+    preserved = result.preserved_paths[0]
+    assert preserved.is_dir()
+    shutil.rmtree(preserved)
+
+
+def test_source_export_refuses_an_existing_unowned_directory(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    bundle, _generated = _bundle(project)
+    destination = project / "src"
+    destination.mkdir()
+    valuable = destination / "valuable.cpp"
+    valuable.write_bytes(b"keep me\n")
+
+    with pytest.raises(SourceExportError, match="not owned by ReproBit"):
+        refresh_effective_source_export(bundle, project, destination)
+
+    assert valuable.read_bytes() == b"keep me\n"
+
+
+def test_source_export_refuses_a_source_that_uses_its_reserved_marker(
+    tmp_path: Path,
+) -> None:
+    project = tmp_path / "project"
+    bundle, _generated = _bundle(project)
+    assert bundle.source_manifest is not None
+    assert bundle.build_plan is not None
+    reserved = project / ".reprobit-source-export"
+    payload = b"project-owned source data\n"
+    reserved.write_bytes(payload)
+    manifest = SourceManifestDocument(
+        schema_version=3,
+        complete=True,
+        entries=tuple(
+            sorted(
+                (
+                    *bundle.source_manifest.entries,
+                    SourceManifestEntry(
+                        path=reserved.name,
+                        size=len(payload),
+                        digest=Digest.from_bytes(payload),
+                    ),
+                ),
+                key=lambda item: (item.path.casefold(), item.path),
+            )
+        ),
+    )
+    reserved_bundle = bundle.model_copy(
+        update={
+            "source_manifest": manifest,
+            "build_plan": bundle.build_plan.model_copy(
+                update={"source_manifest_digest": source_manifest_digest(manifest)}
+            ),
+        }
+    )
+    destination = project / "build/comparison-source"
+
+    with pytest.raises(SourceExportError, match="reserved export path"):
+        refresh_effective_source_export(reserved_bundle, project, destination)
+
+    assert not destination.exists()
+    assert reserved.read_bytes() == payload
+
+
+def test_source_export_preserves_a_destination_created_during_refresh(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    bundle, _generated = _bundle(project)
+    destination = project / "build/comparison-source"
+    real_materialize = source_export.materialize_effective_workspace
+
+    def materialize_then_compete(*args: object, **kwargs: object) -> object:
+        witnesses = real_materialize(*args, **kwargs)
+        destination.mkdir()
+        (destination / "valuable.cpp").write_bytes(b"keep me\n")
+        return witnesses
+
+    monkeypatch.setattr(
+        source_export,
+        "materialize_effective_workspace",
+        materialize_then_compete,
+    )
+
+    with pytest.raises(SourceExportError, match="changed before publication"):
+        refresh_effective_source_export(bundle, project, destination)
+
+    assert (destination / "valuable.cpp").read_bytes() == b"keep me\n"
+
+
+def test_source_export_preserves_a_destination_swapped_during_backup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    bundle, _generated = _bundle(project)
+    destination = project / "build/comparison-source"
+    refresh_effective_source_export(bundle, project, destination)
+    original = destination.parent / "original-export"
+    real_replace = source_export._replace_directory
+    swapped = False
+
+    def swap_after_validation(source: Path, target: Path, **options: object) -> None:
+        nonlocal swapped
+        if source == destination and not swapped:
+            swapped = True
+            real_replace(destination, original, **options)
+            destination.mkdir()
+            (destination / "valuable.cpp").write_bytes(b"keep me\n")
+        real_replace(source, target, **options)
+
+    monkeypatch.setattr(source_export, "_replace_directory", swap_after_validation)
+
+    with pytest.raises(SourceExportError, match="cannot preserve the previous"):
+        refresh_effective_source_export(bundle, project, destination)
+
+    assert swapped
+    assert (destination / "valuable.cpp").read_bytes() == b"keep me\n"
+    assert (original / ".reprobit-source-export").is_file()
+    assert not tuple(destination.parent.glob(".rbit-source-backup-*"))
+    assert not tuple(destination.parent.glob(".rbit-source-staging-*"))
+
+
+def test_source_export_failed_promotion_preserves_the_previous_complete_export(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -262,25 +451,93 @@ def test_source_export_failed_promotion_restores_the_previous_complete_export(
     real_replace = source_export._replace_directory
     calls = 0
 
-    def fail_new_export(source: Path, target: Path) -> None:
+    def fail_new_export(source: Path, target: Path, **options: object) -> None:
         nonlocal calls
         calls += 1
         if calls == 2:
             raise OSError("simulated promotion failure")
-        real_replace(source, target)
+        real_replace(source, target, **options)
 
     monkeypatch.setattr(source_export, "_replace_directory", fail_new_export)
 
-    with pytest.raises(SourceExportError, match="previous export was preserved"):
+    with pytest.raises(SourceExportError, match="previous complete export was preserved"):
         refresh_effective_source_export(bundle, project, destination)
 
+    backup = next(destination.parent.glob(".rbit-source-backup-*"))
     after = {
-        path.relative_to(destination): path.read_bytes()
-        for path in destination.rglob("*")
-        if path.is_file()
+        path.relative_to(backup): path.read_bytes() for path in backup.rglob("*") if path.is_file()
     }
     assert after == before
-    assert not tuple(destination.parent.glob(".rbit-source-*-*"))
+    assert not destination.exists()
+    assert not tuple(destination.parent.glob(".rbit-source-staging-*"))
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX directory replacement")
+def test_source_export_refuses_a_replaced_parent_without_writing_outside(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    bundle, _generated = _bundle(project)
+    destination = project / "build/comparison-source"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "valuable.txt"
+    sentinel.write_bytes(b"keep me")
+    original_parent = project / "original-build"
+    real_create = source_export.create_directory_in_exact_parent
+    swapped = False
+
+    def swap_parent(path: Path, expected: tuple[int, int]) -> tuple[int, int]:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            destination.parent.rename(original_parent)
+            destination.parent.symlink_to(outside, target_is_directory=True)
+        return real_create(path, expected)
+
+    monkeypatch.setattr(source_export, "create_directory_in_exact_parent", swap_parent)
+
+    with pytest.raises(SourceExportError, match="cannot create source export staging"):
+        refresh_effective_source_export(bundle, project, destination)
+
+    assert swapped
+    assert sentinel.read_bytes() == b"keep me"
+    assert tuple(outside.iterdir()) == (sentinel,)
+    assert original_parent.is_dir()
+
+
+def test_source_export_does_not_clobber_a_destination_created_at_promotion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    bundle, _generated = _bundle(project)
+    destination = project / "build/comparison-source"
+    real_replace = source_export._replace_directory
+    competed = False
+    competitor_identity: tuple[int, int] | None = None
+
+    def create_competitor(source: Path, target: Path, **options: object) -> None:
+        nonlocal competed, competitor_identity
+        if target == destination and not competed:
+            competed = True
+            destination.mkdir()
+            metadata = destination.stat(follow_symlinks=False)
+            competitor_identity = metadata.st_dev, metadata.st_ino
+        real_replace(source, target, **options)
+
+    monkeypatch.setattr(source_export, "_replace_directory", create_competitor)
+
+    with pytest.raises(SourceExportError, match="promotion failed before publication"):
+        refresh_effective_source_export(bundle, project, destination)
+
+    assert competed
+    assert competitor_identity is not None
+    metadata = destination.stat(follow_symlinks=False)
+    assert (metadata.st_dev, metadata.st_ino) == competitor_identity
+    assert not tuple(destination.iterdir())
+    assert not tuple(destination.parent.glob(".rbit-source-staging-*"))
 
 
 def test_source_export_rejects_a_redirected_destination(tmp_path: Path) -> None:

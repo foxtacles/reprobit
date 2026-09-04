@@ -422,6 +422,16 @@ def project_grind_plan(item: ProjectGrindWorkItem) -> ProjectGrindPlan:
     )
 
 
+def _reference_preflight_message(campaign: ProjectGrindCampaign) -> str:
+    paired = campaign.reference_objects
+    missing = max(0, campaign.eligible_units - paired)
+    return (
+        f"Reference preflight: {paired} of {campaign.eligible_units} eligible compiler "
+        f"steps paired; {missing} missing; {len(campaign.items)} bounded "
+        f"function{'s' if len(campaign.items) != 1 else ''} selected"
+    )
+
+
 def _compact_outcome(
     item: ProjectGrindWorkItem,
     result: ProjectGrindResult,
@@ -481,7 +491,7 @@ def run_project_auto_grind(
             completed,
             total,
             "discovery-enumerate",
-            f"Found {len(campaign.items)} eligible project function(s)",
+            _reference_preflight_message(campaign),
             ProgressKind.PHASE_STARTED,
             None,
         )

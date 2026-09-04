@@ -7,17 +7,15 @@ resulting changes like ordinary project files.
 
 A project has a small `reprobit.toml` entry point and strict JSON files under
 `reprobit/`. After `rbit source lock`, `reprobit/source-manifest.json` lists the
-complete source read set and the hash of every file. Inspect a proposed refresh
-with `rbit source preview`, then run its printed `rbit source lock` command when
-one is available. The update rechecks every listed file and refuses to overwrite
-records when a source change requires other saved records to be repaired. For
-normal edits to already-listed files, use `rbit repair .`; reserve preview and
-lock for added or removed files.
-Repair preserves the exact locked set and never silently admits a new Git file.
-Preview prints a lock command only when the update is safe. ReproBit currently
-refuses changes to which files CMake builds when they would strand saved
-interventions; restore the previous file list rather than editing those records
-by hand.
+complete source read set and the hash of every file. For normal edits to files
+already in that set, use `rbit repair .`. For an added, removed, or renamed file,
+run `rbit source preview .` and follow the exact command it prints: `source lock`
+before the first import, or a staged `import cmake --refresh` once CMake records
+exist. Refresh verifies the new records from scratch and publishes them
+together. Compatible per-source guidance is kept; changed or new steps start
+empty, and removed steps are retired. Repair never silently admits a new Git
+file.
+
 Committed files use
 project-relative source, output, and reference-binary paths plus stable DOS
 paths seen by the compiler. The CLI project root selects the physical checkout;
@@ -48,7 +46,10 @@ project SDK libraries, archive exceptions, and target gates; it cannot name Pyth
 shell fragments. `reprobit/producer-graph.json` separately records the complete direct compiler,
 resource-compiler, librarian, and linker DAG. Schema v3 binds it to the toolchain lock,
 logical-path profile, target set, exact terminal artifact paths, and every explicit direct source
-edge. Unrelated files may enter or leave the source manifest without changing commands; recursive
+edge. New CMake imports also record the small invocation recipe needed to repeat
+a refresh: CMake program, configuration, timeout, cache definitions, and
+directive inputs. Older graphs without that recipe remain buildable but must be
+re-imported once before automatic refresh. Unrelated files may enter or leave the source manifest without changing commands; recursive
 include reads remain closed and sealed by the runtime source namespace.
 The toolchain lock keeps content and profile configuration deliberately separate: file/tree receipts
 are exact installed-byte authority, while each `profile_sources` entry freezes a reviewed immutable
@@ -102,6 +103,16 @@ self-contained Draft 2020-12 root with a stable `urn:reprobit:schema:...` identi
 These roots support editors and standalone validators. Regard `rbit validate` as authoritative
 because it additionally checks cross-document relationships and current admitted/effective source
 bytes.
+
+## Schema versions
+
+The current runtime accepts schema 3 project records. If it reports another
+version, do not change `schema_version` by hand: the remaining fields and checks
+may differ too. Use the ReproBit revision that last wrote the project to verify
+the committed records, then follow the version-specific upgrade instructions
+for the newer release. A future schema bump must ship those instructions and a
+tested one-step conversion or regeneration path for the immediately preceding
+version. ReproBit deliberately does not guess how to convert an unknown schema.
 
 ### Schema files
 

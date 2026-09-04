@@ -136,7 +136,9 @@ simulation-proved region rewrites.
 | `image_metadata` | Image metadata adjustment | Generated supplier (5) | Contract `classic.image-metadata.v1`; obligations `image.candidate_only`, `image.logic_bytes_unchanged`, `image.metadata_only`. |
 | `image_link_order` | Image link order adjustment | Link ordering (10) | Contract `classic.image-link-order.v1`; obligations `image.candidate_only`, `image.import_binding_preserved`, `image.semantic_equivalence`. |
 | `image_binary_repack` | Image binary repack adjustment | Binary surgery (500) | Contract `classic.image-binary-repack.v1`; obligations `image.byte_conservation`, `image.candidate_only`, `image.fixups_preserved`, `image.semantic_equivalence`. |
-| `archive_admission` | Archive admission adjustment | Link ordering (10) | No semantic contract is registered; the typed declaration is preserved but the terminal producer is not implemented (see `reprobit.classic_project` family coverage). |
+
+`archive_admission` is reserved but not available. Project files that name it
+are rejected because ReproBit cannot run it.
 
 #### Quarantine-only family
 

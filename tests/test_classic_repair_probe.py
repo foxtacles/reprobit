@@ -178,7 +178,12 @@ def _fake_compile_windows(
     progress: subject.ClassicDonorProbeProgress | None = None,
     planned_candidates: int,
     cache: Any = None,
+    close_runtime: bool = True,
+    materialize_source_epoch: bool = True,
+    source_seal: object | None = None,
+    namespace_id: str = "noncertifying-donor-repair-probe",
 ) -> tuple[str, ...]:
+    del close_runtime, materialize_source_epoch, source_seal, namespace_id
     by_id = {unit.donors[0].intervention.id: unit for unit in units}
     outputs: list[ClassicDonorProbeOutput] = []
     for window in windows:
@@ -552,8 +557,19 @@ def test_one_candidate_compile_refusal_does_not_abort_later_windows(
         progress: subject.ClassicDonorProbeProgress | None = None,
         planned_candidates: int,
         cache: Any = None,
+        close_runtime: bool = True,
+        materialize_source_epoch: bool = True,
+        source_seal: object | None = None,
+        namespace_id: str = "noncertifying-donor-repair-probe",
     ) -> tuple[str, ...]:
-        del planned_candidates, progress
+        del (
+            planned_candidates,
+            progress,
+            close_runtime,
+            materialize_source_epoch,
+            source_seal,
+            namespace_id,
+        )
         by_id = {unit.donors[0].intervention.id: unit for unit in units}
         outcomes: list[subject.ClassicDonorCompileOutcome] = []
         for window_index, window in enumerate(windows):

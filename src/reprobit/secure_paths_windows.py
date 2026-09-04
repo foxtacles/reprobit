@@ -362,6 +362,8 @@ class _WindowsHandles:
         allow_missing: bool = False,
         deny_other_writes: bool = False,
         read_data: bool = True,
+        exclusive: bool = False,
+        allow_redirect: bool = False,
     ) -> Any | None:
         buffer = self.ctypes.create_unicode_buffer(name)
         length = len(name.encode("utf-16-le"))
@@ -393,10 +395,13 @@ class _WindowsHandles:
             # an admitted READONLY artifact with IGNORE_READONLY_ATTRIBUTE.
             access |= self._DELETE | self._FILE_WRITE_ATTRIBUTES
         disposition = (
-            self._FILE_OPEN_IF
-            if directory and create
-            else (self._FILE_CREATE if create else self._FILE_OPEN)
+            self._FILE_CREATE
+            if create and (exclusive or not directory)
+            else (self._FILE_OPEN_IF if create else self._FILE_OPEN)
         )
+        create_options = self._DIRECTORY_OPTIONS if directory else self._FILE_OPTIONS
+        if allow_redirect:
+            create_options &= ~0x40  # FILE_NON_DIRECTORY_FILE
         status = int(
             self.ntdll.NtCreateFile(
                 self.ctypes.byref(handle),
@@ -407,7 +412,7 @@ class _WindowsHandles:
                 0x80,
                 0x1 if deny_other_writes else self._SHARE_ALL,
                 disposition,
-                self._DIRECTORY_OPTIONS if directory else self._FILE_OPTIONS,
+                create_options,
                 None,
                 0,
             )
@@ -422,7 +427,12 @@ class _WindowsHandles:
         received = handle.value
         identity = self.identity(received)
         is_directory = bool(identity[4] & self._ATTRIBUTE_DIRECTORY)
-        if identity[4] & self._ATTRIBUTE_REPARSE or is_directory != directory:
+        redirected = bool(identity[4] & self._ATTRIBUTE_REPARSE)
+        if (
+            (allow_redirect and not redirected)
+            or (redirected and not allow_redirect)
+            or (is_directory != directory and not (redirected and allow_redirect))
+        ):
             self.close(received)
             raise SecurePathError(
                 f"native path component is redirected or has the wrong kind: {name!r}"
@@ -615,11 +625,19 @@ class _WindowsHandles:
 
 
 class _HeldWindowsRoot:
-    def __init__(self, root: Path) -> None:
+    def __init__(
+        self,
+        root: Path,
+        *,
+        expected_identity: tuple[int, int] | None = None,
+    ) -> None:
         self.api = _WindowsHandles()
         self.path = root.resolve(strict=True)
         self.handle = self.api.root(self.path)
         self.identity = self.api.identity(self.handle)[:2]
+        if expected_identity is not None and self.identity != expected_identity:
+            self.close()
+            raise SecurePathError(f"native secure path root changed before use: {root}")
         self.verify_root()
 
     def close(self) -> None:
@@ -642,18 +660,34 @@ class _HeldWindowsRoot:
             self.api.close(received)
 
     def parent_chain(
-        self, relative: PurePosixPath, *, create: bool
+        self,
+        relative: PurePosixPath,
+        *,
+        create: bool,
+        expected_directories: Mapping[str, tuple[int, int]] | None = None,
     ) -> tuple[list[Any], list[tuple[Any, str, tuple[int, int]]], str]:
+        expected_directories = expected_directories or {}
         handles: list[Any] = [self.handle]
         edges: list[tuple[Any, str, tuple[int, int]]] = []
         try:
-            for component in relative.parts[:-1]:
+            for index, component in enumerate(relative.parts[:-1]):
+                prefix = PurePosixPath(*relative.parts[: index + 1]).as_posix()
+                expected = expected_directories.get(prefix)
                 child = self.api.open_relative(
-                    handles[-1], component, directory=True, create=create
+                    handles[-1],
+                    component,
+                    directory=True,
+                    create=create and expected is None,
+                    deny_other_writes=expected is not None,
                 )
                 if child is None:
                     raise SecurePathError(f"native path component is absent: {component!r}")
                 identity = self.api.identity(child)[:2]
+                if expected is not None and identity != expected:
+                    self.api.close(child)
+                    raise SecurePathError(
+                        f"native secure path directory changed before use: {prefix!r}"
+                    )
                 edges.append((handles[-1], component, identity))
                 handles.append(child)
             return handles, edges, relative.parts[-1]
@@ -677,6 +711,32 @@ class _HeldWindowsRoot:
                 self.api.close(received)
 
 
+def _hold_root(
+    root: Path,
+    expected_directories: Mapping[str, tuple[int, int]],
+) -> _HeldWindowsRoot:
+    expected = expected_directories.get(".")
+    if expected is None:
+        return _HeldWindowsRoot(root)
+    return _HeldWindowsRoot(root, expected_identity=expected)
+
+
+def _parent_chain(
+    held: _HeldWindowsRoot,
+    relative: PurePosixPath,
+    *,
+    create: bool,
+    expected_directories: Mapping[str, tuple[int, int]],
+) -> tuple[list[Any], list[tuple[Any, str, tuple[int, int]]], str]:
+    if expected_directories:
+        return held.parent_chain(
+            relative,
+            create=create,
+            expected_directories=expected_directories,
+        )
+    return held.parent_chain(relative, create=create)
+
+
 _T = TypeVar("_T")
 
 
@@ -687,6 +747,7 @@ def _inspect_leaf(
     consume: Callable[[_WindowsHandles, Any], tuple[_T, int]],
     verb: str,
     noun: str,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
 ) -> tuple[Path, tuple[int, int, int, int, int], tuple[Any, ...], _T]:
     """Open one leaf, consume it, and prove it never changed before settling.
 
@@ -699,8 +760,14 @@ def _inspect_leaf(
     """
 
     canonical = canonical_relative_path(relative)
-    with _HeldWindowsRoot(root) as held:
-        handles, edges, name = held.parent_chain(canonical, create=False)
+    expected_directories = expected_directories or {}
+    with _hold_root(root, expected_directories) as held:
+        handles, edges, name = _parent_chain(
+            held,
+            canonical,
+            create=False,
+            expected_directories=expected_directories,
+        )
         file_handle: Any = None
         terminal: Any = None
         try:
@@ -769,9 +836,19 @@ def _hash_whole(api: _WindowsHandles, handle: Any) -> tuple[Digest, int]:
     return Digest(value=hasher.hexdigest()), size
 
 
-def read_relative_file(root: Path, relative: str) -> tuple[bytes, SecureFileSnapshot]:
+def read_relative_file(
+    root: Path,
+    relative: str,
+    *,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
+) -> tuple[bytes, SecureFileSnapshot]:
     path, settled, settled_strong, payload = _inspect_leaf(
-        root, relative, consume=_read_whole, verb="read", noun="read"
+        root,
+        relative,
+        consume=_read_whole,
+        verb="read",
+        noun="read",
+        expected_directories=expected_directories,
     )
     return payload, SecureFileSnapshot(
         path,
@@ -795,34 +872,59 @@ def atomic_publish_relative(
     replace: bool,
     expected: SecureFileSnapshot | None = None,
     windows_attributes: int | None = None,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
 ) -> SecureFileSnapshot:
     canonical = canonical_relative_path(relative)
-    with _HeldWindowsRoot(root) as held:
-        handles, edges, name = held.parent_chain(canonical, create=True)
+    expected_directories = expected_directories or {}
+    with _hold_root(root, expected_directories) as held:
+        handles, edges, name = _parent_chain(
+            held,
+            canonical,
+            create=True,
+            expected_directories=expected_directories,
+        )
         temporary = f".{name}.reprobit-{uuid.uuid4().hex}"
         handle: Any = None
+        previous_handle: Any = None
+        previous_identity: tuple[int, int, int, int, int] | None = None
+        previous_strong: tuple[Any, ...] | None = None
+        previous_digest: Digest | None = None
+        quarantine: str | None = None
         published = False
         committed = False
         try:
-            previous = held.api.open_relative(
-                handles[-1], name, directory=False, allow_missing=True
+            previous_handle = held.api.open_relative(
+                handles[-1],
+                name,
+                directory=False,
+                delete=True,
+                allow_missing=True,
+                deny_other_writes=True,
             )
-            if previous is not None:
-                try:
-                    previous_identity = held.api.identity(previous)
-                    previous_strong = held.api.strong_identity(previous)
-                    if expected is not None and (
-                        not _matches_windows_snapshot(previous_identity, previous_strong, expected)
-                        or Digest.from_bytes(held.api.read(previous)) != expected.digest
-                        or held.api.strong_identity(previous) != previous_strong
-                    ):
-                        raise SecurePathError(f"publication preimage changed: {relative!r}")
-                    if not replace:
-                        raise SecurePathError(
-                            f"secure create-if-absent target already exists: {relative!r}"
+            if previous_handle is not None:
+                previous_identity = held.api.identity(previous_handle)
+                previous_strong = held.api.strong_identity(previous_handle)
+                previous_digest = Digest.from_bytes(held.api.read(previous_handle))
+                if (
+                    held.api.identity(previous_handle) != previous_identity
+                    or held.api.strong_identity(previous_handle) != previous_strong
+                    or (
+                        expected is not None
+                        and (
+                            not _matches_windows_snapshot(
+                                previous_identity,
+                                previous_strong,
+                                expected,
+                            )
+                            or previous_digest != expected.digest
                         )
-                finally:
-                    held.api.close(previous)
+                    )
+                ):
+                    raise SecurePathError(f"publication preimage changed: {relative!r}")
+                if not replace:
+                    raise SecurePathError(
+                        f"secure create-if-absent target already exists: {relative!r}"
+                    )
             else:
                 if expected is not None:
                     raise SecurePathError(f"publication preimage disappeared: {relative!r}")
@@ -855,22 +957,46 @@ def atomic_publish_relative(
             before = held.api.identity(handle)
             if before[2] != len(payload):
                 raise SecurePathError(f"native publication produced a short file: {relative!r}")
-            if expected is not None:
-                current = held.api.open_relative(handles[-1], name, directory=False)
-                if current is None:
+            if previous_handle is not None:
+                if previous_identity is None or previous_strong is None or previous_digest is None:
+                    raise SecurePathError("publication preimage identity is missing")
+                held.api.rewind(previous_handle)
+                if (
+                    held.api.identity(previous_handle) != previous_identity
+                    or held.api.strong_identity(previous_handle) != previous_strong
+                    or Digest.from_bytes(held.api.read(previous_handle)) != previous_digest
+                    or held.api.strong_identity(previous_handle) != previous_strong
+                ):
+                    raise SecurePathError(f"publication preimage changed: {relative!r}")
+                quarantine = f".{name}.reprobit-guard-{uuid.uuid4().hex}"
+                held.api.rename(
+                    previous_handle,
+                    handles[-1],
+                    quarantine,
+                    replace=False,
+                )
+                guarded = held.api.open_relative(
+                    handles[-1],
+                    quarantine,
+                    directory=False,
+                    read_data=False,
+                    deny_other_writes=True,
+                )
+                if guarded is None:
                     raise SecurePathError(f"publication preimage disappeared: {relative!r}")
                 try:
-                    current_identity = held.api.identity(current)
-                    current_strong = held.api.strong_identity(current)
-                    if (
-                        not _matches_windows_snapshot(current_identity, current_strong, expected)
-                        or Digest.from_bytes(held.api.read(current)) != expected.digest
-                        or held.api.strong_identity(current) != current_strong
+                    guarded_identity = held.api.identity(guarded)
+                    guarded_strong = held.api.strong_identity(guarded)
+                    if guarded_identity != previous_identity or not (
+                        _same_windows_identity_except_change_time(
+                            previous_strong,
+                            guarded_strong,
+                        )
                     ):
                         raise SecurePathError(f"publication preimage changed: {relative!r}")
                 finally:
-                    held.api.close(current)
-            held.api.rename(handle, handles[-1], name, replace=replace)
+                    held.api.close(guarded)
+            held.api.rename(handle, handles[-1], name, replace=False)
             published = True
             if windows_attributes is not None:
                 # Windows rename may add ARCHIVE.  Apply the admitted final
@@ -917,6 +1043,12 @@ def atomic_publish_relative(
                 )
             held.recheck(edges)
             held.api.flush_directory(handles[-1])
+            if previous_handle is not None:
+                held.api.delete_on_close(previous_handle)
+                held.api.close(previous_handle)
+                previous_handle = None
+                quarantine = None
+                held.api.flush_directory(handles[-1])
             committed = True
             return SecureFileSnapshot(
                 held.path.joinpath(*canonical.parts),
@@ -931,14 +1063,37 @@ def atomic_publish_relative(
                 settled_strong[8],
             )
         finally:
+            cleanup_error: SecurePathError | None = None
             if handle is not None:
-                if not committed:
-                    held.api.delete_on_close(handle)
-                held.api.close(handle)
+                try:
+                    if not committed:
+                        held.api.delete_on_close(handle)
+                except SecurePathError as error:
+                    cleanup_error = error
+                finally:
+                    held.api.close(handle)
+            if previous_handle is not None:
+                try:
+                    if quarantine is not None:
+                        held.api.rename(
+                            previous_handle,
+                            handles[-1],
+                            name,
+                            replace=False,
+                        )
+                except SecurePathError:
+                    cleanup_error = SecurePathError(
+                        "secure path changed; original entry remains under its "
+                        f"private guard {quarantine!r}"
+                    )
+                finally:
+                    held.api.close(previous_handle)
             if published and not committed:
                 held.api.flush_directory(handles[-1])
             for current in reversed(handles[1:]):
                 held.api.close(current)
+            if cleanup_error is not None:
+                raise cleanup_error
 
 
 def atomic_publish_new_relative_from_stream(
@@ -950,11 +1105,18 @@ def atomic_publish_new_relative_from_stream(
     windows_attributes: int | None,
     expected_digest: Digest | None,
     expected_size: int | None,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
 ) -> SecureFileSnapshot:
     del executable  # Native Windows does not encode POSIX executable mode bits.
     canonical = canonical_relative_path(relative)
-    with _HeldWindowsRoot(root) as held:
-        handles, edges, name = held.parent_chain(canonical, create=True)
+    expected_directories = expected_directories or {}
+    with _hold_root(root, expected_directories) as held:
+        handles, edges, name = _parent_chain(
+            held,
+            canonical,
+            create=True,
+            expected_directories=expected_directories,
+        )
         temporary = f".{name}.reprobit-{uuid.uuid4().hex}"
         handle: Any = None
         published = False
@@ -1129,11 +1291,21 @@ def stat_relative_file(root: Path, relative: str) -> SecureFileIdentity:
                 held.api.close(current)
 
 
-def digest_relative_file(root: Path, relative: str) -> SecureFileSnapshot:
+def digest_relative_file(
+    root: Path,
+    relative: str,
+    *,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
+) -> SecureFileSnapshot:
     """Hash one regular file through a held ancestor chain with bounded memory."""
 
     path, settled, settled_strong, digest = _inspect_leaf(
-        root, relative, consume=_hash_whole, verb="hashed", noun="hash"
+        root,
+        relative,
+        consume=_hash_whole,
+        verb="hashed",
+        noun="hash",
+        expected_directories=expected_directories,
     )
     return SecureFileSnapshot(
         path,
@@ -1159,12 +1331,20 @@ def atomic_copy_new_relative(
     expected_digest: Digest | None = None,
     expected_size: int | None = None,
     expected_source: SecureFileIdentity | None = None,
+    expected_source_directories: Mapping[str, tuple[int, int]] | None = None,
+    expected_destination_directories: Mapping[str, tuple[int, int]] | None = None,
 ) -> SecureFileSnapshot:
     """Copy one held source to a new held destination in a single pass."""
 
     source_path = canonical_relative_path(source_relative)
-    with _HeldWindowsRoot(source_root) as held:
-        handles, edges, name = held.parent_chain(source_path, create=False)
+    expected_source_directories = expected_source_directories or {}
+    with _hold_root(source_root, expected_source_directories) as held:
+        handles, edges, name = _parent_chain(
+            held,
+            source_path,
+            create=False,
+            expected_directories=expected_source_directories,
+        )
         handle: Any = None
         try:
             handle = held.api.open_relative(handles[-1], name, directory=False)
@@ -1198,6 +1378,7 @@ def atomic_copy_new_relative(
                 windows_attributes=None,
                 expected_digest=expected_digest,
                 expected_size=expected_size,
+                expected_directories=expected_destination_directories,
             )
             after_strong = held.api.strong_identity(handle)
             terminal = held.api.open_relative(handles[-1], name, directory=False)
@@ -1228,6 +1409,7 @@ def promote_relative_new(
     destination_relative: str,
     *,
     expected: SecureFileSnapshot,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
 ) -> SecureFileSnapshot:
     """Move an exact held file to a new name with commit-time no-overwrite."""
 
@@ -1235,10 +1417,19 @@ def promote_relative_new(
     destination_path = canonical_relative_path(destination_relative)
     if source_path == destination_path:
         raise SecurePathError("secure promotion source and destination overlap")
-    with _HeldWindowsRoot(root) as held:
-        source_handles, source_edges, source_name = held.parent_chain(source_path, create=False)
-        destination_handles, destination_edges, destination_name = held.parent_chain(
-            destination_path, create=True
+    expected_directories = expected_directories or {}
+    with _hold_root(root, expected_directories) as held:
+        source_handles, source_edges, source_name = _parent_chain(
+            held,
+            source_path,
+            create=False,
+            expected_directories=expected_directories,
+        )
+        destination_handles, destination_edges, destination_name = _parent_chain(
+            held,
+            destination_path,
+            create=True,
+            expected_directories=expected_directories,
         )
         source_handle: Any = None
         try:
@@ -1319,6 +1510,7 @@ def remove_published_relative(
     relative: str,
     *,
     expected: SecureFileSnapshot,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
 ) -> bool:
     """Remove only the exact regular file returned by secure publication.
 
@@ -1328,8 +1520,14 @@ def remove_published_relative(
     """
 
     canonical = canonical_relative_path(relative)
-    with _HeldWindowsRoot(root) as held:
-        handles, edges, name = held.parent_chain(canonical, create=False)
+    expected_directories = expected_directories or {}
+    with _hold_root(root, expected_directories) as held:
+        handles, edges, name = _parent_chain(
+            held,
+            canonical,
+            create=False,
+            expected_directories=expected_directories,
+        )
         handle: Any = None
         try:
             handle = held.api.open_relative(

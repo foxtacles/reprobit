@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from reprobit.model import Digest
 from reprobit.schema import (
+    CLASSIC_RECIPE_FAMILIES_BY_ROLE,
     ClassicProofReceipt,
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
@@ -38,18 +39,7 @@ class DonorSourceError(ValueError):
     """A donor declaration or its authenticated source input is invalid."""
 
 
-DONOR_FAMILIES = frozenset(
-    {
-        ClassicRecipeFamily.DECLARATION_SHAPE,
-        ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
-        ClassicRecipeFamily.FORWARD_DECLARATION_RUN,
-        ClassicRecipeFamily.PAD_SHAPE,
-        ClassicRecipeFamily.EXTERN_RUN_PAIR,
-        ClassicRecipeFamily.FORWARD_RUN_WITH_SHAPE,
-        ClassicRecipeFamily.DECLARATION_RUN_TRIPLE,
-        ClassicRecipeFamily.PREFIX_FORWARD_AFTER_INCLUDES_EXTERN,
-    }
-)
+DONOR_FAMILIES = CLASSIC_RECIPE_FAMILIES_BY_ROLE[ClassicRecipeRole.DONOR]
 
 _SHA256 = re.compile(r"[0-9a-f]{64}")
 _IDENTIFIER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")

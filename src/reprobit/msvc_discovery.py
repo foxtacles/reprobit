@@ -30,6 +30,7 @@ from reprobit.implementation import scoped_package_implementation_digest
 from reprobit.model import Digest, StrictModel
 from reprobit.msvc_compile import (
     MsvcStateCompiler,
+    msvc_source_identifiers,
     render_msvc_declaration_state,
     safe_msvc_compiler_arguments,
     validate_msvc_compiler_arguments,
@@ -268,6 +269,7 @@ class MsvcDiscoveryAdapter:
         if any(not symbol or not payload for symbol, payload in seeds.items()):
             raise DiscoveryError("MSVC discovery seed objects are malformed")
         self.source = bytes(source)
+        self.source_identifiers = msvc_source_identifiers(self.source)
         self.compiler = compiler
         self.references = MappingProxyType(
             dict(sorted(reference_map.items(), key=lambda item: item[0].casefold()))
@@ -317,25 +319,11 @@ class MsvcDiscoveryAdapter:
         )
 
     def cache_material(self, state: DeclarationState) -> Mapping[str, JsonValue]:
-        rendered = render_msvc_declaration_state(self.source, state)
-        return {
-            "rendered_source": cast(
-                JsonValue,
-                Digest.from_bytes(rendered.source).model_dump(mode="json"),
-            ),
-            "force_include": cast(
-                JsonValue,
-                (
-                    Digest.from_bytes(rendered.force_include).model_dump(mode="json")
-                    if rendered.force_include is not None
-                    else None
-                ),
-            ),
-            "generated_declarations": cast(
-                JsonValue,
-                Digest.from_bytes(rendered.generated_declarations).model_dump(mode="json"),
-            ),
-        }
+        # Source, state, and renderer implementation already participate in the
+        # cell key. Rendering here would duplicate all work on misses and would
+        # needlessly scan source even when the compiled object is cached.
+        del state
+        return {}
 
     def compile(
         self,
@@ -344,7 +332,11 @@ class MsvcDiscoveryAdapter:
         cancellation: CancellationToken,
     ) -> DiscoveryCompileOutput:
         return self.compiler.compile(
-            render_msvc_declaration_state(self.source, state),
+            render_msvc_declaration_state(
+                self.source,
+                state,
+                source_identifiers=self.source_identifiers,
+            ),
             workspace,
             cancellation,
         )

@@ -12,6 +12,7 @@ from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.implementation import scoped_package_import_closure_digest
 from reprobit.model import Digest, SemanticProof
 from reprobit.schema import (
+    CLASSIC_RECIPE_FAMILIES_BY_ROLE,
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ClassicRecipeRole,
@@ -428,38 +429,11 @@ SOURCE_OVERLAY_VALIDATOR_DIGEST = _source_overlay_validator_digest(
     CLASSIC_VALIDATOR_IMPLEMENTATION_DIGEST
 )
 
-_DONOR_FAMILIES = frozenset(
-    {
-        ClassicRecipeFamily.DECLARATION_SHAPE,
-        ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
-        ClassicRecipeFamily.FORWARD_DECLARATION_RUN,
-        ClassicRecipeFamily.PAD_SHAPE,
-        ClassicRecipeFamily.EXTERN_RUN_PAIR,
-        ClassicRecipeFamily.FORWARD_RUN_WITH_SHAPE,
-        ClassicRecipeFamily.DECLARATION_RUN_TRIPLE,
-        ClassicRecipeFamily.PREFIX_FORWARD_AFTER_INCLUDES_EXTERN,
-    }
-)
-
-_FUNCTION_FAMILIES = frozenset(
-    {
-        ClassicRecipeFamily.EQUAL_BODY_STRICT,
-        ClassicRecipeFamily.EQUAL_BODY_EH_STRUCTURAL_LOCAL,
-        ClassicRecipeFamily.SAME_SLOT_RESIZE,
-        ClassicRecipeFamily.EQUAL_BODY_EH_RELOC_LAYOUT,
-        ClassicRecipeFamily.RETAIL_EXACT_RELOC_DIVERGENT,
-        ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING,
-        ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC,
-        ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION,
-        ClassicRecipeFamily.RETAIL_EXACT_SOURCE_EQUAL_BODY,
-        ClassicRecipeFamily.RETAIL_EXACT_COMPOSED_REWRITING,
-        ClassicRecipeFamily.RETAIL_EXACT_SOURCE_TARGET_CLOSURE,
-        ClassicRecipeFamily.RETAIL_EXACT_WEB_RECOLOUR,
-        ClassicRecipeFamily.RETAIL_EXACT_CROSS_TU_COMPLETE_TARGET_RESIZE,
-        ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION_REENCODING,
-        ClassicRecipeFamily.RETAIL_EXACT_SAME_TU_INSTRUCTION_HYBRID_RESIZE,
-    }
-)
+_DONOR_FAMILIES = CLASSIC_RECIPE_FAMILIES_BY_ROLE[ClassicRecipeRole.DONOR]
+_FUNCTION_FAMILIES = CLASSIC_RECIPE_FAMILIES_BY_ROLE[ClassicRecipeRole.FUNCTION]
+_PROJECT_CANDIDATE_FAMILIES = CLASSIC_RECIPE_FAMILIES_BY_ROLE[ClassicRecipeRole.PROJECT] - {
+    ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
+}
 
 
 def _registered_contracts() -> Mapping[ClassicRecipeFamily, RegisteredSemanticContract]:
@@ -476,21 +450,26 @@ def _registered_contracts() -> Mapping[ClassicRecipeFamily, RegisteredSemanticCo
             CLASSIC_VALIDATOR_IMPLEMENTATION_DIGEST,
             BINARY_TRANSFORM_OBLIGATIONS,
         )
-    result[ClassicRecipeFamily.IMAGE_METADATA] = RegisteredSemanticContract(
-        "classic.image-metadata.v1",
-        CLASSIC_VALIDATOR_IMPLEMENTATION_DIGEST,
-        IMAGE_METADATA_OBLIGATIONS,
-    )
-    result[ClassicRecipeFamily.IMAGE_LINK_ORDER] = RegisteredSemanticContract(
-        "classic.image-link-order.v1",
-        CLASSIC_VALIDATOR_IMPLEMENTATION_DIGEST,
-        IMAGE_LINK_ORDER_OBLIGATIONS,
-    )
-    result[ClassicRecipeFamily.IMAGE_BINARY_REPACK] = RegisteredSemanticContract(
-        "classic.image-binary-repack.v1",
-        CLASSIC_VALIDATOR_IMPLEMENTATION_DIGEST,
-        IMAGE_BINARY_REPACK_OBLIGATIONS,
-    )
+    image_contracts = {
+        ClassicRecipeFamily.IMAGE_METADATA: (
+            "classic.image-metadata.v1",
+            IMAGE_METADATA_OBLIGATIONS,
+        ),
+        ClassicRecipeFamily.IMAGE_LINK_ORDER: (
+            "classic.image-link-order.v1",
+            IMAGE_LINK_ORDER_OBLIGATIONS,
+        ),
+        ClassicRecipeFamily.IMAGE_BINARY_REPACK: (
+            "classic.image-binary-repack.v1",
+            IMAGE_BINARY_REPACK_OBLIGATIONS,
+        ),
+    }
+    for family, (validator_id, obligations) in image_contracts.items():
+        result[family] = RegisteredSemanticContract(
+            validator_id,
+            CLASSIC_VALIDATOR_IMPLEMENTATION_DIGEST,
+            obligations,
+        )
     result[ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH] = RegisteredSemanticContract(
         SOURCE_OVERLAY_VALIDATOR_ID,
         SOURCE_OVERLAY_VALIDATOR_DIGEST,
@@ -667,11 +646,10 @@ def issue_classic_candidate_semantics(
         intervention.family not in _FUNCTION_FAMILIES
     ):
         raise ClassicSemanticError("function family is not a closed binary validator")
-    if intervention.role is ClassicRecipeRole.PROJECT and intervention.family not in {
-        ClassicRecipeFamily.IMAGE_METADATA,
-        ClassicRecipeFamily.IMAGE_LINK_ORDER,
-        ClassicRecipeFamily.IMAGE_BINARY_REPACK,
-    }:
+    if (
+        intervention.role is ClassicRecipeRole.PROJECT
+        and intervention.family not in _PROJECT_CANDIDATE_FAMILIES
+    ):
         raise ClassicSemanticError("project family is not a closed image validator")
     if not isinstance(candidate.output, bytes) or not isinstance(
         candidate.validator_trace, Mapping

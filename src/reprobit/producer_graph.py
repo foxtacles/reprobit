@@ -643,6 +643,33 @@ class ProducerNode(StrictModel):
         return self
 
 
+class CMakeImportRecipe(StrictModel):
+    """The small graph-affecting input set needed to repeat a CMake import."""
+
+    cmake: Annotated[str, Field(min_length=1, max_length=4096)] = "cmake"
+    configuration: Annotated[str, Field(min_length=1, max_length=128)] = "RelWithDebInfo"
+    timeout_seconds: Annotated[float, Field(gt=0)] = 600.0
+    cmake_defines: tuple[str, ...] = ()
+    directive_inputs: tuple[str, ...] = ()
+
+    @field_validator("cmake", "configuration")
+    @classmethod
+    def validate_literal(cls, value: str) -> str:
+        if any(character in value for character in ("\0", "\n", "\r")):
+            raise ValueError("CMake configuration contains a control character")
+        return value
+
+    @field_validator("cmake_defines", "directive_inputs")
+    @classmethod
+    def validate_arguments(cls, values: tuple[str, ...]) -> tuple[str, ...]:
+        if any(
+            not value or any(character in value for character in ("\0", "\n", "\r"))
+            for value in values
+        ):
+            raise ValueError("CMake import recipe entries must be non-empty literal values")
+        return values
+
+
 class ProducerGraphDocument(StrictModel):
     """Portable authority for every byte-producing child process."""
 
@@ -650,6 +677,10 @@ class ProducerGraphDocument(StrictModel):
     toolchain_lock_digest: Digest
     path_profile_id: Identifier
     extractor: Literal["cmake-makefiles-v1"]
+    # Older schema-v3 graphs remain usable for build and verification, but they
+    # cannot be refreshed automatically because their original CMake invocation
+    # was never recorded.
+    import_recipe: CMakeImportRecipe | None = None
     nodes: Annotated[tuple[ProducerNode, ...], Field(min_length=1)]
 
     @model_validator(mode="after")
@@ -914,6 +945,7 @@ def write_producer_graph(path: Path, graph: ProducerGraphDocument) -> None:
 
 
 __all__ = [
+    "CMakeImportRecipe",
     "ProducerGraphDocument",
     "ProducerGraphError",
     "ProducerNode",

@@ -3,19 +3,23 @@
 from __future__ import annotations
 
 import argparse
-import io
 import shutil
 import tempfile
 from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
-from reprobit.cli_environment import (
-    resolve_classic_execution_inputs,
-    selected_backend,
+from reprobit.cli_build import (
+    NULL_EXECUTION_PROGRESS,
+    ProjectExecutionOptions,
+    VerifyRequest,
+    execute_verify,
+    execution_options_from_cli,
+    prepare_producer_graph_run,
 )
-from reprobit.cli_output import CLIOutput, human_command
+from reprobit.cli_environment import resolve_classic_execution_inputs
+from reprobit.cli_output import CLIOutput, NextStep, human_command, next_step_fields
 from reprobit.cli_paths import (
     CLIError,
     canonical_project_relative,
@@ -45,9 +49,6 @@ from reprobit.discovery_project import (
 from reprobit.discovery_project_grind_cli import project_state_root
 from reprobit.progress import ProgressKind
 from reprobit.project_loader import load_project_tree
-from reprobit.report_io import (
-    read_report_json,
-)
 from reprobit.state import KeepWorkspace
 from reprobit.strict_json import canonical_json
 from reprobit.transactions import CASTransaction
@@ -55,10 +56,6 @@ from reprobit.transactions import CASTransaction
 if TYPE_CHECKING:
     from reprobit.classic_runtime_preparation import ClassicProducerGraphPreparedRun
     from reprobit.schema import ProjectBundle
-
-
-PrepareRun = Callable[..., "ClassicProducerGraphPreparedRun"]
-VerifyCommand = Callable[[argparse.Namespace, CLIOutput], int]
 
 
 def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> int:
@@ -109,7 +106,7 @@ def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> 
     transaction.write(destination, canonical_json(plan), expected_sha256=None)
     result = transaction.commit()
     states = len(enumerate_declaration_states(plan.plan))
-    next_command = human_command(
+    next_step = NextStep(
         ("rbit", "discover", "grind", root, "--expert-plan", destination.as_posix())
     )
     output.emit(
@@ -117,7 +114,7 @@ def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> 
         f"Created a {states}-state grind plan at {root / destination}.\n"
         f"Selected '{unit.id}' from '{source}' for '{args.symbol}'.\n"
         "No compiler was run and no intervention authority changed.\n"
-        f"Next: {next_command}",
+        f"Next: {next_step.command}",
         project=root,
         plan=root / destination,
         target=unit.target_id,
@@ -127,15 +124,7 @@ def command_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> 
         reference=plan.reference_object,
         states=states,
         transaction_id=result.transaction_id,
-        next_command=next_command,
-        next_argv=(
-            "rbit",
-            "discover",
-            "grind",
-            str(root),
-            "--expert-plan",
-            destination.as_posix(),
-        ),
+        **next_step.fields(),
     )
     return 0
 
@@ -145,11 +134,10 @@ def _private_session(staged_root: Path, label: str) -> Path:
 
 
 def _prepare_probe(
-    args: argparse.Namespace,
+    options: ProjectExecutionOptions,
     *,
     staged_root: Path,
     label: str,
-    prepare_run: PrepareRun,
 ) -> tuple[ClassicProducerGraphPreparedRun, Path]:
     bundle: ProjectBundle = load_project_tree(staged_root)
     session = _private_session(staged_root, label)
@@ -167,13 +155,13 @@ def _prepare_probe(
     try:
         execution = resolve_classic_execution_inputs(
             profile=bundle.spec.toolchain.profile,
-            explicit_toolchain_root=args.toolchain_root,
-            backend=selected_backend(args),
-            compiler_transport=args.compiler_transport,
-            resource_transport=args.resource_transport,
+            explicit_toolchain_root=options.toolchain_root,
+            backend=options.backend,
+            compiler_transport=options.compiler_transport,
+            resource_transport=options.resource_transport,
         )
-        prepared = prepare_run(
-            args,
+        prepared = prepare_producer_graph_run(
+            options,
             bundle,
             project_root=staged_root,
             session_root=session,
@@ -187,17 +175,15 @@ def _prepare_probe(
 
 
 def _probe_seed(
-    args: argparse.Namespace,
+    options: ProjectExecutionOptions,
     *,
     staged_root: Path,
     node_id: str,
-    prepare_run: PrepareRun,
 ) -> bytes:
     prepared, session = _prepare_probe(
-        args,
+        options,
         staged_root=staged_root,
         label="seed",
-        prepare_run=prepare_run,
     )
     try:
         outputs = prepared.probes.probe_compiler_nodes(
@@ -213,18 +199,16 @@ def _probe_seed(
 
 
 def _probe_donors(
-    args: argparse.Namespace,
+    options: ProjectExecutionOptions,
     *,
     staged_root: Path,
     donor_ids: tuple[str, ...],
     progress: Callable[[int, int, str], None] | None,
-    prepare_run: PrepareRun,
 ) -> dict[str, bytes]:
     prepared, session = _prepare_probe(
-        args,
+        options,
         staged_root=staged_root,
         label="donors",
-        prepare_run=prepare_run,
     )
     try:
         outputs = prepared.probes.probe_donor_compilers(
@@ -238,56 +222,41 @@ def _probe_donors(
 
 
 def _cold_trial(
-    args: argparse.Namespace,
+    options: ProjectExecutionOptions,
     *,
     staged_root: Path,
-    verify_command: VerifyCommand,
 ) -> ColdTrialEvidence:
     report_relative = ".reprobit-grind-trial-report"
-    values: dict[str, Any] = dict(vars(args))
-    values.update(
-        {
-            "project": str(staged_root),
-            "policy": None,
-            "report_dir": report_relative,
-            "action_receipt": None,
-            "action_nonce": None,
-            "keep_workspace": KeepWorkspace.NEVER.value,
-        }
+    verified = execute_verify(
+        VerifyRequest(
+            project=staged_root,
+            execution=options,
+            report_directory=report_relative,
+            keep_workspace=KeepWorkspace.NEVER,
+        ),
+        NULL_EXECUTION_PROGRESS,
     )
-    sink = io.StringIO()
-    status = verify_command(
-        argparse.Namespace(**values),
-        CLIOutput("text", sink, sink),
-    )
-    report = read_report_json(staged_root / report_relative / "report.json")
-    return ColdTrialEvidence(accepted=status == 0, report=report)
+    return ColdTrialEvidence(accepted=verified.accepted, report=verified.engine.report)
 
 
 def _grind_callbacks(
-    args: argparse.Namespace,
-    *,
-    prepare_run: PrepareRun,
-    verify_command: VerifyCommand,
+    options: ProjectExecutionOptions,
 ) -> ProjectGrindCallbacks:
     return ProjectGrindCallbacks(
         probe_seed=lambda staged, node: _probe_seed(
-            args,
+            options,
             staged_root=staged,
             node_id=node,
-            prepare_run=prepare_run,
         ),
         probe_donors=lambda staged, donors, progress: _probe_donors(
-            args,
+            options,
             staged_root=staged,
             donor_ids=donors,
             progress=progress,
-            prepare_run=prepare_run,
         ),
         cold_verify=lambda staged: _cold_trial(
-            args,
+            options,
             staged_root=staged,
-            verify_command=verify_command,
         ),
     )
 
@@ -295,9 +264,6 @@ def _grind_callbacks(
 def command_discover_grind(
     args: argparse.Namespace,
     output: CLIOutput,
-    *,
-    prepare_run: PrepareRun,
-    verify_command: VerifyCommand,
 ) -> int:
     """Run the public bounded auto-solve workflow."""
 
@@ -308,17 +274,14 @@ def command_discover_grind(
         error=CLIError,
         message="choose either --accept-exact or --accept-progress, not both",
     )
+    execution = execution_options_from_cli(args)
     if args.plan is None:
         from reprobit.discovery_project_grind_cli import command_discover_project_grind
 
         return command_discover_project_grind(
             args,
             output,
-            callbacks=_grind_callbacks(
-                args,
-                prepare_run=prepare_run,
-                verify_command=verify_command,
-            ),
+            callbacks=_grind_callbacks(execution),
         )
     if getattr(args, "reference_object", ()):
         raise CLIError("--reference-object belongs to the default project-wide grind")
@@ -334,11 +297,7 @@ def command_discover_grind(
             plan_relative=args.plan,
             accept_exact=args.accept_exact,
             accept_progress=accept_progress,
-            callbacks=_grind_callbacks(
-                args,
-                prepare_run=prepare_run,
-                verify_command=verify_command,
-            ),
+            callbacks=_grind_callbacks(execution),
             progress=progress,
         )
 
@@ -375,6 +334,7 @@ def command_discover_grind(
             error_type=type(exc).__name__,
             error=str(exc),
             nonfatal=True,
+            diagnostic=True,
         )
 
     cold_files: dict[Path, bytes] = {}
@@ -420,6 +380,7 @@ def command_discover_grind(
     )
 
     if solution is None:
+        next_step = None
         reasons = Counter(item.reason for item in result.rejections)
         common = sorted(reasons.items(), key=lambda item: (-item[1], item[0]))[:3]
         reason_summary = ""
@@ -443,7 +404,6 @@ def command_discover_grind(
             else "ReproBit saved 2 intervention records and their matching proof records"
         )
         review_command = human_command(("git", "diff", "--", intervention_file, proof_file))
-        verify_command_text = human_command(("rbit", "verify", root))
         outcome_label = "Exact solution" if result.exact else "Local progress"
         verdict_line = (
             "A fresh build matched every target byte for byte, and both required logic "
@@ -455,10 +415,8 @@ def command_discover_grind(
                 "certification."
             )
         )
-        next_command = (
-            verify_command_text
-            if result.exact
-            else human_command(("rbit", "discover", "grind", root))
+        next_step = NextStep(
+            ("rbit", "verify", root) if result.exact else ("rbit", "discover", "grind", root)
         )
         message = (
             f"{outcome_label} saved for '{solution.symbol}': "
@@ -469,9 +427,10 @@ def command_discover_grind(
             f"{grind_report_line}\n"
             f"{cold_report_line}\n"
             f"Review: {review_command}\n"
-            f"Next: {next_command}"
+            f"Next: {next_step.command}"
         )
     else:
+        next_step = NextStep(approval_argv)
         classes, functions = (solution.state.parameter(name) for name in ("classes", "functions"))
         reuse_line = (
             "Approval will save 1 function intervention, reuse the matching shared donor, "
@@ -539,6 +498,7 @@ def command_discover_grind(
             }
             for item in result.rejections
         ],
+        **next_step_fields(next_step),
     )
     if args.accept_exact:
         return 0 if result.published and result.exact else 1

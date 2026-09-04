@@ -51,6 +51,7 @@ from reprobit.secure_paths import (
     read_relative_file,
 )
 from reprobit.strict_json import JsonValue, canonical_json
+from reprobit.toolchains import ToolchainDoctorReport
 
 
 class ClassicIncrementalError(RuntimeError):
@@ -293,6 +294,7 @@ class ClassicIncrementalPlan:
     session_root: Path
     state_root: Path
     toolchain_root: Path
+    toolchain_report: ToolchainDoctorReport
     backend: ExecutionBackend
     jobs: int
     compiler_transport: Path | None
@@ -597,6 +599,7 @@ def runtime_factory(plan: ClassicIncrementalPlan) -> WarmRuntime:
             jobs=plan.jobs,
             compiler_transport=plan.compiler_transport,
             resource_transport=plan.resource_transport,
+            source_toolchain_report=plan.toolchain_report,
             initialization_timeout=plan.initialization_timeout,
             compile_timeout=plan.compile_timeout,
             link_timeout=plan.link_timeout,

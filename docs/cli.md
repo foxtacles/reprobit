@@ -1,4 +1,4 @@
-# Command-line reference
+# Command-line guide
 
 `rbit` keeps project intent, local machine configuration, building, and
 verification separate. Commands write plain text by default, and long work uses
@@ -16,9 +16,11 @@ by design: no colour, no shell completion, and no terminal control beyond the
 transient progress line.
 
 This page has one section per command, in the order `rbit --help` lists them.
-The option tables are generated from the parser into
-[cli-reference.md](cli-reference.md); [Getting started](getting-started.md) is
-the narrative walk from a bare CMake project to a verified build.
+It explains what commands do and how they fit together. The exact flags and
+defaults are generated from the parser into
+[cli-reference.md](cli-reference.md). [Getting started](getting-started.md)
+owns the narrative walk from a bare CMake project to a verified build, while
+the focused workflow guides own discovery, CMake import, and CI behavior.
 
 For an existing project, the everyday path is short:
 
@@ -34,8 +36,8 @@ editing a file that already belongs to the project—including a shared header
 used by many source files—use `rbit repair .`. Run `setup` once on each machine
 to prepare and remember its local compiler.
 
-Every command that takes a project accepts it as a positional argument
-(`rbit status .`); `--project PATH` is still accepted as an alias.
+Every command that takes a project accepts it as a positional argument, such as
+`rbit status .`.
 
 <details>
 <summary>Advanced: progress events</summary>
@@ -98,8 +100,9 @@ check failed.
 ## rbit doctor
 
 `doctor` is the read-only diagnostic underneath setup. It checks the selected
-host backend and, when a project and toolchain root are supplied, verifies the
-installation against the committed lock:
+host backend and the compiler chosen for the project against its saved lock.
+That is the path passed on the command line, set in the environment, remembered
+by `setup`, or found in the standard location:
 
 ```console
 rbit doctor .
@@ -111,7 +114,7 @@ Windows the opt-in probe creates a fresh, verified logon session and defines a
 temporary drive only in that session. The real producer starts suspended inside
 a nested Job Object, and the probe requires its descendant to observe the same
 drive. The mapping is removed only after that complete producer tree exits.
-Without a project, `--toolchain-root` also needs `--toolchain-profile`.
+Without a project, `--toolchain-root` also needs `--profile`.
 
 ## rbit toolchain provision
 
@@ -135,13 +138,17 @@ automatically; the lower-level command remains available for CI images and
 unusual manual installations that need explicit runtime files:
 
 ```console
-rbit toolchain lock . --root /opt/toolchains/msvc42 \
+rbit toolchain lock . --toolchain-root /opt/toolchains/msvc42 \
   --runtime-file wine/x86/cl \
   --runtime-file wine/x86/rc \
   --runtime-file wine/x86/link \
   --runtime-file wine/x86/lib \
   --runtime-file wine/x86/wine-msvc.sh
 ```
+
+An existing project always writes the compiler lock path declared in
+`reprobit.toml`; `--output` is only for bootstrapping a directory that has no
+project configuration yet.
 
 The lock command hashes required compiler producers and portable include and
 library tree receipts. It also writes `profile_sources`, the selected profile's
@@ -152,8 +159,8 @@ acquisition; the lock receipts establish the installed content. Platform wrapper
 or support files that participate in execution must be named explicitly with
 repeatable `--runtime-file` arguments and remain outside `profile_sources`.
 The five paths above are the complete portable runtime set for MSVC 4.2 on
-POSIX. `wine/x86/msvcenv.sh` is used only while CMake configures the one-time
-import tree; direct ReproBit builds do not execute it, so the provisioner
+POSIX. `wine/x86/msvcenv.sh` is used only while CMake configures an import or
+refresh tree; direct ReproBit builds do not execute it, so the provisioner
 authenticates it but the portable runtime lock does not include it.
 Committed lock paths are relative to the supplied toolchain root; the physical
 root itself remains local configuration. `rbit validate` rejects a registered
@@ -171,32 +178,37 @@ rbit source preview .
 `source preview` hashes the proposed Git-tracked read set without writing.
 Repeat `--path` to provide an explicit complete file or tree set instead. It is
 not a filter over the current record: every omitted path is reported as a
-removal.
+removal. Text output keeps long change lists brief; NDJSON retains every path.
 
 To add a new file to the reviewed source list—or remove a locked one—preview
 the new list first. `repair` keeps using the exact locked list and never
-silently admits another Git-tracked file. When existing build records still
-apply, preview prints the exact `source lock` command to run. If preview says it
-cannot safely update which files CMake builds, there is no automatic command for
-that case yet; restore the previous file list instead of deleting saved
-interventions.
+silently admits another Git-tracked file. Before the first import, preview
+prints the exact `source lock` command. Once CMake records exist, it normally
+prints `rbit import cmake . --refresh`, carrying forward every explicit
+`--path` selection and the saved CMake import options. If an older graph does
+not contain those options, preview refuses to guess and asks for one ordinary
+CMake re-import first.
 
 ## rbit source export
 
 Write the reviewed effective source view used by compilers and analysis tools:
 
 ```console
-rbit source export build/reprobit-debug/source
+rbit source export . --destination build/reprobit-debug/source
 ```
 
 Source-aware tools must read the same reviewed source view as the compiler. This
 matters when an intervention adds declarations or otherwise moves source lines.
-The export contains only project inputs admitted by the source lock, with the
-reviewed source adjustments applied. It does not contain reference binaries,
-compiler files, build outputs, or private run state. Running the command again
+The export contains project inputs admitted by the source lock, with the
+reviewed source adjustments applied, plus one hidden ownership marker. It does
+not contain reference binaries, compiler files, build outputs, or private run
+state. Running the command again
 safely replaces the prior export, including files that are no longer part of
-the reviewed source view. Point the tool's source root at the exported
-directory.
+the reviewed source view. ReproBit marks directories it creates and refreshes
+only those marked exports, so it cannot replace an unrelated directory by
+mistake. The destination also cannot overlap source inputs, project records,
+reference binaries, or build outputs. Point the tool's source root at the
+exported directory.
 
 ## rbit source lock
 
@@ -208,20 +220,16 @@ rbit source lock .
 
 `source lock` publishes the set shown by `source preview` after review. A
 successful lock prints the next required step—usually placing the original
-binary, running `rbit import cmake .`, or checking `rbit status .`. Re-run
-`rbit import cmake .` only when a successful source lock asks for it.
+binary, running the first `rbit import cmake .`, or checking `rbit status .`.
+After a CMake import exists, use the refresh command printed by preview rather
+than locking a changed file list separately.
 
 <details>
 <summary>Advanced: source-lock safety and generated project records</summary>
 
 `source lock` publishes the manifest and, when one exists, its build-plan
-binding in one content-addressed transaction. Every admitted source file is a
-transaction precondition, so an edit racing the lock aborts rather than
-committing a stale receipt. Pass `--invalidate-producer-graph` when preview says
-the generated graph is stale; rerun `rbit import cmake .` afterward. A graph-v3
-command DAG remains valid when bytes change at an already admitted path, but a
-direct graph input cannot be removed without invalidating the graph. Unrelated
-manifest additions and removals leave the command DAG valid. The command does
+binding in one guarded transaction. Every admitted source file is checked
+again, so an edit racing the lock aborts rather than saving mixed state. It does
 not rewrite translation-unit, intervention, or proof checks. If those checks
 became stale after a routine edit, use `rbit repair .`. The advanced
 [`source regenerate`](#rbit-source-regenerate) command lets you inspect only the
@@ -274,9 +282,9 @@ then handles compiler-dependent fallout and exact verification. Prefer
 
 ## rbit import cmake
 
-Prepare and record an ordinary CMake project in one guided run. CMake is a
-one-time import input, not a build or certification runtime. For a normal
-project, the entire import is one command:
+Prepare and record an ordinary CMake project in one guided run. CMake is an
+import and refresh input, not a build or certification runtime. For a normal
+project, the initial import is one command:
 
 ```console
 rbit import cmake .
@@ -309,6 +317,22 @@ rbit import cmake . --target program=app
 If the import fails, the generated scaffold is removed and the diagnostic
 workspace is retained for inspection.
 
+After adding, removing, or renaming source files in an imported project, begin
+with `rbit source preview .`. When the change is compatible, preview points
+directly to `rbit import cmake . --refresh`. Refresh stages the new source list
+and CMake records, preserves compatible per-source adjustments and checks,
+resets changed steps, retires removed steps, verifies every target from scratch,
+and publishes the records, verified outputs, and report as one complete passing
+update. It refuses ambiguous compiler steps and any candidate that fails cold
+verification. The saved CMake program, configuration, timeout, repeated
+`--cmake-define` values, and directive inputs are replayed automatically;
+explicit refresh options replace those saved values. The
+[CMake workflow](cmake.md#refresh-after-adding-or-removing-source-files) gives
+the full sequence.
+
+Use `--clear-cmake-defines` or `--clear-directive-inputs` with `--refresh`
+when the refreshed graph should replace one of those saved lists with no values.
+
 ## rbit graph configure
 
 Create a fresh CMake metadata tree without building. Together with
@@ -320,13 +344,16 @@ rbit graph configure . \
   --workspace-root .reprobit-state/import \
   --toolchain-root /opt/toolchains/msvc42 \
   --compiler-transport /opt/toolchains/msvc42/wine/x86/cl \
-  --resource-transport /opt/toolchains/msvc42/wine/x86/rc
+  --resource-transport /opt/toolchains/msvc42/wine/x86/rc \
+  --cmake-define FEATURE_SET=classic
 ```
 
 `graph configure` reports the exact configured/effective roots, target plan,
 compile database, effective-source digest, configure log, command digest, and
-duration. It refuses a non-empty workspace and detects any source mutation
-during CMake configuration.
+duration. It also prints the complete `graph extract` command for that exact
+workspace. It refuses a non-empty workspace and detects any source mutation
+during CMake configuration. Repeat `--cmake-define NAME=VALUE` for ordinary
+CMake cache settings; the same validation applies to guided import.
 
 ## rbit graph extract
 
@@ -433,9 +460,9 @@ rbit clean . --cache --preview
 rbit clean . --reports --preview
 ```
 
-Use `--cache` only when you intend to clear the complete incremental cache and
-the repair search cache. Use
-`--older-than-hours 24` to keep recent workspaces and selected cache records.
+Use `--cache` only when you intend to clear incremental and repair-search cache
+entries. With no age it clears them all; use `--older-than-hours 24` to keep
+recent workspaces and cache entries.
 Active runs are never removed. The `--keep-workspace` option of `build`, `verify`,
 `repair`, and `import cmake` changes which run workspaces are retained in the
 first place (`on-failure` by default).
@@ -451,8 +478,9 @@ rbit explain . --intervention intervention-id
 
 `explain` lists interventions and their fixed costs; pass `--intervention ID`
 to select one and print it in full. Like `cost`, it reads the committed metadata
-only, so it remains useful while source bytes are being edited. An unknown ID is
-an error that lists the known IDs.
+only, so it remains useful while source bytes are being edited. A project with
+no saved interventions says so explicitly. An unknown ID is an error that lists
+the known IDs.
 
 ## rbit repair
 
@@ -500,14 +528,14 @@ was exhausted, these advanced options widen it:
 
 ```console
 rbit repair . --retune-radius 32 --retune-candidates 2048 \
-  --donor-candidates 20000 --discovery-candidates 512 \
+  --candidate-limit 20000 --discovery-candidates 512 \
   --adjustment-rounds 200
 ```
 
 `--retune-radius` is the farthest declaration-count distance tried per saved
 compiler choice or source layout (default 8, maximum 64). `--retune-candidates`
 caps nearby choices per saved compiler choice or source layout (default 64),
-while `--donor-candidates` caps nearby repair choices tested by the whole command
+while `--candidate-limit` caps nearby repair choices tested by the whole command
 (default 256). `--discovery-candidates`
 caps fresh choices per affected source file after its saved donors are
 exhausted (default 64).
@@ -529,7 +557,7 @@ edit also moves a function that never needed special handling before. It can add
 the source file to its saved repair guidance and create the needed records
 automatically; it succeeds only after every newly affected function is restored.
 If no replacement is found within the default budget, raise
-`--discovery-candidates` and `--donor-candidates` and rerun the same command.
+`--discovery-candidates` and `--candidate-limit` and rerun the same command.
 Do not hand-edit project records.
 
 Repair stops when the edit removed the function entirely, because it cannot
@@ -598,7 +626,9 @@ rbit verify . --report-dir build/reprobit-report
 
 `verify` always builds from scratch, has no warm/cache mode, and never opens
 the cache. It writes the trust report as canonical JSON plus self-contained
-HTML. Exit status 1 means the result did not satisfy the authenticity policy.
+HTML. When targets differ, the final message names them rather than reporting
+only a count. Exit status 1 means the result did not satisfy the authenticity
+policy.
 
 ### Reading the report
 
@@ -716,8 +746,11 @@ Project-wide grind needs project-owned reference `.obj` files; it cannot derive
 them from the reference executable alone. Put those objects under `reference/`
 and name them after the source filename without its extension—for example,
 `src/widget.cpp` maps to `reference/widget.obj`—or use the exact translation-unit
-ID, or pair them explicitly with `--reference-object TU=PATH`. The preview tries
-a small round-robin sample across eligible source files (`--max-symbols`) and
+ID, or pair them explicitly with `--reference-object TU=PATH`. Before compiling,
+the preview reports how many eligible compiler steps have an object, how many
+are missing one, and how many functions it selected. Detailed pairings and skip
+reasons remain in the report and NDJSON result. The preview tries a small
+round-robin sample across eligible source files (`--max-symbols`) and
 keeps its summary at `.reprobit-state/reports/grind/project/report.html`. Each
 outcome links to a detailed decision report and a persisted bounded plan. Exact
 previews show the copyable, platform-quoted approval command. If the whole
@@ -750,8 +783,9 @@ rbit state status .
 ```
 
 `state status` reports reusable build and repair-search caches separately from
-cache data left by older ReproBit code, and prints the safe cleanup command when
-it finds any.
+cache data left by older ReproBit code. It names the newest retained runs and
+their outcomes, keeps a long run list brief, and prints the safe cleanup command
+when it finds any. NDJSON includes the complete run list.
 
 ## rbit report
 
@@ -762,7 +796,8 @@ rbit report build/reprobit-report/report.json
 ```
 
 `report` strictly re-reads canonical report JSON before rendering HTML. The
-input must be an existing file.
+input must be an existing file, and the HTML output must be a different path so
+the canonical JSON cannot be overwritten.
 
 ## rbit cmake-module
 
@@ -773,8 +808,8 @@ rbit cmake-module --file
 ```
 
 `cmake-module` prints the installed module directory, or the complete
-`ReproBit.cmake` path with `--file`. The module is used only during the one-time
-CMake import; normal `build` and `verify` runs do not load it.
+`ReproBit.cmake` path with `--file`. The module is used only during CMake import
+or refresh; normal `build` and `verify` runs do not load it.
 
 
 ## Exit status
@@ -799,7 +834,9 @@ and returns `2` without publishing partial authority or outputs.
 With `--format ndjson`, every line on standard output is one JSON object and
 nothing else is written there (diagnostics that text mode sends to standard
 error become events too). Keys are sorted, non-ASCII is kept, and NaN is
-rejected. Every object carries:
+rejected. Invalid arguments are emitted as one `error` event too, so automation
+does not need a separate parser for usage failures. `--help` and `--version`
+remain ordinary human-readable text. Every object carries:
 
 - `event` - the event name from the table below;
 - `message` - human-readable text for command results and diagnostics;
@@ -812,6 +849,11 @@ events with the fields of `reprobit.progress.ProgressEvent`: `sequence`,
 `total`, `node_id`, `reason`. Progress messages retain machine-level detail;
 text mode replaces internal phase and node names with concise friendly labels.
 
+Events that offer a follow-up command include both `next_argv`, the exact
+argument array for automation, and `next_command`, the same command rendered
+for a person to copy. Where those fields are part of an event but no follow-up
+is needed, they are `[]` and `null`.
+
 Command events (from `CLIOutput.emit` call sites; paths and pydantic models are
 serialized as strings and JSON objects):
 
@@ -820,42 +862,44 @@ serialized as strings and JSON objects):
 | `build_complete` | build | `cold`, nodes+hits+misses (warm) or steps (cold), `outputs` |
 | `cleanup` | clean | `active_cache_leases`, `cache_blobs`, `cache_records`, `cache_requested`, `obsolete_cache_requested`, `older_than_hours`, `reclaimed_bytes`, `removed`, `repair_search_cache_bytes`, `repair_search_cache_files`, `report_bytes`, `report_files`, `reports`, `reports_requested`, `skipped_active`, `skipped_recent`, `skipped_recent_cache_records` |
 | `cleanup_preview` | clean --preview | `active_cache_leases`, `cache_blobs`, `cache_records`, `cache_requested`, `candidates`, `next_argv`, `next_command`, `obsolete_cache_requested`, `older_than_hours`, `reclaimable_bytes`, `repair_search_cache_bytes`, `repair_search_cache_files`, `report_bytes`, `report_files`, `reports`, `reports_requested` |
-| `cmake_imported` | import cmake | `build_plan`, `next_command`, `nodes`, `producer_graph`, `scaffold_transaction_id`, `translation_units` |
+| `cmake_imported` | import cmake | `build_plan`, `next_argv`, `next_command`, `nodes`, `producer_graph`, `scaffold_transaction_id`, `translation_units` |
+| `cmake_refreshed` | import cmake --refresh | `added_translation_units`, `build_plan`, `cleanup_warning`, `cold_verified`, `next_argv`, `next_command`, `nodes`, `outputs`, `preserved_translation_units`, `producer_graph`, `report_html`, `report_json`, `reset_translation_units`, `retired_translation_units`, `source_manifest`, `transaction_id` |
 | `cmake_module` | cmake-module | `path` |
 | `composed_body_ledger` | verify | `functions` (when saved), `outcome`, `path` |
 | `cost` | cost | `breakdown` |
 | `discovery_clean` | discover clean | `bytes`, `files`, `preview`, `removed`, `request`, `requests`, `shared`, `state` |
 | `discovery_complete` | discover run | `applied`, `built`, `candidate_kinds`, `cells`, `proposals`, `report_html`, `report_html_digest`, `report_json`, `report_json_digest`, `reused`, `transaction_id` |
-| `discovery_grind_complete` | discover grind --expert-plan | `added_cost`, `added_interventions`, `approval_argv`, `authority_files`, `cold_trials`, `cold_verification_report_html`, `cold_verification_report_json`, `compiler_trials`, `declaration_state`, `donor_id`, `exact`, `function_id`, `grind_report_html`, `locally_qualified`, `project`, `proposed_interventions`, `published`, `qualified_candidates`, `rejections`, `report_run_id`, `report_transaction_id`, `report_warning`, `reused_donor`, `states`, `symbol`, `transaction_id` |
+| `discovery_grind_complete` | discover grind --expert-plan | `added_cost`, `added_interventions`, `approval_argv`, `authority_files`, `cold_trials`, `cold_verification_report_html`, `cold_verification_report_json`, `compiler_trials`, `declaration_state`, `donor_id`, `exact`, `function_id`, `grind_report_html`, `locally_qualified`, `next_argv`, `next_command`, `project`, `proposed_interventions`, `published`, `qualified_candidates`, `rejections`, `report_run_id`, `report_transaction_id`, `report_warning`, `reused_donor`, `states`, `symbol`, `transaction_id` |
 | `discovery_grind_plan_created` | discover init | `next_argv`, `next_command`, `plan`, `project`, `reference`, `source`, `states`, `symbol`, `target`, `transaction_id`, `translation_unit` |
 | `discovery_grind_report_warning` | discover grind --expert-plan | `artifact`, `error`, `error_type`, `nonfatal`, `project`, `published`, `report` |
 | `discovery_project_grind_complete` | discover grind | `accept_mode`, `accepted`, `approval_argv`, `attempted_symbols`, `decision_reports`, `discovered_symbols`, `eligible_units`, `exact_symbols`, `locally_qualified_symbols`, `max_symbols`, `next_argv`, `next_command`, `outcomes`, `persisted_plans`, `project`, `project_wide`, `published_progress_symbols`, `published_symbols`, `reference_objects`, `report_html`, `report_json`, `report_transaction_id`, `report_warning`, `skips`, `truncated_symbols`, `verify_argv` |
 | `discovery_project_grind_report_warning` | discover grind | `error`, `error_type`, `nonfatal`, `project`, `report`, `symbol`, `translation_unit` |
 | `doctor_check` | doctor | `component`, `detail`, `name`, `passed`, `required` |
 | `doctor_result` | doctor | `backend`, `executed_probe`, `passed` |
-| `error` | any | `error_type` |
+| `error` | any | `error_type`, `exit_code`, `notes` (when available) |
 | `hint` | cost, explain |  |
 | `incremental_build_summary` | build (warm) | `elapsed_seconds`, `hit_rate`, `hits`, `invalidations`, `misses`, `producer_hits`, `producer_misses`, `published_comparison_pairs`, `published_targets`, `runtime_init_count`, `transform_hits`, `transform_misses`, `unchanged_comparison_pairs`, `unchanged_targets` |
-| `initialized` | init | `changed_paths`, `next_command`, `project_id`, `project_root` |
+| `initialized` | init | `changed_paths`, `next_argv`, `next_command`, `project_id`, `project_root` |
 | `interrupted` | any | `error_type`, `exit_code` |
 | `intervention` | explain | `beneficiaries`, `cost`, `cost_class`, `dependencies`, `id`, `kind`, `rationale`, `scope`, `units` |
-| `producer_graph_configured` | graph configure | `certification_runtime`, `command_digest`, `compile_database`, `configure_log`, `configured_build_root`, `duration_seconds`, `effective_source_digest`, `effective_source_root`, `project_plan`, `target_plan`, `toolchain_root` |
+| `intervention_summary` | explain | `interventions` |
+| `producer_graph_configured` | graph configure | `certification_runtime`, `command_digest`, `compile_database`, `configure_log`, `configured_build_root`, `duration_seconds`, `effective_source_digest`, `effective_source_root`, `next_argv`, `next_command`, `project_plan`, `target_plan`, `toolchain_root` |
 | `producer_graph_extracted` | graph extract, import cmake | `certification_runtime`, `extractor`, `graph_digest`, `nodes`, `output`, `roles`, `skipped_translation_units`, `transaction_id`, `translation_units` |
-| `project_readiness` | status | `checks`, `completed`, `next_command`, `next_step`, `ready`, `total` |
+| `project_readiness` | status | `checks`, `completed`, `next_argv`, `next_command`, `next_instruction`, `ready`, `total` |
 | `repair_cleanup_warning` | repair | `project`, `workspace` |
-| `repair_complete` | repair | `adjustment_rounds`, `admitted_translation_units`, `changed_records`, `cleanup_warning`, `compiler_candidates`, `discovered_actions`, `donor_candidates` (compatibility alias), `donor_retunes`, `exact`, `measured_checks`, `project`, `reauthored_actions`, `refreshed_checks`, `removed_donors`, `repair_passes`, `repaired_translation_units`, `replayed_candidates`, `report_html`, `report_json`, `retired_actions`, `source_inputs`, `source_retunes`, `transaction_id` |
+| `repair_complete` | repair | `adjustment_rounds`, `admitted_translation_units`, `changed_records`, `cleanup_warning`, `compiler_candidates`, `discovered_actions`, `donor_retunes`, `exact`, `measured_checks`, `project`, `reauthored_actions`, `refreshed_checks`, `removed_donors`, `repair_passes`, `repaired_translation_units`, `replayed_candidates`, `report_html`, `report_json`, `retired_actions`, `source_inputs`, `source_retunes`, `transaction_id` |
 | `repair_refused` | repair | failure diagnostic fields, `phase` |
 | `report_written` | report | `clean`, `html`, `input`, `total_cost` |
-| `setup` | setup | `backend`, `backend_failures`, `environment_ready`, `next_command`, `next_step`, `profile`, `project_ready`, `readiness`, `toolchain_lock`, `toolchain_lock_created`, `toolchain_root` |
-| `source_exported` | source export | `interventions`, `path` |
-| `source_locked` | source lock | `entries`, `next_command`, `next_step`, `output`, `producer_graph_invalidated`, `source_manifest_digest`, `transaction_id` |
-| `source_preview` | source preview | `added`, `after_source_manifest_digest`, `authority_checked`, `authority_error`, `before_source_manifest_digest`, `changed`, `checked_overlay_outputs`, `classic_preflight_checked`, `cmake_import_command`, `entries`, `membership_transition_blocked`, `next_command`, `producer_graph_invalidation_required`, `removed`, `repair_required`, `stale_translation_units`, `unchanged`, `up_to_date` |
-| `source_regenerated` | source regenerate | `applied`, `changes`, `documents`, `next_command`, `transaction_id` |
+| `setup` | setup | `backend`, `backend_failures`, `environment_ready`, `next_argv`, `next_command`, `next_instruction`, `profile`, `project_ready`, `readiness`, `toolchain_lock`, `toolchain_lock_created`, `toolchain_root` |
+| `source_exported` | source export | `cleanup_warning`, `interventions`, `path`, `preserved_paths` |
+| `source_locked` | source lock | `entries`, `next_argv`, `next_command`, `next_instruction`, `output`, `producer_graph_invalidated`, `source_manifest_digest`, `transaction_id` |
+| `source_preview` | source preview | `added`, `after_source_manifest_digest`, `authority_checked`, `authority_error`, `before_source_manifest_digest`, `changed`, `checked_overlay_outputs`, `classic_preflight_checked`, `cmake_import_command`, `cmake_refresh_required`, `entries`, `membership_transition_blocked`, `next_argv`, `next_command`, `producer_graph_invalidation_required`, `removed`, `repair_required`, `stale_translation_units`, `unchanged`, `up_to_date` |
+| `source_regenerated` | source regenerate | `applied`, `changes`, `documents`, `next_argv`, `next_command`, `transaction_id` |
 | `state_status` | state status | `cache_active_leases`, `cache_blobs`, `cache_bytes`, `cache_current_records`, `cache_files`, `cache_obsolete_records`, `cache_records`, `cache_stale_leases`, `repair_ledger_bytes`, `repair_ledger_files`, `repair_search_cache_bytes`, `repair_search_cache_files`, `report_bytes`, `report_files`, `root`, `run_bytes`, `run_files`, `runs`, `total_bytes`, `total_files` |
 | `toolchain_locked` | toolchain lock | `input_trees`, `output`, `profile`, `runtime_files`, `tools`, `transaction_id` |
-| `toolchain_provisioned` | toolchain provision | `next_command`, `profile`, `root`, `saved` |
+| `toolchain_provisioned` | toolchain provision | `next_argv`, `next_command`, `profile`, `root`, `saved` |
 | `validated` | validate | `interventions`, `project_id`, `proofs`, `targets` |
-| `verification` | verify | `accepted`, `exact_targets`, `origin_integrity`, `policy`, `quarantine_actions`, `quarantine_bytes`, `report_html`, `report_json`, `targets`, `total_cost`, `verdict` |
+| `verification` | verify | `accepted`, `exact_targets`, `origin_integrity`, `policy`, `quarantine_actions`, `quarantine_bytes`, `report_html`, `report_json`, `target_results`, `targets`, `total_cost`, `verdict` |
 | `workspace_gc_hint` | build, verify | `project` |
 | `workspace_retained` | build, verify, repair, import cmake | `outcome`, `path` |
 

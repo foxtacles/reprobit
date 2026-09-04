@@ -11,8 +11,8 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import stat
+import tempfile
 import time
 import uuid
 from collections.abc import Iterator
@@ -23,10 +23,21 @@ from pathlib import Path
 from types import TracebackType
 from typing import Self
 
-from reprobit.atomic_io import write_json_atomic
 from reprobit.composition_ledger import COMPOSED_BODY_LEDGER_RELATIVE
+from reprobit.exact_tree import remove_exact_directory_tree
+from reprobit.secure_path_contracts import (
+    SecureFileSnapshot,
+    SecurePathError,
+)
+from reprobit.secure_paths import (
+    atomic_publish_relative_if_current,
+    read_relative_file,
+    remove_published_relative,
+    reseal_relative_file,
+)
 from reprobit.state_lock import AdvisoryFileLock as _AdvisoryFileLock
 from reprobit.state_lock import StateError as _StateError
+from reprobit.strict_json import canonical_json
 
 
 class KeepWorkspace(StrEnum):
@@ -126,6 +137,11 @@ _LEASE_FILE = ".lease"
 _MAINTENANCE_FILE = ".maintenance.lock"
 _CANONICAL_REPORTS = ("report.html", "report.json")
 _GRIND_REPORT_DIRECTORY = "grind"
+_CMAKE_WORKSPACE_POINTER = ".cmake-workspace.json"
+_CMAKE_WORKSPACE_MARKER = ".reprobit-cmake-workspace.json"
+_CMAKE_WORKSPACE_SCHEMA = "reprobit.cmake-workspace.v1"
+_CMAKE_WORKSPACE_NONCE = re.compile(r"^[0-9a-f]{32}$")
+_DirectoryIdentity = tuple[int, int]
 
 
 def _require_real_directory(path: Path, label: str) -> Path:
@@ -219,6 +235,214 @@ def _outcome(path: Path) -> str:
     return outcome if outcome in {"succeeded", "failed", "interrupted"} else "invalid"
 
 
+def _read_small_json(path: Path, *, label: str) -> dict[str, object]:
+    if path.is_symlink() or not path.is_file():
+        raise _StateError(f"{label} is not a real file: {path}")
+    if path.stat(follow_symlinks=False).st_size > 4096:
+        raise _StateError(f"{label} is too large: {path}")
+    try:
+        value = json.loads(path.read_bytes())
+    except (OSError, ValueError) as error:
+        raise _StateError(f"cannot read {label} {path}: {error}") from error
+    if not isinstance(value, dict):
+        raise _StateError(f"{label} is malformed: {path}")
+    return value
+
+
+def _real_directory_identity(path: Path, *, label: str) -> _DirectoryIdentity:
+    try:
+        status = path.stat(follow_symlinks=False)
+    except OSError as error:
+        raise _StateError(f"cannot inspect {label} {path}: {error}") from error
+    if not stat.S_ISDIR(status.st_mode):
+        raise _StateError(f"{label} is not a real directory: {path}")
+    return status.st_dev, status.st_ino
+
+
+def _require_directory_identity(
+    path: Path,
+    expected: _DirectoryIdentity,
+    *,
+    label: str,
+) -> None:
+    if _real_directory_identity(path, label=label) != expected:
+        raise _StateError(f"{label} changed: {path}")
+
+
+def _write_json_in_exact_directory(
+    directory: Path,
+    expected: _DirectoryIdentity,
+    name: str,
+    value: object,
+) -> None:
+    """Create one state record beneath the exact captured directory."""
+
+    try:
+        atomic_publish_relative_if_current(
+            directory,
+            name,
+            canonical_json(value),
+            expected=None,
+            mode=0o600 if os.name != "nt" else None,
+            expected_directories={".": expected},
+        )
+    except SecurePathError as error:
+        raise _StateError(f"cannot securely create state record {name!r}: {error}") from error
+
+
+def _owned_cmake_workspace_record(
+    arena_path: Path,
+    *,
+    pointer_payload: bytes | None = None,
+) -> tuple[Path, _DirectoryIdentity | None] | None:
+    """Resolve an external CMake workspace and its validated directory identity."""
+
+    pointer = arena_path / _CMAKE_WORKSPACE_POINTER
+    if pointer_payload is None:
+        if not os.path.lexists(pointer):
+            return None
+        value = _read_small_json(pointer, label="CMake workspace pointer")
+    else:
+        if len(pointer_payload) > 4096:
+            raise _StateError(f"CMake workspace pointer is too large: {pointer}")
+        try:
+            value = json.loads(pointer_payload)
+        except (UnicodeError, ValueError) as error:
+            raise _StateError(f"cannot read CMake workspace pointer {pointer}: {error}") from error
+        if not isinstance(value, dict):
+            raise _StateError(f"CMake workspace pointer is malformed: {pointer}")
+    if set(value) != {"schema", "arena", "workspace", "nonce"}:
+        raise _StateError(f"CMake workspace pointer is malformed: {pointer}")
+    nonce = value.get("nonce")
+    workspace_value = value.get("workspace")
+    arena_value = value.get("arena")
+    if (
+        value.get("schema") != _CMAKE_WORKSPACE_SCHEMA
+        or not isinstance(nonce, str)
+        or _CMAKE_WORKSPACE_NONCE.fullmatch(nonce) is None
+        or not isinstance(workspace_value, str)
+        or not isinstance(arena_value, str)
+    ):
+        raise _StateError(f"CMake workspace pointer is malformed: {pointer}")
+    canonical_arena = arena_path.resolve(strict=True)
+    workspace = Path(workspace_value)
+    if (
+        arena_value != str(canonical_arena)
+        or not workspace.is_absolute()
+        or workspace.name != f"rbit-cmake-{nonce}"
+        or workspace != workspace.resolve(strict=False)
+    ):
+        raise _StateError(f"CMake workspace pointer is not canonical: {pointer}")
+    if not os.path.lexists(workspace):
+        return workspace, None
+    identity = _real_directory_identity(workspace, label="owned CMake workspace")
+    marker = workspace / _CMAKE_WORKSPACE_MARKER
+    if not os.path.lexists(marker):
+        raise _StateError(f"owned CMake workspace marker is missing: {workspace}")
+    if _read_small_json(marker, label="CMake workspace marker") != value:
+        raise _StateError(f"owned CMake workspace marker differs: {workspace}")
+    return workspace, identity
+
+
+def _owned_cmake_workspace(arena_path: Path) -> Path | None:
+    """Resolve the one external CMake workspace positively owned by a run."""
+
+    record = _owned_cmake_workspace_record(arena_path)
+    return None if record is None else record[0]
+
+
+def _remove_exact_directory(
+    path: Path,
+    expected: _DirectoryIdentity,
+    *,
+    label: str,
+) -> None:
+    """Quarantine and remove only the exact inspected directory entry."""
+
+    if not os.path.lexists(path):
+        return
+    if _real_directory_identity(path, label=label) != expected:
+        raise _StateError(f"{label} changed before cleanup: {path}")
+    quarantine = path.with_name(f".{path.name}.reprobit-remove-{uuid.uuid4().hex}")
+    try:
+        _move_to_quarantine(path, quarantine)
+    except FileNotFoundError:
+        return
+    except OSError as error:
+        raise _StateError(f"cannot quarantine {label} {path}: {error}") from error
+    try:
+        if _real_directory_identity(quarantine, label=label) != expected:
+            raise _StateError(
+                f"{label} changed during cleanup; moved directory preserved at {quarantine}"
+            )
+        remove_exact_directory_tree(quarantine, expected)
+    except OSError as error:
+        raise _StateError(f"cannot remove quarantined {label} {quarantine}: {error}") from error
+
+
+def _move_to_quarantine(source: Path, quarantine: Path) -> None:
+    """Keep the destructive rename patchable for deterministic race tests."""
+
+    os.replace(source, quarantine)
+
+
+def _remove_owned_cmake_workspace(
+    arena_path: Path,
+    expected_arena: _DirectoryIdentity,
+) -> None:
+    _require_directory_identity(arena_path, expected_arena, label="run arena")
+    pointer = arena_path / _CMAKE_WORKSPACE_POINTER
+    pointer_snapshot = None
+    pointer_payload = None
+    if os.path.lexists(pointer):
+        try:
+            pointer_payload, pointer_snapshot = read_relative_file(
+                arena_path,
+                _CMAKE_WORKSPACE_POINTER,
+                expected_directories={".": expected_arena},
+            )
+        except SecurePathError as error:
+            raise _StateError(f"cannot seal CMake workspace pointer {pointer}: {error}") from error
+    _require_directory_identity(arena_path, expected_arena, label="run arena")
+    record = (
+        _owned_cmake_workspace_record(arena_path)
+        if pointer_payload is None
+        else _owned_cmake_workspace_record(arena_path, pointer_payload=pointer_payload)
+    )
+    if (pointer_snapshot is None) != (record is None):
+        raise _StateError(f"CMake workspace pointer changed before cleanup: {pointer}")
+    if record is None:
+        return
+    workspace, identity = record
+    if identity is not None:
+        _require_directory_identity(arena_path, expected_arena, label="run arena")
+        assert pointer_snapshot is not None
+        try:
+            reseal_relative_file(
+                arena_path,
+                _CMAKE_WORKSPACE_POINTER,
+                expected=pointer_snapshot,
+                expected_directories={".": expected_arena},
+            )
+        except SecurePathError as error:
+            raise _StateError(
+                f"CMake workspace pointer changed before cleanup: {pointer}"
+            ) from error
+        _remove_exact_directory(
+            workspace,
+            identity,
+            label="owned CMake workspace",
+        )
+    _require_directory_identity(arena_path, expected_arena, label="run arena")
+    if pointer_snapshot is not None and not remove_published_relative(
+        arena_path,
+        _CMAKE_WORKSPACE_POINTER,
+        expected=pointer_snapshot,
+        expected_directories={".": expected_arena},
+    ):
+        raise _StateError(f"CMake workspace pointer changed before cleanup: {pointer}")
+
+
 class RunArena:
     """A leased per-invocation workspace with deterministic retention."""
 
@@ -244,6 +468,8 @@ class RunArena:
         self.path = self.runs_root / f"{kind}-{identifier}"
         self.keep = KeepWorkspace(keep)
         self._lease: _AdvisoryFileLock | None = None
+        self._arena_identity: _DirectoryIdentity | None = None
+        self._outcome_snapshot: SecureFileSnapshot | None = None
         self._entered = False
         self._finished = False
 
@@ -257,13 +483,17 @@ class RunArena:
                 self.path.mkdir(exist_ok=False)
             except FileExistsError as exc:
                 raise _StateError(f"run arena already exists: {self.path}") from exc
+            arena_identity = _real_directory_identity(self.path, label="new run arena")
+            self._arena_identity = arena_identity
             lease = _AdvisoryFileLock(self.path / _LEASE_FILE)
             try:
                 if not lease.acquire(nonblocking=True):  # freshly-created path
                     raise _StateError(f"cannot lease fresh run arena: {self.path}")
                 self._lease = lease
-                write_json_atomic(
-                    self.path / _OUTCOME_FILE,
+                _write_json_in_exact_directory(
+                    self.path,
+                    arena_identity,
+                    _OUTCOME_FILE,
                     {
                         "kind": self.path.name.split("-", 1)[0],
                         "outcome": "interrupted",
@@ -271,44 +501,165 @@ class RunArena:
                         "started_ns": time.time_ns(),
                     },
                 )
+                outcome_relative = (
+                    (self.path / _OUTCOME_FILE).relative_to(self.state_root).as_posix()
+                )
+                arena_relative = self.path.relative_to(self.state_root).as_posix()
+                _payload, self._outcome_snapshot = read_relative_file(
+                    self.state_root,
+                    outcome_relative,
+                    expected_directories={arena_relative: arena_identity},
+                )
             except BaseException:
                 self._lease = None
                 lease.close()
-                shutil.rmtree(self.path)
+                _remove_exact_directory(
+                    self.path,
+                    arena_identity,
+                    label="new run arena",
+                )
                 raise
         return self
+
+    def _require_arena_identity(self, *, action: str) -> _DirectoryIdentity:
+        expected = self._arena_identity
+        if expected is None:
+            raise _StateError("run arena identity is unavailable")
+        if not os.path.lexists(self.path):
+            raise _StateError(f"run arena disappeared before {action}: {self.path}")
+        if _real_directory_identity(self.path, label="run arena") != expected:
+            raise _StateError(f"run arena changed before {action}: {self.path}")
+        return expected
 
     def finish(self, *, succeeded: bool) -> None:
         if not self._entered or self._finished:
             raise _StateError("run arena is not active")
         self._finished = True
         outcome = "succeeded" if succeeded else "failed"
-        write_json_atomic(
-            self.path / _OUTCOME_FILE,
-            {
-                "kind": self.path.name.split("-", 1)[0],
-                "outcome": outcome,
-                "pid": os.getpid(),
-                "finished_ns": time.time_ns(),
-            },
-        )
         should_keep = self.keep is KeepWorkspace.ALWAYS or (
             self.keep is KeepWorkspace.ON_FAILURE and not succeeded
         )
         lease = self._lease
         self._lease = None
-        with _maintenance_gate(self.state_root):
+        try:
+            expected = self._require_arena_identity(action="writing its outcome")
+            outcome_snapshot = self._outcome_snapshot
+            if outcome_snapshot is None:
+                raise _StateError("run arena outcome identity is unavailable")
+            outcome_relative = (self.path / _OUTCOME_FILE).relative_to(self.state_root).as_posix()
+            arena_relative = self.path.relative_to(self.state_root).as_posix()
+            try:
+                self._outcome_snapshot = atomic_publish_relative_if_current(
+                    self.state_root,
+                    outcome_relative,
+                    canonical_json(
+                        {
+                            "kind": self.path.name.split("-", 1)[0],
+                            "outcome": outcome,
+                            "pid": os.getpid(),
+                            "finished_ns": time.time_ns(),
+                        }
+                    ),
+                    expected=outcome_snapshot,
+                    mode=0o600 if os.name != "nt" else None,
+                    expected_directories={arena_relative: expected},
+                )
+            except SecurePathError as error:
+                raise _StateError(
+                    f"run arena changed before writing its outcome: {self.path}"
+                ) from error
+            _require_directory_identity(self.path, expected, label="run arena")
+            self._require_arena_identity(action="finishing")
+            with _maintenance_gate(self.state_root):
+                self._require_arena_identity(action="cleanup")
+                if not should_keep:
+                    self._remove()
+        finally:
             if lease is not None:
                 lease.close()
-            if not should_keep:
-                self._remove()
+
+    def create_cmake_workspace(self) -> Path:
+        """Create one short external CMake workspace owned by this run."""
+
+        if not self._entered or self._finished:
+            raise _StateError("CMake workspace requires an active run arena")
+        self._require_arena_identity(action="creating an owned CMake workspace")
+        pointer = self.path / _CMAKE_WORKSPACE_POINTER
+        if os.path.lexists(pointer):
+            raise _StateError("run arena already owns a CMake workspace")
+        nonce = uuid.uuid4().hex
+        temporary_root = Path(tempfile.gettempdir()).resolve(strict=True)
+        workspace = temporary_root / f"rbit-cmake-{nonce}"
+        ownership = {
+            "schema": _CMAKE_WORKSPACE_SCHEMA,
+            "arena": str(self.path.resolve(strict=True)),
+            "workspace": str(workspace),
+            "nonce": nonce,
+        }
+        created_identity: _DirectoryIdentity | None = None
+        try:
+            workspace.mkdir(mode=0o700, exist_ok=False)
+            created_identity = _real_directory_identity(
+                workspace,
+                label="new CMake workspace",
+            )
+            _write_json_in_exact_directory(
+                workspace,
+                created_identity,
+                _CMAKE_WORKSPACE_MARKER,
+                ownership,
+            )
+            arena_identity = self._require_arena_identity(
+                action="recording CMake workspace ownership"
+            )
+            _write_json_in_exact_directory(
+                self.path,
+                arena_identity,
+                _CMAKE_WORKSPACE_POINTER,
+                ownership,
+            )
+            self._require_arena_identity(action="recording CMake workspace ownership")
+            if _owned_cmake_workspace_record(self.path) != (
+                workspace,
+                created_identity,
+            ):
+                raise _StateError("CMake workspace ownership could not be verified")
+        except BaseException as error:
+            if created_identity is not None:
+                try:
+                    _remove_exact_directory(
+                        workspace,
+                        created_identity,
+                        label="new CMake workspace",
+                    )
+                except _StateError as cleanup_error:
+                    error.add_note(f"CMake workspace cleanup was refused: {cleanup_error}")
+            raise
+        return workspace
+
+    def remove_cmake_workspace(self, workspace: Path) -> None:
+        """Remove this run's exact positively-owned external workspace."""
+
+        self._require_arena_identity(action="owned CMake workspace cleanup")
+        owned = _owned_cmake_workspace(self.path)
+        if owned is None or owned != workspace:
+            raise _StateError("CMake workspace differs from its run ownership record")
+        _remove_owned_cmake_workspace(
+            self.path,
+            self._require_arena_identity(action="owned CMake workspace cleanup"),
+        )
 
     def _remove(self) -> None:
-        if self.path.is_symlink() or not self.path.is_dir():
-            raise _StateError(f"run arena changed type before cleanup: {self.path}")
+        arena_identity = self._require_arena_identity(action="cleanup")
         if self.path.parent.resolve(strict=True) != self.runs_root.resolve(strict=True):
             raise _StateError("run arena escaped the runs root")
-        shutil.rmtree(self.path)
+        _remove_owned_cmake_workspace(self.path, arena_identity)
+        self._require_arena_identity(action="removal")
+        _remove_exact_directory(
+            self.path,
+            arena_identity,
+            label="run arena",
+        )
 
     def __exit__(
         self,
@@ -445,6 +796,14 @@ class StateStore:
         for path, active in run_activity:
             try:
                 size, files, modified_ns = _tree_usage(path)
+                external_workspace = _owned_cmake_workspace(path)
+                if external_workspace is not None and os.path.lexists(external_workspace):
+                    external_size, external_files, external_modified_ns = _tree_usage(
+                        external_workspace
+                    )
+                    size += external_size
+                    files += external_files
+                    modified_ns = max(modified_ns, external_modified_ns)
                 outcome = _outcome(path)
             except (FileNotFoundError, _StateError):
                 if not os.path.lexists(path):
@@ -584,18 +943,30 @@ class StateStore:
                         # lease denotes an abandoned pre-lease arena; the state
                         # maintenance gate prevents a creator from entering it.
                         size, _, modified_ns = _tree_usage(path)
+                        external_workspace = _owned_cmake_workspace(path)
+                        if external_workspace is not None and os.path.lexists(external_workspace):
+                            external_size, _, external_modified_ns = _tree_usage(external_workspace)
+                            size += external_size
+                            modified_ns = max(modified_ns, external_modified_ns)
                         if modified_ns > cutoff_ns:
                             skipped_recent.append(path)
                             continue
                         if path.is_symlink() or path.parent.resolve(strict=True) != self.runs_root:
                             raise _StateError(f"run escaped state root during GC: {path}")
+                        arena_identity = _real_directory_identity(path, label="state run")
                         # Windows cannot remove a held lease file. The state-wide
                         # gate keeps the close-to-remove window exclusive.
                         if lease is not None:
                             lease.close()
                             lease = None
                         if not dry_run:
-                            shutil.rmtree(path)
+                            _require_directory_identity(path, arena_identity, label="state run")
+                            _remove_owned_cmake_workspace(path, arena_identity)
+                            _remove_exact_directory(
+                                path,
+                                arena_identity,
+                                label="state run",
+                            )
                         removed.append(path)
                         reclaimed += size
                     except (FileNotFoundError, _StateError):
@@ -631,17 +1002,21 @@ class StateStore:
             reclaimed += cache_result.reclaimed_bytes
         if include_cache:
             from reprobit.classic_repair_probe_cache import (
+                gc_probe_store,
                 probe_store_directory,
-                probe_store_usage,
             )
 
             probe_store = probe_store_directory(self.root)
             if os.path.lexists(probe_store):
                 if probe_store.is_symlink() or not probe_store.is_dir():
                     raise _StateError(f"probe store is not a real directory: {probe_store}")
-                repair_probe_cache_files, repair_probe_cache_bytes = probe_store_usage(self.root)
-                if not dry_run:
-                    shutil.rmtree(probe_store)
+                probe_result = gc_probe_store(
+                    self.root,
+                    older_than_seconds=older_than_seconds,
+                    dry_run=dry_run,
+                )
+                repair_probe_cache_files = probe_result.removed_files
+                repair_probe_cache_bytes = probe_result.reclaimed_bytes
                 reclaimed += repair_probe_cache_bytes
         if include_reports and os.path.lexists(self.root):
             with _maintenance_gate(self.root):
@@ -650,9 +1025,30 @@ class StateStore:
                 if not dry_run:
                     for path in reports_removed:
                         if path.is_dir():
-                            shutil.rmtree(path)
+                            identity = _real_directory_identity(
+                                path,
+                                label="managed report directory",
+                            )
+                            _remove_exact_directory(
+                                path,
+                                identity,
+                                label="managed report directory",
+                            )
                         else:
-                            path.unlink()
+                            relative = path.relative_to(self.root).as_posix()
+                            try:
+                                _payload, snapshot = read_relative_file(self.root, relative)
+                                removed_exact = remove_published_relative(
+                                    self.root,
+                                    relative,
+                                    expected=snapshot,
+                                )
+                            except SecurePathError as error:
+                                raise _StateError(
+                                    f"cannot remove managed report {path}: {error}"
+                                ) from error
+                            if not removed_exact:
+                                raise _StateError(f"managed report changed before cleanup: {path}")
                 reclaimed += report_bytes
         return GCResult(
             removed=tuple(removed),

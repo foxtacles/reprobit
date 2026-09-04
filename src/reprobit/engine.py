@@ -202,6 +202,7 @@ class EngineResult:
     evidence: EvidenceAudit
     verdict: Verdict
     report: Report
+    report_payloads: Mapping[Path, bytes]
 
     def accepts(self, policy: AuthenticityPolicy) -> bool:
         """Evaluate policy without letting quarantine hide other origin defects."""
@@ -970,7 +971,14 @@ class ReproductionEngine:
             )
         else:
             reseal()
-        return EngineResult(build, target_receipts, evidence, verdict, report)
+        return EngineResult(
+            build,
+            target_receipts,
+            evidence,
+            verdict,
+            report,
+            MappingProxyType(dict(report_payloads)),
+        )
 
 
 def _command_digest(step: BuildStep, cwd: Path) -> Digest:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from reprobit.cli_output import CLIOutput, count_phrase
+from reprobit.cli_output import CLIOutput, NextStep, count_phrase
 from reprobit.cli_paths import (
     project_root,
     real_directory,
@@ -48,12 +48,34 @@ def command_graph_configure(args: argparse.Namespace, output: CLIOutput) -> int:
             resource_transport=absolute_transport(args.resource_transport),
             configuration=args.configuration,
             timeout_seconds=args.timeout,
+            cmake_defines=args.cmake_define,
         )
+    next_arguments: list[str | Path] = [
+        "rbit",
+        "graph",
+        "extract",
+        root,
+        "--configured-build-root",
+        result.configured_build_root,
+        "--effective-source-root",
+        result.effective_source_root,
+        "--effective-source-digest",
+        result.effective_source_digest.value,
+        "--toolchain-root",
+        result.toolchain_root,
+        "--configuration",
+        args.configuration,
+        "--cmake",
+        args.cmake,
+        "--timeout",
+        str(args.timeout),
+    ]
+    for declaration in args.cmake_define:
+        next_arguments.extend(("--cmake-define", declaration))
+    next_step = NextStep(next_arguments)
     output.emit(
         "producer_graph_configured",
-        "configured build metadata; review it, then run rbit graph extract "
-        f"with --configured-build-root {result.configured_build_root} and "
-        f"--effective-source-root {result.effective_source_root}",
+        f"Configured build metadata for review.\nNext: {next_step.command}",
         configured_build_root=result.configured_build_root,
         effective_source_root=result.effective_source_root,
         toolchain_root=result.toolchain_root,
@@ -65,6 +87,7 @@ def command_graph_configure(args: argparse.Namespace, output: CLIOutput) -> int:
         effective_source_digest=result.effective_source_digest.value,
         duration_seconds=result.duration_seconds,
         certification_runtime=False,
+        **next_step.fields(),
     )
     return 0
 
@@ -84,6 +107,10 @@ def command_graph_extract(args: argparse.Namespace, output: CLIOutput) -> int:
             expected_effective_source_digest=Digest(value=args.effective_source_digest),
             toolchain_root=Path(args.toolchain_root),
             target_plan=target_plan,
+            cmake=args.cmake,
+            configuration=args.configuration,
+            timeout_seconds=args.timeout,
+            cmake_defines=args.cmake_define,
             directive_inputs=args.directive_input,
             derive_translation_units=getattr(args, "derive_translation_units", False),
         )

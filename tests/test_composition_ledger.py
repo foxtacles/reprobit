@@ -6,10 +6,10 @@ from hashlib import sha256
 from pathlib import Path
 
 import pytest
+import test_classic_fpo_mosaic_identity as fixture
 from pydantic import ValidationError
 
 from reprobit import composition_ledger as subject
-from tests import test_classic_fpo_mosaic_identity as fixture
 
 SYMBOL = fixture.TARGET_SYMBOL
 GRAPH = "1" * 64

@@ -172,6 +172,14 @@ def _declaration_identifiers(payloads: Sequence[bytes]) -> tuple[str, ...]:
     return tuple(sorted(values))
 
 
+def msvc_source_identifiers(source: bytes) -> frozenset[str]:
+    """Scan one immutable source payload once for declaration collisions."""
+
+    if not source or b"\0" in source:
+        raise DiscoveryError("MSVC discovery source must be non-empty and NUL-free")
+    return frozenset(item.decode("ascii", "strict") for item in _SOURCE_IDENTIFIER.findall(source))
+
+
 def _append_source(source: bytes, suffix: bytes) -> bytes:
     if not suffix:
         return source
@@ -200,11 +208,13 @@ def _place_declarations(
 def render_msvc_declaration_state(
     source: bytes,
     state: DeclarationState,
+    *,
+    source_identifiers: frozenset[str] | None = None,
 ) -> RenderedMsvcState:
     """Render exactly one of the four admitted declaration-only families."""
 
-    if not source or b"\0" in source:
-        raise DiscoveryError("MSVC discovery source must be non-empty and NUL-free")
+    if source_identifiers is None:
+        source_identifiers = msvc_source_identifiers(source)
     force_include: bytes | None
     payloads: tuple[bytes, ...]
     if state.family is DeclarationFamily.DECLARATION_SHAPE:
@@ -269,9 +279,6 @@ def render_msvc_declaration_state(
         payloads = tuple(payload for payload in (header, seat) if payload)
 
     identifiers = _declaration_identifiers(payloads)
-    source_identifiers = {
-        item.decode("ascii", "strict") for item in _SOURCE_IDENTIFIER.findall(source)
-    }
     collisions = sorted(source_identifiers.intersection(identifiers))
     if collisions:
         raise DiscoveryError(
@@ -526,6 +533,7 @@ __all__ = [
     "DirectMsvcCompiler",
     "MsvcStateCompiler",
     "RenderedMsvcState",
+    "msvc_source_identifiers",
     "render_msvc_declaration_state",
     "safe_msvc_compiler_arguments",
     "validate_msvc_compiler_arguments",

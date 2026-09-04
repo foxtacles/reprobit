@@ -55,6 +55,7 @@ from reprobit.classic_repair_probe_cache import (
 from reprobit.classic_repair_probe_candidates import clone_retune_probe_unit
 from reprobit.classic_repair_probe_execution import (
     ClassicDonorCompileCache,
+    ClassicDonorSourceSeal,
     probe_donor_compile_windows,
 )
 from reprobit.classic_repair_session import (
@@ -675,6 +676,10 @@ def probe_carrier_discovery(
     progress: ClassicDonorProbeProgress | None = None,
     tried_states: Mapping[str, frozenset[str]] | None = None,
     compile_cache: ClassicDonorCompileCache | None = None,
+    close_runtime: bool = True,
+    materialize_source_epoch: bool = True,
+    source_seal: ClassicDonorSourceSeal | None = None,
+    namespace_id: str = "noncertifying-donor-repair-probe",
 ) -> ClassicDiscoveryResult:
     """Compile fresh carrier states per unit until every refusal is settled or bounded out.
 
@@ -690,6 +695,8 @@ def probe_carrier_discovery(
     try:
         work = _group_units(refusals)
         if not work:
+            if close_runtime and probes.producer.is_open:
+                probes.close()
             return ClassicDiscoveryResult((), (), 0)
         order = _prepare_attempts(
             work,
@@ -709,7 +716,7 @@ def probe_carrier_discovery(
                 for unit_id, entry in work.items()
                 for refusal in entry.refusals
             )
-            if probes.producer.is_open:
+            if close_runtime and probes.producer.is_open:
                 probes.close()
             return ClassicDiscoveryResult((), unprepared, 0)
         budget = min(candidate_budget, len(order))
@@ -766,6 +773,10 @@ def probe_carrier_discovery(
             progress=progress,
             planned_candidates=len(order),
             cache=compile_cache,
+            close_runtime=close_runtime,
+            materialize_source_epoch=materialize_source_epoch,
+            source_seal=source_seal,
+            namespace_id=namespace_id,
         )
     except BaseException as original:
         try:
@@ -774,7 +785,7 @@ def probe_carrier_discovery(
         except BaseException as cleanup_error:
             original.add_note(f"classic discovery cleanup also failed: {cleanup_error}")
         raise
-    if probes.producer.is_open:
+    if close_runtime and probes.producer.is_open:
         probes.close()
     compiled_id_set = set(compiled_ids)
     tried: dict[str, set[str]] = {}

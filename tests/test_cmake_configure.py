@@ -27,6 +27,7 @@ from reprobit.schema import (
     ToolchainLock,
     ToolchainRef,
 )
+from reprobit.strict_json import canonical_json
 
 
 def _bundle(project_root: Path) -> ProjectBundle:
@@ -81,6 +82,25 @@ def _executable(path: Path, payload: str = "#!/bin/sh\nexit 0\n") -> Path:
     path.write_text(payload, encoding="utf-8")
     path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
     return path
+
+
+@pytest.mark.parametrize(
+    "declarations, message",
+    (
+        (("FEATURE",), "NAME=VALUE"),
+        (("1FEATURE=on",), "NAME=VALUE"),
+        (("FEATURE=on", "FEATURE=off"), "repeats"),
+        (("CMAKE_C_COMPILER=other",), "cannot replace"),
+        (("REPROBIT_PROJECT_PLAN=other",), "cannot replace"),
+        (("FEATURE=bad\nvalue",), "control character"),
+    ),
+)
+def test_cmake_defines_are_narrow_and_cannot_replace_import_controls(
+    declarations: tuple[str, ...],
+    message: str,
+) -> None:
+    with pytest.raises(cmake_configure.CMakeConfigureError, match=message):
+        cmake_configure.cmake_define_arguments(declarations)
 
 
 def test_cmake_paths_use_forward_slashes_for_native_windows_values() -> None:
@@ -313,6 +333,7 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
         defer_project_plan=True,
         generator=generator,
         make_program=make_program,
+        cmake_defines=("FEATURE_SET=classic", "SDK_LABEL=value with spaces"),
     )
 
     assert result.configured_build_root == (workspace / "build").resolve()
@@ -326,6 +347,8 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
         json.loads((workspace / "build/argv.json").read_text(encoding="utf-8")),
     )
     assert arguments[arguments.index("-G") + 1] == generator
+    assert "-DFEATURE_SET=classic" in arguments
+    assert "-DSDK_LABEL=value with spaces" in arguments
     if generator == "NMake Makefiles":
         assert f"-DCMAKE_MAKE_PROGRAM={make_program}" in arguments
         assert "-DCMAKE_RULE_MESSAGES=OFF" in arguments
@@ -348,6 +371,16 @@ def test_graph_configure_is_fresh_bounded_and_never_builds(
         encoding="utf-8"
     )
     assert not (workspace / "build/program.exe").exists()
+    assert result.command_digest == Digest.from_bytes(
+        canonical_json(
+            {
+                "schema": 1,
+                "argv": list(result.command),
+                "returncode": 0,
+                "output": Digest.from_bytes(b"").model_dump(mode="json"),
+            }
+        )
+    )
 
     system_cmake = shutil.which("cmake")
     if system_cmake is not None:

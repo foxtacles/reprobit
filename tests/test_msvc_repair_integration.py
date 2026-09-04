@@ -210,7 +210,6 @@ def test_authenticated_msvc42_repair_handles_shared_header_and_publishes_atomica
     assert completion["removed_donors"] == 1
     assert completion["repaired_translation_units"] == 1
     assert completion["compiler_candidates"] == 0
-    assert completion["donor_candidates"] == 0
     assert completion["changed_records"] == [
         "reprobit/build-plan.json",
         "reprobit/interventions/tu.transform.json",
@@ -253,6 +252,52 @@ def test_authenticated_msvc42_repair_handles_shared_header_and_publishes_atomica
     assert report.cache.mode is CacheMode.BYPASSED
     assert report.cache.hits == report.cache.misses == 0
     assert report.costs.project_total == 5
+
+    authority_after_first_repair = {
+        path.relative_to(project).as_posix(): path.read_bytes()
+        for path in (project / "reprobit").rglob("*.json")
+    }
+    transform = project / "transform.cpp"
+    transform_before_comment = transform.read_text(encoding="utf-8")
+    transform.write_text(
+        transform_before_comment + "\n// A source-only edit should need no repair search.\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    no_search = _run(
+        (_rbit(), "--format", "ndjson", "repair", project),
+        cwd=project,
+        environment=environment,
+    )
+    no_search_events = _events(no_search)
+    no_search_complete = [
+        event for event in no_search_events if event.get("event") == "repair_complete"
+    ]
+    assert len(no_search_complete) == 1
+    no_search_completion = no_search_complete[0]
+    assert no_search_completion["exact"] is True
+    assert no_search_completion["compiler_candidates"] == 0
+    assert no_search_completion["donor_retunes"] == 0
+    assert no_search_completion["retired_actions"] == 0
+    assert no_search_completion["changed_records"] == ["reprobit/source-manifest.json"]
+    assert no_search_completion["transaction_id"]
+    assert no_search_completion["transaction_id"] != completion["transaction_id"]
+    assert Digest.from_path(project / "build/repair.exe") == Digest.from_path(reference)
+
+    authority_after_no_search = {
+        path.relative_to(project).as_posix(): path.read_bytes()
+        for path in (project / "reprobit").rglob("*.json")
+    }
+    assert authority_after_no_search.keys() == authority_after_first_repair.keys()
+    assert {
+        relative
+        for relative in authority_after_no_search
+        if authority_after_no_search[relative] != authority_after_first_repair[relative]
+    } == {"reprobit/source-manifest.json"}
+    no_search_report = Report.model_validate_json(report_path.read_bytes())
+    assert no_search_report.verdict.cold is True
+    assert no_search_report.verdict.byte_exact is True
+    assert no_search_report.cache.mode is CacheMode.BYPASSED
 
     published_after_success = _published_bytes(project)
     semantic_header = harmless_header.replace(

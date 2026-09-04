@@ -1411,7 +1411,7 @@ def test_project_overlay_probe_coordinates_header_owners_and_proof_gates(
     assert exhausted.repair is None
     assert exhausted.compiled_candidates == 1
     assert exhausted.exhausted is True
-    assert exhausted.reason is not None and "--donor-candidates limit" in exhausted.reason
+    assert exhausted.reason is not None and "--candidate-limit" in exhausted.reason
     assert exhausted_probes.closed is True
 
     epoch_ids.clear()
@@ -1637,7 +1637,7 @@ def test_project_overlay_probe_coordinates_header_owners_and_proof_gates(
     assert limited_settlement.compiled_candidates == 1
     assert limited_settlement.exhausted is True
     assert limited_settlement.reason is not None
-    assert "--donor-candidates limit" in limited_settlement.reason
+    assert "--candidate-limit" in limited_settlement.reason
     assert limited_settlement_probes.closed is True
 
     epoch_ids.clear()

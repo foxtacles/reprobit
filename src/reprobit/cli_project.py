@@ -6,21 +6,43 @@ import argparse
 import json
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from contextlib import AbstractContextManager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from reprobit.authority_snapshot import (
     AuthoritySnapshotError,
+    JsonAuthorityDirectorySnapshot,
     assert_json_authority_unchanged,
     capture_file_preimage,
     capture_json_authority_directories,
 )
-from reprobit.cli_output import CLIOutput, count_phrase, human_command
-from reprobit.cli_paths import CLIError, project_root, relative_output, safe_project_path
+from reprobit.cli_output import (
+    CLIOutput,
+    NextStep,
+    bounded_items,
+    count_phrase,
+    human_command,
+    next_step_fields,
+)
+from reprobit.cli_paths import (
+    CLIError,
+    paths_alias,
+    paths_overlap,
+    project_root,
+    protected_project_paths,
+    relative_output,
+    safe_project_path,
+)
 from reprobit.costs import CostBreakdown, InterventionCost, calculate_cost
 from reprobit.model import Digest
-from reprobit.producer_graph import producer_graph_accepts_source
+from reprobit.producer_graph import (
+    CMakeImportRecipe,
+    producer_graph_accepts_source,
+    read_producer_graph,
+)
 from reprobit.project_loader import load_project, load_project_tree
 from reprobit.report_html_format import cost_class_label, human_label
 from reprobit.schema import (
@@ -36,7 +58,21 @@ from reprobit.schema import (
     source_manifest_digest,
 )
 from reprobit.strict_json import canonical_json, strict_load
-from reprobit.transactions import CASTransaction
+from reprobit.transactions import CASTransaction, TransactionResult
+
+if TYPE_CHECKING:
+    from reprobit.source_authority import SourceAuthorityReport
+
+
+class ActivityProgress(Protocol):
+    """The progress surface needed while selecting project source files."""
+
+    def activity(
+        self,
+        description: str,
+        *,
+        phase: str = "work",
+    ) -> AbstractContextManager[Callable[[str], None]]: ...
 
 
 def _toml_string(value: str) -> str:
@@ -204,14 +240,14 @@ def command_init(args: argparse.Namespace, output: CLIOutput) -> int:
     if gitignore is not None:
         transaction.write(".gitignore", gitignore)
     result = transaction.commit()
-    next_command = human_command(("rbit", "setup", root))
+    next_step = NextStep(("rbit", "setup", root))
     output.emit(
         "initialized",
-        f"Created ReproBit project {spec.project_id!r} at {root}\nNext: {next_command}",
+        f"Created ReproBit project {spec.project_id!r} at {root}\nNext: {next_step.command}",
         project_root=root,
         project_id=spec.project_id,
         changed_paths=result.changed_paths,
-        next_command=next_command,
+        **next_step.fields(),
     )
     return 0
 
@@ -238,7 +274,7 @@ def _build_source_document(
     root: Path,
     spec: ProjectSpec,
     values: Sequence[str],
-    output: CLIOutput,
+    output: ActivityProgress,
 ) -> SourceManifestDocument:
     from reprobit.source_lock import SourceLockError, build_source_manifest, git_tracked_paths
 
@@ -297,7 +333,9 @@ def _inspect_candidate_source_authority(
     spec: ProjectSpec,
     document: SourceManifestDocument,
     document_digest: Digest,
-) -> tuple[BuildPlanDocument | None, Any | None]:
+    *,
+    preflight_classic_recipes: bool = True,
+) -> tuple[BuildPlanDocument | None, SourceAuthorityReport | None]:
     build_plan_path = safe_project_path(root, spec.layout.build_plan)
     intervention_root = safe_project_path(root, spec.layout.interventions)
     if not build_plan_path.is_file() and not any(intervention_root.rglob("*.json")):
@@ -323,11 +361,11 @@ def _inspect_candidate_source_authority(
         root,
         source_manifest=document,
         build_plan=plan,
-        preflight_classic_recipes=True,
+        preflight_classic_recipes=preflight_classic_recipes,
     )
 
 
-def _stale_tu_fields(report: Any | None) -> tuple[dict[str, Any], ...]:
+def _stale_tu_fields(report: SourceAuthorityReport | None) -> tuple[dict[str, Any], ...]:
     if report is None:
         return ()
     return tuple(
@@ -388,6 +426,11 @@ def _source_preview_message(
     authority_error: str | None,
     stale_units: Sequence[Mapping[str, Any]],
 ) -> str:
+    def concise(values: Sequence[str]) -> str:
+        visible, hidden = bounded_items(values)
+        rendered = ", ".join(visible)
+        return rendered + (f", ... and {hidden} more" if hidden else "")
+
     if not added and not removed and not changed:
         lines = [f"Source files are up to date; {count_phrase(entries, 'selected input')}."]
     else:
@@ -396,11 +439,11 @@ def _source_preview_message(
             f"{count_phrase(entries, 'selected input')}"
         ]
     if added:
-        lines.append("  add: " + ", ".join(added))
+        lines.append("  add: " + concise(added))
     if removed:
-        lines.append("  remove: " + ", ".join(removed))
+        lines.append("  remove: " + concise(removed))
     if changed:
-        lines.append("  change: " + ", ".join(str(item["path"]) for item in changed))
+        lines.append("  change: " + concise(tuple(str(item["path"]) for item in changed)))
     if graph_invalidation_required:
         graph_detail = (
             "update needed, but these source changes cannot be locked safely yet"
@@ -416,9 +459,12 @@ def _source_preview_message(
         )
         lines.append(label + authority_error)
     elif stale_units:
+        visible_units, hidden_units = bounded_items(stale_units)
         rendered = ", ".join(
-            f"{item['translation_unit_id']} ({item['source']})" for item in stale_units
+            f"{item['translation_unit_id']} ({item['source']})" for item in visible_units
         )
+        if hidden_units:
+            rendered += f", ... and {hidden_units} more"
         label = (
             "  saved records still name the previous source-file list for: "
             if added or removed
@@ -432,273 +478,312 @@ def _source_preview_message(
     return "\n".join(lines)
 
 
-def _source_selection_command(
+def _source_selection_step(
     action: str,
     root: Path,
     paths: Sequence[str],
     *,
     invalidate_graph: bool = False,
-) -> str:
+) -> NextStep:
     arguments: list[str | Path] = ["rbit", "source", action, root]
     for path in paths:
         arguments.extend(("--path", path))
     if invalidate_graph:
         arguments.append("--invalidate-producer-graph")
-    return human_command(arguments)
+    return NextStep(arguments)
+
+
+def _recorded_cmake_recipe(root: Path) -> CMakeImportRecipe | None:
+    spec = load_project(root)
+    return read_producer_graph(safe_project_path(root, spec.layout.producer_graph)).import_recipe
+
+
+def cmake_reimport_guidance(root: Path) -> str:
+    """Explain the one safe migration for a graph without replayable import options."""
+
+    return (
+        "Automatic CMake refresh needs the original import options and will not guess them. "
+        f"Re-run {human_command(('rbit', 'import', 'cmake', root))} once with those "
+        "options before refreshing."
+    )
+
+
+def _cmake_refresh_step(
+    root: Path,
+    paths: Sequence[str],
+    *,
+    recipe: CMakeImportRecipe | None = None,
+) -> NextStep:
+    arguments: list[str | Path] = ["rbit", "import", "cmake", root, "--refresh"]
+    for path in paths:
+        arguments.extend(("--path", path))
+    recipe = _recorded_cmake_recipe(root) if recipe is None else recipe
+    if recipe is None:
+        raise CLIError(cmake_reimport_guidance(root))
+    arguments.extend(("--cmake", recipe.cmake))
+    arguments.extend(("--configuration", recipe.configuration))
+    arguments.extend(("--timeout", str(recipe.timeout_seconds)))
+    for declaration in recipe.cmake_defines:
+        arguments.extend(("--cmake-define", declaration))
+    for declaration in recipe.directive_inputs:
+        arguments.extend(("--directive-input", declaration))
+    return NextStep(arguments)
 
 
 def _blocked_source_membership_guidance() -> str:
     return (
-        "\nNo safe automatic next step is available: ReproBit cannot yet reconcile "
-        "a change to which files the project builds without risking saved interventions. "
-        "Restore the previous source-file list for now; the guided CMake update for this "
-        "case is not supported yet."
+        "\nNo safe automatic next step is available because the saved build records "
+        "cannot be matched unambiguously to this source selection. Review the listed "
+        "project records before trying again."
     )
 
 
-def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
-    root = project_root(args.project)
-    spec = load_project(root)
-    document = _build_source_document(root, spec, args.path, output)
+@dataclass(frozen=True, slots=True)
+class SourceLockPlan:
+    """One inspected source selection and, when sealed, its commit preconditions."""
+
+    root: Path
+    spec: ProjectSpec
+    selected_paths: tuple[str, ...]
+    document: SourceManifestDocument
+    current: SourceManifestDocument
+    document_digest: Digest
+    current_digest: Digest
+    added: tuple[str, ...]
+    removed: tuple[str, ...]
+    changed: tuple[dict[str, Any], ...]
+    build_plan: BuildPlanDocument | None
+    authority_report: SourceAuthorityReport | None
+    authority_error: str | None
+    stale_units: tuple[dict[str, Any], ...]
+    graph_present: bool
+    graph_invalidation_required: bool
+    checked_overlay_outputs: tuple[str, ...]
+    config_preimage: str | None = None
+    control_preimages: dict[str, str | None] | None = None
+    authority_snapshot: tuple[JsonAuthorityDirectorySnapshot, ...] | None = None
+
+    @property
+    def membership_changed(self) -> bool:
+        return bool(self.added or self.removed)
+
+    @property
+    def source_changed(self) -> bool:
+        return self.document_digest != self.current_digest
+
+
+def plan_source_lock(
+    root: Path,
+    paths: Sequence[str],
+    output: ActivityProgress,
+    *,
+    seal: bool = False,
+    reconcile_translation_units: bool = False,
+) -> SourceLockPlan:
+    """Inspect one source selection; optionally seal everything needed to apply it."""
+
+    project = root.resolve(strict=True)
+    config_preimage: str | None = None
+    control_preimages: dict[str, str | None] | None = None
+    authority_snapshot: tuple[JsonAuthorityDirectorySnapshot, ...] | None = None
+    try:
+        if seal:
+            config_preimage = capture_file_preimage(project, "reprobit.toml", required=True)
+        spec = load_project(project)
+        if seal:
+            if capture_file_preimage(project, "reprobit.toml", required=True) != config_preimage:
+                raise AuthoritySnapshotError("reprobit.toml changed while source lock was starting")
+            control_preimages = {
+                relative: capture_file_preimage(project, relative)
+                for relative in (
+                    spec.toolchain.lock_file,
+                    spec.layout.source_manifest,
+                    spec.layout.build_plan,
+                    spec.layout.producer_graph,
+                )
+            }
+            authority_snapshot = capture_json_authority_directories(
+                project,
+                (
+                    spec.layout.interventions,
+                    spec.layout.proofs,
+                    spec.layout.oracles,
+                ),
+            )
+    except AuthoritySnapshotError as exc:
+        raise CLIError(f"cannot seal source-lock inputs: {exc}") from exc
+
+    document = _build_source_document(project, spec, paths, output)
     document_digest = source_manifest_digest(document)
-    current = _load_source_manifest(safe_project_path(root, spec.layout.source_manifest))
+    current = _load_source_manifest(safe_project_path(project, spec.layout.source_manifest))
     current_digest = source_manifest_digest(current)
     added, removed, changed = _source_changes(current, document)
 
-    producer_graph_path = safe_project_path(root, spec.layout.producer_graph)
     authority_error: str | None = None
-    plan: BuildPlanDocument | None = None
-    report: Any | None = None
+    build_plan: BuildPlanDocument | None = None
+    report: SourceAuthorityReport | None = None
     try:
-        plan, report = _inspect_candidate_source_authority(root, spec, document, document_digest)
+        build_plan, report = _inspect_candidate_source_authority(
+            project,
+            spec,
+            document,
+            document_digest,
+            preflight_classic_recipes=not reconcile_translation_units,
+        )
     except ValueError as exc:
         from reprobit.source_authority import SourceAuthorityError
 
         if not isinstance(exc, SourceAuthorityError):
             raise
         authority_error = str(exc)
-    graph_invalidation_required = False
+
+    graph_path = safe_project_path(project, spec.layout.producer_graph)
+    graph_present = graph_path.is_file()
     checked_overlay_outputs: tuple[str, ...] = ()
-    if producer_graph_path.is_file():
-        from reprobit.producer_graph import read_producer_graph
-
-        checked_overlay_outputs = (
-            report.overlay_outputs if report is not None else _declared_overlay_outputs(root, spec)
-        )
-        graph_invalidation_required = not producer_graph_accepts_source(
-            read_producer_graph(producer_graph_path),
-            paths=(item.path for item in document.entries),
-            overlay_outputs=checked_overlay_outputs,
-        )
-    stale_units = _stale_tu_fields(report)
-    source_changed = document_digest != current_digest
-    next_command: str | None = None
-    membership_changed = bool(added or removed)
-    membership_transition_blocked = membership_changed and bool(authority_error or stale_units)
-    if not membership_transition_blocked:
-        if authority_error is not None or stale_units:
-            next_command = human_command(("rbit", "repair", root))
-        elif source_changed or graph_invalidation_required:
-            next_command = _source_selection_command(
-                "lock",
-                root,
-                args.path,
-                invalidate_graph=graph_invalidation_required,
-            )
-    message = _source_preview_message(
-        added=added,
-        removed=removed,
-        changed=changed,
-        entries=len(document.entries),
-        graph_invalidation_required=graph_invalidation_required,
-        membership_transition_blocked=membership_transition_blocked,
-        authority_checked=report is not None,
-        authority_error=authority_error,
-        stale_units=stale_units,
-    )
-    if membership_transition_blocked:
-        message += _blocked_source_membership_guidance()
-    if next_command is not None:
-        message += f"\nNext: {next_command}"
-    cmake_import_command = (
-        human_command(("rbit", "import", "cmake", root))
-        if graph_invalidation_required and not membership_transition_blocked
-        else None
-    )
-    if cmake_import_command is not None:
-        message += (
-            "\nThen refresh the recorded CMake build because one of its inputs changed: "
-            f"{cmake_import_command}"
-        )
-    output.emit(
-        "source_preview",
-        message,
-        before_source_manifest_digest=current_digest.value,
-        after_source_manifest_digest=document_digest.value,
-        entries=len(document.entries),
-        added=added,
-        removed=removed,
-        changed=changed,
-        unchanged=len(document.entries) - len(added) - len(changed),
-        producer_graph_invalidation_required=graph_invalidation_required,
-        checked_overlay_outputs=checked_overlay_outputs,
-        authority_checked=report is not None,
-        classic_preflight_checked=plan is not None and report is not None,
-        stale_translation_units=stale_units,
-        repair_required=bool(authority_error or stale_units),
-        authority_error=authority_error,
-        membership_transition_blocked=membership_transition_blocked,
-        cmake_import_command=cmake_import_command,
-        up_to_date=(
-            not source_changed
-            and not graph_invalidation_required
-            and authority_error is None
-            and not stale_units
-        ),
-        next_command=next_command,
-    )
-    return 0
-
-
-def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
-    root = project_root(args.project)
-    try:
-        config_preimage = capture_file_preimage(root, "reprobit.toml", required=True)
-        spec = load_project(root)
-        if capture_file_preimage(root, "reprobit.toml", required=True) != config_preimage:
-            raise AuthoritySnapshotError("reprobit.toml changed while source lock was starting")
-        control_preimages = {
-            relative: capture_file_preimage(root, relative)
-            for relative in (
-                spec.toolchain.lock_file,
-                spec.layout.source_manifest,
-                spec.layout.build_plan,
-                spec.layout.producer_graph,
-            )
-        }
-        authority_snapshot = capture_json_authority_directories(
-            root,
-            (
-                spec.layout.interventions,
-                spec.layout.proofs,
-                spec.layout.oracles,
-            ),
-        )
-    except AuthoritySnapshotError as exc:
-        raise CLIError(f"cannot seal source-lock inputs: {exc}") from exc
-    document = _build_source_document(root, spec, args.path, output)
-    document_digest = source_manifest_digest(document)
-    current = _load_source_manifest(safe_project_path(root, spec.layout.source_manifest))
-    added, removed, _changed = _source_changes(current, document)
-    membership_changed = bool(added or removed)
-
-    producer_graph_path = safe_project_path(root, spec.layout.producer_graph)
-    graph_invalidated = False
-    graph_present = producer_graph_path.is_file()
-    graph = None
+    graph_invalidation_required = False
     if graph_present:
         from reprobit.producer_graph import read_producer_graph
 
-        graph = read_producer_graph(producer_graph_path)
-        graph_invalidated = not producer_graph_accepts_source(
-            graph,
+        checked_overlay_outputs = (
+            report.overlay_outputs
+            if report is not None
+            else _declared_overlay_outputs(project, spec)
+        )
+        graph_invalidation_required = not producer_graph_accepts_source(
+            read_producer_graph(graph_path),
             paths=(item.path for item in document.entries),
-            overlay_outputs=_declared_overlay_outputs(root, spec),
+            overlay_outputs=checked_overlay_outputs,
         )
 
-    plan: BuildPlanDocument | None = None
-    report: Any | None = None
-    try:
-        plan, report = _inspect_candidate_source_authority(root, spec, document, document_digest)
-    except ValueError as exc:
-        from reprobit.source_authority import SourceAuthorityError
+    return SourceLockPlan(
+        root=project,
+        spec=spec,
+        selected_paths=tuple(paths),
+        document=document,
+        current=current,
+        document_digest=document_digest,
+        current_digest=current_digest,
+        added=added,
+        removed=removed,
+        changed=changed,
+        build_plan=build_plan,
+        authority_report=report,
+        authority_error=authority_error,
+        stale_units=_stale_tu_fields(report),
+        graph_present=graph_present,
+        graph_invalidation_required=graph_invalidation_required,
+        checked_overlay_outputs=checked_overlay_outputs,
+        config_preimage=config_preimage,
+        control_preimages=control_preimages,
+        authority_snapshot=authority_snapshot,
+    )
 
-        if not isinstance(exc, SourceAuthorityError):
-            raise
-        if membership_changed:
+
+def apply_source_lock(
+    plan: SourceLockPlan,
+    *,
+    invalidate_producer_graph: bool,
+    reconcile_translation_units: bool = False,
+    replace_producer_graph: bool = False,
+) -> TransactionResult:
+    """Apply one sealed plan without re-running CLI orchestration."""
+
+    if (
+        plan.config_preimage is None
+        or plan.control_preimages is None
+        or plan.authority_snapshot is None
+    ):
+        raise CLIError("source-lock plan was not sealed for publication")
+
+    if plan.authority_error is not None:
+        if plan.membership_changed:
             raise CLIError(
                 "source lock refused because saved records still name the previous "
-                f"source-file list: {exc}" + _blocked_source_membership_guidance()
-            ) from exc
-        repair_hint = human_command(("rbit", "repair", root))
+                f"source-file list: {plan.authority_error}" + _blocked_source_membership_guidance()
+            )
+        repair_hint = human_command(("rbit", "repair", plan.root))
         raise CLIError(
             "source lock refused because reviewed source-derived authority must be "
-            f"repaired: {exc}\nTry: {repair_hint}"
-        ) from exc
-    stale_units = _stale_tu_fields(report)
-    if stale_units:
-        rendered = ", ".join(
-            f"{item['translation_unit_id']} ({item['source']})" for item in stale_units
+            f"repaired: {plan.authority_error}\nTry: {repair_hint}"
         )
-        if membership_changed:
+    if plan.stale_units and not (plan.membership_changed and reconcile_translation_units):
+        rendered = ", ".join(
+            f"{item['translation_unit_id']} ({item['source']})" for item in plan.stale_units
+        )
+        if plan.membership_changed:
+            if plan.graph_present and plan.build_plan is not None:
+                refresh_hint = _cmake_refresh_step(plan.root, plan.selected_paths).command
+                raise CLIError(
+                    "source lock cannot replace translation-unit records on its own: "
+                    f"{rendered}\nUse: {refresh_hint}"
+                )
             raise CLIError(
                 "source lock refused because saved translation-unit records still name "
                 f"the previous source-file list: {rendered}" + _blocked_source_membership_guidance()
             )
-        repair_hint = human_command(("rbit", "repair", root))
+        repair_hint = human_command(("rbit", "repair", plan.root))
         raise CLIError(
             "source lock refused because effective translation-unit bytes changed; "
             "repair the affected intervention and proof records instead of repinning "
             f"them: {rendered}\nTry: {repair_hint}"
         )
-
-    if graph is not None:
-        graph_invalidated = not producer_graph_accepts_source(
-            graph,
-            paths=(item.path for item in document.entries),
-            overlay_outputs=(report.overlay_outputs if report is not None else ()),
+    graph_will_be_removed = plan.graph_invalidation_required or (
+        replace_producer_graph and plan.graph_present
+    )
+    if graph_will_be_removed and not invalidate_producer_graph:
+        if plan.graph_present and plan.build_plan is not None:
+            refresh_hint = _cmake_refresh_step(plan.root, plan.selected_paths).command
+            raise CLIError(
+                "the selected source files require new CMake build records; "
+                f"refresh them together with the source lock: {refresh_hint}"
+            )
+        retry_hint = _source_selection_step(
+            "lock",
+            plan.root,
+            plan.selected_paths,
+            invalidate_graph=True,
+        ).command
+        raise CLIError(
+            "the selected source files removed an input used by the recorded build; "
+            f"lock them and remove that obsolete graph: {retry_hint}\n"
+            f"Then record a new build: {human_command(('rbit', 'import', 'cmake', plan.root))}"
         )
-        if graph_invalidated:
-            if not args.invalidate_producer_graph:
-                retry_hint = _source_selection_command(
-                    "lock",
-                    root,
-                    args.path,
-                    invalidate_graph=True,
-                )
-                raise CLIError(
-                    "the selected source files removed an input used by the recorded build; "
-                    f"first run: {retry_hint}\n"
-                    "Then refresh the CMake build records: "
-                    f"{human_command(('rbit', 'import', 'cmake', root))}"
-                )
-            graph_invalidated = True
 
-    transaction = CASTransaction(root)
+    spec = plan.spec
+    preimages = plan.control_preimages
+    transaction = CASTransaction(plan.root)
     transaction.write(
         spec.layout.source_manifest,
-        canonical_json(document),
-        expected_sha256=control_preimages[spec.layout.source_manifest],
+        canonical_json(plan.document),
+        expected_sha256=preimages[spec.layout.source_manifest],
     )
-    if plan is not None:
+    if plan.build_plan is not None:
         transaction.write(
             spec.layout.build_plan,
-            canonical_json(plan),
-            expected_sha256=control_preimages[spec.layout.build_plan],
+            canonical_json(plan.build_plan),
+            expected_sha256=preimages[spec.layout.build_plan],
         )
     else:
         transaction.assert_unchanged(
             spec.layout.build_plan,
-            expected_sha256=control_preimages[spec.layout.build_plan],
+            expected_sha256=preimages[spec.layout.build_plan],
         )
-    if graph_invalidated:
+    if graph_will_be_removed:
         transaction.delete(
             spec.layout.producer_graph,
-            expected_sha256=control_preimages[spec.layout.producer_graph],
-        )
-    elif graph_present:
-        transaction.assert_unchanged(
-            spec.layout.producer_graph,
-            expected_sha256=control_preimages[spec.layout.producer_graph],
+            expected_sha256=preimages[spec.layout.producer_graph],
         )
     else:
-        transaction.assert_unchanged(spec.layout.producer_graph, expected_sha256=None)
-    transaction.assert_unchanged("reprobit.toml", expected_sha256=config_preimage)
+        transaction.assert_unchanged(
+            spec.layout.producer_graph,
+            expected_sha256=preimages[spec.layout.producer_graph],
+        )
+    transaction.assert_unchanged("reprobit.toml", expected_sha256=plan.config_preimage)
     transaction.assert_unchanged(
         spec.toolchain.lock_file,
-        expected_sha256=control_preimages[spec.toolchain.lock_file],
+        expected_sha256=preimages[spec.toolchain.lock_file],
     )
-    assert_json_authority_unchanged(transaction, authority_snapshot)
+    assert_json_authority_unchanged(transaction, plan.authority_snapshot)
     claimed_paths = {
         "reprobit.toml",
         spec.toolchain.lock_file,
@@ -707,32 +792,127 @@ def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         spec.layout.producer_graph,
         *(
             relative
-            for directory in authority_snapshot
+            for directory in plan.authority_snapshot
             for relative, _digest in directory.file_digests
         ),
     }
-    for entry in document.entries:
+    for entry in plan.document.entries:
         if entry.path not in claimed_paths:
             transaction.assert_unchanged(entry.path, expected_sha256=entry.digest.value)
-    result = transaction.commit()
+    return transaction.commit()
+
+
+def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
+    root = project_root(args.project)
+    plan = plan_source_lock(root, args.path, output)
+    document = plan.document
+    added, removed, changed = plan.added, plan.removed, plan.changed
+    next_step: NextStep | None = None
+    recipe = _recorded_cmake_recipe(root) if plan.graph_present else None
+    cmake_refresh_available = bool(
+        (plan.membership_changed or plan.graph_invalidation_required)
+        and plan.authority_error is None
+        and plan.graph_present
+        and plan.build_plan is not None
+        and recipe is not None
+    )
+    cmake_recipe_missing = bool(
+        (plan.membership_changed or plan.graph_invalidation_required)
+        and plan.graph_present
+        and plan.build_plan is not None
+        and recipe is None
+    )
+    membership_transition_blocked = plan.membership_changed and bool(
+        plan.authority_error or (plan.stale_units and not cmake_refresh_available)
+    )
+    if not membership_transition_blocked:
+        if cmake_refresh_available:
+            next_step = _cmake_refresh_step(root, args.path, recipe=recipe)
+        elif plan.authority_error is not None or plan.stale_units:
+            next_step = NextStep(("rbit", "repair", root))
+        elif plan.source_changed:
+            next_step = _source_selection_step(
+                "lock",
+                root,
+                args.path,
+            )
+    message = _source_preview_message(
+        added=added,
+        removed=removed,
+        changed=changed,
+        entries=len(document.entries),
+        graph_invalidation_required=plan.graph_invalidation_required,
+        membership_transition_blocked=membership_transition_blocked,
+        authority_checked=plan.authority_report is not None,
+        authority_error=plan.authority_error,
+        stale_units=plan.stale_units,
+    )
+    if membership_transition_blocked:
+        message += (
+            "\n" + cmake_reimport_guidance(root)
+            if cmake_recipe_missing
+            else _blocked_source_membership_guidance()
+        )
+    if next_step is not None:
+        message += f"\nNext: {next_step.command}"
+    cmake_import_step = next_step if cmake_refresh_available else None
+    output.emit(
+        "source_preview",
+        message,
+        before_source_manifest_digest=plan.current_digest.value,
+        after_source_manifest_digest=plan.document_digest.value,
+        entries=len(document.entries),
+        added=added,
+        removed=removed,
+        changed=changed,
+        unchanged=len(document.entries) - len(added) - len(changed),
+        producer_graph_invalidation_required=plan.graph_invalidation_required,
+        checked_overlay_outputs=plan.checked_overlay_outputs,
+        authority_checked=plan.authority_report is not None,
+        classic_preflight_checked=plan.build_plan is not None and plan.authority_report is not None,
+        stale_translation_units=plan.stale_units,
+        repair_required=bool(
+            plan.authority_error or (plan.stale_units and not cmake_refresh_available)
+        ),
+        authority_error=plan.authority_error,
+        membership_transition_blocked=membership_transition_blocked,
+        cmake_refresh_required=cmake_refresh_available,
+        cmake_import_command=(None if cmake_import_step is None else cmake_import_step.command),
+        up_to_date=(
+            not plan.source_changed
+            and not plan.graph_invalidation_required
+            and plan.authority_error is None
+            and not plan.stale_units
+        ),
+        **next_step_fields(next_step),
+    )
+    return 0
+
+
+def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
+    root = project_root(args.project)
+    plan = plan_source_lock(root, args.path, output, seal=True)
+    result = apply_source_lock(
+        plan,
+        invalidate_producer_graph=args.invalidate_producer_graph,
+    )
     from reprobit.project_readiness import inspect_project_readiness
 
     readiness = inspect_project_readiness(root, check_local_environment=True)
-    next_command = readiness.next_command
-    next_step = readiness.next_step
-    message = f"locked {count_phrase(len(document.entries), 'project source input')}"
-    if next_step is not None:
-        message += f"\nNext: {next_step}"
+    next_instruction = readiness.next_instruction
+    message = f"locked {count_phrase(len(plan.document.entries), 'project source input')}"
+    if next_instruction is not None:
+        message += f"\nNext: {next_instruction}"
     output.emit(
         "source_locked",
         message,
-        output=spec.layout.source_manifest,
-        entries=len(document.entries),
-        source_manifest_digest=document_digest.value,
-        producer_graph_invalidated=graph_invalidated,
-        next_command=next_command,
-        next_step=next_step,
+        output=plan.spec.layout.source_manifest,
+        entries=len(plan.document.entries),
+        source_manifest_digest=plan.document_digest.value,
+        producer_graph_invalidated=plan.graph_invalidation_required,
+        next_instruction=next_instruction,
         transaction_id=result.transaction_id,
+        **next_step_fields(readiness.next),
     )
     return 0
 
@@ -767,6 +947,7 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
             applied=False,
             changes=rendered_changes,
             documents=[],
+            **next_step_fields(None),
         )
         return 0
     counts_by_document: dict[str, int] = {}
@@ -796,8 +977,8 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
             raise CLIError(f"source regeneration refused: {exc}") from exc
         if transaction is None:
             raise AssertionError("source regeneration applied an empty plan")
-        next_command = human_command(("rbit", "repair", root))
-        lines.append(f"Next: {next_command}")
+        next_step = NextStep(("rbit", "repair", root))
+        lines.append(f"Next: {next_step.command}")
         output.emit(
             "source_regenerated",
             "\n".join(lines),
@@ -805,7 +986,7 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
             changes=rendered_changes,
             documents=list(plan.changed_documents),
             transaction_id=transaction.transaction_id,
-            next_command=next_command,
+            **next_step.fields(),
         )
         return 0
     lines.append("Preview only: no project files changed. Add --apply to save these updates.")
@@ -815,6 +996,7 @@ def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> in
         applied=False,
         changes=rendered_changes,
         documents=list(plan.changed_documents),
+        **next_step_fields(None),
     )
     return 0
 
@@ -830,12 +1012,26 @@ def command_source_export(args: argparse.Namespace, output: CLIOutput) -> int:
     destination = Path(os.path.abspath(candidate if candidate.is_absolute() else root / candidate))
     with output.activity("preparing the effective source view", phase="source"):
         bundle = load_project_tree(root)
-        witnesses = refresh_effective_source_export(bundle, root, destination)
+        if bundle.source_manifest is None:
+            raise CLIError("source export requires a locked source manifest")
+        for label, protected in protected_project_paths(
+            root,
+            bundle.spec,
+            source_paths=(entry.path for entry in bundle.source_manifest.entries),
+        ):
+            if paths_overlap(destination, protected):
+                raise CLIError(f"source export destination overlaps {label}: {protected}")
+        result = refresh_effective_source_export(bundle, root, destination)
+    message = f"Effective source view ready: {destination}"
+    if result.cleanup_warning is not None:
+        message += f"\nWarning: {result.cleanup_warning}"
     output.emit(
         "source_exported",
-        f"Effective source view ready: {destination}",
+        message,
         path=destination,
-        interventions=len(witnesses),
+        interventions=len(result.witnesses),
+        cleanup_warning=result.cleanup_warning,
+        preserved_paths=result.preserved_paths,
     )
     return 0
 
@@ -941,6 +1137,9 @@ def command_explain(args: argparse.Namespace, output: CLIOutput) -> int:
     if args.intervention is not None and not selected:
         known = ", ".join(item.id for item in bundle.interventions) or "none saved"
         raise CLIError(f"unknown intervention: {args.intervention} (known: {known})")
+    if args.intervention is None and not selected:
+        output.emit("intervention_summary", "No saved interventions.", interventions=0)
+        return 0
     for item in selected:
         cost = costs[item.id]
         summary = (
@@ -1011,8 +1210,8 @@ def command_status(args: argparse.Namespace, output: CLIOutput) -> int:
         ready=readiness.ready,
         completed=readiness.completed,
         total=len(readiness.items),
-        next_command=readiness.next_command,
-        next_step=readiness.next_step,
+        next_instruction=readiness.next_instruction,
+        **next_step_fields(readiness.next),
         checks=[
             {
                 "id": item.id,
@@ -1020,6 +1219,7 @@ def command_status(args: argparse.Namespace, output: CLIOutput) -> int:
                 "ready": item.ready,
                 "detail": item.detail,
                 "next_command": item.next_command,
+                "next_argv": item.next_argv,
             }
             for item in readiness.items
         ],
@@ -1038,6 +1238,8 @@ def command_report(args: argparse.Namespace, output: CLIOutput) -> int:
         if args.html
         else source.with_suffix(".html")
     )
+    if paths_alias(source, destination):
+        raise CLIError("report HTML output must differ from its canonical JSON input")
     report = read_report_json(source)
     write_report_html(report, destination, canonical_json_path=source)
     output.emit(
@@ -1052,6 +1254,9 @@ def command_report(args: argparse.Namespace, output: CLIOutput) -> int:
 
 
 __all__ = [
+    "SourceLockPlan",
+    "apply_source_lock",
+    "cmake_reimport_guidance",
     "command_cost",
     "command_explain",
     "command_init",
@@ -1061,4 +1266,5 @@ __all__ = [
     "command_source_preview",
     "command_status",
     "command_validate",
+    "plan_source_lock",
 ]

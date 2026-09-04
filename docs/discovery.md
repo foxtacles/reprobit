@@ -7,7 +7,10 @@ is `grind`: let it make a bounded project pass, or select one source and
 function when you need precise control. ReproBit saves a result only when you
 explicitly approve a run whose candidate passes a fresh proof build. After the
 project has reached an exact match, use `rbit repair .` for regressions caused
-by later benign source edits instead of starting discovery again.
+by later benign source edits instead of starting discovery again. This guide is
+the source of truth for discovery workflow and approval behavior; the generated
+[option tables](cli-reference.md#rbit-discover-grind) list exact flags and
+defaults.
 
 ## Automatic grind
 
@@ -20,6 +23,12 @@ Obtain them from your project's archival or analysis inputs, place them under
 ```console
 rbit discover grind .
 ```
+
+Before compiling, grind reports how many eligible compiler steps have a paired
+reference object, how many are missing one, and how many functions fit in this
+bounded pass. A missing object skips that compiler step; it does not invalidate
+the rest of the preview. Full mapping and skip reasons remain in the report and
+NDJSON result.
 
 ReproBit first matches an object to the source filename without its extension:
 `src/widget.cpp` maps to `reference/widget.obj`. An exact translation-unit ID
@@ -248,6 +257,8 @@ The command keeps the JSON and HTML reports. It removes only a state tree marked
 by ReproBit for that request, refuses active campaigns, and
 never follows symbolic links, junctions, or other redirected entries. If the
 campaign used `--state-directory DIR`, pass the same option to `discover clean`.
+The request file may be removed after a campaign; the guarded ownership marker
+is enough for cleanup when the same request path is supplied.
 When several request files deliberately reuse one state directory, cleanup
 refuses to remove their shared cache unless you add `--all-requests`; use
 `--preview --all-requests` first to review the combined size.

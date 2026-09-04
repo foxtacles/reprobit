@@ -60,7 +60,11 @@ def load_project(path: str | Path) -> ProjectSpec:
         raise SchemaError(f"cannot load {source}: {exc}") from exc
     version = document.get("schema_version")
     if version != 3:
-        raise SchemaVersionError(f"{source} uses schema {version!r}; runtime accepts only schema 3")
+        raise SchemaVersionError(
+            f"{source} uses schema {version!r}; runtime accepts only schema 3. "
+            "Use the ReproBit version that created this project and follow its "
+            "version-specific upgrade instructions; do not edit schema_version by hand"
+        )
     try:
         # TOML arrays are lists; round-tripping through JSON retains strict scalar
         # types while allowing immutable tuple fields to consume array syntax.

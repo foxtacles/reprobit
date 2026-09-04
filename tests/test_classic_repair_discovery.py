@@ -183,7 +183,12 @@ def _fake_windows(objects: dict[int, bytes], compiled: list[str]) -> Any:
         progress: Any = None,
         planned_candidates: int,
         cache: Any = None,
+        close_runtime: bool = True,
+        materialize_source_epoch: bool = True,
+        source_seal: object | None = None,
+        namespace_id: str = "noncertifying-donor-repair-probe",
     ) -> tuple[str, ...]:
+        del close_runtime, materialize_source_epoch, source_seal, namespace_id
         by_id = {unit.donors[0].intervention.id: unit for unit in units}
         outputs: list[ClassicDonorProbeOutput] = []
         for window in windows:

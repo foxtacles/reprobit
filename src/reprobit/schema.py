@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Annotated, Any, Literal, Self, TypeAlias
 
 from pydantic import (
@@ -586,6 +587,64 @@ class ClassicRecipeRole(StrEnum):
     PROJECT = "project"
 
 
+CLASSIC_RECIPE_FAMILIES_BY_ROLE: Mapping[ClassicRecipeRole, frozenset[ClassicRecipeFamily]] = (
+    MappingProxyType(
+        {
+            ClassicRecipeRole.DONOR: frozenset(
+                {
+                    ClassicRecipeFamily.DECLARATION_SHAPE,
+                    ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
+                    ClassicRecipeFamily.FORWARD_DECLARATION_RUN,
+                    ClassicRecipeFamily.PAD_SHAPE,
+                    ClassicRecipeFamily.EXTERN_RUN_PAIR,
+                    ClassicRecipeFamily.FORWARD_RUN_WITH_SHAPE,
+                    ClassicRecipeFamily.DECLARATION_RUN_TRIPLE,
+                    ClassicRecipeFamily.PREFIX_FORWARD_AFTER_INCLUDES_EXTERN,
+                }
+            ),
+            ClassicRecipeRole.FUNCTION: frozenset(
+                {
+                    ClassicRecipeFamily.EQUAL_BODY_STRICT,
+                    ClassicRecipeFamily.EQUAL_BODY_EH_STRUCTURAL_LOCAL,
+                    ClassicRecipeFamily.SAME_SLOT_RESIZE,
+                    ClassicRecipeFamily.EQUAL_BODY_EH_RELOC_LAYOUT,
+                    ClassicRecipeFamily.RETAIL_EXACT_RELOC_DIVERGENT,
+                    ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING,
+                    ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC,
+                    ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION,
+                    ClassicRecipeFamily.RETAIL_EXACT_SOURCE_EQUAL_BODY,
+                    ClassicRecipeFamily.RETAIL_EXACT_COMPOSED_REWRITING,
+                    ClassicRecipeFamily.RETAIL_EXACT_SOURCE_TARGET_CLOSURE,
+                    ClassicRecipeFamily.RETAIL_EXACT_WEB_RECOLOUR,
+                    ClassicRecipeFamily.RETAIL_EXACT_CROSS_TU_COMPLETE_TARGET_RESIZE,
+                    ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION_REENCODING,
+                    ClassicRecipeFamily.RETAIL_EXACT_SAME_TU_INSTRUCTION_HYBRID_RESIZE,
+                }
+            ),
+            ClassicRecipeRole.PROJECT: frozenset(
+                {
+                    ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH,
+                    ClassicRecipeFamily.IMAGE_METADATA,
+                    ClassicRecipeFamily.IMAGE_LINK_ORDER,
+                    ClassicRecipeFamily.IMAGE_BINARY_REPACK,
+                }
+            ),
+        }
+    )
+)
+
+
+def classic_recipe_family_role(
+    family: ClassicRecipeFamily,
+) -> ClassicRecipeRole | None:
+    """Return the one runtime-supported role for a classic family."""
+
+    return next(
+        (role for role, families in CLASSIC_RECIPE_FAMILIES_BY_ROLE.items() if family in families),
+        None,
+    )
+
+
 _FORBIDDEN_CLASSIC_FIELDS = frozenset(
     {
         "bytes",
@@ -700,6 +759,16 @@ class ClassicRecipeIntervention(InterventionBase):
             raise ValueError("classic project recipe requires target scope")
         if self.family is ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION:
             raise ValueError("simulated elision must use legacy.oracle_install quarantine")
+        family_role = classic_recipe_family_role(self.family)
+        if family_role is None:
+            raise ValueError(
+                f"classic recipe family {self.family.value!r} is not supported by the runtime"
+            )
+        if family_role is not self.role:
+            raise ValueError(
+                f"classic recipe family {self.family.value!r} requires role "
+                f"{family_role.value!r}, not {self.role.value!r}"
+            )
         forbidden = _forbidden_classic_paths(self.parameters)
         if forbidden:
             raise ValueError(f"classic recipe contains forbidden payload fields: {forbidden}")
@@ -1270,375 +1339,434 @@ class ProjectBundle(StrictModel):
 
     @model_validator(mode="after")
     def validate_tree(self) -> ProjectBundle:
-        if self.toolchain_lock.profile != self.spec.toolchain.profile:
-            raise ValueError("toolchain lock profile does not match project profile")
-        project_root = Path(self.root).resolve(strict=False)
-        resolved_target_paths: dict[Path, tuple[str, str]] = {}
-        for target in self.spec.targets:
-            for kind, relative in (("artifact", target.artifact), ("oracle", target.oracle)):
-                resolved = project_root.joinpath(*relative.replace("\\", "/").split("/")).resolve(
-                    strict=False
-                )
-                try:
-                    resolved.relative_to(project_root)
-                except ValueError as exc:
-                    raise ValueError(
-                        f"target {kind} path escapes project root: {relative!r}"
-                    ) from exc
-                if previous := resolved_target_paths.get(resolved):
-                    raise ValueError(
-                        "target artifact/oracle paths must resolve uniquely; "
-                        f"{previous[0]} for {previous[1]!r} and {kind} for "
-                        f"{target.id!r} resolve to {resolved}"
-                    )
-                resolved_target_paths[resolved] = (kind, target.id)
-        target_ids = {target.id for target in self.spec.targets}
-        oracle_ids = {document.target_id for document in self.oracle_documents}
-        if oracle_ids != target_ids:
-            missing = sorted(target_ids - oracle_ids)
-            extra = sorted(oracle_ids - target_ids)
-            raise ValueError(f"oracle target mismatch; missing={missing}, extra={extra}")
-        all_documents: tuple[InterventionDocument | ProofDocument, ...] = (
-            *self.intervention_documents,
-            *self.proof_documents,
-        )
-        if any(document.target_id not in target_ids for document in all_documents):
-            raise ValueError("manifest document names an unknown target")
-        if self.source_manifest is not None and not self.source_manifest.complete:
-            raise ValueError("certifiable bundles require a complete portable source manifest")
-        if self.source_manifest is not None:
-            forbidden_source_paths = {
-                "reprobit.toml",
-                self.spec.toolchain.lock_file.replace("\\", "/").casefold(),
-                self.spec.layout.source_manifest.replace("\\", "/").casefold(),
-                self.spec.layout.build_plan.replace("\\", "/").casefold(),
-                self.spec.layout.producer_graph.replace("\\", "/").casefold(),
-                *(target.artifact.replace("\\", "/").casefold() for target in self.spec.targets),
-                *(target.oracle.replace("\\", "/").casefold() for target in self.spec.targets),
-            }
-            forbidden_roots = tuple(
-                value.replace("\\", "/").rstrip("/").casefold() + "/"
-                for value in (
-                    self.spec.state_dir,
-                    self.spec.layout.interventions,
-                    self.spec.layout.proofs,
-                    self.spec.layout.oracles,
-                )
-            )
-            for entry in self.source_manifest.entries:
-                folded = entry.path.casefold()
-                if folded in forbidden_source_paths or folded.startswith(forbidden_roots):
-                    raise ValueError(
-                        f"source manifest admits control, output, or oracle path {entry.path!r}"
-                    )
-        if self.build_plan is not None:
-            if self.source_manifest is None:
-                raise ValueError("build plan requires a portable source manifest")
-            classic_debug_companion_paths(self)
-            actual_source_manifest_digest = source_manifest_digest(self.source_manifest)
-            if self.build_plan.source_manifest_digest != actual_source_manifest_digest:
-                raise ValueError("build-plan source manifest digest does not match its document")
-            planned_targets = {item.target_id for item in self.build_plan.target_gates}
-            if planned_targets != target_ids:
-                raise ValueError("build-plan target gates do not match project targets")
-            if any(item.target_id not in target_ids for item in self.build_plan.translation_units):
-                raise ValueError("build plan names an unknown target")
-            manifest_entries = {item.path.casefold(): item for item in self.source_manifest.entries}
-            for archive in self.build_plan.archives:
-                source_entry = manifest_entries.get(archive.source.casefold())
-                if source_entry is None:
-                    raise ValueError(
-                        f"quarantine archive is absent from source authority: {archive.source!r}"
-                    )
-                if source_entry.digest.value != archive.source_sha256:
-                    raise ValueError(
-                        f"quarantine archive digest differs from source authority: "
-                        f"{archive.source!r}"
-                    )
-            for sdk_archive in self.build_plan.project_sdk_libraries:
-                source_entry = manifest_entries.get(sdk_archive.path.casefold())
-                if source_entry is None:
-                    raise ValueError(
-                        f"project SDK archive is absent from source authority: {sdk_archive.path!r}"
-                    )
-                if source_entry.digest.value != sdk_archive.sha256:
-                    raise ValueError(
-                        f"project SDK archive digest differs from source authority: "
-                        f"{sdk_archive.path!r}"
-                    )
+        target_ids = _validate_bundle_identity(self)
+        _validate_bundle_source_manifest(self)
+        _validate_bundle_build_plan(self, target_ids)
         interventions = self.interventions
-        overlay_outputs: dict[str, str] = {}
-        if self.source_manifest is not None:
-            manifest_source_paths = {
-                item.path.casefold(): item.path for item in self.source_manifest.entries
-            }
-            for intervention in interventions:
-                if not (
-                    isinstance(intervention, ClassicRecipeIntervention)
-                    and intervention.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
-                ):
-                    continue
-                values = {item.name: item.value for item in intervention.parameters}
-                outputs = values.get("outputs")
-                if not isinstance(outputs, list):
-                    raise ValueError("source-overlay outputs are malformed")
-                for output in outputs:
-                    if not isinstance(output, dict) or not isinstance(output.get("path"), str):
-                        raise ValueError("source-overlay output is malformed")
-                    output_path = output["path"]
-                    assert isinstance(output_path, str)
-                    canonical = _check_relative_path(output_path)
-                    folded = canonical.casefold()
-                    if folded in overlay_outputs:
-                        raise ValueError(f"source-overlay output repeats {canonical!r}")
-                    manifest_path = manifest_source_paths.get(folded)
-                    if "clean" in output:
-                        if manifest_path is None:
-                            raise ValueError(
-                                "clean source-overlay output is absent from the source "
-                                f"manifest: {canonical!r}"
-                            )
-                        if manifest_path != canonical:
-                            raise ValueError(
-                                "clean source-overlay output spelling differs from the "
-                                f"source manifest: {canonical!r}, {manifest_path!r}"
-                            )
-                    elif manifest_path is not None:
-                        raise ValueError(
-                            "generated source-overlay output collides with source manifest: "
-                            f"{canonical!r}, {manifest_path!r}"
-                        )
-                    overlay_outputs[folded] = canonical
-        if self.producer_graph is not None:
-            if self.source_manifest is None:
-                raise ValueError("producer graph requires a portable source manifest")
-            if self.producer_graph.toolchain_lock_digest != toolchain_document_digest(
-                self.toolchain_lock
-            ):
-                raise ValueError("producer graph toolchain-lock binding differs")
-            if self.producer_graph.path_profile_id != self.spec.paths.id:
-                raise ValueError("producer graph logical-path profile differs")
-            graph_targets = {
-                node.target_id for node in self.producer_graph.nodes if node.target_id is not None
-            }
-            if graph_targets != target_ids:
-                missing = sorted(target_ids - graph_targets)
-                extra = sorted(graph_targets - target_ids)
-                raise ValueError(
-                    f"producer graph target mismatch; missing={missing}, extra={extra}"
-                )
-            target_artifacts = {
-                target.id: target.artifact.replace("\\", "/") for target in self.spec.targets
-            }
-            for node in self.producer_graph.nodes:
-                if node.target_id is None:
-                    continue
-                expected = target_artifacts[node.target_id]
-                if expected not in node.outputs:
-                    raise ValueError(
-                        f"terminal producer {node.id!r} does not publish the exact "
-                        f"project artifact {expected!r}"
-                    )
-            if not producer_graph_accepts_source(
-                self.producer_graph,
-                paths=(item.path for item in self.source_manifest.entries),
-                overlay_outputs=overlay_outputs.values(),
-            ):
-                raise ValueError("producer graph reads source outside reviewed authority")
-            quarantine_references = {
-                input_ref.removeprefix("quarantine-archive/").casefold()
-                for node in self.producer_graph.nodes
-                for input_ref in node.inputs
-                if input_ref.startswith("quarantine-archive/")
-            }
-            authorized_archives = (
-                {archive.source.casefold() for archive in self.build_plan.archives}
-                if self.build_plan is not None
-                else set()
-            )
-            if quarantine_references != authorized_archives:
-                missing = sorted(authorized_archives - quarantine_references)
-                extra = sorted(quarantine_references - authorized_archives)
-                raise ValueError(
-                    "producer quarantine archives do not match build-plan authority; "
-                    f"missing={missing}, extra={extra}"
-                )
-            if self.build_plan is not None:
-                _validate_archive_link_contracts(self.build_plan, self.producer_graph, target_ids)
-        _require_unique((item.id for item in interventions), "intervention id")
-        direct_function_scopes = {
-            (
-                item.scope.target,
-                item.scope.translation_unit,
-                item.scope.function,
-            )
-            for item in interventions
-            if item.scope.function is not None
-        }
-        oracle_function_scopes = {
-            (document.target_id, item.translation_unit, item.symbol)
-            for document in self.oracle_documents
-            for item in document.functions
-        }
-        authoritative_function_scopes = direct_function_scopes | oracle_function_scopes
-        for item in interventions:
-            for beneficiary in item.beneficiaries:
-                key = (
-                    beneficiary.target,
-                    beneficiary.translation_unit,
-                    beneficiary.function,
-                )
-                if key not in authoritative_function_scopes:
-                    raise ValueError(
-                        f"intervention {item.id!r} allocates cost to an unknown "
-                        f"function scope: {key!r}"
-                    )
-        legacy_interventions = {
-            item.id: item
-            for item in interventions
-            if isinstance(item, LegacyOracleInstallIntervention)
-        }
-        declared_allowlist = {
-            item.intervention_id: item for item in self.spec.authenticity.legacy_allowlist
-        }
-        if set(legacy_interventions) != set(declared_allowlist):
-            missing = sorted(set(legacy_interventions) - set(declared_allowlist))
-            extra = sorted(set(declared_allowlist) - set(legacy_interventions))
-            raise ValueError(f"legacy allowlist mismatch; missing={missing}, extra={extra}")
-        for intervention_id, legacy_action in legacy_interventions.items():
-            pin = declared_allowlist[intervention_id]
-            if (
-                pin.allowlist_digest != legacy_action.allowlist_digest
-                or pin.proof_receipt_digest != legacy_action.proof_receipt_digest
-                or pin.range_count != len(legacy_action.ranges)
-                or pin.byte_count != legacy_action.byte_count
-                or pin.maximum_oracle_payload_bytes != legacy_action.maximum_oracle_payload_bytes
-            ):
-                raise ValueError(f"legacy allowlist pin mismatch for {intervention_id!r}")
-        intervention_ids = {item.id for item in interventions}
-        for item in interventions:
-            unknown = set(item.dependencies) - intervention_ids
-            if unknown:
-                raise ValueError(
-                    f"intervention {item.id!r} has dangling dependencies: {sorted(unknown)}"
-                )
-        receipts = tuple(
-            receipt
-            for document in self.proof_documents
-            for receipt in document.expected_observations
-        )
-        _validate_classic_donor_beneficiaries(interventions, receipts)
-        _reject_dependency_cycles(interventions)
-        if self.build_plan is not None:
-            overlay_ids = {
-                item.id
-                for item in interventions
-                if isinstance(item, ClassicRecipeIntervention)
-                and item.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
-            }
-            planned_overlay_ids = set(self.build_plan.source_overlay_interventions)
-            if len(planned_overlay_ids) != len(self.build_plan.source_overlay_interventions):
-                raise ValueError("build-plan source overlay intervention ids repeat")
-            if planned_overlay_ids != overlay_ids:
-                missing = sorted(overlay_ids - planned_overlay_ids)
-                extra = sorted(planned_overlay_ids - overlay_ids)
-                raise ValueError(
-                    "build-plan source overlay interventions do not match authority; "
-                    f"missing={missing}, extra={extra}"
-                )
-
-            translation_unit_documents = {
-                document.translation_unit_id: document
-                for document in self.intervention_documents
-                if document.translation_unit_id is not None
-            }
-            translation_unit_ids = [
-                document.translation_unit_id
-                for document in self.intervention_documents
-                if document.translation_unit_id is not None
-            ]
-            _require_unique(translation_unit_ids, "intervention translation-unit id")
-            planned_units = {item.id: item for item in self.build_plan.translation_units}
-            if set(planned_units) != set(translation_unit_documents):
-                missing = sorted(set(translation_unit_documents) - set(planned_units))
-                extra = sorted(set(planned_units) - set(translation_unit_documents))
-                raise ValueError(
-                    "build-plan translation units do not match intervention shards; "
-                    f"missing={missing}, extra={extra}"
-                )
-            for unit_id, plan in planned_units.items():
-                document = translation_unit_documents[unit_id]
-                if (
-                    document.target_id != plan.target_id
-                    or document.source != plan.source
-                    or document.source_digest != plan.source_digest
-                    or document.build_target != plan.build_target
-                ):
-                    raise ValueError(
-                        f"build-plan translation unit {unit_id!r} does not match its shard"
-                    )
-        _require_unique((item.id for item in receipts), "classic receipt id")
-        _require_unique(
-            (item.intervention_id for item in receipts),
-            "classic receipt intervention id",
-        )
-        dangling_receipts = {
-            item.intervention_id
-            for item in receipts
-            if item.intervention_id not in intervention_ids
-        }
-        if dangling_receipts:
-            raise ValueError(
-                f"classic receipts name unknown interventions: {sorted(dangling_receipts)}"
-            )
-        expected_receipts = {
-            item.id: item
-            for item in interventions
-            if isinstance(
-                item,
-                (ClassicRecipeIntervention, LegacyOracleInstallIntervention),
-            )
-        }
-        received_receipts = {item.intervention_id: item for item in receipts}
-        if set(received_receipts) != set(expected_receipts):
-            missing = sorted(set(expected_receipts) - set(received_receipts))
-            extra = sorted(set(received_receipts) - set(expected_receipts))
-            raise ValueError(
-                "classic expected receipts do not match interventions; "
-                f"missing={missing}, extra={extra}"
-            )
-        receipt_documents = {
-            receipt.intervention_id: document
-            for document in self.proof_documents
-            for receipt in document.expected_observations
-        }
-        intervention_documents = {
-            intervention.id: document
-            for document in self.intervention_documents
-            for intervention in document.interventions
-        }
-        for intervention_id, receipt in received_receipts.items():
-            intervention = expected_receipts[intervention_id]
-            expected_family = (
-                intervention.family
-                if isinstance(intervention, ClassicRecipeIntervention)
-                else ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION
-            )
-            if receipt.family is not expected_family:
-                raise ValueError(f"classic receipt family does not match {intervention_id!r}")
-            if (
-                isinstance(intervention, LegacyOracleInstallIntervention)
-                and Digest.from_bytes(canonical_json(receipt)) != intervention.proof_receipt_digest
-            ):
-                raise ValueError(f"legacy proof receipt digest does not match {intervention_id!r}")
-            intervention_document = intervention_documents[intervention_id]
-            receipt_document = receipt_documents[intervention_id]
-            if (
-                receipt_document.target_id != intervention_document.target_id
-                or receipt_document.translation_unit_id != intervention_document.translation_unit_id
-            ):
-                raise ValueError(f"classic receipt target/TU does not match {intervention_id!r}")
+        overlay_outputs = _validate_bundle_overlay_outputs(self, interventions)
+        _validate_bundle_producer_graph(self, target_ids, overlay_outputs)
+        intervention_ids, receipts = _validate_bundle_interventions(self, interventions)
+        _validate_bundle_build_plan_records(self, interventions)
+        _validate_bundle_receipts(self, interventions, intervention_ids, receipts)
         return self
+
+
+def _validate_bundle_identity(bundle: ProjectBundle) -> set[str]:
+    """Validate project, target, and document identity before dependent authority."""
+
+    if bundle.toolchain_lock.profile != bundle.spec.toolchain.profile:
+        raise ValueError("toolchain lock profile does not match project profile")
+    project_root = Path(bundle.root).resolve(strict=False)
+    resolved_target_paths: dict[Path, tuple[str, str]] = {}
+    for target in bundle.spec.targets:
+        for kind, relative in (("artifact", target.artifact), ("oracle", target.oracle)):
+            resolved = project_root.joinpath(*relative.replace("\\", "/").split("/")).resolve(
+                strict=False
+            )
+            try:
+                resolved.relative_to(project_root)
+            except ValueError as exc:
+                raise ValueError(f"target {kind} path escapes project root: {relative!r}") from exc
+            if previous := resolved_target_paths.get(resolved):
+                raise ValueError(
+                    "target artifact/oracle paths must resolve uniquely; "
+                    f"{previous[0]} for {previous[1]!r} and {kind} for "
+                    f"{target.id!r} resolve to {resolved}"
+                )
+            resolved_target_paths[resolved] = (kind, target.id)
+    target_ids = {target.id for target in bundle.spec.targets}
+    oracle_ids = {document.target_id for document in bundle.oracle_documents}
+    if oracle_ids != target_ids:
+        missing = sorted(target_ids - oracle_ids)
+        extra = sorted(oracle_ids - target_ids)
+        raise ValueError(f"oracle target mismatch; missing={missing}, extra={extra}")
+    all_documents: tuple[InterventionDocument | ProofDocument, ...] = (
+        *bundle.intervention_documents,
+        *bundle.proof_documents,
+    )
+    if any(document.target_id not in target_ids for document in all_documents):
+        raise ValueError("manifest document names an unknown target")
+    return target_ids
+
+
+def _validate_bundle_source_manifest(bundle: ProjectBundle) -> None:
+    """Validate the portable source boundary before build-derived records."""
+
+    if bundle.source_manifest is not None and not bundle.source_manifest.complete:
+        raise ValueError("certifiable bundles require a complete portable source manifest")
+    if bundle.source_manifest is None:
+        return
+    forbidden_source_paths = {
+        "reprobit.toml",
+        bundle.spec.toolchain.lock_file.replace("\\", "/").casefold(),
+        bundle.spec.layout.source_manifest.replace("\\", "/").casefold(),
+        bundle.spec.layout.build_plan.replace("\\", "/").casefold(),
+        bundle.spec.layout.producer_graph.replace("\\", "/").casefold(),
+        *(target.artifact.replace("\\", "/").casefold() for target in bundle.spec.targets),
+        *(target.oracle.replace("\\", "/").casefold() for target in bundle.spec.targets),
+    }
+    forbidden_roots = tuple(
+        value.replace("\\", "/").rstrip("/").casefold() + "/"
+        for value in (
+            bundle.spec.state_dir,
+            bundle.spec.layout.interventions,
+            bundle.spec.layout.proofs,
+            bundle.spec.layout.oracles,
+        )
+    )
+    for entry in bundle.source_manifest.entries:
+        folded = entry.path.casefold()
+        if folded in forbidden_source_paths or folded.startswith(forbidden_roots):
+            raise ValueError(
+                f"source manifest admits control, output, or oracle path {entry.path!r}"
+            )
+
+
+def _validate_bundle_build_plan(bundle: ProjectBundle, target_ids: set[str]) -> None:
+    """Validate a build plan's source, target, and archive bindings."""
+
+    if bundle.build_plan is None:
+        return
+    if bundle.source_manifest is None:
+        raise ValueError("build plan requires a portable source manifest")
+    classic_debug_companion_paths(bundle)
+    actual_source_manifest_digest = source_manifest_digest(bundle.source_manifest)
+    if bundle.build_plan.source_manifest_digest != actual_source_manifest_digest:
+        raise ValueError("build-plan source manifest digest does not match its document")
+    planned_targets = {item.target_id for item in bundle.build_plan.target_gates}
+    if planned_targets != target_ids:
+        raise ValueError("build-plan target gates do not match project targets")
+    if any(item.target_id not in target_ids for item in bundle.build_plan.translation_units):
+        raise ValueError("build plan names an unknown target")
+    manifest_entries = {item.path.casefold(): item for item in bundle.source_manifest.entries}
+    for archive in bundle.build_plan.archives:
+        source_entry = manifest_entries.get(archive.source.casefold())
+        if source_entry is None:
+            raise ValueError(
+                f"quarantine archive is absent from source authority: {archive.source!r}"
+            )
+        if source_entry.digest.value != archive.source_sha256:
+            raise ValueError(
+                f"quarantine archive digest differs from source authority: {archive.source!r}"
+            )
+    for sdk_archive in bundle.build_plan.project_sdk_libraries:
+        source_entry = manifest_entries.get(sdk_archive.path.casefold())
+        if source_entry is None:
+            raise ValueError(
+                f"project SDK archive is absent from source authority: {sdk_archive.path!r}"
+            )
+        if source_entry.digest.value != sdk_archive.sha256:
+            raise ValueError(
+                f"project SDK archive digest differs from source authority: {sdk_archive.path!r}"
+            )
+
+
+def _validate_bundle_overlay_outputs(
+    bundle: ProjectBundle,
+    interventions: tuple[Intervention, ...],
+) -> dict[str, str]:
+    """Validate source-overlay outputs and return their canonical path index."""
+
+    overlay_outputs: dict[str, str] = {}
+    if bundle.source_manifest is None:
+        return overlay_outputs
+    manifest_source_paths = {
+        item.path.casefold(): item.path for item in bundle.source_manifest.entries
+    }
+    for intervention in interventions:
+        if not (
+            isinstance(intervention, ClassicRecipeIntervention)
+            and intervention.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
+        ):
+            continue
+        values = {item.name: item.value for item in intervention.parameters}
+        outputs = values.get("outputs")
+        if not isinstance(outputs, list):
+            raise ValueError("source-overlay outputs are malformed")
+        for output in outputs:
+            if not isinstance(output, dict) or not isinstance(output.get("path"), str):
+                raise ValueError("source-overlay output is malformed")
+            output_path = output["path"]
+            assert isinstance(output_path, str)
+            canonical = _check_relative_path(output_path)
+            folded = canonical.casefold()
+            if folded in overlay_outputs:
+                raise ValueError(f"source-overlay output repeats {canonical!r}")
+            manifest_path = manifest_source_paths.get(folded)
+            if "clean" in output:
+                if manifest_path is None:
+                    raise ValueError(
+                        "clean source-overlay output is absent from the source "
+                        f"manifest: {canonical!r}"
+                    )
+                if manifest_path != canonical:
+                    raise ValueError(
+                        "clean source-overlay output spelling differs from the "
+                        f"source manifest: {canonical!r}, {manifest_path!r}"
+                    )
+            elif manifest_path is not None:
+                raise ValueError(
+                    "generated source-overlay output collides with source manifest: "
+                    f"{canonical!r}, {manifest_path!r}"
+                )
+            overlay_outputs[folded] = canonical
+    return overlay_outputs
+
+
+def _validate_bundle_producer_graph(
+    bundle: ProjectBundle,
+    target_ids: set[str],
+    overlay_outputs: Mapping[str, str],
+) -> None:
+    """Validate the producer graph against earlier project authority."""
+
+    if bundle.producer_graph is None:
+        return
+    if bundle.source_manifest is None:
+        raise ValueError("producer graph requires a portable source manifest")
+    if bundle.producer_graph.toolchain_lock_digest != toolchain_document_digest(
+        bundle.toolchain_lock
+    ):
+        raise ValueError("producer graph toolchain-lock binding differs")
+    if bundle.producer_graph.path_profile_id != bundle.spec.paths.id:
+        raise ValueError("producer graph logical-path profile differs")
+    graph_targets = {
+        node.target_id for node in bundle.producer_graph.nodes if node.target_id is not None
+    }
+    if graph_targets != target_ids:
+        missing = sorted(target_ids - graph_targets)
+        extra = sorted(graph_targets - target_ids)
+        raise ValueError(f"producer graph target mismatch; missing={missing}, extra={extra}")
+    target_artifacts = {
+        target.id: target.artifact.replace("\\", "/") for target in bundle.spec.targets
+    }
+    for node in bundle.producer_graph.nodes:
+        if node.target_id is None:
+            continue
+        expected = target_artifacts[node.target_id]
+        if expected not in node.outputs:
+            raise ValueError(
+                f"terminal producer {node.id!r} does not publish the exact "
+                f"project artifact {expected!r}"
+            )
+    if not producer_graph_accepts_source(
+        bundle.producer_graph,
+        paths=(item.path for item in bundle.source_manifest.entries),
+        overlay_outputs=overlay_outputs.values(),
+    ):
+        raise ValueError("producer graph reads source outside reviewed authority")
+    quarantine_references = {
+        input_ref.removeprefix("quarantine-archive/").casefold()
+        for node in bundle.producer_graph.nodes
+        for input_ref in node.inputs
+        if input_ref.startswith("quarantine-archive/")
+    }
+    authorized_archives = (
+        {archive.source.casefold() for archive in bundle.build_plan.archives}
+        if bundle.build_plan is not None
+        else set()
+    )
+    if quarantine_references != authorized_archives:
+        missing = sorted(authorized_archives - quarantine_references)
+        extra = sorted(quarantine_references - authorized_archives)
+        raise ValueError(
+            "producer quarantine archives do not match build-plan authority; "
+            f"missing={missing}, extra={extra}"
+        )
+    if bundle.build_plan is not None:
+        _validate_archive_link_contracts(bundle.build_plan, bundle.producer_graph, target_ids)
+
+
+def _validate_bundle_interventions(
+    bundle: ProjectBundle,
+    interventions: tuple[Intervention, ...],
+) -> tuple[set[str], tuple[ClassicProofReceipt, ...]]:
+    """Validate intervention scopes, allowlists, dependencies, and donor consumers."""
+
+    _require_unique((item.id for item in interventions), "intervention id")
+    direct_function_scopes = {
+        (
+            item.scope.target,
+            item.scope.translation_unit,
+            item.scope.function,
+        )
+        for item in interventions
+        if item.scope.function is not None
+    }
+    oracle_function_scopes = {
+        (document.target_id, item.translation_unit, item.symbol)
+        for document in bundle.oracle_documents
+        for item in document.functions
+    }
+    authoritative_function_scopes = direct_function_scopes | oracle_function_scopes
+    for item in interventions:
+        for beneficiary in item.beneficiaries:
+            key = (
+                beneficiary.target,
+                beneficiary.translation_unit,
+                beneficiary.function,
+            )
+            if key not in authoritative_function_scopes:
+                raise ValueError(
+                    f"intervention {item.id!r} allocates cost to an unknown function scope: {key!r}"
+                )
+    legacy_interventions = {
+        item.id: item for item in interventions if isinstance(item, LegacyOracleInstallIntervention)
+    }
+    declared_allowlist = {
+        item.intervention_id: item for item in bundle.spec.authenticity.legacy_allowlist
+    }
+    if set(legacy_interventions) != set(declared_allowlist):
+        missing = sorted(set(legacy_interventions) - set(declared_allowlist))
+        extra = sorted(set(declared_allowlist) - set(legacy_interventions))
+        raise ValueError(f"legacy allowlist mismatch; missing={missing}, extra={extra}")
+    for intervention_id, legacy_action in legacy_interventions.items():
+        pin = declared_allowlist[intervention_id]
+        if (
+            pin.allowlist_digest != legacy_action.allowlist_digest
+            or pin.proof_receipt_digest != legacy_action.proof_receipt_digest
+            or pin.range_count != len(legacy_action.ranges)
+            or pin.byte_count != legacy_action.byte_count
+            or pin.maximum_oracle_payload_bytes != legacy_action.maximum_oracle_payload_bytes
+        ):
+            raise ValueError(f"legacy allowlist pin mismatch for {intervention_id!r}")
+    intervention_ids = {item.id for item in interventions}
+    for item in interventions:
+        unknown = set(item.dependencies) - intervention_ids
+        if unknown:
+            raise ValueError(
+                f"intervention {item.id!r} has dangling dependencies: {sorted(unknown)}"
+            )
+    receipts = tuple(
+        receipt for document in bundle.proof_documents for receipt in document.expected_observations
+    )
+    _validate_classic_donor_beneficiaries(interventions, receipts)
+    _reject_dependency_cycles(interventions)
+    return intervention_ids, receipts
+
+
+def _validate_bundle_build_plan_records(
+    bundle: ProjectBundle,
+    interventions: tuple[Intervention, ...],
+) -> None:
+    """Validate build-plan overlay and translation-unit record alignment."""
+
+    if bundle.build_plan is None:
+        return
+    overlay_ids = {
+        item.id
+        for item in interventions
+        if isinstance(item, ClassicRecipeIntervention)
+        and item.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
+    }
+    planned_overlay_ids = set(bundle.build_plan.source_overlay_interventions)
+    if len(planned_overlay_ids) != len(bundle.build_plan.source_overlay_interventions):
+        raise ValueError("build-plan source overlay intervention ids repeat")
+    if planned_overlay_ids != overlay_ids:
+        missing = sorted(overlay_ids - planned_overlay_ids)
+        extra = sorted(planned_overlay_ids - overlay_ids)
+        raise ValueError(
+            "build-plan source overlay interventions do not match authority; "
+            f"missing={missing}, extra={extra}"
+        )
+
+    translation_unit_documents = {
+        document.translation_unit_id: document
+        for document in bundle.intervention_documents
+        if document.translation_unit_id is not None
+    }
+    translation_unit_ids = [
+        document.translation_unit_id
+        for document in bundle.intervention_documents
+        if document.translation_unit_id is not None
+    ]
+    _require_unique(translation_unit_ids, "intervention translation-unit id")
+    planned_units = {item.id: item for item in bundle.build_plan.translation_units}
+    if set(planned_units) != set(translation_unit_documents):
+        missing = sorted(set(translation_unit_documents) - set(planned_units))
+        extra = sorted(set(planned_units) - set(translation_unit_documents))
+        raise ValueError(
+            "build-plan translation units do not match intervention shards; "
+            f"missing={missing}, extra={extra}"
+        )
+    for unit_id, plan in planned_units.items():
+        document = translation_unit_documents[unit_id]
+        if (
+            document.target_id != plan.target_id
+            or document.source != plan.source
+            or document.source_digest != plan.source_digest
+            or document.build_target != plan.build_target
+        ):
+            raise ValueError(f"build-plan translation unit {unit_id!r} does not match its shard")
+
+
+def _validate_bundle_receipts(
+    bundle: ProjectBundle,
+    interventions: tuple[Intervention, ...],
+    intervention_ids: set[str],
+    receipts: tuple[ClassicProofReceipt, ...],
+) -> None:
+    """Validate proof-receipt identity, coverage, family, and document placement."""
+
+    _require_unique((item.id for item in receipts), "classic receipt id")
+    _require_unique(
+        (item.intervention_id for item in receipts),
+        "classic receipt intervention id",
+    )
+    dangling_receipts = {
+        item.intervention_id for item in receipts if item.intervention_id not in intervention_ids
+    }
+    if dangling_receipts:
+        raise ValueError(
+            f"classic receipts name unknown interventions: {sorted(dangling_receipts)}"
+        )
+    expected_receipts = {
+        item.id: item
+        for item in interventions
+        if isinstance(
+            item,
+            (ClassicRecipeIntervention, LegacyOracleInstallIntervention),
+        )
+    }
+    received_receipts = {item.intervention_id: item for item in receipts}
+    if set(received_receipts) != set(expected_receipts):
+        missing = sorted(set(expected_receipts) - set(received_receipts))
+        extra = sorted(set(received_receipts) - set(expected_receipts))
+        raise ValueError(
+            "classic expected receipts do not match interventions; "
+            f"missing={missing}, extra={extra}"
+        )
+    receipt_documents = {
+        receipt.intervention_id: document
+        for document in bundle.proof_documents
+        for receipt in document.expected_observations
+    }
+    intervention_documents = {
+        intervention.id: document
+        for document in bundle.intervention_documents
+        for intervention in document.interventions
+    }
+    for intervention_id, receipt in received_receipts.items():
+        intervention = expected_receipts[intervention_id]
+        expected_family = (
+            intervention.family
+            if isinstance(intervention, ClassicRecipeIntervention)
+            else ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION
+        )
+        if receipt.family is not expected_family:
+            raise ValueError(f"classic receipt family does not match {intervention_id!r}")
+        if (
+            isinstance(intervention, LegacyOracleInstallIntervention)
+            and Digest.from_bytes(canonical_json(receipt)) != intervention.proof_receipt_digest
+        ):
+            raise ValueError(f"legacy proof receipt digest does not match {intervention_id!r}")
+        intervention_document = intervention_documents[intervention_id]
+        receipt_document = receipt_documents[intervention_id]
+        if (
+            receipt_document.target_id != intervention_document.target_id
+            or receipt_document.translation_unit_id != intervention_document.translation_unit_id
+        ):
+            raise ValueError(f"classic receipt target/TU does not match {intervention_id!r}")
 
 
 class SchemaCatalog(StrictModel):
@@ -1925,6 +2053,7 @@ def write_project_document_schemas(directory: str | Path) -> None:
 
 
 __all__ = [
+    "CLASSIC_RECIPE_FAMILIES_BY_ROLE",
     "AuthenticitySettings",
     "BinarySurgeryIntervention",
     "BinarySurgeryMethod",
@@ -1981,6 +2110,7 @@ __all__ = [
     "candidate_auxiliary_donor_ids",
     "classic_debug_companion_paths",
     "classic_function_donor_ids",
+    "classic_recipe_family_role",
     "intervention_authority_digest",
     "legacy_allowlist_digest",
     "project_document_schemas",

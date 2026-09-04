@@ -7,7 +7,9 @@ import math
 import os
 import sys
 from collections.abc import Callable
+from contextlib import redirect_stderr
 from importlib.metadata import PackageNotFoundError, version
+from io import StringIO
 from typing import TextIO
 
 from reprobit.backends import (
@@ -31,7 +33,6 @@ from reprobit.classic_repair_probe import (
 from reprobit.cli_build import (
     command_build,
     command_verify,
-    prepare_producer_graph_run,
 )
 from reprobit.cli_graph import (
     command_graph_configure,
@@ -53,6 +54,7 @@ from reprobit.cli_project import (
 from reprobit.cli_state import command_clean, command_state_status
 from reprobit.discovery_cli import command_discover, command_discover_clean
 from reprobit.model import AuthenticityPolicy
+from reprobit.progress import bounded_exception_notes, exception_detail
 from reprobit.repair_workflow import MAX_REPAIR_ADJUSTMENT_ROUNDS
 from reprobit.state import KeepWorkspace
 from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES
@@ -100,12 +102,7 @@ def _lazy_discover_grind(args: argparse.Namespace, output: CLIOutput) -> int:
 
     from reprobit.discovery_grind_cli import command_discover_grind
 
-    return command_discover_grind(
-        args,
-        output,
-        prepare_run=prepare_producer_graph_run,
-        verify_command=command_verify,
-    )
+    return command_discover_grind(args, output)
 
 
 def _lazy_discover_grind_init(args: argparse.Namespace, output: CLIOutput) -> int:
@@ -327,20 +324,9 @@ def _add_project_argument(
     command: argparse.ArgumentParser,
     *,
     help: str = "project directory (default: .)",
-    alias: bool = False,
 ) -> None:
-    """Add the positional project directory, optionally with a hidden --project alias.
+    """Add the consistent positional project directory used by project commands."""
 
-    ``--project`` was the spelling on toolchain lock, source export, graph
-    configure and graph extract; it stays accepted but undocumented. The
-    positional suppresses its own default so that a bare ``--project DIR``
-    is not overwritten by the positional's absent value.
-    """
-
-    if alias:
-        command.add_argument("--project", default=".", help=argparse.SUPPRESS)
-        command.add_argument("project", nargs="?", default=argparse.SUPPRESS, help=help)
-        return
     command.add_argument("project", nargs="?", default=".", help=help)
 
 
@@ -504,24 +490,35 @@ def _parser() -> argparse.ArgumentParser:
     setup.set_defaults(handler=_lazy_setup)
 
     doctor = _subcommand(
-        subcommands, "doctor", help="check whether the compiler can run correctly on this machine"
+        subcommands,
+        "doctor",
+        help="check this machine's backend and the selected compiler files",
     )
-    _add_project_argument(doctor)
+    doctor.add_argument(
+        "project",
+        nargs="?",
+        default=None,
+        help="project directory; omit it to check only this machine",
+    )
     _add_host_options(doctor, toolchain_root=False)
     doctor.add_argument(
         "--execute-probe",
         action="store_true",
-        help="also run the bounded compiler child-process test",
+        help="also run the bounded backend and isolation probe (including Wine when used)",
     )
     doctor.add_argument(
-        "--toolchain-profile",
+        "--profile",
+        dest="toolchain_profile",
         choices=tuple(TOOLCHAIN_PROFILES),
         help="compiler profile when checking an installation without a project",
     )
     doctor.add_argument(
         "--toolchain-root",
         metavar="DIRECTORY",
-        help="compiler installation to authenticate (default: check only the host backend)",
+        help=(
+            "compiler installation to authenticate (default: use the project's remembered "
+            "compiler when available)"
+        ),
     )
     doctor.set_defaults(handler=_lazy_doctor)
 
@@ -537,7 +534,7 @@ def _parser() -> argparse.ArgumentParser:
     provision.add_argument(
         "profile",
         nargs="?",
-        choices=tuple(TOOLCHAIN_PROFILES),
+        choices=(MSVC_42,),
         default=MSVC_42,
         help="compiler profile (default: msvc_4_2)",
     )
@@ -555,14 +552,15 @@ def _parser() -> argparse.ArgumentParser:
     lock = _subcommand(
         toolchain_commands, "lock", help="record the exact compiler files this project expects"
     )
-    _add_project_argument(lock, alias=True)
+    _add_project_argument(lock)
     lock.add_argument(
         "--profile",
         choices=tuple(TOOLCHAIN_PROFILES),
         help="compiler profile (default: read it from reprobit.toml)",
     )
     lock.add_argument(
-        "--root",
+        "--toolchain-root",
+        metavar="DIRECTORY",
         help="compiler installation override (normally remembered by rbit setup)",
     )
     lock.add_argument(
@@ -575,7 +573,10 @@ def _parser() -> argparse.ArgumentParser:
     lock.add_argument(
         "--output",
         metavar="PROJECT_RELATIVE_PATH",
-        help="lock-file path (default: read it from reprobit.toml)",
+        help=(
+            "lock-file path without reprobit.toml "
+            "(existing projects always use their configured path)"
+        ),
     )
     lock.set_defaults(handler=_lazy_toolchain_lock)
 
@@ -601,16 +602,13 @@ def _parser() -> argparse.ArgumentParser:
         "export",
         help="write the reviewed effective source view used by compilers and analysis tools",
     )
+    _add_project_argument(source_export)
     source_export.add_argument(
-        "destination",
-        nargs="?",
+        "--destination",
         default="build/reprobit-source",
-        help=(
-            "project-relative directory to create or safely refresh "
-            "(default: build/reprobit-source)"
-        ),
+        metavar="PROJECT_RELATIVE_DIRECTORY",
+        help="directory to create or refresh (default: build/reprobit-source)",
     )
-    _add_project_argument(source_export, alias=True)
     source_export.set_defaults(handler=command_source_export)
     source_lock = _subcommand(
         source_commands, "lock", help="safely record tracked or explicitly named source inputs"
@@ -661,7 +659,19 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="TARGET=CMAKE_TARGET",
-        help="map a ReproBit target when its CMake target has a different name",
+        help="map a ReproBit target during the first import (not used by --refresh)",
+    )
+    cmake_import.add_argument(
+        "--refresh",
+        action="store_true",
+        help="update the saved source list and CMake build records as one verified change",
+    )
+    cmake_import.add_argument(
+        "--path",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help="source file or directory selected by --refresh (repeatable; default: Git index)",
     )
     cmake_import.add_argument(
         "--keep-workspace",
@@ -673,30 +683,51 @@ def _parser() -> argparse.ArgumentParser:
     _add_host_options(cmake_import_advanced, backend=False, wine=False, transports=True)
     cmake_import_advanced.add_argument(
         "--cmake",
-        default="cmake",
+        default=None,
         metavar="PATH_OR_NAME",
         help="CMake executable (default: resolve cmake from PATH)",
     )
     cmake_import_advanced.add_argument(
         "--configuration",
-        default="RelWithDebInfo",
+        default=None,
         help="single-configuration CMake build type (default: RelWithDebInfo)",
+    )
+    cmake_define_choice = cmake_import_advanced.add_mutually_exclusive_group()
+    cmake_define_choice.add_argument(
+        "--cmake-define",
+        action="append",
+        default=None,
+        metavar="NAME=VALUE",
+        help="set one CMake cache value (repeatable)",
+    )
+    cmake_define_choice.add_argument(
+        "--clear-cmake-defines",
+        action="store_true",
+        help="replace saved CMake cache values with an empty list during --refresh",
     )
     cmake_import_advanced.add_argument(
         "--timeout",
         type=_positive_seconds,
-        default=600.0,
+        default=None,
         metavar="SECONDS",
         help="bounded configure deadline (default: 600)",
     )
-    cmake_import_advanced.add_argument(
+    directive_input_choice = cmake_import_advanced.add_mutually_exclusive_group()
+    directive_input_choice.add_argument(
         "--directive-input",
         action="append",
-        default=[],
+        default=None,
         metavar="TARGET=LIBRARY",
         help="record one prelink-discovered default library edge (repeatable)",
     )
-    cmake_import.set_defaults(handler=_lazy_cmake_import)
+    directive_input_choice.add_argument(
+        "--clear-directive-inputs",
+        action="store_true",
+        help="replace saved default-library edges with an empty list during --refresh",
+    )
+    # A refresh performs one private cold verification. ``main`` fills this
+    # internal execution default without adding an initial-import-only flag.
+    cmake_import.set_defaults(handler=_lazy_cmake_import, jobs=None)
 
     graph = _subcommand(
         subcommands, "graph", help="record the compiler and linker steps used by direct builds"
@@ -707,7 +738,7 @@ def _parser() -> argparse.ArgumentParser:
         "configure",
         help="create a fresh CMake metadata tree without building",
     )
-    _add_project_argument(graph_configure, alias=True)
+    _add_project_argument(graph_configure)
     graph_configure.add_argument(
         "--workspace-root",
         required=True,
@@ -744,6 +775,13 @@ def _parser() -> argparse.ArgumentParser:
         help="single-configuration CMake build type (default: RelWithDebInfo)",
     )
     graph_configure.add_argument(
+        "--cmake-define",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="set one CMake cache value (repeatable)",
+    )
+    graph_configure.add_argument(
         "--timeout",
         type=_positive_seconds,
         default=600.0,
@@ -756,7 +794,7 @@ def _parser() -> argparse.ArgumentParser:
         "extract",
         help="record direct compiler and linker steps from that CMake tree",
     )
-    _add_project_argument(graph_extract, alias=True)
+    _add_project_argument(graph_extract)
     graph_extract.add_argument(
         "--configured-build-root",
         required=True,
@@ -784,6 +822,31 @@ def _parser() -> argparse.ArgumentParser:
     graph_extract.add_argument(
         "--target-plan",
         help="path beneath the configured build (defaults to reprobit-target-plan.json)",
+    )
+    graph_extract.add_argument(
+        "--configuration",
+        default="RelWithDebInfo",
+        help="configuration used by the matching graph configure run",
+    )
+    graph_extract.add_argument(
+        "--cmake",
+        default="cmake",
+        metavar="PATH_OR_NAME",
+        help="CMake executable used by the matching graph configure run",
+    )
+    graph_extract.add_argument(
+        "--timeout",
+        type=_positive_seconds,
+        default=600.0,
+        metavar="SECONDS",
+        help="configure deadline used by the matching graph configure run",
+    )
+    graph_extract.add_argument(
+        "--cmake-define",
+        action="append",
+        default=[],
+        metavar="NAME=VALUE",
+        help="CMake cache value used by the matching graph configure run (repeatable)",
     )
     graph_extract.add_argument(
         "--directive-input",
@@ -837,10 +900,7 @@ def _parser() -> argparse.ArgumentParser:
     cache_cleanup.add_argument(
         "--cache",
         action="store_true",
-        help=(
-            "also remove incremental cache data selected by age and the complete repair "
-            "search cache"
-        ),
+        help="also remove incremental and repair-search cache data selected by age",
     )
     cache_cleanup.add_argument(
         "--obsolete-cache",
@@ -913,7 +973,7 @@ def _parser() -> argparse.ArgumentParser:
         ),
     )
     search.add_argument(
-        "--donor-candidates",
+        "--candidate-limit",
         type=int,
         default=None,
         metavar="COUNT",
@@ -1098,10 +1158,8 @@ def _parser() -> argparse.ArgumentParser:
             "project, use rbit repair instead."
         ),
     )
-    discover_grind.add_argument(
-        "project",
-        nargs="?",
-        default=".",
+    _add_project_argument(
+        discover_grind,
         help="ReproBit project to search (default: .)",
     )
     grind_acceptance = discover_grind.add_mutually_exclusive_group()
@@ -1173,6 +1231,30 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _requested_format(argv: list[str]) -> str:
+    """Read the last explicit format without asking argparse to accept the command."""
+
+    selected = "text"
+    for index, value in enumerate(argv):
+        if value.startswith("--format="):
+            selected = value.partition("=")[2]
+        elif value == "--format" and index + 1 < len(argv):
+            selected = argv[index + 1]
+    return selected
+
+
+def _argument_error_message(rendered: str) -> str:
+    """Extract argparse's useful final detail without duplicating its usage block."""
+
+    lines = tuple(line.strip() for line in rendered.splitlines() if line.strip())
+    if lines:
+        marker = ": error: "
+        if marker in lines[-1]:
+            return "error: " + lines[-1].partition(marker)[2]
+        return f"error: {lines[-1]}"
+    return "error: invalid command arguments"
+
+
 def _silence_broken_pipe(stream: TextIO) -> None:
     """Redirect a closed standard stream so interpreter shutdown stays quiet."""
 
@@ -1192,7 +1274,27 @@ def _silence_broken_pipe(stream: TextIO) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = _parser().parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    parser = _parser()
+    if _requested_format(arguments) == "ndjson":
+        captured = StringIO()
+        try:
+            with redirect_stderr(captured):
+                args = parser.parse_args(arguments)
+        except SystemExit as stopped:
+            if stopped.code in (None, 0):
+                raise
+            output = CLIOutput("ndjson", sys.stdout, sys.stderr)
+            output.emit(
+                "error",
+                _argument_error_message(captured.getvalue()),
+                error_type="ArgumentError",
+                exit_code=2,
+                diagnostic=True,
+            )
+            return 2
+    else:
+        args = parser.parse_args(arguments)
     output = CLIOutput(args.format, sys.stdout, sys.stderr, quiet=args.quiet)
     handler: Handler = args.handler
     if hasattr(args, "jobs") and args.jobs is None:
@@ -1202,6 +1304,7 @@ def main(argv: list[str] | None = None) -> int:
             "error",
             "error: --jobs must be at least one",
             error_type="CLIError",
+            exit_code=2,
             diagnostic=True,
         )
         return 2
@@ -1229,13 +1332,26 @@ def main(argv: list[str] | None = None) -> int:
             message = f"error: cannot read {error.filename}: {error.strerror or error}"
         else:
             message = f"error: {error}"
-        output.emit("error", message, error_type=type(error).__name__, diagnostic=True)
-        return 2
-    except Exception as error:
+        notes = bounded_exception_notes(error)
+        if notes:
+            message += "\n" + "\n".join(f"Note: {note}" for note in notes)
         output.emit(
             "error",
-            f"error: {error}",
+            message,
             error_type=type(error).__name__,
+            exit_code=2,
+            notes=notes,
+            diagnostic=True,
+        )
+        return 2
+    except Exception as error:
+        notes = bounded_exception_notes(error)
+        output.emit(
+            "error",
+            f"error: {exception_detail(error)}",
+            error_type=type(error).__name__,
+            exit_code=2,
+            notes=notes,
             diagnostic=True,
         )
         return 2

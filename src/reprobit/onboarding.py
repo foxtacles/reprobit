@@ -9,16 +9,31 @@ from reprobit.backends import (
     ExecutionBackend,
 )
 from reprobit.cli_environment import selected_backend
-from reprobit.cli_output import CLIOutput, human_command
-from reprobit.cli_paths import CLIError, project_root, relative_output, safe_project_path
+from reprobit.cli_output import CLIOutput, NextStep, human_command, next_step_fields
+from reprobit.cli_paths import (
+    CLIError,
+    paths_overlap,
+    project_root,
+    protected_project_paths,
+    relative_output,
+    safe_project_path,
+)
 from reprobit.msvc42_provision import provision_msvc42, verify_msvc42
 from reprobit.project_loader import load_project
 from reprobit.project_readiness import inspect_project_readiness, render_project_readiness
+from reprobit.schema import SourceManifestDocument
 from reprobit.schema import ToolchainLock as SchemaToolchainLock
 from reprobit.strict_json import canonical_json, strict_load
-from reprobit.toolchains import MSVC_42, ClassicMSVCToolchain, validate_toolchain_lock
+from reprobit.toolchains import (
+    MSVC_42,
+    ClassicMSVCToolchain,
+    ToolchainDoctorReport,
+    ToolchainError,
+    validate_toolchain_lock,
+)
 from reprobit.transactions import CASTransaction
 from reprobit.user_config import (
+    UserConfigError,
     default_toolchain_root,
     resolve_toolchain_root,
     save_toolchain_root,
@@ -66,13 +81,14 @@ def command_toolchain_provision(args: argparse.Namespace, output: CLIOutput) -> 
     )
     if not args.no_save:
         save_toolchain_root(args.profile, installed)
+    next_step = NextStep(("rbit", "setup", "."))
     output.emit(
         "toolchain_provisioned",
-        f"Compiler ready at {installed}\nNext in a ReproBit project: rbit setup .",
+        f"Compiler ready at {installed}\nNext in a ReproBit project: {next_step.command}",
         profile=args.profile,
         root=installed,
         saved=not args.no_save,
-        next_command="rbit setup .",
+        **next_step.fields(),
     )
     return 0
 
@@ -120,8 +136,38 @@ def _backend_failures(backend: ExecutionBackend, *, execute_probe: bool) -> tupl
     )
 
 
+def _emit_toolchain_report(output: CLIOutput, report: ToolchainDoctorReport) -> None:
+    for check in report.checks:
+        output.emit(
+            "doctor_check",
+            f"{'ok' if check.passed else 'FAIL'} toolchain/{check.path}: {check.detail}",
+            component="toolchain",
+            name=check.path,
+            passed=check.passed,
+            detail=check.detail,
+        )
+
+
+def _emit_doctor_failure(
+    output: CLIOutput,
+    *,
+    component: str,
+    name: str,
+    detail: str,
+) -> None:
+    output.emit(
+        "doctor_check",
+        f"FAIL {component}/{name}: {detail}",
+        component=component,
+        name=name,
+        passed=False,
+        required=True,
+        detail=detail,
+    )
+
+
 def command_doctor(args: argparse.Namespace, output: CLIOutput) -> int:
-    """Check the selected execution backend and optional compiler installation."""
+    """Check the selected backend and the compiler selected for this project."""
 
     backend = selected_backend(args)
     report = backend.doctor(execute_probe=args.execute_probe)
@@ -137,8 +183,13 @@ def command_doctor(args: argparse.Namespace, output: CLIOutput) -> int:
             required=backend_check.required,
             detail=backend_check.detail,
         )
-    project = Path(args.project).expanduser().resolve(strict=False)
-    if (project / "reprobit.toml").is_file():
+    project = (
+        Path(args.project).expanduser().resolve(strict=False) if args.project is not None else None
+    )
+    if project is not None:
+        entrypoint = project / "reprobit.toml"
+        if entrypoint.is_symlink() or not entrypoint.is_file():
+            raise CLIError(f"no ReproBit project found at {entrypoint}")
         spec = load_project(project)
         if args.toolchain_profile is not None and args.toolchain_profile != spec.toolchain.profile:
             raise CLIError(
@@ -152,51 +203,90 @@ def command_doctor(args: argparse.Namespace, output: CLIOutput) -> int:
             name="schema",
             passed=True,
         )
-        if args.toolchain_root is not None:
+        try:
+            selected_root = resolve_toolchain_root(
+                spec.toolchain.profile,
+                args.toolchain_root,
+            )
+        except (OSError, UserConfigError) as error:
+            _emit_doctor_failure(
+                output,
+                component="toolchain",
+                name="root",
+                detail=str(error),
+            )
+            okay = False
+        else:
             installation = ClassicMSVCToolchain(
                 spec.toolchain.profile,
-                Path(args.toolchain_root).expanduser().resolve(strict=True),
+                selected_root,
             )
-            lock_document = None
             lock_path = safe_project_path(project, spec.toolchain.lock_file)
-            if lock_path.is_file():
-                lock_document = SchemaToolchainLock.model_validate_json(
-                    canonical_json(strict_load(lock_path))
+            if lock_path.is_symlink() or not lock_path.is_file():
+                _emit_doctor_failure(
+                    output,
+                    component="project",
+                    name="toolchain-lock",
+                    detail=f"saved compiler lock is missing: {lock_path}",
                 )
-            tool_report = installation.doctor(lock_document)
-            okay = okay and tool_report.ok
-            for tool_check in tool_report.checks:
-                output.emit(
-                    "doctor_check",
-                    f"{'ok' if tool_check.passed else 'FAIL'} "
-                    f"toolchain/{tool_check.path}: {tool_check.detail}",
-                    component="toolchain",
-                    name=tool_check.path,
-                    passed=tool_check.passed,
-                    detail=tool_check.detail,
-                )
-    elif args.toolchain_root is not None:
+                okay = False
+            else:
+                try:
+                    lock_document = _load_toolchain_lock(lock_path)
+                except (OSError, ToolchainError, ValueError) as error:
+                    _emit_doctor_failure(
+                        output,
+                        component="project",
+                        name="toolchain-lock",
+                        detail=f"saved compiler lock is invalid: {error}",
+                    )
+                    okay = False
+                else:
+                    try:
+                        tool_report = installation.doctor(lock_document)
+                    except (OSError, ToolchainError) as error:
+                        _emit_doctor_failure(
+                            output,
+                            component="toolchain",
+                            name="root",
+                            detail=f"compiler could not be checked: {error}",
+                        )
+                        okay = False
+                    else:
+                        okay = okay and tool_report.ok
+                        _emit_toolchain_report(output, tool_report)
+    elif args.toolchain_profile is not None or args.toolchain_root is not None:
         if args.toolchain_profile is None:
-            raise CLIError("--toolchain-root requires --toolchain-profile without a project")
-        installation = ClassicMSVCToolchain(
-            args.toolchain_profile,
-            Path(args.toolchain_root).expanduser().resolve(strict=True),
-        )
-        tool_report = installation.doctor()
-        okay = okay and tool_report.ok
-        for tool_check in tool_report.checks:
-            output.emit(
-                "doctor_check",
-                f"{'ok' if tool_check.passed else 'FAIL'} "
-                f"toolchain/{tool_check.path}: {tool_check.detail}",
-                component="toolchain",
-                name=tool_check.path,
-                passed=tool_check.passed,
-                detail=tool_check.detail,
+            raise CLIError("--toolchain-root requires --profile without a project")
+        try:
+            selected_root = resolve_toolchain_root(
+                args.toolchain_profile,
+                args.toolchain_root,
             )
+            installation = ClassicMSVCToolchain(args.toolchain_profile, selected_root)
+            tool_report = installation.doctor()
+        except (OSError, ToolchainError, UserConfigError) as error:
+            _emit_doctor_failure(
+                output,
+                component="toolchain",
+                name="root",
+                detail=f"compiler could not be checked: {error}",
+            )
+            okay = False
+        else:
+            okay = okay and tool_report.ok
+            _emit_toolchain_report(output, tool_report)
+    if project is None and args.toolchain_profile is None and args.toolchain_root is None:
+        message = (
+            "host checks passed; no project compiler was checked"
+            if okay
+            else "host checks failed; no project compiler was checked"
+        )
+    else:
+        message = "doctor checks passed" if okay else "doctor checks failed"
     output.emit(
         "doctor_result",
-        "doctor checks passed" if okay else "doctor checks failed",
+        message,
         passed=okay,
         backend=backend.identifier,
         executed_probe=report.executed_probe,
@@ -215,7 +305,7 @@ def command_toolchain_lock(args: argparse.Namespace, output: CLIOutput) -> int:
         raise CLIError("toolchain profile is required without reprobit.toml")
     installation = ClassicMSVCToolchain(
         identifier,
-        resolve_toolchain_root(identifier, args.root),
+        resolve_toolchain_root(identifier, args.toolchain_root),
     )
     with output.activity("checking compiler files, headers, and libraries"):
         document = installation.create_lock(
@@ -226,7 +316,38 @@ def command_toolchain_lock(args: argparse.Namespace, output: CLIOutput) -> int:
     default_output = (
         spec.toolchain.lock_file if spec is not None else "reprobit/toolchain.lock.json"
     )
-    relative = relative_output(root, args.output or default_output)
+    if spec is not None:
+        configured_output = relative_output(root, default_output)
+        if args.output is not None and relative_output(root, args.output) != configured_output:
+            raise CLIError(
+                "--output cannot change an existing project's configured compiler lock path"
+            )
+        relative = configured_output
+    else:
+        relative = relative_output(root, args.output or default_output)
+    absolute_output = root / relative
+    if spec is not None:
+        source_paths: tuple[str, ...] = ()
+        source_manifest_path = safe_project_path(root, spec.layout.source_manifest)
+        if source_manifest_path.is_file():
+            try:
+                source_manifest = SourceManifestDocument.model_validate_json(
+                    canonical_json(strict_load(source_manifest_path))
+                )
+            except (OSError, ValueError) as error:
+                raise CLIError(
+                    f"cannot validate existing source manifest: {source_manifest_path}"
+                ) from error
+            source_paths = tuple(entry.path for entry in source_manifest.entries)
+        for label, protected in protected_project_paths(
+            root,
+            spec,
+            source_paths=source_paths,
+        ):
+            if label == "compiler lock":
+                continue
+            if paths_overlap(absolute_output, protected):
+                raise CLIError(f"compiler lock output overlaps {label}: {protected}")
     transaction = CASTransaction(root)
     transaction.write(relative, data)
     result = transaction.commit()
@@ -299,6 +420,7 @@ def command_setup(args: argparse.Namespace, output: CLIOutput) -> int:
         root,
         check_local_environment=True,
         local_toolchain_root=selected_root,
+        prior_toolchain_report=toolchain_report,
     )
     lines = [
         (
@@ -330,11 +452,12 @@ def command_setup(args: argparse.Namespace, output: CLIOutput) -> int:
                 "ready": item.ready,
                 "detail": item.detail,
                 "next_command": item.next_command,
+                "next_argv": item.next_argv,
             }
             for item in readiness.items
         ],
-        next_command=readiness.next_command,
-        next_step=readiness.next_step,
+        next_instruction=readiness.next_instruction,
+        **next_step_fields(readiness.next),
     )
     return 0 if not failures else 1
 

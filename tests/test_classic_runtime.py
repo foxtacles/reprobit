@@ -5985,6 +5985,106 @@ def test_repair_donor_probe_isolates_candidate_failure_and_stops_before_later_wi
     assert executor.producer._runtime_open is False
 
 
+@pytest.mark.parametrize("with_overlay", [False, True])
+def test_repair_donor_probe_runtime_supports_multiple_owned_waves(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    with_overlay: bool,
+) -> None:
+    executor, pool, _unit, empty_snapshot, source = _donor_probe_executor(
+        tmp_path,
+        donors=(("donor.first", b"first\n"), ("donor.second", b"second\n")),
+        jobs=1,
+    )
+    overlay_materializations = 0
+
+    def materialize(source_seal: object) -> tuple[object, object]:
+        nonlocal overlay_materializations
+        overlay_materializations += 1
+        return object(), source_seal
+
+    executor.overlay = SimpleNamespace(
+        overlay_witnesses=((object(),) if with_overlay else ()),
+        generated_translation_units=frozenset(),
+        materialize_certified_project_overlay_epoch=materialize,
+    )
+    tree_seals = 0
+    real_tree_file_seal = classic_repair_probe_execution._tree_file_seal
+
+    def tree_file_seal(root: Path) -> Mapping[Path, tuple[int, Digest]]:
+        nonlocal tree_seals
+        tree_seals += 1
+        return real_tree_file_seal(root)
+
+    monkeypatch.setattr(classic_repair_probe_execution, "_tree_file_seal", tree_file_seal)
+    source_seal = classic_repair_probe_execution.prepare_donor_probe_source_epoch(executor)
+    namespace_ids: list[str] = []
+    executor.producer.capture_compiler_namespace = (  # type: ignore[method-assign]
+        lambda namespace_id, **_kwargs: (
+            namespace_ids.append(namespace_id)
+            or SimpleNamespace(evidence=SimpleNamespace(namespace_id=namespace_id))
+        )
+    )
+
+    def invoke(
+        supervisor: ProcessSupervisor,
+        unit_arg: SimpleNamespace,
+        donor_index: int,
+        cancellation: CancellationToken,
+        *,
+        step_id: str,
+        compiler_epoch: classic_execution_records.ClassicActiveCompilerEpoch,
+    ) -> classic_runtime_donor._DonorCompilerInvocation:
+        del supervisor, cancellation, compiler_epoch
+        donor_id = unit_arg.donors[donor_index].intervention.id
+        record = classic_runtime_graph.ClassicCompileRecord(
+            "compiler.program.0000",
+            tmp_path,
+            source,
+            tmp_path / "unit.obj",
+            tmp_path / "unit.pdb",
+            ("cl",),
+            "program",
+        )
+        return classic_runtime_donor._DonorCompilerInvocation(
+            record,
+            tmp_path / "donor.obj",
+            tmp_path / "donor.pdb",
+            f"object:{donor_id}".encode(),
+            f"pdb:{donor_id}".encode(),
+            ProcessResult(("cl",), 0, b"ok", 1, 0.01),
+            CommandSpec.create(("cl",), cwd=tmp_path, timeout_seconds=1),
+            empty_snapshot,
+            step_id,
+        )
+
+    executor.donors = SimpleNamespace(
+        invoke_donor_compiler=invoke,
+        release_probe_invocation=lambda _invocation: None,
+    )
+    for ordinal, donor_id in enumerate(("donor.first", "donor.second"), start=1):
+        completed = classic_repair_probe_execution.probe_donor_compile_windows(
+            executor,
+            executor.units,
+            ((donor_id,),),
+            evaluate=lambda _outcomes: False,
+            planned_candidates=1,
+            close_runtime=False,
+            materialize_source_epoch=False,
+            source_seal=source_seal,
+            namespace_id=f"repair-wave-{ordinal}",
+        )
+        assert completed == (donor_id,)
+        assert executor.producer.is_open
+        assert not pool.closed
+
+    executor.close()
+    assert namespace_ids == ["repair-wave-1", "repair-wave-2"]
+    assert tree_seals == 1
+    assert overlay_materializations == int(with_overlay)
+    assert pool.closed
+
+
 def test_probe_invocation_release_removes_only_its_exact_candidate_arena(
     tmp_path: Path,
 ) -> None:

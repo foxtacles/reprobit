@@ -12,6 +12,7 @@ import pytest
 
 import reprobit.cache as cache_module
 import reprobit.secure_paths as secure_paths
+import reprobit.secure_paths_posix as secure_paths_posix
 from reprobit.cache import (
     CacheError,
     CachePoisonError,
@@ -29,117 +30,132 @@ def _key(value: str, *, implementation: str = "test-implementation-v1") -> str:
     )
 
 
-def _hold_posix_unlink_until_competing_observation(
+def _race_posix_noreplace_publications(
     monkeypatch: pytest.MonkeyPatch,
     *,
     matches_name: Callable[[str], bool],
+    cross_parent: bool = False,
     observation: Literal["read", "stat"] = "read",
 ) -> tuple[threading.Event, threading.Event, threading.Event]:
-    unlink_started = threading.Event()
+    rename_started = threading.Event()
     observation_started = threading.Event()
-    unlink_finished = threading.Event()
+    winner_published = threading.Event()
     publication_identity: tuple[int, int] | None = None
-    original_unlink = secure_paths.os.unlink
+    call_lock = threading.Lock()
+    matching_calls = 0
     original_read = secure_paths.os.read
     original_fstat = secure_paths.os.fstat
 
-    def unlink_after_competing_read_opens(
-        path: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        *,
-        dir_fd: int | None = None,
+    def commit(
+        destination_parent: int,
+        destination: str,
+        operation: Callable[[], None],
     ) -> None:
-        nonlocal publication_identity
-        name = os.fsdecode(path)
-        candidate = (
-            os.stat(path, dir_fd=dir_fd, follow_symlinks=False)
-            if dir_fd is not None and matches_name(name)
-            else None
-        )
-        if not unlink_started.is_set() and candidate is not None and candidate.st_nlink == 2:
-            publication_identity = (candidate.st_dev, candidate.st_ino)
-            unlink_started.set()
-            if not observation_started.wait(timeout=5):
-                raise RuntimeError("competing cache validation did not begin")
-            try:
-                original_unlink(path, dir_fd=dir_fd)
-            finally:
-                unlink_finished.set()
+        nonlocal matching_calls, publication_identity
+        if not matches_name(destination):
+            operation()
             return
-        if dir_fd is None:
-            original_unlink(path)
-        else:
-            original_unlink(path, dir_fd=dir_fd)
+        with call_lock:
+            matching_calls += 1
+            leader = matching_calls == 1
+        if leader:
+            rename_started.set()
+            if not winner_published.wait(timeout=5):
+                raise RuntimeError("competing cache publication did not commit")
+            operation()
+            return
+        try:
+            operation()
+            metadata = os.stat(
+                destination,
+                dir_fd=destination_parent,
+                follow_symlinks=False,
+            )
+            publication_identity = (metadata.st_dev, metadata.st_ino)
+        finally:
+            winner_published.set()
 
-    def read_after_staging_unlink(fd: int, size: int) -> bytes:
-        metadata = original_fstat(fd)
-        identity = (metadata.st_dev, metadata.st_ino)
-        if (
-            observation == "read"
-            and unlink_started.is_set()
-            and not unlink_finished.is_set()
-            and identity == publication_identity
-        ):
+    if cross_parent:
+        original_rename_between = secure_paths_posix._rename_noreplace_between
+
+        def race_between(
+            source_parent: int,
+            source: str,
+            destination_parent: int,
+            destination: str,
+        ) -> None:
+            commit(
+                destination_parent,
+                destination,
+                lambda: original_rename_between(
+                    source_parent,
+                    source,
+                    destination_parent,
+                    destination,
+                ),
+            )
+
+        monkeypatch.setattr(
+            secure_paths_posix,
+            "_rename_noreplace_between",
+            race_between,
+        )
+    else:
+        original_rename_at = secure_paths_posix._rename_noreplace_at
+
+        def race_at(parent: int, source: str, destination: str) -> None:
+            commit(
+                parent,
+                destination,
+                lambda: original_rename_at(parent, source, destination),
+            )
+
+        monkeypatch.setattr(secure_paths_posix, "_rename_noreplace_at", race_at)
+
+    def observe(metadata: os.stat_result) -> None:
+        if winner_published.is_set() and publication_identity == (metadata.st_dev, metadata.st_ino):
             observation_started.set()
-            if not unlink_finished.wait(timeout=5):
-                raise RuntimeError("winning cache publication did not settle")
+
+    def read_after_competing_publish(fd: int, size: int) -> bytes:
+        if observation == "read":
+            observe(original_fstat(fd))
         return original_read(fd, size)
 
-    def stat_across_staging_unlink(fd: int) -> os.stat_result:
+    def stat_after_competing_publish(fd: int) -> os.stat_result:
         metadata = original_fstat(fd)
-        identity = (metadata.st_dev, metadata.st_ino)
-        if (
-            observation == "stat"
-            and unlink_started.is_set()
-            and not unlink_finished.is_set()
-            and identity == publication_identity
-        ):
-            observation_started.set()
-            if not unlink_finished.wait(timeout=5):
-                raise RuntimeError("winning cache publication did not settle")
-            # Return the deliberately stale pre-unlink metadata once.  The
-            # named entry now has a newer ctime, forcing the strict probe to
-            # reject this observation and exercise its bounded retry.
+        if observation == "stat":
+            observe(metadata)
         return metadata
 
-    monkeypatch.setattr(secure_paths.os, "unlink", unlink_after_competing_read_opens)
     if observation == "read":
-        monkeypatch.setattr(secure_paths.os, "read", read_after_staging_unlink)
+        monkeypatch.setattr(secure_paths.os, "read", read_after_competing_publish)
     else:
-        monkeypatch.setattr(secure_paths.os, "fstat", stat_across_staging_unlink)
-    return unlink_started, observation_started, unlink_finished
+        monkeypatch.setattr(secure_paths.os, "fstat", stat_after_competing_publish)
+    return rename_started, observation_started, winner_published
 
 
-def _pause_posix_publication_before_link(
+def _pause_posix_publication_before_rename(
     monkeypatch: pytest.MonkeyPatch,
     *,
     matches_name: Callable[[str], bool],
 ) -> tuple[threading.Event, threading.Event]:
-    link_started = threading.Event()
-    release_link = threading.Event()
-    original_link = secure_paths.os.link
+    rename_started = threading.Event()
+    release_rename = threading.Event()
+    original_rename = secure_paths_posix._rename_noreplace_at
 
-    def pause_matching_link(
-        source: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        destination: str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        *,
-        src_dir_fd: int | None = None,
-        dst_dir_fd: int | None = None,
-        follow_symlinks: bool = True,
-    ) -> None:
-        if not link_started.is_set() and matches_name(os.fsdecode(source)):
-            link_started.set()
-            if not release_link.wait(timeout=5):
+    def pause_matching_rename(parent: int, source: str, destination: str) -> None:
+        if not rename_started.is_set() and matches_name(source):
+            rename_started.set()
+            if not release_rename.wait(timeout=5):
                 raise RuntimeError("paused cache publication was not released")
-        original_link(
-            source,
-            destination,
-            src_dir_fd=src_dir_fd,
-            dst_dir_fd=dst_dir_fd,
-            follow_symlinks=follow_symlinks,
-        )
+        original_rename(parent, source, destination)
 
-    monkeypatch.setattr(secure_paths.os, "link", pause_matching_link)
-    return link_started, release_link
+    monkeypatch.setattr(
+        secure_paths_posix,
+        "_rename_noreplace_at",
+        pause_matching_rename,
+    )
+    return rename_started, release_rename
 
 
 def _store_concurrently(
@@ -577,9 +593,9 @@ def test_concurrent_publishers_converge_on_one_immutable_record(
     assert cache.status().blobs == 1
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication regression")
+@pytest.mark.skipif(os.name != "posix", reason="POSIX no-clobber publication regression")
 @pytest.mark.parametrize("observation", ("read", "stat"))
-def test_concurrent_blob_validation_waits_for_posix_link_settlement(
+def test_concurrent_blob_publishers_validate_the_posix_noreplace_winner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     observation: Literal["read", "stat"],
@@ -590,54 +606,18 @@ def test_concurrent_blob_validation_waits_for_posix_link_settlement(
     source.write_bytes(b"stable")
     cache = IncrementalCache(state, implementation="test-implementation-v1")
     key = _key("a")
-    original_promote = cache_module.promote_relative_new
-    unlink_started, validation_started, unlink_finished = (
-        _hold_posix_unlink_until_competing_observation(
-            monkeypatch,
-            matches_name=lambda name: (
-                len(name) == 32 and all(character in "0123456789abcdef" for character in name)
-            ),
-            observation=observation,
-        )
+    rename_started, validation_started, winner_published = _race_posix_noreplace_publications(
+        monkeypatch,
+        matches_name=lambda name: (
+            len(name) == 64 and all(character in "0123456789abcdef" for character in name)
+        ),
+        cross_parent=True,
+        observation=observation,
     )
-    promotion_lock = threading.Lock()
-    follower_ready = threading.Event()
-    promotion_calls = 0
-
-    def promote_together(
-        root: Path,
-        source_relative: str,
-        destination_relative: str,
-        *,
-        expected: secure_paths.SecureFileSnapshot,
-    ) -> secure_paths.SecureFileSnapshot:
-        nonlocal promotion_calls
-        with promotion_lock:
-            promotion_calls += 1
-            leader = promotion_calls == 1
-        if leader:
-            if not follower_ready.wait(timeout=5):
-                raise RuntimeError("competing cache promotion did not begin")
-        else:
-            follower_ready.set()
-            if not unlink_started.wait(timeout=5):
-                raise RuntimeError("winning cache publication did not link")
-        return original_promote(
-            root,
-            source_relative,
-            destination_relative,
-            expected=expected,
-        )
-
-    # Give one publisher a deterministic head start, then release the losing
-    # publisher only while the winner's staging unlink is paused.  A barrier
-    # alone still allowed the loser to validate the tiny blob before that
-    # pause on fast runners, which made this race regression itself flaky.
-    monkeypatch.setattr(cache_module, "promote_relative_new", promote_together)
     records, errors = _store_concurrently(cache, key, source)
-    assert unlink_started.is_set()
+    assert rename_started.is_set()
     assert validation_started.is_set()
-    assert unlink_finished.is_set()
+    assert winner_published.is_set()
     assert not errors
     assert len(records) == 2
     assert records[0] == records[1]
@@ -645,17 +625,17 @@ def test_concurrent_blob_validation_waits_for_posix_link_settlement(
     assert cache.status().blobs == 1
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication regression")
-def test_concurrent_immutable_publication_waits_for_posix_link_settlement(
+@pytest.mark.skipif(os.name != "posix", reason="POSIX no-clobber publication regression")
+def test_concurrent_immutable_publication_validates_the_posix_noreplace_winner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     target = tmp_path / "marker"
     payload = b"immutable marker\n"
     barrier = threading.Barrier(2)
-    unlink_started, read_started, unlink_finished = _hold_posix_unlink_until_competing_observation(
+    rename_started, read_started, winner_published = _race_posix_noreplace_publications(
         monkeypatch,
-        matches_name=lambda name: name.startswith(".marker.reprobit-"),
+        matches_name=lambda name: name == "marker",
     )
     errors: list[BaseException] = []
 
@@ -673,9 +653,9 @@ def test_concurrent_immutable_publication_waits_for_posix_link_settlement(
         thread.join(timeout=10)
 
     assert all(not thread.is_alive() for thread in threads)
-    assert unlink_started.is_set()
+    assert rename_started.is_set()
     assert read_started.is_set()
-    assert unlink_finished.is_set()
+    assert winner_published.is_set()
     assert not errors
     assert target.read_bytes() == payload
 
@@ -703,8 +683,8 @@ def test_layout_validation_retries_one_immutable_settlement_failure(
     assert not transient
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication regression")
-def test_concurrent_record_lookup_waits_for_posix_link_settlement(
+@pytest.mark.skipif(os.name != "posix", reason="POSIX no-clobber publication regression")
+def test_concurrent_record_publishers_validate_the_posix_noreplace_winner(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -714,20 +694,20 @@ def test_concurrent_record_lookup_waits_for_posix_link_settlement(
     source.write_bytes(b"stable")
     cache = IncrementalCache(state, implementation="test-implementation-v1")
     key = _key("a")
-    unlink_started, read_started, unlink_finished = _hold_posix_unlink_until_competing_observation(
+    rename_started, read_started, winner_published = _race_posix_noreplace_publications(
         monkeypatch,
-        matches_name=lambda name: name.startswith(f".{key}.json.reprobit-"),
+        matches_name=lambda name: name == f"{key}.json",
     )
     records, errors = _store_concurrently(cache, key, source)
-    assert unlink_started.is_set()
+    assert rename_started.is_set()
     assert read_started.is_set()
-    assert unlink_finished.is_set()
+    assert winner_published.is_set()
     assert not errors
     assert len(records) == 2
     assert records[0] == records[1]
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication regression")
+@pytest.mark.skipif(os.name != "posix", reason="POSIX no-clobber publication regression")
 def test_record_snapshot_ignores_owned_in_flight_publication_temp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -740,7 +720,7 @@ def test_record_snapshot_ignores_owned_in_flight_publication_temp(
     key = _key("a")
     with cache.lease() as lease:
         record = lease.stage_record("producer", key, {"build/a.obj": source})
-    link_started, release_link = _pause_posix_publication_before_link(
+    rename_started, release_rename = _pause_posix_publication_before_rename(
         monkeypatch,
         matches_name=lambda name: name.startswith(f".{key}.json.reprobit-"),
     )
@@ -755,10 +735,10 @@ def test_record_snapshot_ignores_owned_in_flight_publication_temp(
 
     thread = threading.Thread(target=publish)
     thread.start()
-    assert link_started.wait(timeout=5)
+    assert rename_started.wait(timeout=5)
     with cache.lease() as lease:
         assert lease.records("producer") == ()
-    release_link.set()
+    release_rename.set()
     thread.join(timeout=10)
 
     assert not thread.is_alive()
@@ -767,7 +747,7 @@ def test_record_snapshot_ignores_owned_in_flight_publication_temp(
         assert lease.records("producer") == (record,)
 
 
-@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication regression")
+@pytest.mark.skipif(os.name != "posix", reason="POSIX no-clobber publication regression")
 def test_status_ignores_owned_in_flight_lease_temp(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -775,7 +755,7 @@ def test_status_ignores_owned_in_flight_lease_temp(
     state = tmp_path / "state"
     state.mkdir()
     cache = IncrementalCache(state, implementation="test-implementation-v1")
-    link_started, release_link = _pause_posix_publication_before_link(
+    rename_started, release_rename = _pause_posix_publication_before_rename(
         monkeypatch,
         matches_name=lambda name: bool(
             re.fullmatch(r"\.[0-9a-f]{32}\.lease\.reprobit-[0-9a-f]{32}", name)
@@ -792,9 +772,9 @@ def test_status_ignores_owned_in_flight_lease_temp(
 
     thread = threading.Thread(target=acquire_lease)
     thread.start()
-    assert link_started.wait(timeout=5)
+    assert rename_started.wait(timeout=5)
     assert cache.status().active_leases == 0
-    release_link.set()
+    release_rename.set()
     thread.join(timeout=10)
 
     assert not thread.is_alive()
@@ -1308,27 +1288,37 @@ def test_blob_publication_parent_swap_never_writes_outside(
     held_cache = state / "cache-held"
     outside = tmp_path / "outside"
     outside.mkdir()
-    original_link = secure_paths.os.link
+    original_rename = secure_paths_posix._rename_noreplace_at
     swapped = False
 
-    def swap_then_link(*args: object, **kwargs: object) -> None:
+    def swap_then_rename(parent: int, source_name: str, destination_name: str) -> None:
         nonlocal swapped
-        if not swapped:
+        if not swapped and len(destination_name) == 32:
             cache_root.rename(held_cache)
             cache_root.symlink_to(outside, target_is_directory=True)
             swapped = True
-        original_link(*args, **kwargs)
+        original_rename(parent, source_name, destination_name)
 
     with cache.lease() as lease:
-        monkeypatch.setattr(secure_paths.os, "link", swap_then_link)
+        monkeypatch.setattr(
+            secure_paths_posix,
+            "_rename_noreplace_at",
+            swap_then_rename,
+        )
         try:
             with pytest.raises(CacheError):
                 lease.store("producer", _key("swap"), {"unit.obj": source})
         finally:
-            monkeypatch.setattr(secure_paths.os, "link", original_link)
-            cache_root.unlink()
-            held_cache.rename(cache_root)
+            monkeypatch.setattr(
+                secure_paths_posix,
+                "_rename_noreplace_at",
+                original_rename,
+            )
+            if swapped:
+                cache_root.unlink()
+                held_cache.rename(cache_root)
 
+    assert swapped
     assert tuple(outside.iterdir()) == ()
 
 
@@ -1342,7 +1332,7 @@ def test_restore_parent_swap_and_destination_race_never_overwrite(
     source = tmp_path / "unit.obj"
     source.write_bytes(b"unit")
     cache = IncrementalCache(state, implementation="test-implementation-v1")
-    original_link = secure_paths.os.link
+    original_rename = secure_paths_posix._rename_noreplace_at
     with cache.lease() as lease:
         record = lease.store("producer", _key("restore-swap"), {"unit.obj": source})
         restore_root = tmp_path / "restore"
@@ -1353,15 +1343,19 @@ def test_restore_parent_swap_and_destination_race_never_overwrite(
         outside.mkdir()
         swapped = False
 
-        def swap_then_link(*args: object, **kwargs: object) -> None:
+        def swap_then_rename(parent: int, source_name: str, destination_name: str) -> None:
             nonlocal swapped
-            if not swapped:
+            if not swapped and destination_name == "unit.obj":
                 destination.parent.rename(held_build)
                 destination.parent.symlink_to(outside, target_is_directory=True)
                 swapped = True
-            original_link(*args, **kwargs)
+            original_rename(parent, source_name, destination_name)
 
-        monkeypatch.setattr(secure_paths.os, "link", swap_then_link)
+        monkeypatch.setattr(
+            secure_paths_posix,
+            "_rename_noreplace_at",
+            swap_then_rename,
+        )
         try:
             with pytest.raises(CachePoisonError, match="redirected"):
                 lease.restore(
@@ -1370,17 +1364,28 @@ def test_restore_parent_swap_and_destination_race_never_overwrite(
                     allowed_root=restore_root,
                 )
         finally:
-            monkeypatch.setattr(secure_paths.os, "link", original_link)
-            destination.parent.unlink()
-            held_build.rename(destination.parent)
+            monkeypatch.setattr(
+                secure_paths_posix,
+                "_rename_noreplace_at",
+                original_rename,
+            )
+            if swapped:
+                destination.parent.unlink()
+                held_build.rename(destination.parent)
+        assert swapped
         assert not (outside / "unit.obj").exists()
         assert not destination.exists()
 
-        def race_then_link(*args: object, **kwargs: object) -> None:
-            destination.write_bytes(b"racer")
-            original_link(*args, **kwargs)
+        def race_then_rename(parent: int, source_name: str, destination_name: str) -> None:
+            if destination_name == "unit.obj":
+                destination.write_bytes(b"racer")
+            original_rename(parent, source_name, destination_name)
 
-        monkeypatch.setattr(secure_paths.os, "link", race_then_link)
+        monkeypatch.setattr(
+            secure_paths_posix,
+            "_rename_noreplace_at",
+            race_then_rename,
+        )
         with pytest.raises(CacheError, match="safely publish"):
             lease.restore(
                 record,

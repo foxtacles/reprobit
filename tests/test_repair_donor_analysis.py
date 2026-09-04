@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import argparse
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -11,6 +10,7 @@ import pytest
 
 import reprobit.repair_donor_analysis as subject
 from reprobit.classic_project_overlay_repair import ClassicProjectOverlayRepairResult
+from reprobit.classic_repair_discovery import ClassicDiscoveryResult
 from reprobit.classic_repair_probe import (
     ClassicDonorRetuneProbeResult,
     ClassicDonorRetuneRepair,
@@ -63,7 +63,13 @@ class _Prepared:
         units: tuple[object, ...],
     ) -> None:
         self.producer = SimpleNamespace(is_open=True)
-        self.probes = SimpleNamespace(effective_root=effective_root, units=units)
+        self.producer.begin_developer = lambda: None
+        self.probes = SimpleNamespace(
+            effective_root=effective_root,
+            units=units,
+            producer=self.producer,
+            overlay=SimpleNamespace(overlay_witnesses=()),
+        )
         self.donors = SimpleNamespace(overlay_effective_outputs=overlay)
         self.close_calls = 0
 
@@ -72,20 +78,20 @@ class _Prepared:
         self.producer.is_open = False
 
 
-def _args(root: Path) -> argparse.Namespace:
-    return argparse.Namespace(
-        project=str(root),
-        toolchain_root="/toolchain",
-        backend="auto",
-        wine=None,
-        wineserver=None,
-        compiler_transport="/transport/cl",
-        resource_transport="/transport/rc",
-        jobs=3,
-        initialization_timeout=1.0,
-        compile_timeout=2.0,
-        link_timeout=3.0,
-        cleanup_timeout=4.0,
+def _options(root: Path, backend: object | None = None) -> subject.RepairProbeOptions:
+    return subject.RepairProbeOptions(
+        project=root,
+        execution=subject.ProjectExecutionOptions(
+            backend=cast(Any, backend or object()),
+            jobs=3,
+            toolchain_root="/toolchain",
+            compiler_transport="/transport/cl",
+            resource_transport="/transport/rc",
+            initialization_timeout=1.0,
+            compile_timeout=2.0,
+            link_timeout=3.0,
+            cleanup_timeout=4.0,
+        ),
     )
 
 
@@ -147,7 +153,6 @@ def _wire_preparation(
     execution = object()
     observed: dict[str, Any] = {}
 
-    monkeypatch.setattr(subject, "project_root", lambda _project: root)
     monkeypatch.setattr(subject, "load_project_tree", lambda loaded: bundle)
     monkeypatch.setattr(subject, "canonical_overlay_operations", lambda loaded: {"x": ("op",)})
     monkeypatch.setattr(subject, "state_root", lambda loaded, loaded_spec: tmp_path / "state")
@@ -163,7 +168,6 @@ def _wire_preparation(
 
     monkeypatch.setattr(subject, "RunArena", make_arena)
     backend = object()
-    monkeypatch.setattr(subject, "selected_backend", lambda args: backend)
 
     def resolve(**values: object) -> object:
         observed["resolve"] = values
@@ -177,7 +181,19 @@ def _wire_preparation(
         return prepared
 
     monkeypatch.setattr(subject, "prepare_producer_graph_run", prepare)
-    observed.update(root=root, bundle=bundle, backend=backend)
+    source_seal = object()
+    monkeypatch.setattr(
+        subject,
+        "prepare_donor_probe_source_epoch",
+        lambda _probes: source_seal,
+    )
+    observed.update(
+        root=root,
+        bundle=bundle,
+        backend=backend,
+        options=_options(root, backend),
+        source_seal=source_seal,
+    )
     return prepared, arena, observed, execution
 
 
@@ -200,9 +216,9 @@ def test_probe_uses_one_ordinary_runtime_and_exposes_progress(
 
     monkeypatch.setattr(subject, "probe_bounded_donor_retunes", probe)
 
-    args = _args(cast(Path, observed["root"]))
+    options = cast(subject.RepairProbeOptions, observed["options"])
     actual = subject.probe_classic_donor_repairs(
-        args,
+        options,
         cast(Any, output),
         expected_refusals,
         candidate_budget=17,
@@ -222,7 +238,7 @@ def test_probe_uses_one_ordinary_runtime_and_exposes_progress(
         "compiler_transport": "/transport/cl",
         "resource_transport": "/transport/rc",
     }
-    assert observed["prepare_positional"] == (args, observed["bundle"])
+    assert observed["prepare_positional"] == (options.execution, observed["bundle"])
     prepare = observed["prepare"]
     assert prepare["project_root"] == observed["root"]
     assert prepare["session_root"] == arena.path / "classic"
@@ -238,6 +254,7 @@ def test_probe_uses_one_ordinary_runtime_and_exposes_progress(
         "generated.cpp": b"generated overlay",
     }
     assert probe_values["canonical_overlay_operations"] == {"x": ("op",)}
+    assert probe_values["source_seal"] is observed["source_seal"]
     assert probe_values["candidate_budget"] == 17
     assert probe_values["excluded_groups"] == frozenset({("unit.fixture", "donor.exhausted")})
     assert output.activities == [("preparing the repair search", "repair-probe-prepare")]
@@ -272,9 +289,9 @@ def test_project_overlay_probe_exposes_bounded_progress_and_closes_runtime(
 
     monkeypatch.setattr(subject, "probe_project_overlay_repair", probe)
 
-    args = _args(cast(Path, observed["root"]))
+    options = cast(subject.RepairProbeOptions, observed["options"])
     actual = subject.probe_classic_project_overlay_repairs(
-        args,
+        options,
         cast(Any, output),
         candidate_budget=17,
     )
@@ -292,7 +309,7 @@ def test_project_overlay_probe_exposes_bounded_progress_and_closes_runtime(
         "compiler_transport": "/transport/cl",
         "resource_transport": "/transport/rc",
     }
-    assert observed["prepare_positional"] == (args, observed["bundle"])
+    assert observed["prepare_positional"] == (options.execution, observed["bundle"])
     assert observed["prepare"]["session_root"] == arena.path / "classic"
     assert observed["prepare"]["execution"] is execution
     probes, bundle, probe_values = observed["source_probe"]
@@ -338,7 +355,7 @@ def test_probe_rejects_stale_prepared_unit_authority_and_closes_runtime(
 
     with pytest.raises(subject.ClassicProjectError, match="no longer matches"):
         subject.probe_classic_donor_repairs(
-            _args(cast(Path, observed["root"])),
+            cast(subject.RepairProbeOptions, observed["options"]),
             cast(Any, _Output()),
             (stale,),
         )
@@ -362,7 +379,7 @@ def test_probe_rejects_refusal_that_names_the_wrong_fresh_action(
 
     with pytest.raises(subject.ClassicProjectError, match="freshly prepared action"):
         subject.probe_classic_donor_repairs(
-            _args(cast(Path, observed["root"])),
+            cast(subject.RepairProbeOptions, observed["options"]),
             cast(Any, _Output()),
             (inconsistent,),
         )
@@ -382,7 +399,7 @@ def test_probe_closes_any_runtime_the_probe_leaves_open(
     )
 
     subject.probe_classic_donor_repairs(
-        _args(cast(Path, observed["root"])),
+        cast(subject.RepairProbeOptions, observed["options"]),
         cast(Any, _Output()),
         _refusals(),
     )
@@ -396,7 +413,7 @@ def test_probe_failure_closes_only_an_open_runtime(
     tmp_path: Path,
     probe_closed: bool,
 ) -> None:
-    prepared, _arena, observed, _execution = _wire_preparation(monkeypatch, tmp_path)
+    prepared, arena, observed, _execution = _wire_preparation(monkeypatch, tmp_path)
 
     def fail(*_args: object, **_kwargs: object) -> None:
         prepared.producer.is_open = not probe_closed
@@ -406,12 +423,13 @@ def test_probe_failure_closes_only_an_open_runtime(
 
     with pytest.raises(RuntimeError, match="candidate compiler failed"):
         subject.probe_classic_donor_repairs(
-            _args(cast(Path, observed["root"])),
+            cast(subject.RepairProbeOptions, observed["options"]),
             cast(Any, _Output()),
             _refusals(),
         )
 
     assert prepared.close_calls == (0 if probe_closed else 1)
+    assert arena.exited
 
 
 def test_source_loading_failure_closes_the_prepared_runtime(
@@ -428,7 +446,7 @@ def test_source_loading_failure_closes_the_prepared_runtime(
 
     with pytest.raises(FileNotFoundError):
         subject.probe_classic_donor_repairs(
-            _args(cast(Path, observed["root"])),
+            cast(subject.RepairProbeOptions, observed["options"]),
             cast(Any, _Output()),
             _refusals(),
         )
@@ -442,17 +460,129 @@ def test_empty_probe_skips_project_and_runtime_work(
 ) -> None:
     monkeypatch.setattr(
         subject,
-        "project_root",
+        "load_project_tree",
         lambda _project: pytest.fail("empty probe must not load the project"),
     )
 
     result = subject.probe_classic_donor_repairs(
-        _args(tmp_path),
+        _options(tmp_path),
         cast(Any, _Output()),
         (),
     )
 
     assert result == ClassicDonorRetuneProbeResult((), (), 0)
+
+
+def test_shared_probe_session_reuses_one_runtime_and_one_source_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared, arena, observed, _execution = _wire_preparation(monkeypatch, tmp_path)
+    output = _Output()
+    runtime_options: list[tuple[bool, bool, object, str]] = []
+    source_payload_calls = 0
+    read_source_payloads = subject._source_payloads
+
+    def source_payloads(
+        *args: object, **kwargs: object
+    ) -> tuple[dict[str, bytes], dict[str, bytes]]:
+        nonlocal source_payload_calls
+        source_payload_calls += 1
+        return read_source_payloads(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(subject, "_source_payloads", source_payloads)
+
+    def donor_probe(*_args: object, **kwargs: object) -> ClassicDonorRetuneProbeResult:
+        runtime_options.append(
+            (
+                cast(bool, kwargs["close_runtime"]),
+                cast(bool, kwargs["materialize_source_epoch"]),
+                kwargs["source_seal"],
+                cast(str, kwargs["namespace_id"]),
+            )
+        )
+        cast(Any, kwargs["progress"])(1, 2, "donor.one")
+        return ClassicDonorRetuneProbeResult((), (), 1)
+
+    def discovery_probe(*_args: object, **kwargs: object) -> ClassicDiscoveryResult:
+        runtime_options.append(
+            (
+                cast(bool, kwargs["close_runtime"]),
+                cast(bool, kwargs["materialize_source_epoch"]),
+                kwargs["source_seal"],
+                cast(str, kwargs["namespace_id"]),
+            )
+        )
+        cast(Any, kwargs["progress"])(1, 1, "carrier.one")
+        return ClassicDiscoveryResult((), (), 1)
+
+    monkeypatch.setattr(subject, "probe_bounded_donor_retunes", donor_probe)
+    monkeypatch.setattr(subject, "probe_carrier_discovery", discovery_probe)
+    options = cast(subject.RepairProbeOptions, observed["options"])
+
+    with subject.ClassicRepairProbeSession(options, cast(Any, output)) as session:
+        subject.probe_classic_donor_repairs(
+            options,
+            cast(Any, output),
+            _refusals(),
+            session=session,
+        )
+        subject.probe_classic_carrier_discovery(
+            options,
+            cast(Any, output),
+            _refusals(),
+            candidate_budget=1,
+            session=session,
+        )
+        assert prepared.close_calls == 0
+        assert not arena.exited
+
+    assert output.activities == [("preparing the repair search", "repair-probe-prepare")]
+    assert runtime_options == [
+        (False, False, observed["source_seal"], "noncertifying-donor-repair-probe.0001"),
+        (False, False, observed["source_seal"], "noncertifying-donor-repair-probe.0002"),
+    ]
+    assert source_payload_calls == 2
+    assert output.progress == [
+        (1, 2, "repair-probe", "donor.one", ProgressKind.UNIT_FINISHED, None),
+        (1, 1, "repair-probe", "carrier.one", ProgressKind.UNIT_FINISHED, None),
+    ]
+    assert prepared.close_calls == 1
+    assert arena.exited
+
+
+def test_shared_probe_session_rejects_source_authority_change_and_cleans_up(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared, arena, observed, _execution = _wire_preparation(monkeypatch, tmp_path)
+    monkeypatch.setattr(
+        subject,
+        "probe_bounded_donor_retunes",
+        lambda *_args, **_kwargs: ClassicDonorRetuneProbeResult((), (), 0),
+    )
+    options = cast(subject.RepairProbeOptions, observed["options"])
+
+    with (
+        pytest.raises(subject.ClassicProjectError, match="source authority changed"),
+        subject.ClassicRepairProbeSession(options, cast(Any, _Output())) as session,
+    ):
+        subject.probe_classic_donor_repairs(
+            options,
+            cast(Any, _Output()),
+            _refusals(),
+            session=session,
+        )
+        cast(Path, observed["root"]).joinpath("src/unit.cpp").write_bytes(b"changed")
+        subject.probe_classic_donor_repairs(
+            options,
+            cast(Any, _Output()),
+            _refusals(),
+            session=session,
+        )
+
+    assert prepared.close_calls == 1
+    assert arena.exited
 
 
 def test_apply_flattens_all_typed_edits_into_one_transaction(

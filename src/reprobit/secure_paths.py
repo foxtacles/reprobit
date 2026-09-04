@@ -21,18 +21,34 @@ from reprobit.secure_path_contracts import (
     SecureFileIdentity,
     SecureFileSnapshot,
     SecurePathError,
+    canonical_relative_path,
     canonical_system_path,
 )
+
+_DirectoryIdentity = tuple[int, int]
+_ExpectedDirectories = Mapping[str, _DirectoryIdentity]
 
 
 class _NativeSecurePaths(Protocol):
     """The platform-independent surface both native implementations provide."""
 
-    def read_relative_file(self, root: Path, relative: str) -> tuple[bytes, SecureFileSnapshot]: ...
+    def read_relative_file(
+        self,
+        root: Path,
+        relative: str,
+        *,
+        expected_directories: _ExpectedDirectories = ...,
+    ) -> tuple[bytes, SecureFileSnapshot]: ...
 
     def stat_relative_file(self, root: Path, relative: str) -> SecureFileIdentity: ...
 
-    def digest_relative_file(self, root: Path, relative: str) -> SecureFileSnapshot: ...
+    def digest_relative_file(
+        self,
+        root: Path,
+        relative: str,
+        *,
+        expected_directories: _ExpectedDirectories = ...,
+    ) -> SecureFileSnapshot: ...
 
     def atomic_copy_new_relative(
         self,
@@ -45,6 +61,8 @@ class _NativeSecurePaths(Protocol):
         expected_digest: Digest | None = ...,
         expected_size: int | None = ...,
         expected_source: SecureFileIdentity | None = ...,
+        expected_source_directories: _ExpectedDirectories = ...,
+        expected_destination_directories: _ExpectedDirectories = ...,
     ) -> SecureFileSnapshot: ...
 
     def promote_relative_new(
@@ -54,14 +72,26 @@ class _NativeSecurePaths(Protocol):
         destination_relative: str,
         *,
         expected: SecureFileSnapshot,
+        expected_directories: _ExpectedDirectories = ...,
     ) -> SecureFileSnapshot: ...
 
     def atomic_publish_relative(
-        self, root: Path, relative: str, payload: bytes, *, replace: bool
+        self,
+        root: Path,
+        relative: str,
+        payload: bytes,
+        *,
+        replace: bool,
+        expected_directories: _ExpectedDirectories = ...,
     ) -> SecureFileSnapshot: ...
 
     def remove_published_relative(
-        self, root: Path, relative: str, *, expected: SecureFileSnapshot
+        self,
+        root: Path,
+        relative: str,
+        *,
+        expected: SecureFileSnapshot,
+        expected_directories: _ExpectedDirectories = ...,
     ) -> bool: ...
 
     def remove_regular_relative(self, root: Path, relative: str) -> bool: ...
@@ -75,6 +105,39 @@ def _native() -> _NativeSecurePaths:
     """Select the native implementation at call time (tests swap ``os.name``)."""
 
     return _windows if os.name == "nt" else _posix
+
+
+def _normalize_expected_directories(
+    expected: Mapping[str, tuple[int, int]] | None,
+    *,
+    relatives: tuple[str, ...],
+) -> dict[str, tuple[int, int]]:
+    """Validate exact directory identities used by one held path operation."""
+
+    if expected is None:
+        return {}
+    if not isinstance(expected, Mapping):
+        raise TypeError("expected directory identities must be a mapping")
+    allowed = {"."}
+    for relative in relatives:
+        parts = canonical_relative_path(relative).parts[:-1]
+        allowed.update(
+            PurePosixPath(*parts[:index]).as_posix() for index in range(1, len(parts) + 1)
+        )
+    checked: dict[str, tuple[int, int]] = {}
+    for directory, identity in expected.items():
+        if not isinstance(directory, str) or directory not in allowed:
+            raise ValueError(
+                f"expected directory must be the root or a canonical path ancestor: {directory!r}"
+            )
+        if (
+            not isinstance(identity, tuple)
+            or len(identity) != 2
+            or any(type(value) is not int or value < 0 for value in identity)
+        ):
+            raise ValueError("expected directory identity must contain two non-negative integers")
+        checked[directory] = identity
+    return checked
 
 
 def windows_attributes_are_basic_restorable(attributes: int) -> bool:
@@ -92,10 +155,20 @@ def split_absolute(path: Path) -> tuple[Path, str]:
     return Path(absolute.anchor), PurePosixPath(*absolute.parts[1:]).as_posix()
 
 
-def read_relative_file(root: Path, relative: str) -> tuple[bytes, SecureFileSnapshot]:
+def read_relative_file(
+    root: Path,
+    relative: str,
+    *,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
+) -> tuple[bytes, SecureFileSnapshot]:
     """Read one regular file through a fully held, no-follow ancestor chain."""
 
-    return _native().read_relative_file(root, relative)
+    checked = _normalize_expected_directories(expected_directories, relatives=(relative,))
+    return _native().read_relative_file(
+        root,
+        relative,
+        expected_directories=checked,
+    )
 
 
 def atomic_publish_new_relative_from_stream(
@@ -108,6 +181,7 @@ def atomic_publish_new_relative_from_stream(
     windows_attributes: int | None = None,
     expected_digest: Digest | None = None,
     expected_size: int | None = None,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
 ) -> SecureFileSnapshot:
     """Stream one immutable file into place without replacing an entry.
 
@@ -135,6 +209,10 @@ def atomic_publish_new_relative_from_stream(
         raise TypeError("secure publication expected size must be int")
     if expected_size is not None and expected_size < 0:
         raise ValueError("secure publication expected size cannot be negative")
+    checked_directories = _normalize_expected_directories(
+        expected_directories,
+        relatives=(relative,),
+    )
     if os.name == "nt":
         if mode is not None:
             raise SecurePathError("native Windows publication cannot set POSIX mode")
@@ -146,6 +224,7 @@ def atomic_publish_new_relative_from_stream(
             windows_attributes=windows_attributes,
             expected_digest=expected_digest,
             expected_size=expected_size,
+            expected_directories=checked_directories,
         )
     if windows_attributes is not None:
         raise SecurePathError("POSIX publication cannot set Windows attributes")
@@ -156,6 +235,7 @@ def atomic_publish_new_relative_from_stream(
         mode=mode if mode is not None else (0o755 if executable else 0o644),
         expected_digest=expected_digest,
         expected_size=expected_size,
+        expected_directories=checked_directories,
     )
 
 
@@ -165,10 +245,20 @@ def stat_relative_file(root: Path, relative: str) -> SecureFileIdentity:
     return _native().stat_relative_file(root, relative)
 
 
-def digest_relative_file(root: Path, relative: str) -> SecureFileSnapshot:
+def digest_relative_file(
+    root: Path,
+    relative: str,
+    *,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
+) -> SecureFileSnapshot:
     """Hash one regular file through a held ancestor chain with bounded memory."""
 
-    return _native().digest_relative_file(root, relative)
+    checked = _normalize_expected_directories(expected_directories, relatives=(relative,))
+    return _native().digest_relative_file(
+        root,
+        relative,
+        expected_directories=checked,
+    )
 
 
 def atomic_copy_new_relative(
@@ -181,9 +271,19 @@ def atomic_copy_new_relative(
     expected_digest: Digest | None = None,
     expected_size: int | None = None,
     expected_source: SecureFileIdentity | None = None,
+    expected_source_directories: Mapping[str, tuple[int, int]] | None = None,
+    expected_destination_directories: Mapping[str, tuple[int, int]] | None = None,
 ) -> SecureFileSnapshot:
     """Copy one held source to a new held destination in a single pass."""
 
+    checked_source_directories = _normalize_expected_directories(
+        expected_source_directories,
+        relatives=(source_relative,),
+    )
+    checked_destination_directories = _normalize_expected_directories(
+        expected_destination_directories,
+        relatives=(destination_relative,),
+    )
     return _native().atomic_copy_new_relative(
         source_root,
         source_relative,
@@ -193,6 +293,8 @@ def atomic_copy_new_relative(
         expected_digest=expected_digest,
         expected_size=expected_size,
         expected_source=expected_source,
+        expected_source_directories=checked_source_directories,
+        expected_destination_directories=checked_destination_directories,
     )
 
 
@@ -202,11 +304,20 @@ def promote_relative_new(
     destination_relative: str,
     *,
     expected: SecureFileSnapshot,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
 ) -> SecureFileSnapshot:
     """Move an exact held file to a new name with commit-time no-overwrite."""
 
+    checked = _normalize_expected_directories(
+        expected_directories,
+        relatives=(source_relative, destination_relative),
+    )
     return _native().promote_relative_new(
-        root, source_relative, destination_relative, expected=expected
+        root,
+        source_relative,
+        destination_relative,
+        expected=expected,
+        expected_directories=checked,
     )
 
 
@@ -218,8 +329,8 @@ def atomic_publish_relative(
     """Publish bytes beneath ``root`` by a held-parent atomic replace.
 
     An existing regular target may be replaced for a later independent cold
-    run.  Redirects and non-regular entries are rejected before commit, while
-    the final rename itself replaces the directory entry and never follows it.
+    run.  It is moved aside and rechecked before the candidate is installed
+    without overwriting any entry that appears during the handoff.
     """
 
     if type(payload) is not bytes:
@@ -235,6 +346,7 @@ def atomic_publish_relative_if_current(
     expected: SecureFileSnapshot | None,
     mode: int | None = None,
     windows_attributes: int | None = None,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
 ) -> SecureFileSnapshot:
     """Publish bytes only when the named preimage is still exact.
 
@@ -253,6 +365,10 @@ def atomic_publish_relative_if_current(
         type(windows_attributes) is not int or windows_attributes < 0
     ):
         raise ValueError("secure publication Windows attributes must be non-negative")
+    checked_directories = _normalize_expected_directories(
+        expected_directories,
+        relatives=(relative,),
+    )
     if os.name == "nt":
         if mode is not None:
             raise SecurePathError("native Windows publication cannot set POSIX mode")
@@ -267,6 +383,7 @@ def atomic_publish_relative_if_current(
             replace=expected is not None,
             expected=expected,
             windows_attributes=windows_attributes,
+            expected_directories=checked_directories,
         )
     if windows_attributes is not None:
         raise SecurePathError("POSIX publication cannot set Windows attributes")
@@ -277,6 +394,7 @@ def atomic_publish_relative_if_current(
         replace=expected is not None,
         expected=expected,
         mode=mode if mode is not None else 0o644,
+        expected_directories=checked_directories,
     )
 
 
@@ -303,6 +421,7 @@ def remove_published_relative(
     relative: str,
     *,
     expected: SecureFileSnapshot,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
 ) -> bool:
     """Remove only the exact regular file returned by secure publication.
 
@@ -311,7 +430,13 @@ def remove_published_relative(
     Held-parent deletion never follows a final symlink.
     """
 
-    return _native().remove_published_relative(root, relative, expected=expected)
+    checked = _normalize_expected_directories(expected_directories, relatives=(relative,))
+    return _native().remove_published_relative(
+        root,
+        relative,
+        expected=expected,
+        expected_directories=checked,
+    )
 
 
 def remove_regular_relative(root: Path, relative: str) -> bool:
@@ -325,10 +450,15 @@ def reseal_relative_file(
     relative: str,
     *,
     expected: SecureFileSnapshot | None = None,
+    expected_directories: Mapping[str, tuple[int, int]] | None = None,
 ) -> SecureFileSnapshot:
     """Re-read one published file and optionally require its exact held identity."""
 
-    _payload, received = read_relative_file(root, relative)
+    _payload, received = read_relative_file(
+        root,
+        relative,
+        expected_directories=expected_directories,
+    )
     if expected is not None and (
         received.digest != expected.digest
         or received.size != expected.size

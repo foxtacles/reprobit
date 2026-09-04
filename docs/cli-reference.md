@@ -76,36 +76,36 @@ rbit setup [-h] [--toolchain-root DIRECTORY] [--no-provision] [--no-save] [--ski
 
 ### `rbit doctor`
 
-Check whether the compiler can run correctly on this machine.
+Check this machine's backend and the selected compiler files.
 
 ```
-rbit doctor [-h] [--backend {auto,posix_wine_v1,windows_native_v1}] [--wine PATH_OR_NAME] [--wineserver PATH_OR_NAME] [--execute-probe] [--toolchain-profile {msvc_4_2,msvc_5_0_rtm,msvc_5_0_sp1,msvc_5_0_sp2,msvc_5_0_sp3}] [--toolchain-root DIRECTORY] [project]
+rbit doctor [-h] [--backend {auto,posix_wine_v1,windows_native_v1}] [--wine PATH_OR_NAME] [--wineserver PATH_OR_NAME] [--execute-probe] [--profile {msvc_4_2,msvc_5_0_rtm,msvc_5_0_sp1,msvc_5_0_sp2,msvc_5_0_sp3}] [--toolchain-root DIRECTORY] [project]
 ```
 
 | Argument | Default | Description |
 |---|---|---|
-| `project` | `.` | project directory (default: .) |
+| `project` |  | project directory; omit it to check only this machine |
 
 | Argument | Default | Description |
 |---|---|---|
 | `--backend` `{auto,posix_wine_v1,windows_native_v1}` | `auto` | execution backend (default: select from the host platform) |
 | `--wine` `PATH_OR_NAME` | `wine` | POSIX Wine executable (default: wine from PATH) |
 | `--wineserver` `PATH_OR_NAME` | `wineserver` | POSIX wineserver executable (default: wineserver from PATH) |
-| `--execute-probe` |  | also run the bounded compiler child-process test |
-| `--toolchain-profile` `{msvc_4_2,msvc_5_0_rtm,msvc_5_0_sp1,msvc_5_0_sp2,msvc_5_0_sp3}` |  | compiler profile when checking an installation without a project |
-| `--toolchain-root` `DIRECTORY` |  | compiler installation to authenticate (default: check only the host backend) |
+| `--execute-probe` |  | also run the bounded backend and isolation probe (including Wine when used) |
+| `--profile` `{msvc_4_2,msvc_5_0_rtm,msvc_5_0_sp1,msvc_5_0_sp2,msvc_5_0_sp3}` |  | compiler profile when checking an installation without a project |
+| `--toolchain-root` `DIRECTORY` |  | compiler installation to authenticate (default: use the project's remembered compiler when available) |
 
 ### `rbit toolchain provision`
 
 Download and authenticate a supported compiler.
 
 ```
-rbit toolchain provision [-h] [--destination DIRECTORY] [--no-save] [{msvc_4_2,msvc_5_0_rtm,msvc_5_0_sp1,msvc_5_0_sp2,msvc_5_0_sp3}]
+rbit toolchain provision [-h] [--destination DIRECTORY] [--no-save] [{msvc_4_2}]
 ```
 
 | Argument | Default | Description |
 |---|---|---|
-| `profile` `{msvc_4_2,msvc_5_0_rtm,msvc_5_0_sp1,msvc_5_0_sp2,msvc_5_0_sp3}` | `msvc_4_2` | compiler profile (default: msvc_4_2) |
+| `profile` `{msvc_4_2}` | `msvc_4_2` | compiler profile (default: msvc_4_2) |
 
 | Argument | Default | Description |
 |---|---|---|
@@ -117,19 +117,19 @@ rbit toolchain provision [-h] [--destination DIRECTORY] [--no-save] [{msvc_4_2,m
 Record the exact compiler files this project expects.
 
 ```
-rbit toolchain lock [-h] [--profile {msvc_4_2,msvc_5_0_rtm,msvc_5_0_sp1,msvc_5_0_sp2,msvc_5_0_sp3}] [--root ROOT] [--runtime-file RELATIVE_PATH] [--output PROJECT_RELATIVE_PATH] [project]
+rbit toolchain lock [-h] [--profile {msvc_4_2,msvc_5_0_rtm,msvc_5_0_sp1,msvc_5_0_sp2,msvc_5_0_sp3}] [--toolchain-root DIRECTORY] [--runtime-file RELATIVE_PATH] [--output PROJECT_RELATIVE_PATH] [project]
 ```
 
 | Argument | Default | Description |
 |---|---|---|
-| `project` |  | project directory (default: .) |
+| `project` | `.` | project directory (default: .) |
 
 | Argument | Default | Description |
 |---|---|---|
 | `--profile` `{msvc_4_2,msvc_5_0_rtm,msvc_5_0_sp1,msvc_5_0_sp2,msvc_5_0_sp3}` |  | compiler profile (default: read it from reprobit.toml) |
-| `--root` `ROOT` |  | compiler installation override (normally remembered by rbit setup) |
+| `--toolchain-root` `DIRECTORY` |  | compiler installation override (normally remembered by rbit setup) |
 | `--runtime-file` `RELATIVE_PATH` |  | pin an additional wrapper or runtime dependency (repeatable) |
-| `--output` `PROJECT_RELATIVE_PATH` |  | lock-file path (default: read it from reprobit.toml) |
+| `--output` `PROJECT_RELATIVE_PATH` |  | lock-file path without reprobit.toml (existing projects always use their configured path) |
 
 ### `rbit source preview`
 
@@ -152,13 +152,16 @@ rbit source preview [-h] [--path PATH] [project]
 Write the reviewed effective source view used by compilers and analysis tools.
 
 ```
-rbit source export [-h] [destination] [project]
+rbit source export [-h] [--destination PROJECT_RELATIVE_DIRECTORY] [project]
 ```
 
 | Argument | Default | Description |
 |---|---|---|
-| `destination` | `build/reprobit-source` | project-relative directory to create or safely refresh (default: build/reprobit-source) |
-| `project` |  | project directory (default: .) |
+| `project` | `.` | project directory (default: .) |
+
+| Argument | Default | Description |
+|---|---|---|
+| `--destination` `PROJECT_RELATIVE_DIRECTORY` | `build/reprobit-source` | directory to create or refresh (default: build/reprobit-source) |
 
 ### `rbit source lock`
 
@@ -198,7 +201,7 @@ rbit source regenerate [-h] [--apply] [project]
 Prepare and record an ordinary CMake project in one guided run.
 
 ```
-rbit import cmake [-h] [--target TARGET=CMAKE_TARGET] [--keep-workspace {never,on-failure,always}] [--toolchain-root DIRECTORY] [--compiler-transport PATH] [--resource-transport PATH] [--cmake PATH_OR_NAME] [--configuration CONFIGURATION] [--timeout SECONDS] [--directive-input TARGET=LIBRARY] [project]
+rbit import cmake [-h] [--target TARGET=CMAKE_TARGET] [--refresh] [--path PATH] [--keep-workspace {never,on-failure,always}] [--toolchain-root DIRECTORY] [--compiler-transport PATH] [--resource-transport PATH] [--cmake PATH_OR_NAME] [--configuration CONFIGURATION] [--cmake-define NAME=VALUE | --clear-cmake-defines] [--timeout SECONDS] [--directive-input TARGET=LIBRARY | --clear-directive-inputs] [project]
 ```
 
 | Argument | Default | Description |
@@ -207,7 +210,9 @@ rbit import cmake [-h] [--target TARGET=CMAKE_TARGET] [--keep-workspace {never,o
 
 | Argument | Default | Description |
 |---|---|---|
-| `--target` `TARGET=CMAKE_TARGET` |  | map a ReproBit target when its CMake target has a different name |
+| `--target` `TARGET=CMAKE_TARGET` |  | map a ReproBit target during the first import (not used by --refresh) |
+| `--refresh` |  | update the saved source list and CMake build records as one verified change |
+| `--path` `PATH` |  | source file or directory selected by --refresh (repeatable; default: Git index) |
 | `--keep-workspace` `{never,on-failure,always}` | `on-failure` | retain temporary import files: never, on-failure (default), or always |
 
 **advanced host and graph options**
@@ -217,22 +222,25 @@ rbit import cmake [-h] [--target TARGET=CMAKE_TARGET] [--keep-workspace {never,o
 | `--toolchain-root` `DIRECTORY` |  | compiler installation override (normally remembered by rbit setup) |
 | `--compiler-transport` `PATH` |  | POSIX transport selector for the locked compiler (paired with --resource-transport) |
 | `--resource-transport` `PATH` |  | POSIX transport selector for the locked resource compiler |
-| `--cmake` `PATH_OR_NAME` | `cmake` | CMake executable (default: resolve cmake from PATH) |
-| `--configuration` `CONFIGURATION` | `RelWithDebInfo` | single-configuration CMake build type (default: RelWithDebInfo) |
-| `--timeout` `SECONDS` | `600.0` | bounded configure deadline (default: 600) |
+| `--cmake` `PATH_OR_NAME` |  | CMake executable (default: resolve cmake from PATH) |
+| `--configuration` `CONFIGURATION` |  | single-configuration CMake build type (default: RelWithDebInfo) |
+| `--cmake-define` `NAME=VALUE` |  | set one CMake cache value (repeatable) |
+| `--clear-cmake-defines` |  | replace saved CMake cache values with an empty list during --refresh |
+| `--timeout` `SECONDS` |  | bounded configure deadline (default: 600) |
 | `--directive-input` `TARGET=LIBRARY` |  | record one prelink-discovered default library edge (repeatable) |
+| `--clear-directive-inputs` |  | replace saved default-library edges with an empty list during --refresh |
 
 ### `rbit graph configure`
 
 Create a fresh CMake metadata tree without building.
 
 ```
-rbit graph configure [-h] --workspace-root EMPTY_DIRECTORY --toolchain-root DIRECTORY --compiler-transport PATH --resource-transport PATH [--cmake PATH_OR_NAME] [--configuration CONFIGURATION] [--timeout SECONDS] [project]
+rbit graph configure [-h] --workspace-root EMPTY_DIRECTORY --toolchain-root DIRECTORY --compiler-transport PATH --resource-transport PATH [--cmake PATH_OR_NAME] [--configuration CONFIGURATION] [--cmake-define NAME=VALUE] [--timeout SECONDS] [project]
 ```
 
 | Argument | Default | Description |
 |---|---|---|
-| `project` |  | project directory (default: .) |
+| `project` | `.` | project directory (default: .) |
 
 | Argument | Default | Description |
 |---|---|---|
@@ -242,6 +250,7 @@ rbit graph configure [-h] --workspace-root EMPTY_DIRECTORY --toolchain-root DIRE
 | `--resource-transport` `PATH` | required | admitted resource-compiler frontend paired with the compiler transport |
 | `--cmake` `PATH_OR_NAME` | `cmake` | CMake executable (default: resolve cmake from PATH) |
 | `--configuration` `CONFIGURATION` | `RelWithDebInfo` | single-configuration CMake build type (default: RelWithDebInfo) |
+| `--cmake-define` `NAME=VALUE` |  | set one CMake cache value (repeatable) |
 | `--timeout` `SECONDS` | `600.0` | bounded configure deadline (default: 600) |
 
 ### `rbit graph extract`
@@ -249,12 +258,12 @@ rbit graph configure [-h] --workspace-root EMPTY_DIRECTORY --toolchain-root DIRE
 Record direct compiler and linker steps from that CMake tree.
 
 ```
-rbit graph extract [-h] --configured-build-root DIRECTORY --effective-source-root DIRECTORY --effective-source-digest SHA256 --toolchain-root DIRECTORY [--target-plan TARGET_PLAN] [--directive-input TARGET=LIBRARY] [project]
+rbit graph extract [-h] --configured-build-root DIRECTORY --effective-source-root DIRECTORY --effective-source-digest SHA256 --toolchain-root DIRECTORY [--target-plan TARGET_PLAN] [--configuration CONFIGURATION] [--cmake PATH_OR_NAME] [--timeout SECONDS] [--cmake-define NAME=VALUE] [--directive-input TARGET=LIBRARY] [project]
 ```
 
 | Argument | Default | Description |
 |---|---|---|
-| `project` |  | project directory (default: .) |
+| `project` | `.` | project directory (default: .) |
 
 | Argument | Default | Description |
 |---|---|---|
@@ -263,6 +272,10 @@ rbit graph extract [-h] --configured-build-root DIRECTORY --effective-source-roo
 | `--effective-source-digest` `SHA256` | required | source receipt printed by the matching rbit graph configure run |
 | `--toolchain-root` `DIRECTORY` | required | physical root matching the committed logical toolchain seat |
 | `--target-plan` `TARGET_PLAN` |  | path beneath the configured build (defaults to reprobit-target-plan.json) |
+| `--configuration` `CONFIGURATION` | `RelWithDebInfo` | configuration used by the matching graph configure run |
+| `--cmake` `PATH_OR_NAME` | `cmake` | CMake executable used by the matching graph configure run |
+| `--timeout` `SECONDS` | `600.0` | configure deadline used by the matching graph configure run |
+| `--cmake-define` `NAME=VALUE` |  | CMake cache value used by the matching graph configure run (repeatable) |
 | `--directive-input` `TARGET=LIBRARY` |  | commit one prelink-discovered DEFAULTLIB edge; repeat for each target/library |
 
 ### `rbit validate`
@@ -321,7 +334,7 @@ rbit clean [-h] [--preview] [--older-than-hours HOURS] [--cache | --obsolete-cac
 |---|---|---|
 | `--preview` |  | show how much space can be freed without removing anything |
 | `--older-than-hours` `HOURS` |  | keep workspace and cache entries newer than this age (default: 0) |
-| `--cache` |  | also remove incremental cache data selected by age and the complete repair search cache |
+| `--cache` |  | also remove incremental and repair-search cache data selected by age |
 | `--obsolete-cache` |  | also remove cache data this ReproBit version cannot reuse; keep the current cache |
 | `--reports` |  | also remove the canonical verification and grind reports |
 
@@ -346,7 +359,7 @@ rbit explain [-h] [--intervention ID] [project]
 Use this after editing a file in a project that already matched exactly, including a shared header used by many source files. ReproBit repairs the saved build guidance in private, rebuilds, and publishes only after every target matches exactly. For added or removed files, start with source preview; it prints a safe next command when one is available.
 
 ```
-rbit repair [-h] [--jobs COUNT] [--keep-workspace {never,on-failure,always}] [--backend {auto,posix_wine_v1,windows_native_v1}] [--wine PATH_OR_NAME] [--wineserver PATH_OR_NAME] [--toolchain-root DIRECTORY] [--compiler-transport PATH] [--resource-transport PATH] [--initialization-timeout SECONDS] [--compile-timeout SECONDS] [--link-timeout SECONDS] [--cleanup-timeout SECONDS] [--policy {clean,allow-quarantine}] [--report-dir PROJECT_RELATIVE_DIRECTORY] [--retune-radius DISTANCE] [--retune-candidates COUNT] [--donor-candidates COUNT] [--discovery-candidates COUNT] [--adjustment-rounds COUNT] [project]
+rbit repair [-h] [--jobs COUNT] [--keep-workspace {never,on-failure,always}] [--backend {auto,posix_wine_v1,windows_native_v1}] [--wine PATH_OR_NAME] [--wineserver PATH_OR_NAME] [--toolchain-root DIRECTORY] [--compiler-transport PATH] [--resource-transport PATH] [--initialization-timeout SECONDS] [--compile-timeout SECONDS] [--link-timeout SECONDS] [--cleanup-timeout SECONDS] [--policy {clean,allow-quarantine}] [--report-dir PROJECT_RELATIVE_DIRECTORY] [--retune-radius DISTANCE] [--retune-candidates COUNT] [--candidate-limit COUNT] [--discovery-candidates COUNT] [--adjustment-rounds COUNT] [project]
 ```
 
 | Argument | Default | Description |
@@ -370,7 +383,7 @@ Widen the bounded search for larger repairs; a completed repair must still repro
 |---|---|---|
 | `--retune-radius` `DISTANCE` |  | largest declaration-count change tried per saved compiler choice or source layout (default: 8; max: 64) |
 | `--retune-candidates` `COUNT` |  | maximum nearby settings tried per saved compiler choice or source layout (default: 64; max: 4096) |
-| `--donor-candidates` `COUNT` |  | maximum nearby repair choices tested by the whole command (default: 256; max: 65536) |
+| `--candidate-limit` `COUNT` |  | maximum nearby repair choices tested by the whole command (default: 256; max: 65536) |
 | `--discovery-candidates` `COUNT` |  | fresh declaration settings built per affected source file after its saved compiler choices are exhausted (default: 64; max: 2005) |
 | `--adjustment-rounds` `COUNT` |  | maximum saved-guidance adjustment rounds before repair stops (default: 24) |
 

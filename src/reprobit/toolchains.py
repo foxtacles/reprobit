@@ -17,6 +17,7 @@ from reprobit.context import CompileContext
 from reprobit.model import Digest
 from reprobit.paths import normalize_logical_path
 from reprobit.secure_path_contracts import is_reparse_point
+from reprobit.strict_json import canonical_json
 
 if TYPE_CHECKING:
     from reprobit.schema import ToolchainLock as SchemaToolchainLock
@@ -601,6 +602,7 @@ class ToolchainDoctorReport:
     profile: str
     root: Path
     checks: tuple[ToolchainCheck, ...]
+    lock_digest: Digest | None = None
 
     @property
     def ok(self) -> bool:
@@ -610,6 +612,25 @@ class ToolchainDoctorReport:
         failed = [check for check in self.checks if not check.passed]
         if failed:
             raise ToolchainError("; ".join(f"{item.path}: {item.detail}" for item in failed))
+
+    def reusable_for(
+        self,
+        installation: ClassicMSVCToolchain,
+        lock: SchemaToolchainLock | None,
+    ) -> bool:
+        """Return whether this successful result covers the same run-scoped input."""
+
+        expected_lock = (
+            None
+            if lock is None
+            else Digest.from_bytes(canonical_json(lock.model_dump(mode="json")))
+        )
+        return (
+            self.ok
+            and self.profile == installation.profile.identifier
+            and self.root == installation.root
+            and self.lock_digest == expected_lock
+        )
 
 
 def _hash_file(path: Path, relative: str, roles: tuple[str, ...] = ()) -> ToolchainFileReceipt:
@@ -960,7 +981,17 @@ class ClassicMSVCToolchain:
                         "tree receipt matches" if matches else "tree receipt differs",
                     )
                 )
-        return ToolchainDoctorReport(self.profile.identifier, self.root, tuple(checks))
+        lock_digest = (
+            None
+            if lock is None
+            else Digest.from_bytes(canonical_json(lock.model_dump(mode="json")))
+        )
+        return ToolchainDoctorReport(
+            self.profile.identifier,
+            self.root,
+            tuple(checks),
+            lock_digest,
+        )
 
     def create_lock(
         self,
@@ -1116,6 +1147,24 @@ class ClassicMSVCToolchain:
         return (self.librarian_path, "/nologo", *tuple(arguments))
 
 
+def validate_toolchain_installation(
+    installation: ClassicMSVCToolchain,
+    lock: SchemaToolchainLock | None,
+    *,
+    previous: ToolchainDoctorReport | None = None,
+) -> ToolchainDoctorReport:
+    """Validate once per uninterrupted, in-process trust epoch.
+
+    Callers may pass a result obtained earlier in the same run before any
+    external producer has executed. Results are bound to the exact profile,
+    physical root, and lock document; they are deliberately not persisted.
+    """
+
+    if isinstance(previous, ToolchainDoctorReport) and previous.reusable_for(installation, lock):
+        return previous
+    return installation.doctor(lock)
+
+
 __all__ = [
     "MSVC_42",
     "MSVC_50_RTM",
@@ -1136,5 +1185,6 @@ __all__ = [
     "portable_tree_receipt",
     "profile",
     "profile_source_pins_for_paths",
+    "validate_toolchain_installation",
     "validate_toolchain_lock",
 ]

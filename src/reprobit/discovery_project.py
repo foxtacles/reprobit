@@ -10,7 +10,8 @@ from pydantic import Field, field_validator, model_validator
 
 from reprobit.authority_snapshot import (
     AuthoritySnapshotError,
-    json_authority_members,
+    JsonAuthorityDirectorySnapshot,
+    capture_json_authority_directories,
     resolve_project_path,
 )
 from reprobit.classic_orchestration import (
@@ -144,15 +145,9 @@ class ProjectGrindContext:
 
 
 @dataclass(frozen=True, slots=True)
-class ProjectDirectorySnapshot:
-    relative_path: str
-    json_members: tuple[str, ...]
-
-
-@dataclass(frozen=True, slots=True)
 class ProjectGrindSnapshot:
     files: tuple[ProjectFileSnapshot, ...]
-    authority_directories: tuple[ProjectDirectorySnapshot, ...]
+    authority_directories: tuple[JsonAuthorityDirectorySnapshot, ...]
 
 
 def _safe_project_path(root: Path, relative: str) -> Path:
@@ -189,15 +184,6 @@ def _document_paths(root: Path, relative: str) -> tuple[Path, ...]:
     if any(not path.is_file() for path in paths):
         raise ProjectDiscoveryError(f"project document entry is not a file: {directory}")
     return paths
-
-
-def _json_members(root: Path, relative: str) -> tuple[str, ...]:
-    """Seal one authority directory's membership exactly as CAS publication rechecks it."""
-
-    try:
-        return json_authority_members(root, relative)
-    except AuthoritySnapshotError as exc:
-        raise ProjectDiscoveryError(f"cannot seal project authority: {exc}") from exc
 
 
 def _relative_to(root: Path, path: Path) -> str:
@@ -345,21 +331,23 @@ def capture_project_grind_inputs(
 
     bundle = context.bundle
     assert bundle.source_manifest is not None
-    authority_directories: list[ProjectDirectorySnapshot] = []
-    authority_paths: list[Path] = []
-    for relative in (
+    authority_relatives = (
         bundle.spec.layout.interventions,
         bundle.spec.layout.proofs,
         bundle.spec.layout.oracles,
-    ):
-        paths = _document_paths(context.root, relative)
-        authority_paths.extend(paths)
-        authority_directories.append(
-            ProjectDirectorySnapshot(
-                relative_path=relative,
-                json_members=_json_members(context.root, relative),
-            )
+    )
+    try:
+        authority_directories = capture_json_authority_directories(
+            context.root,
+            authority_relatives,
         )
+    except AuthoritySnapshotError as exc:
+        raise ProjectDiscoveryError(f"cannot seal project authority: {exc}") from exc
+    authority_paths = tuple(
+        relative
+        for directory in authority_directories
+        for relative, _digest in directory.file_digests
+    )
     relatives = {
         "reprobit.toml",
         bundle.spec.toolchain.lock_file,
@@ -370,7 +358,7 @@ def capture_project_grind_inputs(
         context.config.reference_object,
         *(entry.path for entry in bundle.source_manifest.entries),
         *(target.oracle for target in bundle.spec.targets),
-        *(_relative_to(context.root, path) for path in authority_paths),
+        *authority_paths,
     }
     canonical = tuple(sorted(relatives, key=str.casefold))
     if len({item.casefold() for item in canonical}) != len(canonical):
@@ -391,12 +379,11 @@ def capture_project_grind_inputs(
         if size != len(payload):
             raise ProjectDiscoveryError(f"project grind input changed: {relative!r}")
         snapshots.append(ProjectFileSnapshot(relative, digest, payload))
-    for snapshot in authority_directories:
-        _document_paths(context.root, snapshot.relative_path)
-        if _json_members(context.root, snapshot.relative_path) != snapshot.json_members:
-            raise ProjectDiscoveryError(
-                f"project authority membership changed: {snapshot.relative_path!r}"
-            )
+    captured = {snapshot.relative_path: snapshot.digest.value for snapshot in snapshots}
+    for directory in authority_directories:
+        for relative, authority_digest in directory.file_digests:
+            if captured.get(relative) != authority_digest:
+                raise ProjectDiscoveryError(f"project authority changed: {relative!r}")
     return ProjectGrindSnapshot(tuple(snapshots), tuple(authority_directories))
 
 
@@ -419,7 +406,6 @@ def stage_grind_project(
 __all__ = [
     "DEFAULT_GRIND_CLASSES",
     "DEFAULT_GRIND_FUNCTIONS",
-    "ProjectDirectorySnapshot",
     "ProjectDiscoveryError",
     "ProjectGrindContext",
     "ProjectGrindPlan",

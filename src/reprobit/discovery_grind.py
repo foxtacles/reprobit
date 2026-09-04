@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from reprobit.authority_snapshot import (
+    JsonAuthorityDirectorySnapshot,
+    assert_json_authority_unchanged,
+)
 from reprobit.classic_donors import generate_declaration_shape
 from reprobit.costs import calculate_cost
 from reprobit.discovery_authoring import (
@@ -32,7 +36,6 @@ from reprobit.discovery_contracts import (
     enumerate_declaration_states,
 )
 from reprobit.discovery_project import (
-    ProjectDirectorySnapshot,
     ProjectGrindContext,
     capture_project_grind_inputs,
     resolve_project_grind_context,
@@ -260,7 +263,7 @@ def _validate_cold_report(
 def _publish_solution(
     project_root: Path,
     snapshots: tuple[ProjectFileSnapshot, ...],
-    authority_directories: tuple[ProjectDirectorySnapshot, ...],
+    authority_directories: tuple[JsonAuthorityDirectorySnapshot, ...],
     intervention_relative: str,
     proof_relative: str,
     interventions: InterventionDocument,
@@ -281,18 +284,24 @@ def _publish_solution(
         canonical_json(proofs),
         expected_sha256=by_path[proof_relative].digest.value,
     )
+    mutable_paths = frozenset({intervention_relative, proof_relative})
+    authority_paths = {
+        relative
+        for directory in authority_directories
+        for relative, _digest in directory.file_digests
+    }
     for snapshot in snapshots:
-        if snapshot.relative_path in {intervention_relative, proof_relative}:
+        if snapshot.relative_path in mutable_paths or snapshot.relative_path in authority_paths:
             continue
         transaction.assert_unchanged(
             snapshot.relative_path,
             expected_sha256=snapshot.digest.value,
         )
-    for directory in authority_directories:
-        transaction.assert_json_members(
-            directory.relative_path,
-            expected_members=directory.json_members,
-        )
+    assert_json_authority_unchanged(
+        transaction,
+        authority_directories,
+        mutable_paths=mutable_paths,
+    )
     result = transaction.commit()
     return result.transaction_id
 

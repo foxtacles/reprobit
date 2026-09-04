@@ -4,7 +4,9 @@
 
 The messages below were reproduced with the current CLI; long absolute paths
 are shortened to `…`. Every error exits `2`; a not-ready `rbit status` exits
-`1`. `rbit status .` is the quickest way to see which of them applies.
+`1`. `rbit status .` is the quickest way to see which of them applies. This page
+covers failures and recovery; use [Getting started](getting-started.md) for the
+normal setup sequence and the [command-line guide](cli.md) for command behavior.
 
 ### `reprobit.toml has not been created`
 
@@ -76,6 +78,13 @@ error: invalid …/reprobit/interventions/tu.transform.json: Expecting property 
 A committed record was edited by hand or merged badly. `validate` names the
 file and the parser position. Restore it from Git (`git checkout -- <file>`)
 rather than repairing the JSON by eye; the records are canonical documents.
+
+### `runtime accepts only schema 3`
+
+The project records and the installed ReproBit came from different versions.
+Do not edit `schema_version` by hand. Use the ReproBit revision that last wrote
+the project to verify its committed records, then follow the newer release's
+version-specific upgrade instructions. See [Schema versions](project-format.md#schema-versions).
 
 ### `argument --format: invalid choice`
 
@@ -187,33 +196,28 @@ Start with the normal one-command repair:
 rbit repair .
 ```
 
-ReproBit updates the saved build guidance affected by your edit, records the
-current source, rebuilds from scratch, and checks every target. It follows
-shared headers, updates saved compiler choices and function records, and safely
-narrows or removes old fallback records without a hand-written JSON or TOML
-recipe. Work stays private until the complete result is exact and trustworthy;
-publishing is one atomic step. On failure, your source edits remain, while saved
-records and previously published results remain unchanged.
-Follow the printed report or workspace path, then run `rbit clean .` when you
-no longer need it.
-
-The same `repair` command covers an edit to a shared header, even when many
-source files include it. ReproBit finds the affected work; do not run a command
-for each source file. Repair may need several passes: it fixes the earliest
-trustworthy refusal, then checks later work again from the repaired state. It
-does not mistake downstream fallout from an incomplete build for a valid
-repair target.
+The same command covers a source file or a shared header and checks every
+affected compiler step. Work stays private until the complete result is exact
+and trustworthy. On failure, your edit remains while saved records and
+previously published results stay unchanged. Follow the printed report or
+workspace path, then run `rbit clean .` when you no longer need it. The
+[`repair` guide](cli.md#rbit-repair) explains its normal behavior and search
+controls.
 
 For an added or removed file, run `rbit source preview .` (with the
 same repeatable `--path` values used for an explicit lock). The preview is
-read-only and prints a safe `source lock` command when existing build records
-still apply. Repair preserves the exact locked list, so it does not silently
-admit a newly tracked file. If preview says the change to which files CMake
-builds cannot be handled safely, restore the previous file list for now;
-ReproBit does not yet have an automatic update that can preserve every saved
-intervention. A successful source lock prints the next required step.
-The NDJSON event keeps the detailed
-source-list, build-graph, and saved-record findings for automation.
+read-only. Before the first import it prints a safe `source lock` command;
+afterward it normally prints `rbit import cmake . --refresh` with the same
+source selection. Repair preserves the exact locked list, so it does not
+silently admit a newly tracked file.
+
+Refresh keeps compatible saved guidance, resets changed compiler steps, and
+retires removed steps before checking the full candidate from scratch. It
+refuses an ambiguous compiler step, a missing saved CMake import recipe, a
+failed verification, or a concurrent project change. The published project
+remains unchanged. Resolve the reported issue and preview again; do not delete
+saved records by hand. The NDJSON event keeps the detailed source-list,
+build-graph, and saved-record findings for automation.
 
 For advanced diagnosis, `rbit source regenerate .` previews the source-record
 updates that repair can derive, without writing them. It is not a substitute
@@ -228,7 +232,7 @@ saved guidance and restores the function automatically. If it says it could not
 add saved guidance for a source file, start with `rbit source preview .`; the
 file may be missing from the locked source list. If it says it could not restore
 newly affected functions, raise `--discovery-candidates` and
-`--donor-candidates`, then rerun `rbit repair .`. Do not edit project records by
+`--candidate-limit`, then rerun `rbit repair .`. Do not edit project records by
 hand. If the message says the edit removed a function used by the last accepted
 exact check, the source change is semantic and repair cannot recreate that
 function.

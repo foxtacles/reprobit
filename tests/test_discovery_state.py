@@ -119,6 +119,20 @@ def test_discovery_cleanup_is_idempotent(
     assert "No advanced discovery state exists" in capsys.readouterr().out
 
 
+def test_discovery_cleanup_uses_ownership_marker_after_request_is_removed(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _owned_state(tmp_path)
+    request.unlink()
+
+    assert main(["discover", "clean", str(request), "--preview"]) == 0
+    assert "Would remove" in capsys.readouterr().out
+    assert main(["discover", "clean", str(request)]) == 0
+    assert "Removed" in capsys.readouterr().out
+    assert not (tmp_path / ".reprobit-discovery").exists()
+
+
 def test_discovery_state_rejects_absolute_paths_at_ownership_boundary(
     tmp_path: Path,
 ) -> None:

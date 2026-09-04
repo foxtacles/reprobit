@@ -1,12 +1,15 @@
 # Import a CMake project
 
-CMake is a one-time import input. ReproBit never invokes it during a normal
-build or a certifying verification run. After `init`, `setup`, source review,
+CMake is used only to import or refresh build records. Normal builds and
+certifying verification do not invoke it. After `init`, `setup`, source review,
 and placing the reference binary at its configured path, run:
 
 ```console
 rbit import cmake .
 ```
+
+This guide owns the import and refresh workflows. The generated
+[option table](cli-reference.md#rbit-import-cmake) lists every flag and default.
 
 This one command creates the minimal initial build records and empty per-source
 review shards, configures the existing CMake project without building it, and
@@ -35,9 +38,58 @@ For example, initialize a target whose real output name is `GAME.EXE` with:
 rbit init . --target game --artifact build/GAME.EXE --oracle reference/GAME.EXE
 ```
 
+Pass ordinary CMake cache settings explicitly when configuration needs them:
+
+```console
+rbit import cmake . \
+  --cmake-define BUILD_SHARED_LIBS=OFF \
+  --cmake-define GAME_LANGUAGE=en
+```
+
+Repeat `--cmake-define NAME=VALUE` for each setting. ReproBit passes each value
+as one CMake argument and refuses duplicate names or settings it owns itself.
+The import records these values, the selected CMake program, the configuration,
+the timeout, and directive inputs so a later refresh can replay the same setup.
+Passing one of those options to `--refresh` intentionally replaces its saved
+value for the refreshed graph. Use `--clear-cmake-defines` or
+`--clear-directive-inputs` when a refresh should replace a saved list with no
+values.
+
 The generated files are ordinary JSON that can be reviewed and committed. A
 failed first import removes only its new scaffold and retains the temporary
 workspace for diagnosis. ReproBit builds use only the committed graph.
+
+## Refresh after adding or removing source files
+
+Start with a read-only preview whenever the reviewed source list changes:
+
+```console
+rbit source preview .
+```
+
+For an existing CMake import, preview prints the complete refresh command. Run
+that command directly—do not lock the new list separately first:
+
+```console
+rbit import cmake . --refresh
+```
+
+If preview used repeated `--path` values, its refresh command repeats the same
+values in the same order. Without them, both commands use the Git index.
+
+Refresh prepares the new source list and CMake records privately, keeps saved
+adjustments and checks for compiler steps that are still compatible, starts new
+or changed steps with empty review files, and retires steps CMake no longer
+produces.
+It then verifies every target from scratch and publishes the complete update at
+once: source and build records, verified binaries, matching debug files, and
+the JSON and HTML report. An ambiguous compiler step, a failed verification, or
+a concurrent project change leaves the published project unchanged. `--target`
+is only for the first import.
+
+Older recorded graphs may not contain the original CMake options. They remain
+valid for builds and verification, but refresh will ask you to run one ordinary
+`rbit import cmake .` with those options first.
 
 <details>
 <summary>Advanced: how the CMake import works and how to split it for CI</summary>
@@ -113,7 +165,8 @@ rbit graph configure . \
   --workspace-root .reprobit-state/import \
   --toolchain-root /opt/toolchains/msvc42 \
   --compiler-transport /opt/toolchains/msvc42/wine/x86/cl \
-  --resource-transport /opt/toolchains/msvc42/wine/x86/rc
+  --resource-transport /opt/toolchains/msvc42/wine/x86/rc \
+  --cmake-define FEATURE_SET=classic
 rbit graph extract . \
   --configured-build-root .reprobit-state/import/build \
   --effective-source-root .reprobit-state/import/source \

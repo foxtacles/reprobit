@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path, PurePath
 from threading import Lock
-from typing import TYPE_CHECKING, Any, TextIO
+from typing import TYPE_CHECKING, Any, TextIO, TypeVar
 
 from pydantic import BaseModel
 from rich.console import Console
@@ -51,6 +51,8 @@ _ASCII_BAR_WIDTH = 24
 # ProgressEvent.schema_version, so consumers can detect a future shape change.
 EVENT_SCHEMA_VERSION = 1
 
+ItemT = TypeVar("ItemT")
+
 
 def human_command(argv: Sequence[str | Path]) -> str:
     """Render copyable human text while machine events retain the argv array."""
@@ -59,11 +61,48 @@ def human_command(argv: Sequence[str | Path]) -> str:
     return subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
 
 
+@dataclass(frozen=True, slots=True, init=False)
+class NextStep:
+    """One follow-up command rendered consistently for people and automation."""
+
+    argv: tuple[str, ...]
+
+    def __init__(self, argv: Sequence[str | Path]) -> None:
+        object.__setattr__(self, "argv", tuple(os.fspath(value) for value in argv))
+
+    @property
+    def command(self) -> str:
+        return human_command(self.argv)
+
+    def fields(self) -> dict[str, Any]:
+        return {
+            "next_argv": self.argv,
+            "next_command": self.command,
+        }
+
+
+def next_step_fields(step: NextStep | None) -> dict[str, Any]:
+    """Return the stable empty or populated fields for one command event."""
+
+    if step is None:
+        return {"next_argv": (), "next_command": None}
+    return step.fields()
+
+
 def count_phrase(count: int, singular: str, plural: str | None = None) -> str:
     """Render a grammatical count for user-facing CLI text."""
 
     noun = singular if count == 1 else (plural or f"{singular}s")
     return f"{count} {noun}"
+
+
+def bounded_items(values: Sequence[ItemT], *, limit: int = 8) -> tuple[tuple[ItemT, ...], int]:
+    """Return a concise text slice while machine output keeps the complete sequence."""
+
+    if limit < 1:
+        raise ValueError("bounded item limit must be positive")
+    visible = tuple(values[:limit])
+    return visible, max(0, len(values) - len(visible))
 
 
 class _ASCIIBarColumn(ProgressColumn):

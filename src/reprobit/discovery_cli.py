@@ -794,10 +794,17 @@ def command_discover_clean(args: argparse.Namespace, output: CLIOutput) -> int:
     request_candidate = Path(args.request).expanduser()
     if not request_candidate.is_absolute():
         request_candidate = Path.cwd() / request_candidate
-    if request_candidate.is_symlink() or not request_candidate.is_file():
-        raise CLIError(f"discovery request is not an existing real file: {request_candidate}")
-    request = request_candidate.resolve(strict=True)
-    root = request.parent
+    if request_candidate.is_symlink() or (
+        request_candidate.exists() and not request_candidate.is_file()
+    ):
+        raise CLIError(f"discovery request path is redirected or not a file: {request_candidate}")
+    root_candidate = request_candidate.parent
+    if root_candidate.is_symlink() or not root_candidate.is_dir():
+        raise CLIError(
+            f"discovery request directory is not an existing real directory: {root_candidate}"
+        )
+    root = root_candidate.resolve(strict=True)
+    request = root / request_candidate.name
     state = relative_output(root, args.state_directory)
     if not state.parts:
         raise CLIError("discovery state directory must not be the request directory")

@@ -653,6 +653,25 @@ def _project_recipe(
     )
 
 
+def _donor_recipe(
+    recipe_id: str,
+    family: ClassicRecipeFamily,
+    parameters: dict[str, object],
+) -> ClassicRecipeIntervention:
+    return ClassicRecipeIntervention(
+        id=recipe_id,
+        scope=Scope(target="app", translation_unit="unit.app"),
+        rationale="fixture translation-unit-scoped donor transform",
+        family=family,
+        role=ClassicRecipeRole.DONOR,
+        build_target="app",
+        parameters=tuple(
+            ClassicField(name=name, value=cast(JsonValue, value))
+            for name, value in sorted(parameters.items())
+        ),
+    )
+
+
 def _project_receipt(
     recipe_id: str,
     family: ClassicRecipeFamily,
@@ -2105,7 +2124,7 @@ def test_donor_source_mirror_header_edit_invalidates_only_its_transform_closure(
     compiler = next(
         node for node in bundle.producer_graph.nodes if node.role is ProducerRole.COMPILER
     )
-    intervention = _project_recipe(
+    intervention = _donor_recipe(
         "donor_recipe",
         ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
         {"donor": True},
@@ -2262,7 +2281,7 @@ def test_cross_target_donor_header_edit_invalidates_owning_transform_closure(
             )
         }
     )
-    intervention = _project_recipe(
+    intervention = _donor_recipe(
         "cross_target_donor_recipe",
         ClassicRecipeFamily.DECLARATION_SHAPE,
         {"declarations": True},
@@ -2460,7 +2479,7 @@ def test_same_target_cross_source_donor_header_edit_invalidates_transform_closur
     )
     sources[donor_compiler.id] = r"R:\source\donor.cpp"
 
-    intervention = _project_recipe(
+    intervention = _donor_recipe(
         "same_target_cross_source_donor_recipe",
         ClassicRecipeFamily.DECLARATION_SHAPE,
         {"declarations": True},
@@ -3003,6 +3022,7 @@ def test_runtime_factory_binds_all_legacy_oracles_before_donor_use(
         project_root=tmp_path,
         session_root=tmp_path / "session",
         toolchain_root=tmp_path / "toolchain",
+        toolchain_report=None,
         backend=object(),
         jobs=2,
         compiler_transport=None,

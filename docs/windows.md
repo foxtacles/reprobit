@@ -32,16 +32,16 @@ rbit import cmake .
 ```
 
 The provisioned compiler bundle includes authenticated `NMAKE.EXE` and
-`NMAKE.ERR` files for this one-time CMake import. ReproBit uses them
-automatically; direct builds and verification consume the committed graph and
-do not run NMake or CMake.
+`NMAKE.ERR` files for CMake import and refresh. ReproBit uses them automatically;
+direct builds and verification consume the committed graph and do not run NMake
+or CMake.
 
 <details>
 <summary>Advanced: run the native probe without project setup</summary>
 
 ```powershell
 rbit doctor --backend windows_native_v1 `
-  --toolchain-profile msvc_4_2 `
+  --profile msvc_4_2 `
   --toolchain-root C:\toolchains\msvc42 `
   --execute-probe
 ```

@@ -6,10 +6,15 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from reprobit.cli_output import count_phrase, human_command
+from reprobit.cli_output import NextStep, count_phrase
 from reprobit.project_loader import load_project, load_project_tree
 from reprobit.schema import SourceManifestDocument, ToolchainLock
-from reprobit.toolchains import ClassicMSVCToolchain, ToolchainError
+from reprobit.toolchains import (
+    ClassicMSVCToolchain,
+    ToolchainDoctorReport,
+    ToolchainError,
+    validate_toolchain_installation,
+)
 from reprobit.user_config import UserConfigError, resolve_toolchain_root
 
 
@@ -21,17 +26,26 @@ class ReadinessItem:
     label: str
     ready: bool
     detail: str
-    next_command: str | None = None
+    next: NextStep | None = None
     broken: bool = False
     """A saved file exists but cannot be read; ``rbit validate`` explains it."""
     pending: bool = False
     """The check cannot run until the items before it are ready."""
+
+    @property
+    def next_command(self) -> str | None:
+        return None if self.next is None else self.next.command
+
+    @property
+    def next_argv(self) -> tuple[str, ...]:
+        return () if self.next is None else self.next.argv
 
 
 @dataclass(frozen=True, slots=True)
 class ProjectReadiness:
     root: Path
     items: tuple[ReadinessItem, ...]
+    toolchain_report: ToolchainDoctorReport | None = None
 
     @property
     def ready(self) -> bool:
@@ -46,11 +60,19 @@ class ProjectReadiness:
         return next((item for item in self.items if not item.ready), None)
 
     @property
-    def next_command(self) -> str | None:
-        return None if self.next_item is None else self.next_item.next_command
+    def next(self) -> NextStep | None:
+        return None if self.next_item is None else self.next_item.next
 
     @property
-    def next_step(self) -> str | None:
+    def next_command(self) -> str | None:
+        return None if self.next is None else self.next.command
+
+    @property
+    def next_argv(self) -> tuple[str, ...]:
+        return () if self.next is None else self.next.argv
+
+    @property
+    def next_instruction(self) -> str | None:
         """Return the first actionable command or manual setup instruction."""
 
         item = self.next_item
@@ -101,6 +123,7 @@ def inspect_project_readiness(
     *,
     check_local_environment: bool = False,
     local_toolchain_root: str | Path | None = None,
+    prior_toolchain_report: ToolchainDoctorReport | None = None,
 ) -> ProjectReadiness:
     """Aggregate missing authority instead of failing one file at a time."""
 
@@ -115,7 +138,7 @@ def inspect_project_readiness(
                     "Project",
                     False,
                     "reprobit.toml has not been created",
-                    human_command(("rbit", "init", candidate)),
+                    NextStep(("rbit", "init", candidate)),
                 ),
             ),
         )
@@ -151,8 +174,8 @@ def inspect_project_readiness(
     proof_documents = _json_documents(proofs_directory)
     oracle_documents = _json_documents(oracles_directory)
     references = tuple(project_path(target.oracle) for target in spec.targets)
-    setup_command = human_command(("rbit", "setup", candidate))
-    validate_command = human_command(("rbit", "validate", candidate))
+    setup_command = NextStep(("rbit", "setup", candidate))
+    validate_command = NextStep(("rbit", "validate", candidate))
 
     source_ready = False
     source_broken = False
@@ -171,6 +194,7 @@ def inspect_project_readiness(
                 else "run rbit source preview to finish reviewing and locking the tracked files"
             )
 
+    toolchain_report: ToolchainDoctorReport | None = None
     items: list[ReadinessItem] = [
         ReadinessItem("project", "Project", True, f"project ID {spec.project_id}"),
     ]
@@ -200,10 +224,16 @@ def inspect_project_readiness(
                 local_detail = f"saved compiler lock needs attention: {lock_error}"
             else:
                 try:
-                    doctor = ClassicMSVCToolchain(
+                    installation = ClassicMSVCToolchain(
                         spec.toolchain.profile,
                         selected_root,
-                    ).doctor(lock_document)
+                    )
+                    doctor = validate_toolchain_installation(
+                        installation,
+                        lock_document,
+                        previous=prior_toolchain_report,
+                    )
+                    toolchain_report = doctor
                 except ToolchainError as error:
                     local_ready = False
                     local_detail = f"incomplete at {selected_root}: {error}"
@@ -253,7 +283,7 @@ def inspect_project_readiness(
                     else (
                         validate_command
                         if source_broken
-                        else human_command(("rbit", "source", "preview", candidate))
+                        else NextStep(("rbit", "source", "preview", candidate))
                     )
                 ),
                 broken=source_broken,
@@ -279,7 +309,7 @@ def inspect_project_readiness(
         )
     )
 
-    import_command = human_command(("rbit", "import", "cmake", candidate))
+    import_command = NextStep(("rbit", "import", "cmake", candidate))
     for identifier, label, path in (
         ("build_plan", "Build plan", build_plan),
         ("producer_graph", "Build graph", graph),
@@ -319,10 +349,10 @@ def inspect_project_readiness(
         unparseable = _unparseable_json(documents)
         ready = directory_ready and (bool(documents) or not documents_required)
         ready = ready and not unparseable
-        next_command = None
+        next_action: NextStep | None = None
         if unparseable:
             detail = f"{_relative(candidate, unparseable[0])} is not valid JSON; run rbit validate"
-            next_command = validate_command
+            next_action = validate_command
         elif documents:
             detail = count_phrase(len(documents), "document")
         elif not directory_ready:
@@ -342,7 +372,7 @@ def inspect_project_readiness(
                 label,
                 ready,
                 detail,
-                next_command,
+                next_action,
                 broken=bool(unparseable),
             )
         )
@@ -372,14 +402,14 @@ def inspect_project_readiness(
             (
                 None
                 if validated or not prerequisites_ready
-                else human_command(
+                else NextStep(
                     ("rbit", "repair" if repairable_source_drift else "validate", candidate)
                 )
             ),
             pending=not prerequisites_ready,
         )
     )
-    return ProjectReadiness(candidate, tuple(items))
+    return ProjectReadiness(candidate, tuple(items), toolchain_report)
 
 
 def render_project_readiness(readiness: ProjectReadiness, *, include_ready: bool = False) -> str:
@@ -409,8 +439,8 @@ def render_project_readiness(readiness: ProjectReadiness, *, include_ready: bool
             continue
         marker = "ok" if item.ready else ("!!" if item.broken else "  ")
         lines.append(f"[{marker}] {item.label}: {item.detail}")
-    if readiness.next_step is not None:
-        lines.append(f"Next: {readiness.next_step}")
+    if readiness.next_instruction is not None:
+        lines.append(f"Next: {readiness.next_instruction}")
     return "\n".join(lines)
 
 

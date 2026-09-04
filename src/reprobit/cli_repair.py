@@ -3,27 +3,38 @@
 from __future__ import annotations
 
 import argparse
-from io import StringIO
 from pathlib import Path
 
 from reprobit.classic_donor_retune_candidates import (
+    DEFAULT_REPAIR_RETUNE_RADIUS,
+    DEFAULT_RETUNE_CANDIDATES,
     MAX_RETUNE_CANDIDATES,
     MAX_RETUNE_RADIUS,
 )
-from reprobit.classic_repair_discovery import MAX_DISCOVERY_CANDIDATES
-from reprobit.classic_repair_probe import MAX_RETUNE_PROBE_CANDIDATES
-from reprobit.cli_build import command_verify
+from reprobit.classic_repair_discovery import (
+    DEFAULT_DISCOVERY_CANDIDATES,
+    MAX_DISCOVERY_CANDIDATES,
+)
+from reprobit.classic_repair_probe import (
+    DEFAULT_RETUNE_PROBE_CANDIDATES,
+    MAX_RETUNE_PROBE_CANDIDATES,
+)
+from reprobit.cli_build import execute_verify, execution_options_from_cli
 from reprobit.cli_output import CLIOutput, count_phrase, human_command
 from reprobit.cli_paths import CLIError, project_root, safe_project_path
 from reprobit.cli_state import state_root
+from reprobit.model import AuthenticityPolicy
+from reprobit.progress import bounded_exception_notes, exception_detail
 from reprobit.repair import (
     RepairError,
     capture_repair_report_preimages,
     capture_repair_snapshot,
 )
 from reprobit.repair_workflow import (
+    MAX_REPAIR_ADJUSTMENT_ROUNDS,
     RepairAttemptFailure,
     RepairWorkflowError,
+    RepairWorkflowOptions,
     execute_repair_attempt,
     repair_classic_records,
 )
@@ -32,34 +43,10 @@ from reprobit.state import KeepWorkspace
 _CANDIDATE_REPORT_DIRECTORY = ".reprobit-repair/reports"
 
 
-class _CandidateOutput(CLIOutput):
-    """Relay progress while withholding provisional candidate verdicts."""
-
-    def emit(
-        self,
-        event: str,
-        message: str,
-        *,
-        diagnostic: bool = False,
-        **fields: object,
-    ) -> None:
-        del event, message, diagnostic, fields
-
-
-def _candidate_output(output: CLIOutput) -> CLIOutput:
-    return _CandidateOutput(
-        output_format=output.output_format,
-        stdout=output.stdout if output.output_format == "ndjson" else StringIO(),
-        stderr=output.stderr,
-        heartbeat_seconds=output.heartbeat_seconds,
-        quiet=output.quiet,
-    )
-
-
 _SEARCH_BOUNDS = (
     ("retune_radius", "--retune-radius", MAX_RETUNE_RADIUS),
     ("retune_candidates", "--retune-candidates", MAX_RETUNE_CANDIDATES),
-    ("donor_candidates", "--donor-candidates", MAX_RETUNE_PROBE_CANDIDATES),
+    ("candidate_limit", "--candidate-limit", MAX_RETUNE_PROBE_CANDIDATES),
     ("adjustment_rounds", "--adjustment-rounds", None),
     ("discovery_candidates", "--discovery-candidates", MAX_DISCOVERY_CANDIDATES),
 )
@@ -98,12 +85,20 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
         report_preimages = capture_repair_report_preimages(snapshot, final_report_directory)
     except RepairError as exc:
         raise CLIError(str(exc)) from exc
-    candidate_output = _candidate_output(output)
     cache_root = state_root(root, snapshot.spec)
+    options = RepairWorkflowOptions(
+        execution=execution_options_from_cli(args),
+        policy=AuthenticityPolicy(args.policy) if args.policy is not None else None,
+        retune_radius=args.retune_radius or DEFAULT_REPAIR_RETUNE_RADIUS,
+        retune_candidates=args.retune_candidates or DEFAULT_RETUNE_CANDIDATES,
+        candidate_limit=args.candidate_limit or DEFAULT_RETUNE_PROBE_CANDIDATES,
+        adjustment_rounds=args.adjustment_rounds or MAX_REPAIR_ADJUSTMENT_ROUNDS,
+        discovery_candidates=args.discovery_candidates or DEFAULT_DISCOVERY_CANDIDATES,
+    )
     try:
         result = execute_repair_attempt(
-            args,
-            candidate_output,
+            options,
+            output,
             snapshot=snapshot,
             selected_paths=admitted_paths,
             cache_root=cache_root,
@@ -111,7 +106,7 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
             final_report_directory=final_report_directory,
             report_preimages=report_preimages,
             keep=KeepWorkspace(args.keep_workspace),
-            verify_command=command_verify,
+            verify_project=execute_verify,
             repair_records=repair_classic_records,
         )
     except RepairAttemptFailure as failure:
@@ -125,9 +120,10 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
         ):
             output.emit(
                 "repair_refused",
-                str(failure_error),
+                exception_detail(failure_error),
                 diagnostic=True,
                 phase=phase,
+                notes=bounded_exception_notes(failure_error),
                 **failure_error.diagnostic,
             )
         retained = staged.retained_path
@@ -138,7 +134,7 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
             retained_line = f"\nDiagnostics: {retained}"
         else:
             retained_line = ""
-        cause = " ".join(str(failure_error).split())
+        cause = " ".join(exception_detail(failure_error).split())
         if staged.root is not None:
             cause = cause.replace(str(staged.root), "the private repair workspace")
         cleanup_line = (
@@ -242,8 +238,6 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
         reauthored_actions=repair_result.reauthored_actions,
         discovered_actions=repair_result.discovered_actions,
         compiler_candidates=repair_result.compiled_candidates,
-        # Kept for machine-output compatibility with earlier ReproBit releases.
-        donor_candidates=repair_result.compiled_candidates,
         replayed_candidates=repair_result.replayed_candidates,
         repair_passes=repair_result.passes,
         adjustment_rounds=repair_result.adjustment_rounds,
@@ -259,12 +253,13 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
         output.emit(
             "repair_cleanup_warning",
             (
-                "Repair was published and verified, but its private workspace could not "
-                f"be cleaned automatically: {cleanup_warning}\nTry: rbit clean {root}"
+                "Repair was published and verified, but private cleanup could not finish: "
+                f"{cleanup_warning}\nTry: "
+                f"{human_command(('rbit', 'clean', root))}"
             ),
             diagnostic=True,
             project=root,
-            workspace=staged.retained_path,
+            workspace=(staged.retained_path if staged.retained_path.is_dir() else None),
         )
     elif staged.retained_path.is_dir():
         output.emit(

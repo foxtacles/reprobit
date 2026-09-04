@@ -22,10 +22,10 @@ from typing import Literal
 
 from pydantic import Field
 
-from reprobit.atomic_io import write_json_atomic
+from reprobit.atomic_io import write_bytes_atomic
 from reprobit.coff_format import CoffObject, coff_body
 from reprobit.model import StrictModel
-from reprobit.strict_json import strict_load
+from reprobit.strict_json import canonical_json, strict_load
 
 LEDGER_SCHEMA_VERSION: Literal[1] = 1
 COMPOSED_BODY_LEDGER_RELATIVE = ("ledger", "composed-bodies.json")
@@ -166,9 +166,19 @@ def census_unrecorded_fallout(
     return tuple(fallout)
 
 
-def write_ledger(path: Path, ledger: ComposedBodyLedger) -> None:
+def canonical_ledger_payload(ledger: ComposedBodyLedger) -> bytes:
+    """Return the one canonical byte representation used for repair evidence."""
+
+    return canonical_json(ledger.model_dump(mode="json"))
+
+
+def write_ledger(path: Path, ledger: ComposedBodyLedger) -> bytes:
+    """Write and return the exact canonical ledger payload."""
+
+    payload = canonical_ledger_payload(ledger)
     path.parent.mkdir(parents=True, exist_ok=True)
-    write_json_atomic(path, ledger.model_dump(mode="json"))
+    write_bytes_atomic(path, payload)
+    return payload
 
 
 def read_ledger(path: Path) -> ComposedBodyLedger:
@@ -192,6 +202,7 @@ __all__ = [
     "ProvidedObject",
     "UnrecordedFallout",
     "build_ledger",
+    "canonical_ledger_payload",
     "census_unrecorded_fallout",
     "function_bodies",
     "ledger_translation_units",

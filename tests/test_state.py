@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import reprobit.state as state_module
+from reprobit.atomic_io import write_json_atomic
 from reprobit.cache import IncrementalCache, cache_key
 from reprobit.state import (
     KeepWorkspace,
@@ -18,6 +19,48 @@ from reprobit.state import (
     report_publication_lease,
 )
 from reprobit.state_lock import AdvisoryFileLock, StateError
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows directory handles")
+def test_windows_initial_state_write_refuses_a_replaced_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    directory = tmp_path / "arena"
+    directory.mkdir()
+    expected = state_module._real_directory_identity(directory, label="fixture arena")
+    original = tmp_path / "original-arena"
+    real_publish = state_module.atomic_publish_relative_if_current
+    swapped = False
+
+    def swap_before_open(
+        root: Path,
+        relative: str,
+        payload: bytes,
+        **options: object,
+    ):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            directory.rename(original)
+            directory.mkdir()
+            (directory / "valuable.txt").write_bytes(b"keep me")
+        return real_publish(root, relative, payload, **options)
+
+    monkeypatch.setattr(state_module, "atomic_publish_relative_if_current", swap_before_open)
+
+    with pytest.raises(StateError, match="cannot securely create state record"):
+        state_module._write_json_in_exact_directory(
+            directory,
+            expected,
+            ".outcome.json",
+            {"outcome": "interrupted"},
+        )
+
+    assert swapped
+    assert (directory / "valuable.txt").read_bytes() == b"keep me"
+    assert not (directory / ".outcome.json").exists()
+    assert not (original / ".outcome.json").exists()
 
 
 def test_locked_marker_is_read_through_its_own_held_handle(tmp_path: Path) -> None:
@@ -108,6 +151,464 @@ def test_run_arena_retention_modes_are_explicit(tmp_path: Path) -> None:
         removed = arena.path
         raise KeyboardInterrupt
     assert not removed.exists()
+
+
+def test_run_arena_cleanup_preserves_a_directory_swapped_before_quarantine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    real_move = state_module._move_to_quarantine
+    arena_path: Path | None = None
+    original: Path | None = None
+    swapped = False
+
+    def swap_before_move(path: Path, quarantine: Path) -> None:
+        nonlocal swapped
+        if path == arena_path and not swapped:
+            assert original is not None
+            swapped = True
+            real_move(path, original)
+            path.mkdir()
+            (path / "valuable.txt").write_bytes(b"keep me")
+        real_move(path, quarantine)
+
+    monkeypatch.setattr(state_module, "_move_to_quarantine", swap_before_move)
+
+    with (
+        pytest.raises(StateError, match="run arena changed during cleanup"),
+        RunArena(state, kind="build", run_id="cleanup-race") as arena,
+    ):
+        arena_path = arena.path
+        original = arena.path.parent / "original-run"
+
+    assert swapped
+    assert arena_path is not None
+    assert original is not None
+    quarantined = next(arena_path.parent.glob(f".{arena_path.name}.reprobit-remove-*"))
+    assert (quarantined / "valuable.txt").read_bytes() == b"keep me"
+    assert (original / ".outcome.json").is_file()
+
+
+def test_run_arena_exit_refuses_a_replacement_at_its_active_path(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    arena = RunArena(
+        state,
+        kind="build",
+        run_id="active-path-swap",
+        keep=KeepWorkspace.NEVER,
+    )
+    arena.__enter__()
+    original = arena.path.parent / "original-run"
+    arena.path.rename(original)
+    arena.path.mkdir()
+    sentinel = arena.path / "valuable.txt"
+    sentinel.write_bytes(b"keep me")
+
+    with pytest.raises(StateError, match="run arena changed before writing its outcome"):
+        arena.__exit__(None, None, None)
+
+    assert sentinel.read_bytes() == b"keep me"
+    assert (original / ".outcome.json").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX directory replacement")
+def test_run_arena_finish_binds_outcome_publication_to_the_arena(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    arena = RunArena(
+        state,
+        kind="build",
+        run_id="finish-seat-swap",
+        keep=KeepWorkspace.ALWAYS,
+    )
+    arena.__enter__()
+    outcome = arena.path / ".outcome.json"
+    interrupted = outcome.read_bytes()
+    replacement = arena.path.parent / "replacement-run"
+    replacement.mkdir()
+    os.link(outcome, replacement / outcome.name)
+    (replacement / "valuable.txt").write_bytes(b"keep me")
+    outcome_relative = outcome.relative_to(state).as_posix()
+    _payload, arena._outcome_snapshot = state_module.read_relative_file(
+        state,
+        outcome_relative,
+    )
+    original = arena.path.parent / "original-run"
+    real_publish = state_module.atomic_publish_relative_if_current
+    swapped = False
+
+    def swap_before_publish(
+        root: Path,
+        relative: str,
+        payload: bytes,
+        **options: object,
+    ):
+        nonlocal swapped
+        if relative == outcome_relative and not swapped:
+            swapped = True
+            arena.path.rename(original)
+            replacement.rename(arena.path)
+        return real_publish(root, relative, payload, **options)
+
+    monkeypatch.setattr(state_module, "atomic_publish_relative_if_current", swap_before_publish)
+
+    with pytest.raises(StateError, match="changed before writing its outcome"):
+        arena.finish(succeeded=True)
+
+    assert swapped
+    assert (arena.path / "valuable.txt").read_bytes() == b"keep me"
+    assert (arena.path / ".outcome.json").read_bytes() == interrupted
+    assert (original / ".outcome.json").read_bytes() == interrupted
+
+
+def test_state_finds_and_cleans_a_retained_external_cmake_workspace(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    with RunArena(
+        state,
+        kind="import",
+        run_id="retained-cmake",
+        keep=KeepWorkspace.ALWAYS,
+    ) as arena:
+        arena_path = arena.path
+        workspace = arena.create_cmake_workspace()
+        (workspace / "large.bin").write_bytes(b"x" * 4096)
+
+    assert workspace.is_dir()
+    status = StateStore(state).status()
+    assert status.runs[0].path == arena_path
+    assert status.runs[0].bytes >= 4096
+    assert status.runs[0].files >= 4
+
+    result = StateStore(state).gc()
+
+    assert result.removed == (arena_path,)
+    assert result.reclaimed_bytes >= 4096
+    assert not workspace.exists()
+    assert not arena_path.exists()
+
+
+def test_cmake_workspace_creation_failure_preserves_a_competing_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    temporary_root = tmp_path / "temporary"
+    temporary_root.mkdir()
+    monkeypatch.setattr(state_module.tempfile, "gettempdir", lambda: str(temporary_root))
+    real_mkdir = Path.mkdir
+    competitor: list[Path] = []
+
+    def create_competitor_then_fail(
+        path: Path,
+        mode: int = 0o777,
+        parents: bool = False,
+        exist_ok: bool = False,
+    ) -> None:
+        if path.parent == temporary_root and path.name.startswith("rbit-cmake-"):
+            real_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+            (path / "valuable.txt").write_bytes(b"keep me")
+            competitor.append(path)
+            raise FileExistsError(path)
+        real_mkdir(path, mode=mode, parents=parents, exist_ok=exist_ok)
+
+    monkeypatch.setattr(Path, "mkdir", create_competitor_then_fail)
+
+    with RunArena(state, kind="import", run_id="creation-race") as arena:
+        with pytest.raises(FileExistsError):
+            arena.create_cmake_workspace()
+        assert not (arena.path / ".cmake-workspace.json").exists()
+
+    assert len(competitor) == 1
+    assert (competitor[0] / "valuable.txt").read_bytes() == b"keep me"
+
+
+def test_state_gc_refuses_a_markerless_cmake_workspace(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    with RunArena(
+        state,
+        kind="import",
+        run_id="markerless-cmake",
+        keep=KeepWorkspace.ALWAYS,
+    ) as arena:
+        arena_path = arena.path
+
+    nonce = "a" * 32
+    workspace = (tmp_path / f"rbit-cmake-{nonce}").resolve()
+    workspace.mkdir()
+    write_json_atomic(
+        arena_path / ".cmake-workspace.json",
+        {
+            "schema": "reprobit.cmake-workspace.v1",
+            "arena": str(arena_path.resolve(strict=True)),
+            "workspace": str(workspace),
+            "nonce": nonce,
+        },
+    )
+
+    with pytest.raises(StateError, match="marker is missing"):
+        StateStore(state).gc()
+
+    assert workspace.is_dir()
+    assert arena_path.is_dir()
+
+
+def test_state_gc_refuses_to_remove_a_replaced_cmake_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    temporary_root = tmp_path / "temporary"
+    temporary_root.mkdir()
+    monkeypatch.setattr(state_module.tempfile, "gettempdir", lambda: str(temporary_root))
+    with RunArena(
+        state,
+        kind="import",
+        run_id="cleanup-race",
+        keep=KeepWorkspace.ALWAYS,
+    ) as arena:
+        arena_path = arena.path
+        workspace = arena.create_cmake_workspace()
+
+    original = temporary_root / "original-workspace"
+    real_move = state_module._move_to_quarantine
+    swapped = False
+
+    def swap_before_move(path: Path, quarantine: Path) -> None:
+        nonlocal swapped
+        if path == workspace and not swapped:
+            swapped = True
+            real_move(workspace, original)
+            workspace.mkdir()
+            (workspace / "valuable.txt").write_bytes(b"keep me")
+        real_move(path, quarantine)
+
+    monkeypatch.setattr(state_module, "_move_to_quarantine", swap_before_move)
+
+    with pytest.raises(StateError, match="changed during cleanup"):
+        StateStore(state).gc()
+
+    assert swapped
+    quarantined = next(temporary_root.glob(f".{workspace.name}.reprobit-remove-*"))
+    assert (quarantined / "valuable.txt").read_bytes() == b"keep me"
+    assert (original / ".reprobit-cmake-workspace.json").is_file()
+    assert arena_path.is_dir()
+
+
+def test_owned_workspace_cleanup_refuses_a_new_pointer(tmp_path: Path, monkeypatch) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    with RunArena(
+        state,
+        kind="import",
+        run_id="late-pointer",
+        keep=KeepWorkspace.ALWAYS,
+    ) as arena:
+        arena_path = arena.path
+    identity = state_module._real_directory_identity(arena_path, label="fixture arena")
+    workspace = tmp_path / f"rbit-cmake-{'a' * 32}"
+    real_record = state_module._owned_cmake_workspace_record
+    injected = False
+
+    def inject_pointer(path: Path):
+        nonlocal injected
+        if not injected:
+            injected = True
+            workspace.mkdir()
+            ownership = {
+                "schema": "reprobit.cmake-workspace.v1",
+                "arena": str(arena_path.resolve()),
+                "workspace": str(workspace.resolve()),
+                "nonce": "a" * 32,
+            }
+            write_json_atomic(
+                workspace / ".reprobit-cmake-workspace.json",
+                ownership,
+            )
+            write_json_atomic(path / ".cmake-workspace.json", ownership)
+        return real_record(path)
+
+    monkeypatch.setattr(state_module, "_owned_cmake_workspace_record", inject_pointer)
+
+    with pytest.raises(StateError, match="pointer changed before cleanup"):
+        state_module._remove_owned_cmake_workspace(arena_path, identity)
+
+    assert workspace.is_dir()
+    assert (arena_path / ".cmake-workspace.json").is_file()
+
+
+def test_owned_workspace_cleanup_preserves_a_replaced_pointer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    with RunArena(
+        state,
+        kind="import",
+        run_id="pointer-swap",
+        keep=KeepWorkspace.ALWAYS,
+    ) as arena:
+        workspace = arena.create_cmake_workspace()
+        pointer = arena.path / ".cmake-workspace.json"
+        original_pointer = arena.path / ".original-cmake-workspace.json"
+        real_remove = state_module.remove_published_relative
+
+        def swap_pointer(root: Path, relative: str, **kwargs: object) -> bool:
+            pointer.rename(original_pointer)
+            pointer.write_bytes(b"foreign pointer")
+            return real_remove(root, relative, **kwargs)
+
+        monkeypatch.setattr(state_module, "remove_published_relative", swap_pointer)
+        with pytest.raises(StateError, match="pointer changed before cleanup"):
+            arena.remove_cmake_workspace(workspace)
+
+        assert pointer.read_bytes() == b"foreign pointer"
+        assert original_pointer.is_file()
+
+
+def test_owned_workspace_cleanup_checks_the_sealed_pointer_before_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    with RunArena(
+        state,
+        kind="import",
+        run_id="pointer-owner-swap",
+        keep=KeepWorkspace.ALWAYS,
+    ) as arena:
+        first_workspace = arena.create_cmake_workspace()
+        pointer = arena.path / ".cmake-workspace.json"
+        first_pointer = arena.path / ".first-cmake-workspace.json"
+        second_nonce = "b" * 32
+        second_workspace = tmp_path / f"rbit-cmake-{second_nonce}"
+        second_workspace.mkdir()
+        second_ownership = {
+            "schema": "reprobit.cmake-workspace.v1",
+            "arena": str(arena.path.resolve()),
+            "workspace": str(second_workspace.resolve()),
+            "nonce": second_nonce,
+        }
+        write_json_atomic(
+            second_workspace / ".reprobit-cmake-workspace.json",
+            second_ownership,
+        )
+        real_record = state_module._owned_cmake_workspace_record
+        swapped = False
+
+        def swap_owner(path: Path, **kwargs: object):
+            nonlocal swapped
+            if kwargs.get("pointer_payload") is not None and not swapped:
+                swapped = True
+                pointer.rename(first_pointer)
+                write_json_atomic(pointer, second_ownership)
+            return real_record(path, **kwargs)
+
+        monkeypatch.setattr(state_module, "_owned_cmake_workspace_record", swap_owner)
+
+        with pytest.raises(StateError, match="pointer changed before cleanup"):
+            arena.remove_cmake_workspace(first_workspace)
+
+        assert first_workspace.is_dir()
+        assert second_workspace.is_dir()
+        assert pointer.is_file()
+        assert first_pointer.is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires POSIX directory replacement")
+def test_owned_workspace_reseal_is_bound_to_the_arena(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    arena = RunArena(
+        state,
+        kind="import",
+        run_id="pointer-seat-swap",
+        keep=KeepWorkspace.ALWAYS,
+    )
+    arena.__enter__()
+    workspace = arena.create_cmake_workspace()
+    pointer = arena.path / ".cmake-workspace.json"
+    replacement = arena.path.parent / "replacement-run"
+    replacement.mkdir()
+    os.link(pointer, replacement / pointer.name)
+    (replacement / "valuable.txt").write_bytes(b"keep me")
+    original = arena.path.parent / "original-run"
+    real_reseal = state_module.reseal_relative_file
+    swapped = False
+
+    def swap_before_reseal(root: Path, relative: str, **options: object):
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            arena.path.rename(original)
+            replacement.rename(arena.path)
+        return real_reseal(root, relative, **options)
+
+    monkeypatch.setattr(state_module, "reseal_relative_file", swap_before_reseal)
+
+    with pytest.raises(StateError, match="pointer changed before cleanup"):
+        arena.remove_cmake_workspace(workspace)
+
+    assert swapped
+    assert workspace.is_dir()
+    assert (arena.path / "valuable.txt").read_bytes() == b"keep me"
+    displaced = arena.path.parent / "replacement-after-test"
+    arena.path.rename(displaced)
+    original.rename(arena.path)
+    arena.finish(succeeded=False)
+
+
+def test_state_gc_checks_arena_identity_before_owned_workspace_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    with RunArena(
+        state,
+        kind="import",
+        run_id="arena-swap-before-workspace",
+        keep=KeepWorkspace.ALWAYS,
+    ) as arena:
+        arena_path = arena.path
+        workspace = arena.create_cmake_workspace()
+    original = arena_path.parent / "original-arena"
+    real_remove = state_module._remove_owned_cmake_workspace
+    swapped = False
+
+    def swap_arena(path: Path, expected: tuple[int, int]) -> None:
+        nonlocal swapped
+        if not swapped:
+            swapped = True
+            path.rename(original)
+            path.mkdir()
+            (path / "valuable.txt").write_bytes(b"keep me")
+        real_remove(path, expected)
+
+    monkeypatch.setattr(state_module, "_remove_owned_cmake_workspace", swap_arena)
+
+    with pytest.raises(StateError, match="run arena changed"):
+        StateStore(state).gc()
+
+    assert (arena_path / "valuable.txt").read_bytes() == b"keep me"
+    assert workspace.is_dir()
+    assert original.is_dir()
 
 
 def test_state_gc_skips_a_live_lease_and_reclaims_completed_runs(
@@ -212,14 +713,14 @@ def test_state_gc_collectors_share_one_close_to_remove_gate(
     first_at_remove = threading.Event()
     release_first = threading.Event()
     second_attempted_gate = threading.Event()
-    real_rmtree = shutil.rmtree
+    real_move = state_module._move_to_quarantine
     real_acquire = AdvisoryFileLock.acquire
 
-    def paused_rmtree(path: Path) -> None:
-        if Path(path) == arena_path and threading.current_thread().name == "gc-first":
+    def paused_move(source: Path, quarantine: Path) -> None:
+        if source == arena_path and threading.current_thread().name == "gc-first":
             first_at_remove.set()
             assert release_first.wait(5)
-        real_rmtree(path)
+        real_move(source, quarantine)
 
     def observed_acquire(
         lock: AdvisoryFileLock,
@@ -230,7 +731,7 @@ def test_state_gc_collectors_share_one_close_to_remove_gate(
             second_attempted_gate.set()
         return real_acquire(lock, nonblocking=nonblocking)
 
-    monkeypatch.setattr(shutil, "rmtree", paused_rmtree)
+    monkeypatch.setattr(state_module, "_move_to_quarantine", paused_move)
     monkeypatch.setattr(AdvisoryFileLock, "acquire", observed_acquire)
     results: dict[str, object] = {}
 

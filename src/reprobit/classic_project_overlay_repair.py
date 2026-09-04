@@ -1570,10 +1570,8 @@ def probe_project_overlay_repair(
     )
     exhausted = candidate_budget <= 0 or compiled_candidates >= candidate_budget
     if exhausted:
-        reason = (
-            f"tested {compiled_candidates} nearby source layouts; "
-            "the --donor-candidates limit was reached"
-        )
+        tested = f"tested {compiled_candidates} nearby source layouts"
+        reason = tested + "; the --candidate-limit was reached"
     elif search_truncated:
         reason = (
             f"tested {compiled_candidates} nearby source layouts; "

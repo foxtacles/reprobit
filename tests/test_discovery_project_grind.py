@@ -266,7 +266,15 @@ def test_project_auto_grind_stops_after_the_project_becomes_exact(
         ProjectGrindWorkItem("program", "tu.one", "_one", "reference/one.obj"),
         ProjectGrindWorkItem("program", "tu.two", "_two", "reference/two.obj"),
     )
-    campaign = ProjectGrindCampaign("sample", 2, 2, 2, 0, items, ())
+    campaign = ProjectGrindCampaign(
+        "sample",
+        3,
+        2,
+        2,
+        0,
+        items,
+        (ProjectGrindSkip("tu.missing", None, None, "no reference object was assigned"),),
+    )
     monkeypatch.setattr(
         project_grind,
         "enumerate_project_grind_campaign",
@@ -317,7 +325,7 @@ def test_project_auto_grind_stops_after_the_project_becomes_exact(
         )
 
     monkeypatch.setattr(project_grind, "run_project_grind", run_one)
-    observed: list[tuple[int, int]] = []
+    observed: list[tuple[int, int, str]] = []
     finalized: list[tuple[int, str]] = []
 
     def finalize(
@@ -338,7 +346,9 @@ def test_project_auto_grind_stops_after_the_project_becomes_exact(
         tmp_path,
         callbacks=cast(object, SimpleNamespace()),  # type: ignore[arg-type]
         accept_exact=True,
-        progress=lambda completed, total, *_args: observed.append((completed, total)),
+        progress=lambda completed, total, _phase, detail, *_args: observed.append(
+            (completed, total, detail)
+        ),
         finalize_outcome=finalize,
     )
 
@@ -356,7 +366,13 @@ def test_project_auto_grind_stops_after_the_project_becomes_exact(
     )
     gc.collect()
     assert all(reference() is None for reference in report_refs)
-    assert observed[-1] == (30, 30)
+    assert observed[0] == (
+        0,
+        30,
+        "Reference preflight: 2 of 3 eligible compiler steps paired; 1 missing; "
+        "2 bounded functions selected",
+    )
+    assert observed[-1][:2] == (30, 30)
     assert not tuple(tmp_path.glob(".reprobit-project-grind-*"))
     assert not tuple((tmp_path / ".reprobit-state/runs").glob("grind-*"))
 
@@ -821,13 +837,22 @@ def test_project_wide_cli_preview_reports_copyable_acceptance_command(
         plan=None,
         accept_exact=False,
         accept_progress=False,
+        jobs=1,
+        backend="auto",
+        wine="wine",
+        wineserver="wineserver",
+        toolchain_root=None,
+        compiler_transport=None,
+        resource_transport=None,
+        initialization_timeout=600.0,
+        compile_timeout=600.0,
+        link_timeout=900.0,
+        cleanup_timeout=10.0,
     )
 
     status = grind_cli.command_discover_grind(
         args,
         CLIOutput("ndjson", machine, StringIO()),
-        prepare_run=lambda *_args, **_kwargs: None,
-        verify_command=lambda *_args, **_kwargs: 0,
     )
 
     event = next(
@@ -840,6 +865,8 @@ def test_project_wide_cli_preview_reports_copyable_acceptance_command(
     assert observed["accept_exact"] is False
     assert event["approval_argv"][-1] == "--accept-exact"
     assert "--project-wide" not in event["approval_argv"]
+    assert event["next_argv"] == event["approval_argv"]
+    assert event["next_command"] == human_command(event["next_argv"])
     assert event["report_html"] == str(report_html)
 
 
@@ -935,3 +962,5 @@ def test_project_wide_report_failure_is_nonfatal_and_keeps_compact_outcome(
     assert complete["published_symbols"] == 1
     assert result.outcomes[0].transaction_id == "authority-transaction"
     assert "diagnostic disk full" in complete["report_warning"]
+    assert complete["next_argv"] == ["rbit", "verify", str(tmp_path)]
+    assert complete["next_command"] == human_command(complete["next_argv"])

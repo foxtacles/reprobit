@@ -25,9 +25,9 @@ families through reviewed library releases.
 
 ## Install
 
-You need Python 3.11 or newer and Git. The one-time CMake import also needs your
-project's compatible CMake version on `PATH`. On macOS and Linux, install Wine
-and `wineserver`; native Windows does not use Wine.
+You need Python 3.11 or newer and Git. CMake import and later source-list
+refreshes need your project's compatible CMake version on `PATH`. On macOS and
+Linux, install Wine and `wineserver`; native Windows does not use Wine.
 
 ```console
 git clone https://github.com/isledecomp/reprobit.git
@@ -62,11 +62,11 @@ rbit verify .
 
 `setup` downloads and authenticates the compiler the first time, remembers where it is, and
 prints the one remaining checklist item: `place the original at reference/grind.exe`.
-`prepare_reference.py` generates that reference locally with the same compiler. The first
-`discover grind` is a read-only preview: it compiles four bounded declaration candidates, finds
-the one exact match, and prints the approval command. `--accept-exact` repeats the proof and
-saves the matching intervention and proof records (`git diff` shows both files). `verify` then
-builds from scratch and ends with:
+`prepare_reference.py` generates both the reference executable and the project-owned `.obj`
+that automatic grind needs. The first `discover grind` is a read-only preview: it compiles four
+bounded declaration candidates, finds the one exact match, and prints the approval command.
+`--accept-exact` repeats the proof and saves the matching intervention and proof records
+(`git diff` shows both files). `verify` then builds from scratch and ends with:
 
 ```text
 Verification passed: 1/1 targets are byte-identical
@@ -117,12 +117,19 @@ decompilation repository rather than being built into ReproBit.
 
 ## Documentation
 
+Choose the page for the job at hand. [Getting started](docs/getting-started.md)
+owns the setup sequence and stays on the happy path. The
+[command-line guide](docs/cli.md) explains command behavior, while its generated
+[option tables](docs/cli-reference.md) are the exact source for flags and defaults.
+Workflow guides cover their own end-to-end behavior, and
+[Troubleshooting](docs/troubleshooting.md) is reserved for recovering from failures.
+
 Start here:
 
 - [Getting started](docs/getting-started.md) — from an existing CMake project to a verified build
 - [Concepts](docs/concepts.md) — compiler entropy, the clean verification boundary, costs
 - [Runnable examples](examples/README.md)
-- [Command-line reference](docs/cli.md) and the generated [option tables](docs/cli-reference.md)
+- [Command-line guide](docs/cli.md) and the generated [option tables](docs/cli-reference.md)
 - [Find possible compiler interventions](docs/discovery.md)
 - [GitHub Action](docs/action.md)
 - [Troubleshooting](docs/troubleshooting.md)
@@ -136,7 +143,7 @@ Detailed references:
 - [Cost model](docs/costs.md)
 - [Platforms and logical paths](docs/platforms.md)
 - [Native Windows and external MSVC setup](docs/windows.md)
-- [One-time CMake import](docs/cmake.md)
+- [CMake import and refresh](docs/cmake.md)
 - [Architecture](docs/architecture.md)
 
 ## Development
@@ -145,7 +152,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for the test layout and the quality gates
 
 ```console
 python -m pip install -e '.[test]'
-ruff check && ruff format --check && mypy && pytest -q
+ruff check && ruff format --check && mypy && python -m pytest -q
 ```
 
 ReproBit is licensed under `LGPL-3.0-only`.

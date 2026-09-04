@@ -6,6 +6,10 @@ is not met. It installs ReproBit from the Action's own checkout, checks the
 backend and toolchain, and then runs the project's direct compiler and linker
 plan without CMake.
 
+This page is the source of truth for Action setup, inputs, outputs, and failure
+behavior. The generated [CLI option tables](cli-reference.md) cover commands
+run outside the Action.
+
 ## Before you run it
 
 The workflow that calls ReproBit must:

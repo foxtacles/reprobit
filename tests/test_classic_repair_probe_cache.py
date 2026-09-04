@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gc
 import json
+import os
 import threading
 import time
 import weakref
@@ -18,6 +19,7 @@ from reprobit import classic_repair_probe_execution as subject
 from reprobit.classic_runtime_probe import ClassicDonorProbeInput, ClassicDonorProbeOutput
 from reprobit.execution import StepExecutionReceipt
 from reprobit.model import Digest
+from reprobit.secure_path_contracts import SecureFileSnapshot
 from reprobit.strict_json import canonical_json
 
 
@@ -391,6 +393,31 @@ def test_store_discards_a_compression_bomb(tmp_path: Path) -> None:
     assert not entry.exists()
 
 
+def test_store_compresses_probe_payloads_incrementally(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads: list[bytes] = []
+
+    class Compressor:
+        def compress(self, payload: bytes) -> bytes:
+            payloads.append(payload)
+            return b""
+
+        def flush(self) -> bytes:
+            return b"compressed"
+
+    monkeypatch.setattr(store_module.zlib, "compressobj", lambda _level: Compressor())
+
+    encoded = store_module._encode_output(
+        "epoch-a",
+        ("program", "src/unit.cpp", "seat-a"),
+        _output("probe", b"object"),
+    )
+
+    assert encoded is not None and encoded.endswith(b"compressed")
+    assert payloads == [b"int x;\n", b"object", b"pdb"]
+
+
 def test_store_rejects_an_oversized_declared_payload_before_decompression(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -563,3 +590,125 @@ def test_compile_epoch_names_graph_environment_authority_and_sources(
 
     assert first == same
     assert len({first, other_environment, other_sources, other_authority, other_graph}) == 5
+
+
+def test_probe_store_gc_removes_only_entries_older_than_the_requested_age(
+    tmp_path: Path,
+) -> None:
+    state = tmp_path / "state"
+    old_entry = state / "repair-probes" / "v1" / "aa" / "old.bin"
+    recent_entry = state / "repair-probes" / "v1" / "bb" / "recent.bin"
+    old_entry.parent.mkdir(parents=True)
+    recent_entry.parent.mkdir(parents=True)
+    old_entry.write_bytes(b"old")
+    recent_entry.write_bytes(b"recent")
+    now_ns = time.time_ns()
+    old_ns = now_ns - 7_200_000_000_000
+    os.utime(old_entry, ns=(old_ns, old_ns))
+
+    preview = store_module.gc_probe_store(
+        state,
+        older_than_seconds=3600,
+        dry_run=True,
+        now_ns=now_ns,
+    )
+
+    assert preview == store_module.ProbeStoreGCResult(1, 3, 1)
+    assert old_entry.is_file() and recent_entry.is_file()
+
+    result = store_module.gc_probe_store(
+        state,
+        older_than_seconds=3600,
+        now_ns=now_ns,
+    )
+
+    assert result == preview
+    assert not old_entry.exists()
+    assert recent_entry.read_bytes() == b"recent"
+
+
+def test_probe_store_gc_preserves_an_entry_replaced_after_its_age_check(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    entry = state / "repair-probes" / "v1" / "aa" / "old.bin"
+    entry.parent.mkdir(parents=True)
+    entry.write_bytes(b"old")
+    now_ns = time.time_ns()
+    old_ns = now_ns - 7_200_000_000_000
+    os.utime(entry, ns=(old_ns, old_ns))
+    real_remove = store_module.remove_published_relative
+
+    def replace_then_remove(
+        root: Path,
+        relative: str,
+        *,
+        expected: SecureFileSnapshot,
+    ) -> bool:
+        entry.write_bytes(b"fresh")
+        return real_remove(root, relative, expected=expected)
+
+    monkeypatch.setattr(store_module, "remove_published_relative", replace_then_remove)
+
+    result = store_module.gc_probe_store(
+        state,
+        older_than_seconds=3600,
+        now_ns=now_ns,
+    )
+
+    assert result == store_module.ProbeStoreGCResult(0, 0, 0)
+    assert entry.read_bytes() == b"fresh"
+
+
+def test_probe_store_gc_does_not_hash_recent_entries(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    entry = state / "repair-probes" / "v1" / "aa" / "recent.bin"
+    entry.parent.mkdir(parents=True)
+    entry.write_bytes(b"recent")
+
+    def fail_digest(_root: Path, _relative: str) -> object:
+        raise AssertionError("recent entries must not be hashed during cleanup")
+
+    monkeypatch.setattr(store_module, "digest_relative_file", fail_digest)
+
+    result = store_module.gc_probe_store(
+        state,
+        older_than_seconds=3600,
+        now_ns=time.time_ns(),
+    )
+
+    assert result == store_module.ProbeStoreGCResult(0, 0, 1)
+    assert entry.read_bytes() == b"recent"
+
+
+def test_probe_store_gc_preserves_an_empty_directory_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    seat = state / "repair-probes" / "v1" / "aa"
+    seat.mkdir(parents=True)
+    original = seat.with_name("original-aa")
+    real_remove = store_module.remove_exact_empty_directory
+    swapped = False
+
+    def replace_then_remove(path: Path, expected: tuple[int, int]) -> None:
+        nonlocal swapped
+        if path == seat and not swapped:
+            swapped = True
+            seat.rename(original)
+            seat.mkdir()
+        real_remove(path, expected)
+
+    monkeypatch.setattr(store_module, "remove_exact_empty_directory", replace_then_remove)
+
+    result = store_module.gc_probe_store(state, older_than_seconds=0)
+
+    assert result == store_module.ProbeStoreGCResult(0, 0, 0)
+    assert swapped
+    assert seat.is_dir()
+    assert original.is_dir()

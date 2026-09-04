@@ -5,7 +5,9 @@ build. Every command below was run in that order against a fresh copy of the
 `examples/grind-progress` sources; the printed output is reproduced with only the
 absolute project path shortened to `/path/to/project`. For the shortest possible
 first contact, run the ready-made [grind example](../examples/grind/README.md)
-instead; for what the checks mean, read [Concepts](concepts.md).
+instead; for what the checks mean, read [Concepts](concepts.md). This page owns
+the normal setup sequence. The [command-line guide](cli.md) covers optional and
+advanced behavior without interrupting that path.
 
 ## Prerequisites
 
@@ -13,8 +15,13 @@ instead; for what the checks mean, read [Concepts](concepts.md).
 - The project directory is a Git working tree with its source files committed.
   `rbit source` reads the Git-tracked file list, so untracked files are invisible
   to it.
-- The project's compatible CMake version on `PATH` (used once, by `import cmake`).
+- The project's compatible CMake version on `PATH` (used only by CMake import
+  and later source-list refreshes).
 - On macOS and Linux, Wine and `wineserver` on `PATH`.
+- If the first build will need automatic grind, project-owned reference `.obj`
+  files for the source files you want it to search. The reference executable
+  alone is enough to verify, but it cannot supply function bodies to grind.
+  You can skip these objects when the project already matches.
 - A short project path. MSVC 4.2 has small internal path buffers: a first
   attempt under a 150-character path failed inside CMake's compiler test with
   `fatal error C1005:`; the same project under a 55-character path worked. See
@@ -133,15 +140,24 @@ review. Repeat `--path` on either command to provide an explicit complete file
 or tree set instead. It is not a filter over the current record: every omitted
 path is reported as a removal.
 
-## 4. Place the reference binary
+## 4. Place the reference inputs
 
 Copy the original executable to the declared oracle path
 (`reference/grind-progress.exe` here). ReproBit never redistributes reference
 binaries, and `init` does not ignore `reference/` for you: add `/reference/` and
 `/build/` to the project's `.gitignore` unless you intend to commit them (the
-shipped examples do exactly that). The `examples/grind-progress` sources ship a
-`prepare_reference.py` that generates this file with the authenticated
-compiler; a real project uses the shipped original.
+shipped examples do exactly that).
+
+If you expect to use automatic grind after the first verification, also place
+the available reference objects under `reference/`. Name each one after its
+source filename without the extension—for example, `src/widget.cpp` pairs with
+`reference/widget.obj`. Grind's read-only preflight reports how many eligible
+compiler steps have an object, how many do not, and how many functions it selected.
+Use `--reference-object TU=PATH` when names are ambiguous. The
+`examples/grind-progress` script generates both kinds of reference input with
+the authenticated compiler; a real project uses its own archival or analysis
+inputs. The [grind guide](discovery.md#automatic-grind) covers the full mapping
+rules.
 
 ## 5. Import the build steps from CMake
 
@@ -161,14 +177,15 @@ Next: rbit build /path/to/project
 
 `import cmake` derives the initial build plan, records the reference binary's
 digest, and creates an empty review document for each unambiguous source file so
-discovery can start without hand-authored JSON. It then configures the existing
-CMake project once (never a project build) and saves the direct compiler and
-linker steps as `reprobit/producer-graph.json`. It derives only facts it can
+discovery can start without hand-authored JSON. It configures the existing
+CMake project without building it and saves the direct compiler and linker
+steps as `reprobit/producer-graph.json`. It derives only facts it can
 check and does not guess entropy interventions. It does not edit
-`CMakeLists.txt`, and normal ReproBit builds never invoke CMake again. If the
+`CMakeLists.txt`, and normal ReproBit builds never invoke CMake. If the
 import fails, the generated scaffold is removed and the diagnostic workspace is
-retained for inspection. [One-time CMake import](cmake.md) covers projects that
-need the configure and extract halves separately.
+retained for inspection. [CMake import and refresh](cmake.md) covers projects
+that need cache settings, later source-list changes, or the configure and
+extract halves separately.
 
 ## 6. Confirm and commit
 
@@ -240,9 +257,10 @@ Report: /path/to/project/build/reprobit-report/report.html
 
 and exits with 1. That is the starting point for the bounded
 [`discover grind` workflow](discovery.md), which finds the first low-cost
-adjustments and saves them only after a fresh exact proof. Once the project is
-exact, `verify` ends with `Verification passed`, `Authenticity: clean`, and the
-total intervention cost.
+adjustments and saves them only after a fresh exact proof. Its first line checks
+the reference-object coverage before compiling. Once the project is exact,
+`verify` ends with `Verification passed`, `Authenticity: clean`, and the total
+intervention cost.
 
 ## Debug companions and the exported source view
 
@@ -259,15 +277,15 @@ before running a source-aware comparison tool, and point the tool's source root
 at that directory:
 
 ```console
-rbit source export build/reprobit-debug/source
+rbit source export . --destination build/reprobit-debug/source
 ```
 
 This keeps line and symbol information matched to the files the compiler
-actually read. The export contains only project inputs admitted by the source
-lock, with the reviewed source adjustments applied; it does not contain
-reference binaries, compiler files, build outputs, or private run state. Run the
-same command after later changes; ReproBit safely replaces the previous view and
-removes files that are no longer part of it.
+actually read. The export contains project inputs admitted by the source lock,
+with the reviewed source adjustments applied, plus one hidden ownership marker;
+it does not contain reference binaries, compiler files, build outputs, or
+private run state. Run the same command after later changes; ReproBit safely
+replaces the previous view and removes files that are no longer part of it.
 
 ## After the project is exact: edits and repair
 
@@ -279,19 +297,13 @@ step:
 rbit repair .
 ```
 
-`repair` works on a private copy first. It updates the saved build guidance
-affected by your edit, follows shared headers to every affected source file,
-updates saved compiler choices and function records, and safely narrows or
-removes old fallback records. It then rebuilds every target from scratch and
-checks that the result is still exact and trustworthy. No hand-written JSON or
-TOML repair recipe is needed.
-
-Repair may take several passes. It fixes the earliest trustworthy problem,
-then rechecks later work from that valid state instead of relying on fallout
-observed after a failed step. Only after the whole project passes does it
-publish the updated records, verified binaries, matching debug companions, and
-report together. If repair cannot prove the result, your source edit is kept
-while previously published records and results stay unchanged.
+`repair` works on a private copy, follows shared headers to every affected
+source file, refreshes the saved guidance it can prove, and checks every target
+from scratch. It may take several passes, but publishes the records, binaries,
+debug companions, and report together only after the whole project is exact
+and trustworthy. If it cannot prove the result, your source edit remains while
+previously published records and results stay unchanged. No hand-written JSON
+or TOML repair recipe is needed.
 
 This is the maintenance path once a project has reached an exact match; a
 project that builds but does not match yet starts with `discover grind`
@@ -300,12 +312,13 @@ search budgets.
 
 To add a new file to the reviewed source list—or remove a locked one—start with
 `rbit source preview .`; repair never silently admits newly tracked files.
-Preview prints a safe `source lock` command when existing build records still
-apply. Lock then prints the next required step—usually placing the original
-binary, importing CMake, or checking status. If the change affects which files
-CMake builds, ReproBit currently refuses the update instead of risking saved
-interventions; restore the previous file list for now. Re-run
-`rbit import cmake .` only when a successful source lock asks for it.
+Before the first import, preview prints a safe `source lock` command. After an
+import, it normally prints `rbit import cmake . --refresh` instead. That command
+prepares the new source list and CMake records privately, verifies every target
+from scratch, and publishes the records, verified outputs, and report only as a
+complete passing update. If it cannot keep the existing reviewed records safely,
+it refuses without changing the published project. See
+[Refreshing a CMake import](cmake.md#refresh-after-adding-or-removing-source-files).
 
 ## Reclaiming space
 

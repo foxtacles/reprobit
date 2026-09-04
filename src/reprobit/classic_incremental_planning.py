@@ -662,7 +662,8 @@ def prepare_classic_incremental_plan(
         bundle.spec.toolchain.profile, toolchain_root, logical_root=bundle.spec.paths.toolchain
     )
     toolchain_lock = bundle.toolchain_lock
-    installation.doctor(toolchain_lock).require_ok()
+    toolchain_report = installation.doctor(toolchain_lock)
+    toolchain_report.require_ok()
     _role_tool_ids, role_relatives = _graph_role_bindings(bundle, installation)
     role_logical = {
         role: installation.logical_path(relative) for role, relative in role_relatives.items()
@@ -824,6 +825,7 @@ def prepare_classic_incremental_plan(
         session_root=session_root,
         state_root=state_root,
         toolchain_root=toolchain_root,
+        toolchain_report=toolchain_report,
         backend=backend,
         jobs=jobs,
         compiler_transport=compiler_transport,

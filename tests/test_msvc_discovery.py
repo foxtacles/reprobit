@@ -591,7 +591,9 @@ def test_mosaic_search_budget_fails_closed(tmp_path: Path) -> None:
         )
 
 
-def test_adapter_cache_material_is_stable_and_json_safe() -> None:
+def test_adapter_cache_material_is_stable_and_json_safe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     reference = _coff([(TARGET, bytes.fromhex("33c0c3"))])
     adapter = MsvcDiscoveryAdapter(
         source=b"int neutral;\n",
@@ -599,6 +601,14 @@ def test_adapter_cache_material_is_stable_and_json_safe() -> None:
         references=(MsvcFunctionReference.from_object(reference, TARGET),),
     )
     state = enumerate_declaration_states(_plan(1))[0]
+
+    monkeypatch.setattr(
+        msvc_discovery,
+        "render_msvc_declaration_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("cache-key material rendered a candidate")
+        ),
+    )
 
     first: Mapping[str, JsonValue] = adapter.cache_material(state)
     second = adapter.cache_material(state)
