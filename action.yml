@@ -105,7 +105,7 @@ runs:
       env:
         REPROBIT_TOOLCHAIN_ROOT: ${{ inputs.toolchain-root }}
       run: >-
-        rbit doctor
+        rbit doctor .
         --toolchain-root "$REPROBIT_TOOLCHAIN_ROOT"
         --execute-probe
 

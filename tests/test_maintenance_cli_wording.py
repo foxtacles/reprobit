@@ -125,6 +125,10 @@ def test_project_commands_send_an_existing_source_edit_to_repair(
         "reprobit.project_readiness.ClassicMSVCToolchain.doctor",
         lambda _self, _lock=None: SimpleNamespace(ok=True, checks=()),
     )
+    monkeypatch.setattr(
+        "reprobit.project_readiness.backend_for_host",
+        lambda: SimpleNamespace(doctor=lambda **_kwargs: SimpleNamespace(ok=True, checks=())),
+    )
     unit_path = project / "reprobit/interventions/tu.transform.json"
     unit = InterventionDocument.model_validate_json(unit_path.read_bytes())
     unit_path.write_bytes(
