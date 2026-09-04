@@ -214,11 +214,13 @@ def move_directory_in_exact_parent(
                         destination_name,
                         replace=False,
                     )
+                    # The source handle still denies writes and deletion. This
+                    # read-only verifier must share its existing DELETE access;
+                    # a second restrictive lease would conflict with our own.
                     destination_handle = held.api.open_relative(
                         held.handle,
                         destination_name,
                         directory=True,
-                        deny_other_writes=True,
                     )
                     assert destination_handle is not None
                     if held.api.identity(destination_handle)[:2] != expected_source:

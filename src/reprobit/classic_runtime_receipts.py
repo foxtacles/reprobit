@@ -46,12 +46,11 @@ def _held_publication_receipt(
 ) -> FileReceipt:
     """Bind a held publication snapshot to Python's current stat identity.
 
-    Windows' secure path layer records both the legacy 64-bit file index and
-    the full native file ID.  Python 3.14 exposes the latter through ``st_ino``,
-    while older Python versions expose the former.  Content and native identity
-    remain protected by the surrounding held-publication context; the receipt
-    uses ``Path.stat`` only so the later literal verifier speaks the same
-    platform/Python identity dialect.
+    The secure path layer uses the current interpreter's stat identity dialect
+    and retains the full native file ID on Windows.  Content and native identity
+    remain protected by the surrounding held-publication context; ``Path.stat``
+    checks the named publication and supplies the later literal verifier's
+    platform/Python identity.
     """
 
     path = snapshot.path

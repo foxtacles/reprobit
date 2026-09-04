@@ -844,7 +844,6 @@ def test_native_held_set_and_rollback_use_strong_write_excluding_capabilities(
     root = tmp_path / "project"
     root.mkdir()
     payload = b"native"
-    basic = (7, 11, len(payload), 13, 0x22)
     strong = (
         0x1234567800000007,
         b"file-id",
@@ -856,6 +855,12 @@ def test_native_held_set_and_rollback_use_strong_write_excluding_capabilities(
         False,
         0x22,
     )
+    volume, index = (
+        (strong[0], int.from_bytes(strong[1], "little"))
+        if secure_paths_windows._STAT_USES_FILE_ID_INFO
+        else (7, 11)
+    )
+    basic = (volume, index, len(payload), 13, 0x22)
     expected = SecureFileSnapshot(
         root / "target.exe",
         Digest.from_bytes(payload),

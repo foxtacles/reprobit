@@ -557,12 +557,21 @@ def test_transaction_never_creates_a_seat_in_a_replacement_state_root(
     transaction = CASTransaction(tmp_path)
     transaction.write("result.bin", b"payload", expected_sha256=None)
     real_create = transactions.create_directory_in_exact_parent
+    swap_blocked = False
 
     def swap_then_create(path: Path, identity: tuple[int, int]) -> tuple[int, int]:
+        nonlocal swap_blocked
         if path.name == transaction.transaction_id:
-            os.replace(state_root, moved)
-            state_root.mkdir()
-            (state_root / "keep.txt").write_bytes(b"replacement")
+            if os.name == "nt":
+                # The held project lock denies delete sharing, so Windows
+                # prevents replacing its directory before seat creation.
+                with pytest.raises(PermissionError):
+                    os.replace(state_root, moved)
+                swap_blocked = True
+            else:
+                os.replace(state_root, moved)
+                state_root.mkdir()
+                (state_root / "keep.txt").write_bytes(b"replacement")
         return real_create(path, identity)
 
     monkeypatch.setattr(
@@ -570,6 +579,15 @@ def test_transaction_never_creates_a_seat_in_a_replacement_state_root(
         "create_directory_in_exact_parent",
         swap_then_create,
     )
+
+    if os.name == "nt":
+        transaction.commit()
+        assert swap_blocked
+        assert not moved.exists()
+        assert (tmp_path / "result.bin").read_bytes() == b"payload"
+        assert not (state_root / transaction.transaction_id).exists()
+        assert (state_root / "project.lock").is_file()
+        return
 
     with pytest.raises(TransactionError, match="create transaction seat"):
         transaction.commit()

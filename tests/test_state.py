@@ -202,6 +202,18 @@ def test_run_arena_exit_refuses_a_replacement_at_its_active_path(tmp_path: Path)
     )
     arena.__enter__()
     original = arena.path.parent / "original-run"
+    if os.name == "nt":
+        # The live lease denies delete sharing on Windows, so the OS blocks
+        # this replacement before the arena's exit-time identity check.
+        owned = arena.path / "owned.txt"
+        owned.write_bytes(b"owned")
+        with pytest.raises(PermissionError):
+            arena.path.rename(original)
+        assert not original.exists()
+        assert owned.read_bytes() == b"owned"
+        arena.__exit__(None, None, None)
+        assert not arena.path.exists()
+        return
     arena.path.rename(original)
     arena.path.mkdir()
     sentinel = arena.path / "valuable.txt"

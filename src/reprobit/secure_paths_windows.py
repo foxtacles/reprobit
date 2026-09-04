@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import sys
 import uuid
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
@@ -33,6 +34,19 @@ _WINDOWS_BASIC_RESTORABLE_ATTRIBUTES = (
     | 0x2000  # NOT_CONTENT_INDEXED
 )
 
+# CPython 3.12 switched stat() to FILE_ID_INFO's full volume/file IDs.
+# Authority tuples captured with Path.stat() must use the same convention.
+_STAT_USES_FILE_ID_INFO = sys.version_info >= (3, 12)
+_FILETIME_UNIX_EPOCH = 116_444_736_000_000_000
+
+
+def _filetime_to_ns(value: int) -> int:
+    return (value - _FILETIME_UNIX_EPOCH) * 100
+
+
+def _stat_volume(volume: int) -> int:
+    return volume if _STAT_USES_FILE_ID_INFO else volume & 0xFFFFFFFF
+
 
 def windows_attributes_are_basic_restorable(attributes: int) -> bool:
     """Return whether FileBasicInfo can exactly recreate native attributes."""
@@ -61,7 +75,8 @@ def _matches_windows_snapshot(
         and (not expected.windows_file_id or strong[1] == expected.windows_file_id)
         and (not expected.ctime_ns or strong[4] == expected.ctime_ns)
         and (not expected.windows_attributes or strong[8] == expected.windows_attributes)
-        and (strong[0] & 0xFFFFFFFF) == basic[0]
+        and _stat_volume(strong[0]) == basic[0]
+        and (not _STAT_USES_FILE_ID_INFO or int.from_bytes(strong[1], "little") == basic[1])
         and strong[3] == basic[3]
         and strong[5] == basic[2]
         and not strong[7]
@@ -90,7 +105,11 @@ def _windows_snapshot_mismatch_fields(
             not expected.windows_attributes or strong[8] == expected.windows_attributes,
             "attributes",
         ),
-        ((strong[0] & 0xFFFFFFFF) == basic[0], "native-volume-consistency"),
+        (_stat_volume(strong[0]) == basic[0], "native-volume-consistency"),
+        (
+            not _STAT_USES_FILE_ID_INFO or int.from_bytes(strong[1], "little") == basic[1],
+            "native-file-id-consistency",
+        ),
         (strong[3] == basic[3], "native-write-time-consistency"),
         (strong[5] == basic[2], "native-size-consistency"),
         (not strong[7], "delete-pending"),
@@ -344,10 +363,13 @@ class _WindowsHandles:
             raise SecurePathError(
                 f"cannot hold native secure path root {path}: {self.get_last_error()}"
             )
-        attributes = self.identity(handle)[4]
-        if not attributes & self._ATTRIBUTE_DIRECTORY or attributes & self._ATTRIBUTE_REPARSE:
+        try:
+            attributes = self.identity(handle)[4]
+            if not attributes & self._ATTRIBUTE_DIRECTORY or attributes & self._ATTRIBUTE_REPARSE:
+                raise SecurePathError(f"native secure path root is not a plain directory: {path}")
+        except BaseException:
             self.close(handle)
-            raise SecurePathError(f"native secure path root is not a plain directory: {path}")
+            raise
         return handle
 
     def open_relative(
@@ -425,28 +447,51 @@ class _WindowsHandles:
                 f"native handle-relative open failed for {name!r}: 0x{unsigned:08x}"
             )
         received = handle.value
-        identity = self.identity(received)
-        is_directory = bool(identity[4] & self._ATTRIBUTE_DIRECTORY)
-        redirected = bool(identity[4] & self._ATTRIBUTE_REPARSE)
-        if (
-            (allow_redirect and not redirected)
-            or (redirected and not allow_redirect)
-            or (is_directory != directory and not (redirected and allow_redirect))
-        ):
+        try:
+            identity = self.identity(received)
+            is_directory = bool(identity[4] & self._ATTRIBUTE_DIRECTORY)
+            redirected = bool(identity[4] & self._ATTRIBUTE_REPARSE)
+            if (
+                (allow_redirect and not redirected)
+                or (redirected and not allow_redirect)
+                or (is_directory != directory and not (redirected and allow_redirect))
+            ):
+                raise SecurePathError(
+                    f"native path component is redirected or has the wrong kind: {name!r}"
+                )
+        except BaseException:
             self.close(received)
-            raise SecurePathError(
-                f"native path component is redirected or has the wrong kind: {name!r}"
-            )
+            raise
         return received
 
     def identity(self, handle: Any) -> tuple[int, int, int, int, int]:
+        """Return stat-compatible identity and Unix nanosecond write time."""
+
         information = self.ByHandleFileInformation()
         if not self.kernel32.GetFileInformationByHandle(handle, self.ctypes.byref(information)):
             raise SecurePathError(f"GetFileInformationByHandle failed: {self.get_last_error()}")
         size = (information.size_high << 32) | information.size_low
         index = (information.index_high << 32) | information.index_low
         modified = (information.write.high << 32) | information.write.low
-        return information.volume, index, size, modified, information.attributes
+        volume = information.volume
+        if _STAT_USES_FILE_ID_INFO:
+            volume, index = self.file_identity(handle)
+        return volume, index, size, _filetime_to_ns(modified), information.attributes
+
+    def file_identity(self, handle: Any) -> tuple[int, int]:
+        """Retain the full native ID independently of Python's stat version."""
+
+        information = self.FileIdInfo()
+        if not self.kernel32.GetFileInformationByHandleEx(
+            handle,
+            18,  # FileIdInfo
+            self.ctypes.byref(information),
+            self.ctypes.sizeof(information),
+        ):
+            raise SecurePathError(f"GetFileInformationByHandleEx failed: {self.get_last_error()}")
+        return int(information.volume), int.from_bytes(
+            bytes(information.file_id.identifier), "little"
+        )
 
     def strong_identity(self, handle: Any) -> tuple[int, bytes, int, int, int, int, int, bool, int]:
         """Return stable identity/change metadata for one held native handle."""
@@ -473,9 +518,9 @@ class _WindowsHandles:
         return (
             int(file_id.volume),
             identifier,
-            int(basic.creation),
-            int(basic.write),
-            int(basic.change),
+            _filetime_to_ns(int(basic.creation)),
+            _filetime_to_ns(int(basic.write)),
+            _filetime_to_ns(int(basic.change)),
             int(standard.end_of_file),
             int(standard.links),
             bool(standard.delete_pending),
@@ -634,11 +679,15 @@ class _HeldWindowsRoot:
         self.api = _WindowsHandles()
         self.path = root.resolve(strict=True)
         self.handle = self.api.root(self.path)
-        self.identity = self.api.identity(self.handle)[:2]
-        if expected_identity is not None and self.identity != expected_identity:
+        try:
+            self.identity = self.api.identity(self.handle)[:2]
+            self._native_identity = self.api.file_identity(self.handle)
+            if expected_identity is not None and self.identity != expected_identity:
+                raise SecurePathError(f"native secure path root changed before use: {root}")
+            self.verify_root()
+        except BaseException:
             self.close()
-            raise SecurePathError(f"native secure path root changed before use: {root}")
-        self.verify_root()
+            raise
 
     def close(self) -> None:
         if self.handle:
@@ -654,7 +703,7 @@ class _HeldWindowsRoot:
     def verify_root(self) -> None:
         received = self.api.root(self.path)
         try:
-            if self.api.identity(received)[:2] != self.identity:
+            if self.api.file_identity(received) != self._native_identity:
                 raise SecurePathError(f"native secure path root changed while held: {self.path}")
         finally:
             self.api.close(received)
@@ -682,14 +731,13 @@ class _HeldWindowsRoot:
                 )
                 if child is None:
                     raise SecurePathError(f"native path component is absent: {component!r}")
+                handles.append(child)
                 identity = self.api.identity(child)[:2]
                 if expected is not None and identity != expected:
-                    self.api.close(child)
                     raise SecurePathError(
                         f"native secure path directory changed before use: {prefix!r}"
                     )
-                edges.append((handles[-1], component, identity))
-                handles.append(child)
+                edges.append((handles[-2], component, self.api.file_identity(child)))
             return handles, edges, relative.parts[-1]
         except BaseException:
             for handle in reversed(handles[1:]):
@@ -703,7 +751,7 @@ class _HeldWindowsRoot:
             if received is None:
                 raise SecurePathError(f"native path component disappeared: {component!r}")
             try:
-                if self.api.identity(received)[:2] != expected:
+                if self.api.file_identity(received) != expected:
                     raise SecurePathError(
                         f"native path component changed while held: {component!r}"
                     )
@@ -975,12 +1023,13 @@ def atomic_publish_relative(
                     quarantine,
                     replace=False,
                 )
+                # The existing DELETE handle still excludes outside writers.
+                # This metadata-only verifier must share that retained access.
                 guarded = held.api.open_relative(
                     handles[-1],
                     quarantine,
                     directory=False,
                     read_data=False,
-                    deny_other_writes=True,
                 )
                 if guarded is None:
                     raise SecurePathError(f"publication preimage disappeared: {relative!r}")
