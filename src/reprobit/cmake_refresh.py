@@ -16,7 +16,6 @@ from reprobit.authority_snapshot import (
     json_authority_members,
 )
 from reprobit.cli_paths import CLIError, safe_project_path
-from reprobit.cli_project import SourceLockPlan
 from reprobit.cmake_import import json_authority_paths
 from reprobit.composition_ledger import COMPOSED_BODY_LEDGER_RELATIVE
 from reprobit.model import Digest
@@ -38,13 +37,14 @@ from reprobit.schema import (
     source_manifest_digest,
 )
 from reprobit.source_lock import SourceLockError, receipt_source_input
+from reprobit.source_lock_workflow import SourceLockPlan
 from reprobit.staged_project import ProjectFileSnapshot, StagedProject
 from reprobit.state import KeepWorkspace, report_publication_lease
 from reprobit.strict_json import canonical_json
 from reprobit.transactions import CASTransaction, TransactionResult
 
 if TYPE_CHECKING:
-    from reprobit.cli_build import VerifyResult
+    from reprobit.project_execution import VerifyResult
 
 
 @dataclass(frozen=True, slots=True)

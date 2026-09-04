@@ -11,26 +11,20 @@ from typing import Annotated, ClassVar, Literal
 
 from pydantic import Field, model_validator
 
+from reprobit.intervention_metadata import (
+    CLASSIC_RECIPE_METADATA,
+    ClassicRecipeFamily,
+)
+from reprobit.intervention_metadata import (
+    CostClass as CostClass,
+)
 from reprobit.model import Digest, Identifier, Scope, StrictModel
 from reprobit.schema import (
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
     Intervention,
     intervention_authority_digest,
 )
 from reprobit.strict_json import canonical_json
-
-
-class CostClass(StrEnum):
-    STATE_CARRIER = "state_carrier"
-    GENERATED_SUPPLIER = "generated_supplier"
-    LINK_ORDERING = "link_ordering"
-    EQUAL_BODY_DONOR = "equal_body_donor"
-    STRUCTURAL_DONOR = "structural_donor"
-    CROSS_TU_OR_OVERLAY = "cross_tu_or_overlay"
-    SEMANTIC_REWRITE = "semantic_rewrite"
-    BINARY_SURGERY = "binary_surgery"
-    ORACLE_INSTALL = "oracle_install"
 
 
 class CostUnitKind(StrEnum):
@@ -75,40 +69,9 @@ class CostModel:
     )
     _classic_classes: ClassVar[Mapping[ClassicRecipeFamily, CostClass]] = MappingProxyType(
         {
-            ClassicRecipeFamily.DECLARATION_SHAPE: CostClass.STATE_CARRIER,
-            ClassicRecipeFamily.FORWARD_DECLARATION_RUN: CostClass.STATE_CARRIER,
-            ClassicRecipeFamily.EXTERN_RUN_PAIR: CostClass.STATE_CARRIER,
-            ClassicRecipeFamily.DECLARATION_RUN_TRIPLE: CostClass.STATE_CARRIER,
-            ClassicRecipeFamily.PREFIX_FORWARD_AFTER_INCLUDES_EXTERN: CostClass.STATE_CARRIER,
-            ClassicRecipeFamily.PAD_SHAPE: CostClass.GENERATED_SUPPLIER,
-            ClassicRecipeFamily.FORWARD_RUN_WITH_SHAPE: CostClass.GENERATED_SUPPLIER,
-            ClassicRecipeFamily.DONOR_SOURCE_OVERLAY: CostClass.CROSS_TU_OR_OVERLAY,
-            ClassicRecipeFamily.EQUAL_BODY_STRICT: CostClass.EQUAL_BODY_DONOR,
-            ClassicRecipeFamily.EQUAL_BODY_EH_STRUCTURAL_LOCAL: CostClass.STRUCTURAL_DONOR,
-            ClassicRecipeFamily.SAME_SLOT_RESIZE: CostClass.STRUCTURAL_DONOR,
-            ClassicRecipeFamily.EQUAL_BODY_EH_RELOC_LAYOUT: CostClass.STRUCTURAL_DONOR,
-            ClassicRecipeFamily.RETAIL_EXACT_RELOC_DIVERGENT: (CostClass.CROSS_TU_OR_OVERLAY),
-            ClassicRecipeFamily.RETAIL_EXACT_SOURCE_EQUAL_BODY: (CostClass.CROSS_TU_OR_OVERLAY),
-            ClassicRecipeFamily.RETAIL_EXACT_SOURCE_TARGET_CLOSURE: (CostClass.CROSS_TU_OR_OVERLAY),
-            ClassicRecipeFamily.RETAIL_EXACT_CROSS_TU_COMPLETE_TARGET_RESIZE: (
-                CostClass.CROSS_TU_OR_OVERLAY
-            ),
-            ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING: CostClass.SEMANTIC_REWRITE,
-            ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION: (CostClass.SEMANTIC_REWRITE),
-            ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION_REENCODING: (
-                CostClass.SEMANTIC_REWRITE
-            ),
-            ClassicRecipeFamily.RETAIL_EXACT_COMPOSED_REWRITING: (CostClass.SEMANTIC_REWRITE),
-            ClassicRecipeFamily.RETAIL_EXACT_WEB_RECOLOUR: CostClass.SEMANTIC_REWRITE,
-            ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC: CostClass.BINARY_SURGERY,
-            ClassicRecipeFamily.RETAIL_EXACT_SAME_TU_INSTRUCTION_HYBRID_RESIZE: (
-                CostClass.BINARY_SURGERY
-            ),
-            ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH: CostClass.CROSS_TU_OR_OVERLAY,
-            ClassicRecipeFamily.ARCHIVE_ADMISSION: CostClass.LINK_ORDERING,
-            ClassicRecipeFamily.IMAGE_METADATA: CostClass.GENERATED_SUPPLIER,
-            ClassicRecipeFamily.IMAGE_LINK_ORDER: CostClass.LINK_ORDERING,
-            ClassicRecipeFamily.IMAGE_BINARY_REPACK: CostClass.BINARY_SURGERY,
+            family: metadata.cost_class
+            for family, metadata in CLASSIC_RECIPE_METADATA.items()
+            if metadata.cost_class is not None
         }
     )
 
@@ -534,7 +497,6 @@ def calculate_cost(interventions: Iterable[Intervention]) -> CostBreakdown:
 __all__ = [
     "ClassCost",
     "CostBreakdown",
-    "CostClass",
     "CostModel",
     "CostUnitCharge",
     "CostUnitKind",

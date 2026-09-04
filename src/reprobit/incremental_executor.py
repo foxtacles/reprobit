@@ -7,7 +7,7 @@ import stat
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
@@ -17,6 +17,7 @@ from types import MappingProxyType
 from typing import Generic, Literal, TypeAlias, TypeVar
 
 from reprobit.cache import CacheLease, CacheOutput, CacheRecord, IncrementalCache
+from reprobit.dag_queue import DependencyQueue
 from reprobit.incremental import IncrementalBuildSummary
 from reprobit.process import CancellationToken
 from reprobit.secure_path_contracts import (
@@ -185,7 +186,13 @@ class IncrementalExecutionResult(Generic[RuntimeT]):
 
 
 class IncrementalDAGExecutor(Generic[RuntimeT]):
-    """Restore valid nodes and lazily create a runtime for cache misses only."""
+    """Reuse valid nodes and lazily create a runtime for cache misses only.
+
+    Receipt-only consumers can disable ``materialize_cache_hits``. Their hits
+    still receive full content validation; explicit input materializers supply
+    private copies when needed. The default preserves standalone callers that
+    consume the declared workspace outputs after execution.
+    """
 
     def __init__(
         self,
@@ -198,6 +205,7 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
         progress: IncrementalProgress | None = None,
         runtime_init_count: Callable[[], int] | None = None,
         before_publish: Callable[[], None] | None = None,
+        materialize_cache_hits: bool = True,
     ) -> None:
         if max_workers < 1:
             raise IncrementalExecutionError("incremental worker count must be positive")
@@ -210,6 +218,7 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
         self.progress = progress
         self.runtime_init_count = runtime_init_count
         self.before_publish = before_publish
+        self.materialize_cache_hits = materialize_cache_hits
 
     def execute(
         self,
@@ -288,8 +297,12 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
         lazy = _LazyRuntime(self.runtime_factory, self.runtime_close)
         cancellation = CancellationToken()
         outcomes: dict[str, NodeOutcome] = {}
-        completed: set[str] = set()
-        pending = dict(by_id)
+        try:
+            ready_queue = DependencyQueue({node.id: node.depends_on for node in nodes})
+        except ValueError as exc:
+            raise IncrementalExecutionError(
+                f"incremental graph cannot make progress: {exc}"
+            ) from exc
         progress_count = 0
         progress_total = len(nodes) + 1
         progress_lock = Lock()
@@ -326,187 +339,182 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
         runtime_closed = False
         try:
             with self.cache.lease() as lease:
-                while pending:
-                    ready = tuple(
-                        node
-                        for node in sorted(pending.values(), key=lambda item: item.id.casefold())
-                        if set(node.depends_on).issubset(completed)
-                    )
-                    if not ready:
-                        waiting = {
-                            node.id: sorted(set(node.depends_on) - completed)
-                            for node in pending.values()
-                        }
-                        raise IncrementalExecutionError(
-                            f"incremental graph cannot make progress: {waiting}"
-                        )
-                    dependency_snapshot = MappingProxyType(dict(outcomes))
 
-                    def run(
-                        node: IncrementalNode[RuntimeT],
-                        snapshot: Mapping[str, NodeOutcome] = dependency_snapshot,
-                    ) -> NodeOutcome:
-                        cancellation.raise_if_cancelled()
-                        dependencies = MappingProxyType(
-                            {
-                                dependency: snapshot[dependency]
-                                for dependency in node.depends_on
-                                if dependency not in node.order_only
-                            }
-                        )
-                        dependencies_publishable = all(
-                            outcome.publishable for outcome in dependencies.values()
-                        )
-                        prepared_inputs: PreparedNodeInputs | None = None
-                        if node.materialize_before_probe:
-                            assert node.materialize_inputs is not None
-                            prepared_inputs = node.materialize_inputs(lease, snapshot)
-                        if node.probe is not None:
-                            probe = node.probe(lease, dependencies)
-                            key = probe.key
-                            reason = probe.invalidation_reason
-                            record = probe.record
-                            if record is not None and (
-                                key is None
-                                or record.key != key
-                                or record.domain != node.domain
-                                or record.implementation != self.cache.implementation
-                            ):
-                                raise IncrementalExecutionError(
-                                    f"node {node.id!r} probe returned a record from "
-                                    "a different cache identity"
-                                )
-                            if not dependencies_publishable:
-                                record = None
-                                reason = "provisional dependency requires fresh execution"
-                        else:
-                            decision = node.key(dependencies)
-                            if isinstance(decision, NodeKeyDecision):
-                                key = decision.key
-                                reason = decision.invalidation_reason
-                            else:
-                                key = decision
-                                reason = None
-                            record = (
-                                lease.lookup(node.domain, key)
-                                if key is not None and dependencies_publishable
-                                else None
+                def run(
+                    node: IncrementalNode[RuntimeT],
+                    snapshot: Mapping[str, NodeOutcome],
+                ) -> NodeOutcome:
+                    cancellation.raise_if_cancelled()
+                    dependencies = MappingProxyType(
+                        {
+                            dependency: snapshot[dependency]
+                            for dependency in node.depends_on
+                            if dependency not in node.order_only
+                        }
+                    )
+                    dependencies_publishable = all(
+                        outcome.publishable for outcome in dependencies.values()
+                    )
+                    prepared_inputs: PreparedNodeInputs | None = None
+                    if node.materialize_before_probe:
+                        assert node.materialize_inputs is not None
+                        prepared_inputs = node.materialize_inputs(lease, snapshot)
+                    if node.probe is not None:
+                        probe = node.probe(lease, dependencies)
+                        key = probe.key
+                        reason = probe.invalidation_reason
+                        record = probe.record
+                        if record is not None and (
+                            key is None
+                            or record.key != key
+                            or record.domain != node.domain
+                            or record.implementation != self.cache.implementation
+                        ):
+                            raise IncrementalExecutionError(
+                                f"node {node.id!r} probe returned a record from "
+                                "a different cache identity"
                             )
-                            if not dependencies_publishable:
-                                reason = "provisional dependency requires fresh execution"
-                        if record is not None:
-                            assert key is not None
+                        if not dependencies_publishable:
+                            record = None
+                            reason = "provisional dependency requires fresh execution"
+                    else:
+                        decision = node.key(dependencies)
+                        if isinstance(decision, NodeKeyDecision):
+                            key = decision.key
+                            reason = decision.invalidation_reason
+                        else:
+                            key = decision
+                            reason = None
+                        record = (
+                            lease.lookup(node.domain, key)
+                            if key is not None and dependencies_publishable
+                            else None
+                        )
+                        if not dependencies_publishable:
+                            reason = "provisional dependency requires fresh execution"
+                    if record is not None:
+                        assert key is not None
+                        if self.materialize_cache_hits:
                             lease.restore(
                                 record,
                                 canonical_outputs[node.id],
                                 allowed_root=self.workspace_root,
                             )
-                            announce(
-                                "cache_hit",
-                                node,
-                                None,
-                                complete=True,
-                            )
-                            return NodeOutcome(node.id, key, record, True)
-                        if reason:
-                            with progress_lock:
-                                invalidations.append((node.id, reason))
-                        # A typed miss is useful immediately, but discovery is
-                        # not completion: the producer, publication, and
-                        # integrity checks still remain.
-                        announce(
-                            "cache_miss",
-                            node,
-                            reason,
-                            complete=False,
-                        )
-                        data_dependencies = set(node.depends_on) - set(node.order_only)
-                        if data_dependencies:
-                            assert node.materialize_inputs is not None
-                            if prepared_inputs is None:
-                                prepared_inputs = node.materialize_inputs(lease, snapshot)
-                        elif prepared_inputs is None:
-                            prepared_inputs = PreparedNodeInputs(MappingProxyType({}))
-                        runtime = lazy.get()
-                        cancellation.raise_if_cancelled()
-                        assert prepared_inputs is not None
-                        node.execute(runtime, cancellation, prepared_inputs)
-                        cancellation.raise_if_cancelled()
-                        if node.final_key is not None:
-                            final_decision = node.final_key(dependencies)
-                            final_key = (
-                                final_decision.key
-                                if isinstance(final_decision, NodeKeyDecision)
-                                else final_decision
-                            )
                         else:
-                            final_key = key
-                        if final_key is None:
-                            raise IncrementalExecutionError(
-                                f"node {node.id!r} did not produce a final cache key"
-                            )
-                        for name, output in canonical_outputs[node.id].items():
-                            if output.is_symlink() or not output.is_file():
+                            if {item.name for item in record.outputs} != set(node.outputs):
                                 raise IncrementalExecutionError(
-                                    f"node {node.id!r} omitted output {name!r}: {output}"
+                                    f"node {node.id!r} cache hit differs from its output set"
                                 )
-                        if node.pre_store is not None:
-                            node.pre_store(runtime, dependencies)
-                        metadata = dict(node.metadata(dependencies))
-                        publish_result = dependencies_publishable and (
-                            node.publish_result is None or node.publish_result()
-                        )
-                        staged_key = (
-                            final_key
-                            if publish_result
-                            else sha256(
-                                (
-                                    f"provisional\0{node.id}\0{final_key}\0{uuid.uuid4().hex}"
-                                ).encode()
-                            ).hexdigest()
-                        )
-                        if publish_result or node.id in data_consumers:
-                            staged = lease.stage_record(
-                                node.domain,
-                                staged_key,
-                                canonical_outputs[node.id],
-                                metadata=metadata,
-                            )
-                        else:
-                            staged = lease.snapshot_record(
-                                node.domain,
-                                staged_key,
-                                canonical_outputs[node.id],
-                                metadata=metadata,
-                            )
-                        if publish_result:
-                            with staged_lock:
-                                staged_records.append((node, staged))
+                            lease.validate_record(record)
                         announce(
-                            "unit_finished",
+                            "cache_hit",
                             node,
                             None,
                             complete=True,
                         )
-                        return NodeOutcome(
-                            node.id,
-                            staged_key,
-                            staged,
-                            False,
-                            publish_result,
+                        return NodeOutcome(node.id, key, record, True)
+                    if reason:
+                        with progress_lock:
+                            invalidations.append((node.id, reason))
+                    # A typed miss is useful immediately, but discovery is
+                    # not completion: the producer, publication, and
+                    # integrity checks still remain.
+                    announce(
+                        "cache_miss",
+                        node,
+                        reason,
+                        complete=False,
+                    )
+                    data_dependencies = set(node.depends_on) - set(node.order_only)
+                    if data_dependencies:
+                        assert node.materialize_inputs is not None
+                        if prepared_inputs is None:
+                            prepared_inputs = node.materialize_inputs(lease, snapshot)
+                    elif prepared_inputs is None:
+                        prepared_inputs = PreparedNodeInputs(MappingProxyType({}))
+                    runtime = lazy.get()
+                    cancellation.raise_if_cancelled()
+                    assert prepared_inputs is not None
+                    node.execute(runtime, cancellation, prepared_inputs)
+                    cancellation.raise_if_cancelled()
+                    if node.final_key is not None:
+                        final_decision = node.final_key(dependencies)
+                        final_key = (
+                            final_decision.key
+                            if isinstance(final_decision, NodeKeyDecision)
+                            else final_decision
                         )
+                    else:
+                        final_key = key
+                    if final_key is None:
+                        raise IncrementalExecutionError(
+                            f"node {node.id!r} did not produce a final cache key"
+                        )
+                    for name, output in canonical_outputs[node.id].items():
+                        if output.is_symlink() or not output.is_file():
+                            raise IncrementalExecutionError(
+                                f"node {node.id!r} omitted output {name!r}: {output}"
+                            )
+                    if node.pre_store is not None:
+                        node.pre_store(runtime, dependencies)
+                    metadata = dict(node.metadata(dependencies))
+                    publish_result = dependencies_publishable and (
+                        node.publish_result is None or node.publish_result()
+                    )
+                    staged_key = (
+                        final_key
+                        if publish_result
+                        else sha256(
+                            (f"provisional\0{node.id}\0{final_key}\0{uuid.uuid4().hex}").encode()
+                        ).hexdigest()
+                    )
+                    if publish_result or node.id in data_consumers:
+                        staged = lease.stage_record(
+                            node.domain,
+                            staged_key,
+                            canonical_outputs[node.id],
+                            metadata=metadata,
+                        )
+                    else:
+                        staged = lease.snapshot_record(
+                            node.domain,
+                            staged_key,
+                            canonical_outputs[node.id],
+                            metadata=metadata,
+                        )
+                    if publish_result:
+                        with staged_lock:
+                            staged_records.append((node, staged))
+                    announce(
+                        "unit_finished",
+                        node,
+                        None,
+                        complete=True,
+                    )
+                    return NodeOutcome(
+                        node.id,
+                        staged_key,
+                        staged,
+                        False,
+                        publish_result,
+                    )
 
-                    with ThreadPoolExecutor(max_workers=min(self.max_workers, len(ready))) as pool:
-                        futures = {pool.submit(run, node): node for node in ready}
-                        try:
-                            for future in as_completed(futures):
-                                node = futures[future]
+                with ThreadPoolExecutor(max_workers=min(self.max_workers, len(nodes))) as pool:
+                    running: dict[Future[NodeOutcome], IncrementalNode[RuntimeT]] = {}
+                    try:
+                        while ready_queue:
+                            for node_id in ready_queue.take_ready(self.max_workers - len(running)):
+                                node = by_id[node_id]
+                                snapshot = MappingProxyType(dict(outcomes))
+                                running[pool.submit(run, node, snapshot)] = node
+                            done, _pending = wait(running, return_when=FIRST_COMPLETED)
+                            for future in sorted(
+                                done, key=lambda item: running[item].id.casefold()
+                            ):
+                                node = running.pop(future)
                                 try:
                                     outcome = future.result()
                                 except Exception as exc:
-                                    cancellation.cancel(f"incremental node {node.id} failed")
-                                    for sibling in futures:
-                                        sibling.cancel()
                                     raise IncrementalExecutionError(
                                         f"incremental node {node.id!r} failed: {exc}"
                                     ) from exc
@@ -520,14 +528,12 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                                     producer_hits += 1
                                 else:
                                     producer_misses += 1
-                        except BaseException:
-                            cancellation.cancel("incremental sibling failed")
-                            for future in futures:
-                                future.cancel()
-                            raise
-                    for node in ready:
-                        completed.add(node.id)
-                        del pending[node.id]
+                                ready_queue.finish(node.id)
+                    except BaseException:
+                        cancellation.cancel("incremental sibling failed")
+                        for future in running:
+                            future.cancel()
+                        raise
                 # Blobs are immutable and may safely converge during
                 # execution, but record names remain unpublished until every
                 # producer-readable namespace closes cleanly.  A failed close
@@ -555,6 +561,11 @@ class IncrementalDAGExecutor(Generic[RuntimeT]):
                             raise IncrementalExecutionError(
                                 f"node {node.id!r} outcome differs from its output set"
                             )
+                        if outcome.cache_hit and not self.materialize_cache_hits:
+                            # Lazy hits have no mutable producer workspace copy. Recheck their
+                            # immutable bytes before any descendant record becomes reusable.
+                            lease.validate_record(outcome.record)
+                            continue
                         for name, output in canonical_outputs[node.id].items():
                             output_relative = output.relative_to(self.workspace_root).as_posix()
                             try:

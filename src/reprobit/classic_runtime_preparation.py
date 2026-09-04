@@ -59,10 +59,10 @@ from reprobit.classic_runtime_producer import (
     ClassicProgressReporter,
 )
 from reprobit.classic_runtime_warm import ClassicWarmExecution
+from reprobit.intervention_metadata import ClassicRecipeFamily
 from reprobit.model import Digest
 from reprobit.producer_graph import ProducerRole, read_producer_graph
 from reprobit.schema import (
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ProducerGraphBuildAdapter,
     ProjectBundle,
@@ -75,6 +75,7 @@ from reprobit.toolchains import (
 
 if TYPE_CHECKING:
     from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
+    from reprobit.developer_authority import DeveloperAuthority
 
 
 @dataclass(frozen=True, slots=True)
@@ -278,6 +279,7 @@ def prepare_classic_producer_graph_run(
     progress: ClassicProgressCallback | None = None,
     measured_receipt_repair: ClassicMeasuredReceiptRepair | None = None,
     overlay_render_session: ClassicOverlayRenderSession | None = None,
+    developer_authority: DeveloperAuthority | None = None,
 ) -> ClassicProducerGraphPreparedRun:
     """Prepare a cold, direct execution of the committed producer graph.
 
@@ -637,7 +639,7 @@ def prepare_classic_producer_graph_run(
             bundle,
             project_root,
             reporter,
-            provisional=measured_receipt_repair is not None,
+            provisional=measured_receipt_repair is not None or developer_authority is not None,
         )
         executor = ClassicProducerGraphBuildExecutor(
             bundle=bundle,
@@ -661,6 +663,7 @@ def prepare_classic_producer_graph_run(
             donors=donors,
             evidence_provider=evidence_provider,
             progress=reporter,
+            developer_authority=developer_authority,
         )
         return ClassicProducerGraphPreparedRun(
             executor=executor,

@@ -14,7 +14,7 @@ from reprobit.model import Digest
 from reprobit.source_lock import SourceLockError, receipt_source_input
 
 if TYPE_CHECKING:
-    from reprobit.cli_build import VerifyResult
+    from reprobit.project_execution import VerifyResult
 
 
 class PublicationEvidenceError(RuntimeError):

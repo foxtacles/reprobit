@@ -37,13 +37,13 @@ that fails when it is stale:
 
 | Committed file(s) | Regenerate with | Guarding test |
 |---|---|---|
+| `docs/classic-recipe-reference.md` | `python -m reprobit.recipe_reference` (or `--check`) | `tests/test_intervention_metadata.py::test_committed_recipe_reference_is_current` |
 | `docs/cli-reference.md` | `python -m reprobit.cli_reference` | `tests/test_cli_reference.py` |
 | `schemas/*.schema.json` | the generator named per file in the test (`project_document_schemas()`, `msvc_discovery_request_json_schema()`, `discovery_report_json_schema()`, `report_json_schema()`, written as `canonical_json`) | `tests/test_package.py::test_committed_json_schemas_are_current` |
 
 ## Test layout
 
-- `tests/test_*.py`: one flat directory of about 130 modules, roughly 2,600
-  tests. Names follow the module family they cover (`test_classic_*`,
+- `tests/test_*.py`: test modules named for the module family they cover (`test_classic_*`,
   `test_cli_*`, `test_discovery_*`, `test_msvc*`, `test_repair*`, ...).
 - `tests/fixtures/`: small committed inputs such as `classic_smoke.cpp`.
 - Real-compiler tests skip themselves unless a toolchain root is configured in
@@ -80,9 +80,9 @@ by filename prefix:
 
 | Family | Modules | Role |
 |---|---|---|
-| Core model | `model`, `schema`, `costs`, `strict_json`, `formats` | Artifacts, verdicts, provenance, the schema-v3 record types, the cost model, canonical JSON. |
+| Core model | `model`, `schema`, `intervention_metadata`, `costs`, `strict_json`, `formats` | Artifacts, verdicts, provenance, the schema-v3 record types, the cost model, canonical JSON. |
 | Project records | `project_loader`, `project_readiness`, `source_*`, `authority_snapshot`, `onboarding`, `user_config`, `paths`, `secure_paths*` | Loading and cross-validating `reprobit.toml` and `reprobit/`, the readiness checklist, source manifest locking, safe path handling. |
-| Execution | `engine`, `execution`, `scheduler`, `process`, `backends`, `native_device_map`, `sealed_namespace`, `state*`, `transactions`, `cache`, `incremental*`, `artifacts`, `assets`, `context`, `progress` | Running the producer graph in bounded child processes with logical paths, the content-addressed cache, warm builds, state directories. |
+| Execution | `project_execution`, `engine`, `execution`, `scheduler`, `dag_queue`, `process`, `backends`, `native_device_map`, `sealed_namespace`, `state*`, `transactions`, `cache`, `incremental*`, `artifacts`, `assets`, `context`, `progress` | Running the producer graph in bounded child processes with logical paths, the content-addressed cache, warm builds, state directories. `project_execution` owns build/verify inputs and operations shared by CLI and repair. |
 | Toolchains | `toolchains`, `msvc_*`, `msvc42_*` | Profiles, authentication, locking, and the MSVC compile/link drivers. |
 | Verification | `verify`, `evidence_audit`, `oracle_pe32`, `binary`, `coff_format`, `ia32_decode`, `small_msf` | Sealing and comparing references, origin audits, PE/COFF/PDB parsing. |
 | Classic algorithms | `classic/` | The MSVC recipe families' pure algorithms: COFF and CodeView projection, candidate composers, rewriting and scheduling certificates, semantic contracts, source overlays. A leaf: it imports only the model, format, path and toolchain-profile foundations, never a `classic_*` module. `classic` is the label for that older MSVC family (see [docs/architecture.md](docs/architecture.md)). |
@@ -98,25 +98,19 @@ by filename prefix:
 Families are a closed set; a new one is a library release, not a project
 edit. The pieces that must change together are:
 
-1. `reprobit.schema.ClassicRecipeFamily`: add the member. Regenerate the
-   committed schemas (table above).
-2. `reprobit.costs.CostModel._classic_classes`: map the family to a cost
-   class, or `rbit cost`/`rbit explain` will refuse the record as "not
-   costable".
-3. `reprobit.classic.semantic_contracts`: register the family's contract and
-   obligations (`_DONOR_FAMILIES`, `_FUNCTION_FAMILIES`, or an explicit
-   `RegisteredSemanticContract`). The validator implementation digest covers
-   this module, so certificates issued before the change are distinguishable.
-4. `reprobit.classic_project`: add the dispatch branch to the composer and a
-   `FamilyCoverage` entry; the dispatcher raises on a family without a
-   branch, and `FAMILY_COVERAGE` raises at import time unless it covers the
-   whole enum.
-5. Donor-rendering families additionally define their parameter set in
-   `reprobit.classic_donors`; function families need a composer under
-   `reprobit/classic/` that never reads a reference image.
-6. Tests for the composer, the contract, and the cost mapping; then update
-   [docs/interventions.md](docs/interventions.md), which lists every family
-   with its label, cost class, and grounding.
+1. Add an enum member and one `CLASSIC_RECIPE_METADATA` entry in
+   `reprobit.intervention_metadata` with its role, cost class, and execution
+   coverage. Role sets, cost mapping, and display labels derive from this
+   registry. Regenerate the schemas and run `python -m reprobit.recipe_reference`.
+2. Implement the explicit renderer or composer branch in `classic_donors` or
+   `classic_project`, and register and prove its contract in
+   `classic.semantic_contracts`. Metadata contains no callable or proof
+   authority; a catalog entry alone cannot implement a recipe. The validator
+   implementation digest distinguishes certificates after semantic changes.
+3. Add renderer/composer, semantic-contract, and cost tests. Update the
+   handwritten behavior and proof descriptions in
+   [docs/interventions.md](docs/interventions.md); the generated
+   [family catalog](docs/classic-recipe-reference.md) records shared metadata.
 
 ## Regression gate for behaviour changes
 
@@ -126,15 +120,32 @@ Two tiers protect byte identity:
    when a toolchain root is configured.
 2. A cold `rbit verify` of the LEGO Island reference project (see the
    README section on that case), run with the real MSVC 4.2 toolchain. It
-   must end with all targets byte-identical and the accepted quarantine
-   unchanged: `Authenticity: accepted with 2 disclosed exceptions covering
-   572 bytes`, spanning 23 byte ranges in the report. Any other quarantine
-   count, byte total, or range count is a regression even when the build is
-   still byte-exact. Reducing that quarantine is the goal; increasing it is a
-   blocker.
+   must end with all targets byte-identical and match the reference project's
+   reviewed quarantine boundary. The expected exception count, byte count,
+   range count, and digest live in the reference project's
+   [verification workflow](https://github.com/isledecomp/isle/blob/master/.github/workflows/reprobit.yml),
+   alongside the publication gate that enforces them. Compare the report with
+   that checkout's expected values; do not copy a second baseline into this
+   guide. Any unexpected difference is a regression even when the build is
+   byte-exact. A deliberate reduction requires reviewing and updating the
+   reference project's expected boundary; an increase is a blocker.
 
 `rbit verify` is always cold. Warm `rbit build` results are useful while
 iterating but never stand in for the verify tier.
+
+Measure incremental performance on a disposable checkout of the reference
+project with the same compiler, host, worker count, and source revision:
+
+```console
+python scripts/benchmark_build.py /path/to/reference-checkout --jobs 8 --runs 3
+```
+
+The script runs one cache-priming build, then measures fresh-process builds.
+Every measured build must reuse all work, start no compiler environment, and
+leave target and comparison outputs unchanged. It reports wall-clock times,
+including CLI startup, as JSON. Use `--max-warm-seconds` to gate the median on
+a controlled benchmark machine; ordinary tests impose no machine-specific
+timing threshold. This benchmark writes normal build state and outputs.
 
 ## Releasing
 

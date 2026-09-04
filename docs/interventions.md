@@ -6,7 +6,8 @@ linked, or post-processed. This page lists every intervention kind and every
 closed enumeration the record schema admits, together with the label
 `rbit explain` prints for it and its class in the [cost model](costs.md). The
 authoritative definitions are `schemas/intervention-document-v3.schema.json`
-and `reprobit.schema`; the cost mapping is `reprobit.costs.CostModel`.
+and `reprobit.schema`; classic family roles and cost classes are declared once in
+`reprobit.intervention_metadata`, with weights in `reprobit.costs.CostModel`.
 
 ## Common fields
 
@@ -26,7 +27,7 @@ Every kind shares the fields of `reprobit.schema.InterventionBase`:
 `ID: <label>, cost=<points>, scope=<target/tu/function>`. The label is the
 kind with underscores replaced by spaces and title-cased; for classic recipes
 it is the family name, capitalized, followed by `adjustment`
-(see `reprobit.cli_project._human_intervention_label`,
+(see `reprobit.intervention_metadata.classic_recipe_family_label` and
 `reprobit.report_html_format.human_label`).
 
 ## Intervention kinds
@@ -71,9 +72,11 @@ optional `symbol`, and canonically ordered `parameters`. The validator in
 
 ### `ClassicRecipeFamily`
 
-Each family has a registered semantic contract in
-`reprobit.classic.semantic_contracts.CLASSIC_SEMANTIC_CONTRACTS` unless noted.
-Points are the per-unit weight of the family's cost class.
+The [generated family catalog](classic-recipe-reference.md) lists every family's
+role, human label, cost class and per-unit weight, execution path, and availability.
+The descriptions below explain the actual transformations. Each available family
+has a registered semantic contract in
+`reprobit.classic.semantic_contracts.CLASSIC_SEMANTIC_CONTRACTS`.
 
 #### Donor-rendering families (role `donor`)
 
@@ -83,16 +86,16 @@ Parameters are validated and rendered by `reprobit.classic_donors`; all of
 them carry `emission_policy` = `non_emitting_declarations_only` and
 `generated_header_sha256`.
 
-| Family | `rbit explain` label | Cost class (points) | What it renders |
-|---|---|---|---|
-| `declaration_shape` | Declaration shape adjustment | State carrier (1) | A declaration-only shape of `classes` classes and `functions` unused inline members (no storage, code, data, strings, vtables, or directives), force-included (see `reprobit.declaration_shapes.generate_shape`). |
-| `pad_shape` | Pad shape adjustment | Generated supplier (5) | A grid of `classes` classes each with `functions_per_class` unused inline members, force-included; optional `donor_source` (see `reprobit.declaration_shapes.generate_pad_shape`). |
-| `forward_declaration_run` | Forward declaration run adjustment | State carrier (1) | `count` forward declarations with stem `prefix` and `width`, at `placement` `prefix`, `after_includes`, `force_include`, or `suffix`. |
-| `extern_run_pair` | Extern run pair adjustment | State carrier (1) | A header run and a seat run of `extern int` object declarations (`header_prefix`/`header_count`, `seat_prefix`/`seat_count`, `width`) (see `reprobit.declaration_shapes.generate_extern_run`). |
-| `forward_run_with_shape` | Forward run with shape adjustment | Generated supplier (5) | A forward run followed by a declaration shape; optional cross-TU carrier fields pin the donor source and its rendering. |
-| `declaration_run_triple` | Declaration run triple adjustment | State carrier (1) | Up to three forward runs seated `pre`, `post`, and `eof`, each with its own stem and count. |
-| `prefix_forward_after_includes_extern` | Prefix forward after includes extern adjustment | State carrier (1) | A forward run before the includes plus an extern run after them (`forward_*` and `extern_*` parameters). |
-| `donor_source_overlay` | Donor source overlay adjustment | Cross TU or Overlay (100) | A donor-private source overlay; it can never enter a primary project compiler seat (see `ClassicRecipeFamily` docstring). |
+| Family | What it renders |
+| --- | --- |
+| `declaration_shape` | A declaration-only shape of `classes` classes and `functions` unused inline members (no storage, code, data, strings, vtables, or directives), force-included (see `reprobit.declaration_shapes.generate_shape`). |
+| `pad_shape` | A grid of `classes` classes each with `functions_per_class` unused inline members, force-included; optional `donor_source` (see `reprobit.declaration_shapes.generate_pad_shape`). |
+| `forward_declaration_run` | `count` forward declarations with stem `prefix` and `width`, at `placement` `prefix`, `after_includes`, `force_include`, or `suffix`. |
+| `extern_run_pair` | A header run and a seat run of `extern int` object declarations (`header_prefix`/`header_count`, `seat_prefix`/`seat_count`, `width`) (see `reprobit.declaration_shapes.generate_extern_run`). |
+| `forward_run_with_shape` | A forward run followed by a declaration shape; optional cross-TU carrier fields pin the donor source and its rendering. |
+| `declaration_run_triple` | Up to three forward runs seated `pre`, `post`, and `eof`, each with its own stem and count. |
+| `prefix_forward_after_includes_extern` | A forward run before the includes plus an extern run after them (`forward_*` and `extern_*` parameters). |
+| `donor_source_overlay` | A donor-private source overlay; it can never enter a primary project compiler seat (see `ClassicRecipeFamily` docstring). |
 
 #### Function families (role `function`)
 
@@ -101,23 +104,23 @@ Contract `classic.binary-transform.<family>.v1`; obligations
 `binary.semantic_equivalence`. Each is dispatched to one composer in
 `reprobit.classic_project`; the composer never reads a reference image.
 
-| Family | `rbit explain` label | Cost class (points) | What the composer does |
-|---|---|---|---|
-| `equal_body_strict` | Equal body strict adjustment | Equal-body donor (25) | Copies one equal-size COMDAT code body from the donor into the seed object; `.debug$F`/`.debug$S` closure with literally equal relocation tuples (see `classic.composition.compose_equal_body_comdat`). |
-| `equal_body_eh_structural_local` | Equal body eh structural local adjustment | Structural donor (50) | Same equal-size copy with `.debug$S`/`.xdata$x` closure for exception-handling structures (see `classic.composition.compose_equal_body_comdat`). |
-| `equal_body_eh_reloc_layout` | Equal body eh reloc layout adjustment | Structural donor (50) | Equal-size copy handled by the same composer with relocation-layout handling (see `classic.composition.compose_equal_body_comdat`, [costs.md](costs.md)). |
-| `same_slot_resize` | Same slot resize adjustment | Structural donor (50) | Installs a donor body of a different size in the same 16-byte linked slot, repairing every dependent COFF record (see `classic.composition.compose_same_slot_resize`). |
-| `retail_exact_reloc_divergent` | Retail exact reloc divergent adjustment | Cross TU or Overlay (100) | Splices a donor body whose external relocation targets diverge, under a closed declarative relocation contract (see `classic.composition.produce_reloc_divergent_candidate`). |
-| `retail_exact_source_equal_body` | Retail exact source equal body adjustment | Cross TU or Overlay (100) | Installs one equal-size body from a closed source refactor, adding source identity and closure pins (see `classic.composition.produce_source_equal_body_candidate`). |
-| `retail_exact_source_target_closure` | Retail exact source target closure adjustment | Cross TU or Overlay (100) | Extracts one compiler-produced target from a source-closed donor whose source window is proved byte-identical (see `classic.composition.produce_source_target_closure_candidate`). |
-| `retail_exact_cross_tu_complete_target_resize` | Retail exact cross tu complete target resize adjustment | Cross TU or Overlay (100) | Normalizes one complete cross-TU COMDAT into an owner-TU carrier; no partial code ranges (see `classic.composition.produce_cross_tu_complete_target_resize_candidate`). |
-| `retail_exact_donor_rewriting` | Retail exact donor rewriting adjustment | Semantic rewrite (250) | Produces a rewrite of a freshly compiled donor body (see `classic.rewriting.produce_donor_rewriting_candidate`). |
-| `retail_exact_composed_rewriting` | Retail exact composed rewriting adjustment | Semantic rewrite (250) | Applies a reordering, then regional register bijections, then reversed compares (see `classic.rewriting.produce_composed_rewriting_candidate`). |
-| `retail_exact_register_bijection` | Retail exact register bijection adjustment | Semantic rewrite (250) | Fixed-width register renaming of a fresh donor body, proved sound against its control flow (see `classic.register_candidates.produce_register_bijection_candidate`). |
-| `retail_exact_register_bijection_reencoding` | Retail exact register bijection reencoding adjustment | Semantic rewrite (250) | Length-changing register renaming with EBP admitted (see `classic.register_candidates.produce_register_bijection_reencoding_candidate`). |
-| `retail_exact_web_recolour` | Retail exact web recolour adjustment | Semantic rewrite (250) | Recolours a def-use web of the seed's own body; the donor is a provenance witness only (see `classic.scheduling.produce_web_recolour_candidate`). |
-| `retail_exact_instruction_mosaic` | Retail exact instruction mosaic adjustment | Binary surgery (500) | Draws same-offset complete instructions from several declaration-carrier compiles of the same translation unit (see `classic.composition.produce_instruction_mosaic_candidate`). |
-| `retail_exact_same_tu_instruction_hybrid_resize` | Retail exact same tu instruction hybrid resize adjustment | Binary surgery (500) | Composes two source-identical, declaration-carrier same-TU donors (see `classic.composition.produce_same_tu_instruction_hybrid_resize_candidate`). |
+| Family | What the composer does |
+| --- | --- |
+| `equal_body_strict` | Copies one equal-size COMDAT code body from the donor into the seed object; `.debug$F`/`.debug$S` closure with literally equal relocation tuples (see `classic.composition.compose_equal_body_comdat`). |
+| `equal_body_eh_structural_local` | Same equal-size copy with `.debug$S`/`.xdata$x` closure for exception-handling structures (see `classic.composition.compose_equal_body_comdat`). |
+| `equal_body_eh_reloc_layout` | Equal-size copy handled by the same composer with relocation-layout handling (see `classic.composition.compose_equal_body_comdat`, [costs.md](costs.md)). |
+| `same_slot_resize` | Installs a donor body of a different size in the same 16-byte linked slot, repairing every dependent COFF record (see `classic.composition.compose_same_slot_resize`). |
+| `retail_exact_reloc_divergent` | Splices a donor body whose external relocation targets diverge, under a closed declarative relocation contract (see `classic.composition.produce_reloc_divergent_candidate`). |
+| `retail_exact_source_equal_body` | Installs one equal-size body from a closed source refactor, adding source identity and closure pins (see `classic.composition.produce_source_equal_body_candidate`). |
+| `retail_exact_source_target_closure` | Extracts one compiler-produced target from a source-closed donor whose source window is proved byte-identical (see `classic.composition.produce_source_target_closure_candidate`). |
+| `retail_exact_cross_tu_complete_target_resize` | Normalizes one complete cross-TU COMDAT into an owner-TU carrier; no partial code ranges (see `classic.composition.produce_cross_tu_complete_target_resize_candidate`). |
+| `retail_exact_donor_rewriting` | Produces a rewrite of a freshly compiled donor body (see `classic.rewriting.produce_donor_rewriting_candidate`). |
+| `retail_exact_composed_rewriting` | Applies a reordering, then regional register bijections, then reversed compares (see `classic.rewriting.produce_composed_rewriting_candidate`). |
+| `retail_exact_register_bijection` | Fixed-width register renaming of a fresh donor body, proved sound against its control flow (see `classic.register_candidates.produce_register_bijection_candidate`). |
+| `retail_exact_register_bijection_reencoding` | Length-changing register renaming with EBP admitted (see `classic.register_candidates.produce_register_bijection_reencoding_candidate`). |
+| `retail_exact_web_recolour` | Recolours a def-use web of the seed's own body; the donor is a provenance witness only (see `classic.scheduling.produce_web_recolour_candidate`). |
+| `retail_exact_instruction_mosaic` | Draws same-offset complete instructions from several declaration-carrier compiles of the same translation unit (see `classic.composition.produce_instruction_mosaic_candidate`). |
+| `retail_exact_same_tu_instruction_hybrid_resize` | Composes two source-identical, declaration-carrier same-TU donors (see `classic.composition.produce_same_tu_instruction_hybrid_resize_candidate`). |
 
 The two rewriting families accept the same closed set of instruction-level
 primitives, each proved on the measured body: topological window reorderings,
@@ -130,21 +133,21 @@ simulation-proved region rewrites.
 
 #### Project-level families (role `project`)
 
-| Family | `rbit explain` label | Cost class (points) | Contract and meaning |
-|---|---|---|---|
-| `source_overlay_graph` | Source overlay graph adjustment | Cross TU or Overlay (100) | Contract `classic.source-overlay-ancestry.v1`, obligations `overlay.*`; rendered bytes may enter the primary compiler seat with origin `certified-project-overlay` after the closed typed-source proof (see `ClassicRecipeFamily` docstring, `classic.project_overlay`). |
-| `image_metadata` | Image metadata adjustment | Generated supplier (5) | Contract `classic.image-metadata.v1`; obligations `image.candidate_only`, `image.logic_bytes_unchanged`, `image.metadata_only`. |
-| `image_link_order` | Image link order adjustment | Link ordering (10) | Contract `classic.image-link-order.v1`; obligations `image.candidate_only`, `image.import_binding_preserved`, `image.semantic_equivalence`. |
-| `image_binary_repack` | Image binary repack adjustment | Binary surgery (500) | Contract `classic.image-binary-repack.v1`; obligations `image.byte_conservation`, `image.candidate_only`, `image.fixups_preserved`, `image.semantic_equivalence`. |
+| Family | Contract and meaning |
+| --- | --- |
+| `source_overlay_graph` | Contract `classic.source-overlay-ancestry.v1`, obligations `overlay.*`; rendered bytes may enter the primary compiler seat with origin `certified-project-overlay` after the closed typed-source proof (see `ClassicRecipeFamily` docstring, `classic.project_overlay`). |
+| `image_metadata` | Contract `classic.image-metadata.v1`; obligations `image.candidate_only`, `image.logic_bytes_unchanged`, `image.metadata_only`. |
+| `image_link_order` | Contract `classic.image-link-order.v1`; obligations `image.candidate_only`, `image.import_binding_preserved`, `image.semantic_equivalence`. |
+| `image_binary_repack` | Contract `classic.image-binary-repack.v1`; obligations `image.byte_conservation`, `image.candidate_only`, `image.fixups_preserved`, `image.semantic_equivalence`. |
 
 `archive_admission` is reserved but not available. Project files that name it
 are rejected because ReproBit cannot run it.
 
 #### Quarantine-only family
 
-| Family | `rbit explain` label | Cost class | Meaning |
-|---|---|---|---|
-| `retail_exact_simulated_elision` | not printed as a classic recipe | not costable as a classic recipe | Must be represented and executed by the quarantined simulated-elision composer, the only classic producer allowed to read reference-image bytes; its provenance is permanently ineligible for a clean verdict (see `classic.legacy_elision`, `reprobit.classic_quarantine`). |
+| Family | Meaning |
+| --- | --- |
+| `retail_exact_simulated_elision` | Must be represented and executed by the quarantined simulated-elision composer, the only classic producer allowed to read reference-image bytes; its provenance is permanently ineligible for a clean verdict (see `classic.legacy_elision`, `reprobit.classic_quarantine`). |
 
 ### `StructuralMode` (field `mode` of `structural_donor`)
 

@@ -11,7 +11,6 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
@@ -35,12 +34,20 @@ from reprobit.classic.semantic_contracts import (
     issue_classic_candidate_semantics,
 )
 from reprobit.classic.semantic_errors import ClassicSemanticError
+from reprobit.intervention_metadata import (
+    CLASSIC_RECIPE_METADATA,
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
+from reprobit.intervention_metadata import (
+    FamilyCoverage as FamilyCoverage,
+)
+from reprobit.intervention_metadata import (
+    FamilyExecutionMode as FamilyExecutionMode,
+)
 from reprobit.model import Digest, SemanticProof
 from reprobit.schema import (
-    CLASSIC_RECIPE_FAMILIES_BY_ROLE,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     ProjectBundle,
 )
 from reprobit.secure_path_contracts import SecurePathError
@@ -68,72 +75,9 @@ class ClassicProjectError(RuntimeError):
     """A project cannot be executed without guessing or stale state."""
 
 
-class FamilyExecutionMode(StrEnum):
-    SOURCE_OVERLAY = "source-overlay"
-    DONOR_COMPILE = "donor-compile"
-    CLEAN_CANDIDATE = "clean-candidate"
-    LINK_OR_POSTLINK = "link-or-postlink"
-    QUARANTINE_ONLY = "quarantine-only"
-    UNSUPPORTED = "unsupported"
-
-
-@dataclass(frozen=True, slots=True)
-class FamilyCoverage:
-    mode: FamilyExecutionMode
-    implemented: bool
-    detail: str
-
-
-def _coverage() -> Mapping[ClassicRecipeFamily, FamilyCoverage]:
-    donor = CLASSIC_RECIPE_FAMILIES_BY_ROLE[ClassicRecipeRole.DONOR]
-    candidate = CLASSIC_RECIPE_FAMILIES_BY_ROLE[ClassicRecipeRole.FUNCTION]
-    link_or_postlink = CLASSIC_RECIPE_FAMILIES_BY_ROLE[ClassicRecipeRole.PROJECT] - {
-        ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
-    }
-    result: dict[ClassicRecipeFamily, FamilyCoverage] = {}
-    for family in ClassicRecipeFamily:
-        if family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH:
-            result[family] = FamilyCoverage(
-                FamilyExecutionMode.SOURCE_OVERLAY,
-                True,
-                "pinned source copy plus closed declarative generators; opaque legacy anchors fail",
-            )
-        elif family in donor:
-            result[family] = FamilyCoverage(
-                FamilyExecutionMode.DONOR_COMPILE,
-                False,
-                "compile-lane plumbing exists, but this donor source family is not yet rendered",
-            )
-        elif family in candidate:
-            result[family] = FamilyCoverage(
-                FamilyExecutionMode.CLEAN_CANDIDATE,
-                True,
-                "oracle-free classic candidate producer is dispatchable",
-            )
-        elif family is ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION:
-            result[family] = FamilyCoverage(
-                FamilyExecutionMode.QUARANTINE_ONLY,
-                False,
-                "must be represented and executed by the quarantined simulated-elision composer",
-            )
-        elif family in link_or_postlink:
-            result[family] = FamilyCoverage(
-                FamilyExecutionMode.LINK_OR_POSTLINK,
-                True,
-                "closed candidate-only terminal declaration is dispatchable",
-            )
-        else:
-            result[family] = FamilyCoverage(
-                FamilyExecutionMode.LINK_OR_POSTLINK,
-                False,
-                "typed declaration is preserved but the terminal producer is not implemented",
-            )
-    if set(result) != set(ClassicRecipeFamily):
-        raise AssertionError("classic family coverage is not exhaustive")
-    return MappingProxyType(result)
-
-
-FAMILY_COVERAGE = _coverage()
+FAMILY_COVERAGE: Mapping[ClassicRecipeFamily, FamilyCoverage] = MappingProxyType(
+    {family: metadata.coverage for family, metadata in CLASSIC_RECIPE_METADATA.items()}
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -772,8 +716,6 @@ __all__ = [
     "ClassicDispatchMaterials",
     "ClassicFamilyDispatcher",
     "ClassicProjectError",
-    "FamilyCoverage",
-    "FamilyExecutionMode",
     "InterventionWitness",
     "effective_source_seal",
     "materialize_effective_workspace",

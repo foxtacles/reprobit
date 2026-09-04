@@ -25,11 +25,8 @@ from reprobit.classic_includes import (
     index_sealed_include_authority,
     resolve_msvc_include_trace,
 )
-from reprobit.incremental import (
-    PRODUCER_CACHE_IMPLEMENTATION,
-    IncrementalAuthorityError,
-    producer_cache_key,
-)
+from reprobit.developer_authority import IncrementalAuthorityError
+from reprobit.incremental import PRODUCER_CACHE_IMPLEMENTATION, producer_cache_key
 from reprobit.strict_json import JsonValue, canonical_json
 
 

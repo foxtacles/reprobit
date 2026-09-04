@@ -43,9 +43,9 @@ from reprobit.classic_publication import (
 from reprobit.classic_repair_dispatch import ClassicMeasuredReceiptRepair
 from reprobit.classic_runtime_graph import classic_compiler_product_refs
 from reprobit.classic_runtime_receipts import _held_publication_receipt
+from reprobit.developer_authority import DeveloperAuthority
 from reprobit.execution import BuildExecutionReceipt
 from reprobit.incremental import (
-    DeveloperAuthority,
     producer_cache_implementation,
     revalidate_producer_implementation,
 )
@@ -171,6 +171,7 @@ def execute_classic_incremental_plan(
         progress=executor_progress,
         runtime_init_count=runtime_count,
         before_publish=before_record_publication,
+        materialize_cache_hits=False,
     ).execute(tuple(nodes))
 
     # Only complete, re-resolvable compiler traces enter bounded base history.

@@ -9,12 +9,14 @@ from typing import Any, cast
 from reprobit.binary import ByteIdentityError, require
 from reprobit.classic.foundation import declared_symbol_kind
 from reprobit.coff_format import RELOCATION_WIDTHS, CoffObject, detailed_relocations
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.oracle_pe32 import LegacyInstallError, PE32VirtualAddressReader
 from reprobit.schema import (
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
 )
 from reprobit.strict_json import JsonValue
 

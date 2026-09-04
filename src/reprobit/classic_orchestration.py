@@ -49,13 +49,15 @@ from reprobit.classic_project import (
     InterventionWitness,
 )
 from reprobit.classic_retail_repair import authenticated_retail_body_available
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest, SemanticProof
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole
 from reprobit.schema import (
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     ClassicTranslationUnitPlan,
     LegacyOracleInstallIntervention,
     ProjectBundle,

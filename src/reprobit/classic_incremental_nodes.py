@@ -56,7 +56,6 @@ from reprobit.classic_incremental_keys import (
     transform_material as build_transform_material,
 )
 from reprobit.classic_incremental_planning import (
-    _compiler_parameters,
     _donor_dependency_resolution_contexts,
 )
 from reprobit.classic_orchestration import (
@@ -64,8 +63,10 @@ from reprobit.classic_orchestration import (
     classic_unit_oracle_targets,
 )
 from reprobit.classic_resources import scan_msvc_resource_dependencies
+from reprobit.classic_runtime_dependencies import compiler_include_parameters
 from reprobit.classic_runtime_warm import ClassicWarmCompilerTransformResult
-from reprobit.incremental import producer_cache_key, require_fresh_protected_recursive_inputs
+from reprobit.developer_authority import require_fresh_protected_recursive_inputs
+from reprobit.incremental import producer_cache_key
 from reprobit.incremental_executor import (
     CacheProbeDecision,
     IncrementalNode,
@@ -105,7 +106,7 @@ def _add_compiler_node(
     recursive_sampled_paths = partial(warm_context.recursive_sampled_paths, plan)
     staged_reference_inputs = partial(warm_context.staged_reference_inputs, plan)
     verify_before_store = partial(warm_context.verify_before_store, plan)
-    source, cwd, include_dirs, env_dirs, force_includes = _compiler_parameters(
+    source, cwd, include_dirs, env_dirs, force_includes = compiler_include_parameters(
         node,
         bundle=bundle,
         compiler_logical=role_logical[ProducerRole.COMPILER],

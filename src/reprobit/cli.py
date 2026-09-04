@@ -16,46 +16,20 @@ from reprobit.backends import (
     POSIX_WINE_BACKEND,
     WINDOWS_NATIVE_BACKEND,
 )
-from reprobit.classic_donor_retune_candidates import (
-    DEFAULT_REPAIR_RETUNE_RADIUS,
-    DEFAULT_RETUNE_CANDIDATES,
-    MAX_RETUNE_CANDIDATES,
-    MAX_RETUNE_RADIUS,
-)
-from reprobit.classic_repair_discovery import (
-    DEFAULT_DISCOVERY_CANDIDATES,
-    MAX_DISCOVERY_CANDIDATES,
-)
-from reprobit.classic_repair_probe import (
-    DEFAULT_RETUNE_PROBE_CANDIDATES,
-    MAX_RETUNE_PROBE_CANDIDATES,
-)
-from reprobit.cli_build import (
-    command_build,
-    command_verify,
-)
-from reprobit.cli_graph import (
-    command_graph_configure,
-    command_graph_extract,
-)
 from reprobit.cli_output import CLIOutput
-from reprobit.cli_project import (
-    command_cost,
-    command_explain,
-    command_init,
-    command_report,
-    command_source_export,
-    command_source_lock,
-    command_source_preview,
-    command_source_regenerate,
-    command_status,
-    command_validate,
-)
-from reprobit.cli_state import command_clean, command_state_status
-from reprobit.discovery_cli import command_discover, command_discover_clean
 from reprobit.model import AuthenticityPolicy
 from reprobit.progress import bounded_exception_notes, exception_detail
-from reprobit.repair_workflow import MAX_REPAIR_ADJUSTMENT_ROUNDS
+from reprobit.search_limits import (
+    DEFAULT_DISCOVERY_CANDIDATES,
+    DEFAULT_REPAIR_RETUNE_RADIUS,
+    DEFAULT_RETUNE_CANDIDATES,
+    DEFAULT_RETUNE_PROBE_CANDIDATES,
+    MAX_DISCOVERY_CANDIDATES,
+    MAX_REPAIR_ADJUSTMENT_ROUNDS,
+    MAX_RETUNE_CANDIDATES,
+    MAX_RETUNE_PROBE_CANDIDATES,
+    MAX_RETUNE_RADIUS,
+)
 from reprobit.state import KeepWorkspace
 from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES
 
@@ -63,6 +37,114 @@ try:
     _VERSION = version("reprobit")
 except PackageNotFoundError:
     _VERSION = "0.1.0.dev0"
+
+
+def command_verify(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_build import command_verify as execute
+
+    return execute(args, output)
+
+
+def command_build(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_build import command_build as execute
+
+    return execute(args, output)
+
+
+def command_graph_extract(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_graph import command_graph_extract as execute
+
+    return execute(args, output)
+
+
+def command_graph_configure(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_graph import command_graph_configure as execute
+
+    return execute(args, output)
+
+
+def command_validate(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_project import command_validate as execute
+
+    return execute(args, output)
+
+
+def command_status(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_project import command_status as execute
+
+    return execute(args, output)
+
+
+def command_source_regenerate(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_project import command_source_regenerate as execute
+
+    return execute(args, output)
+
+
+def command_source_preview(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_project import command_source_preview as execute
+
+    return execute(args, output)
+
+
+def command_source_lock(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_project import command_source_lock as execute
+
+    return execute(args, output)
+
+
+def command_source_export(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_project import command_source_export as execute
+
+    return execute(args, output)
+
+
+def command_report(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_project import command_report as execute
+
+    return execute(args, output)
+
+
+def command_init(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_project import command_init as execute
+
+    return execute(args, output)
+
+
+def command_explain(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_project import command_explain as execute
+
+    return execute(args, output)
+
+
+def command_cost(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_project import command_cost as execute
+
+    return execute(args, output)
+
+
+def command_state_status(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_state import command_state_status as execute
+
+    return execute(args, output)
+
+
+def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.cli_state import command_clean as execute
+
+    return execute(args, output)
+
+
+def command_discover_clean(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.discovery_cli import command_discover_clean as execute
+
+    return execute(args, output)
+
+
+def command_discover(args: argparse.Namespace, output: CLIOutput) -> int:
+    from reprobit.discovery_cli import command_discover as execute
+
+    return execute(args, output)
 
 
 def _lazy_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:

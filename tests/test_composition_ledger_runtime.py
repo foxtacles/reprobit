@@ -168,7 +168,7 @@ def test_verify_records_the_ledger_only_when_it_could_be_derived(
 ) -> None:
     from contextlib import contextmanager
 
-    from reprobit import cli_build
+    import reprobit.project_execution as cli_build
     from reprobit.composition_ledger import read_ledger
 
     leases: list[Path] = []

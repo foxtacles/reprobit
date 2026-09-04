@@ -7,11 +7,22 @@ from types import SimpleNamespace
 
 import pytest
 
+from reprobit.backends import BackendDoctorReport, DoctorCheck
 from reprobit.cli import main
 from reprobit.cli_output import human_command
 from reprobit.project_readiness import inspect_project_readiness, render_project_readiness
 from reprobit.schema import BuildPlanDocument
 from reprobit.strict_json import canonical_json
+
+
+@pytest.fixture(autouse=True)
+def _available_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "reprobit.project_readiness.backend_for_host",
+        lambda: SimpleNamespace(
+            doctor=lambda *, execute_probe: BackendDoctorReport("fixture", "fixture", ())
+        ),
+    )
 
 
 def test_readiness_points_an_empty_directory_to_init(tmp_path: Path) -> None:
@@ -136,11 +147,11 @@ def test_valid_project_can_have_no_intervention_or_proof_documents(
         lambda _self, _lock=None: SimpleNamespace(ok=True, checks=()),
     )
     assert main(["status", str(project)]) == 0
-    assert "Project and machine ready: 11/11 checks passed" in capsys.readouterr().out
+    assert "Project and machine ready: 12/12 checks passed" in capsys.readouterr().out
 
     assert main(["status", str(project), "--all"]) == 0
     detailed = capsys.readouterr().out
-    assert "Project and machine ready: 11/11 checks passed" in detailed
+    assert "Project and machine ready: 12/12 checks passed" in detailed
     assert "[ok] Project: project ID grind" in detailed
     assert f"[ok] Local compiler: available at {local_toolchain}" in detailed
     assert "[ok] Final project check: all saved project files agree" in detailed
@@ -262,3 +273,43 @@ def test_status_flags_a_saved_document_that_is_not_json(
     assert checks["interventions"].next_command == f"rbit validate {project}"
     assert checks["authority"].pending
     assert checks["authority"].detail == "not checked until the project files above are ready"
+
+
+def test_status_requires_backend_tools_without_running_a_probe(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = tmp_path / "project"
+    shutil.copytree(Path(__file__).parents[1] / "examples/grind", project)
+    (project / "reference").mkdir()
+    (project / "reference/grind.exe").write_bytes(b"reference")
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    monkeypatch.setattr(
+        "reprobit.project_readiness.resolve_toolchain_root", lambda *_args, **_kwargs: toolchain
+    )
+    monkeypatch.setattr(
+        "reprobit.project_readiness.ClassicMSVCToolchain.doctor",
+        lambda _self, _lock=None: SimpleNamespace(ok=True, checks=()),
+    )
+    probes: list[bool] = []
+
+    def doctor(*, execute_probe: bool) -> BackendDoctorReport:
+        probes.append(execute_probe)
+        return BackendDoctorReport(
+            "fixture", "fixture", (DoctorCheck("wine", False, "wine not found"),)
+        )
+
+    monkeypatch.setattr(
+        "reprobit.project_readiness.backend_for_host", lambda: SimpleNamespace(doctor=doctor)
+    )
+    assert main(["status", str(project), "--format", "ndjson"]) == 1
+    event = json.loads(capsys.readouterr().out)
+    assert event["ready"] is False
+    checks = {item["id"]: item for item in event["checks"]}
+    assert checks["local_backend"]["ready"] is False
+    assert checks["local_backend"]["detail"] == "wine: wine not found"
+    assert checks["authority"]["ready"] is True
+    assert event["next_argv"] == ["rbit", "doctor", str(project)]
+    assert probes == [False]

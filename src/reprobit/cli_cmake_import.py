@@ -13,7 +13,6 @@ from dataclasses import replace
 from pathlib import Path
 
 from reprobit.backends import ExecutionBackend, NativeWindowsBackend, backend_for_host
-from reprobit.cli_build import ProjectExecutionOptions, VerifyRequest, VerifyResult, execute_verify
 from reprobit.cli_environment import resolve_classic_execution_inputs
 from reprobit.cli_output import CLIOutput, NextStep, count_phrase, next_step_fields
 from reprobit.cli_paths import (
@@ -23,7 +22,6 @@ from reprobit.cli_paths import (
     resolve_program,
     safe_project_path,
 )
-from reprobit.cli_project import apply_source_lock, cmake_reimport_guidance, plan_source_lock
 from reprobit.cli_state import state_root
 from reprobit.cmake_configure import configure_cmake_project
 from reprobit.cmake_graph import CMakeGraphResult, record_cmake_graph
@@ -47,10 +45,22 @@ from reprobit.msvc42_provision import (
     verify_msvc42_cmake_frontend,
 )
 from reprobit.producer_graph import CMakeImportRecipe, read_producer_graph
+from reprobit.project_execution import (
+    ProjectExecutionOptions,
+    VerifyRequest,
+    VerifyResult,
+    execute_verify,
+)
 from reprobit.project_loader import load_project, load_project_tree
 from reprobit.project_readiness import inspect_project_readiness
-from reprobit.schema import ProducerGraphBuildAdapter, ProjectBundle
+from reprobit.schema import ProducerGraphBuildAdapter, ProjectBundle, SchemaError
 from reprobit.secure_path_contracts import is_redirected_metadata
+from reprobit.source_authority import SourceInputMismatch
+from reprobit.source_lock_workflow import (
+    apply_source_lock,
+    cmake_reimport_guidance,
+    plan_source_lock,
+)
 from reprobit.state import KeepWorkspace, RunArena
 from reprobit.toolchains import (
     MSVC_42,
@@ -526,7 +536,19 @@ def command_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:
     try:
         with output.activity("preparing a reviewable CMake build plan", phase="import"):
             scaffold = scaffold_cmake_authority(root, spec, args.target)
-            bundle = load_project_tree(root, include_producer_graph=False)
+            try:
+                bundle = load_project_tree(root, include_producer_graph=False)
+            except SchemaError as error:
+                if scaffold.transaction_id is not None and isinstance(
+                    error.__cause__, SourceInputMismatch
+                ):
+                    next_step = NextStep(("rbit", "source", "preview", root))
+                    raise CLIError(
+                        "Source inputs changed after they were locked; review and lock them "
+                        f"again before the first CMake import. {error.__cause__.detail}\n"
+                        f"Next: {next_step.command}"
+                    ) from error
+                raise
             validate_toolchain_installation(
                 installation,
                 bundle.toolchain_lock,

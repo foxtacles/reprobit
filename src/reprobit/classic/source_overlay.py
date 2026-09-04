@@ -52,9 +52,15 @@ from reprobit.classic.source_overlay_claims import (
     _validate_include_leaf,
     _validate_unreachable_helper_leaf,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+)
 from reprobit.model import Digest
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole
-from reprobit.schema import ClassicRecipeFamily, ClassicRecipeIntervention, ProjectBundle
+from reprobit.schema import (
+    ClassicRecipeIntervention,
+    ProjectBundle,
+)
 from reprobit.toolchains import ToolchainError
 from reprobit.toolchains import profile as toolchain_profile
 

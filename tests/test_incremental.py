@@ -6,16 +6,18 @@ import pytest
 
 import reprobit.implementation as implementation
 from reprobit.cache import IncrementalCache, cache_key
+from reprobit.developer_authority import (
+    IncrementalAuthorityError,
+    current_worktree_authority,
+    require_fresh_protected_recursive_inputs,
+)
 from reprobit.implementation import package_implementation_digest
 from reprobit.incremental import (
     PRODUCER_CACHE_IMPLEMENTATION,
     PRODUCER_IMPLEMENTATION_DIGEST,
-    IncrementalAuthorityError,
     IncrementalBuildSummary,
-    current_worktree_authority,
     producer_cache_implementation,
     producer_cache_key,
-    require_fresh_protected_recursive_inputs,
 )
 from reprobit.model import Digest, Scope
 from reprobit.producer_graph import (

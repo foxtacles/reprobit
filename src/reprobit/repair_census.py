@@ -34,12 +34,14 @@ from reprobit.composition_ledger import (
     LedgerFunction,
     function_bodies,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Scope
 from reprobit.schema import (
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     ClassicTranslationUnitPlan,
     ProjectBundle,
 )

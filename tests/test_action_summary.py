@@ -10,11 +10,11 @@ from types import SimpleNamespace
 import pytest
 
 import reprobit.action_summary as action_summary_module
-import reprobit.cli_build as cli_build_module
 import reprobit.engine as engine_module
+import reprobit.project_execution as cli_build_module
 from reprobit.action_summary import main, publish_action_completion
 from reprobit.build import BuildPlan
-from reprobit.cli_build import _execute_verify, command_verify
+from reprobit.cli_build import command_verify
 from reprobit.cli_output import CLIOutput
 from reprobit.costs import (
     calculate_cost,
@@ -37,6 +37,7 @@ from reprobit.model import (
     Verdict,
     quarantine_proof_binding,
 )
+from reprobit.project_execution import _execute_verify
 from reprobit.report import (
     AuditIssueSummary,
     BuildExecutionSummary,

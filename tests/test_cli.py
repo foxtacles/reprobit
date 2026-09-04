@@ -30,11 +30,6 @@ from reprobit.cli import (
     main,
     usable_cpu_count,
 )
-from reprobit.cli_build import (
-    ProjectExecutionOptions,
-    _check_report_outputs,
-    _quarantine_oracle_targets,
-)
 from reprobit.cli_cmake_import import (
     _cmake_import_workspace,
     _command_cmake_refresh,
@@ -99,6 +94,11 @@ from reprobit.producer_graph import (
     toolchain_document_digest,
 )
 from reprobit.progress import ProgressEvent, ProgressKind
+from reprobit.project_execution import (
+    ProjectExecutionOptions,
+    _check_report_outputs,
+    _quarantine_oracle_targets,
+)
 from reprobit.project_loader import load_project, load_project_tree
 from reprobit.report import (
     BuildExecutionSummary,
@@ -5298,7 +5298,9 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
     render_sessions: list[tuple[str, object]] = []
 
     def load(root: Path, **kwargs: object) -> ProjectBundle:
-        render_sessions.append(("load", kwargs.get("overlay_render_session")))
+        # Record the source-validating load, not the preceding metadata read.
+        if kwargs.get("verify_source_authority", True):
+            render_sessions.append(("load", kwargs.get("overlay_render_session")))
         return load_project_tree(root, **kwargs)  # type: ignore[arg-type]
 
     class CacheBomb:
@@ -5381,8 +5383,8 @@ def test_cold_producer_build_and_verify_never_construct_incremental_cache(
         return result
 
     monkeypatch.setattr("reprobit.cache.IncrementalCache", CacheBomb)
-    monkeypatch.setattr("reprobit.cli_build.load_project_tree", load)
-    monkeypatch.setattr("reprobit.cli_build.prepare_producer_graph_run", prepare)
+    monkeypatch.setattr("reprobit.project_execution.load_project_tree", load)
+    monkeypatch.setattr("reprobit.project_execution.prepare_producer_graph_run", prepare)
     monkeypatch.setattr(
         "reprobit.cli_environment.resolve_classic_execution_inputs",
         lambda **_kwargs: object(),
@@ -5505,8 +5507,8 @@ def test_plain_build_loads_worktree_authority_before_state_and_emits_warm_summar
             seed_objects={},
         )
 
-    monkeypatch.setattr("reprobit.cli_build.load_project_tree", load)
-    monkeypatch.setattr("reprobit.incremental.current_worktree_authority", worktree)
+    monkeypatch.setattr("reprobit.project_execution.load_project_tree", load)
+    monkeypatch.setattr("reprobit.developer_authority.current_worktree_authority", worktree)
     monkeypatch.setattr(
         "reprobit.classic_incremental_execution.execute_classic_incremental_build",
         execute,
@@ -5769,6 +5771,12 @@ with contextlib.redirect_stdout(io.StringIO()):
         if error.code != 0:
             raise
 for module in (
+    "reprobit.cli_build",
+    "reprobit.cli_project",
+    "reprobit.cli_graph",
+    "reprobit.incremental",
+    "reprobit.classic_repair_probe",
+    "reprobit.repair_workflow",
     "reprobit.cli_cmake_import",
     "reprobit.discovery_grind_cli",
     "reprobit.discovery_project",

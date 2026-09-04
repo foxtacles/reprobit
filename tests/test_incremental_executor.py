@@ -1310,3 +1310,177 @@ def test_transient_workspace_dependency_mutation_cannot_poison_child_record(
     second = run(tmp_path / "second")
     assert second.summary.hits == 2  # type: ignore[attr-defined]
     assert (tmp_path / "second" / "child.lib").read_bytes() == b"good:child"
+
+
+def test_ready_child_starts_before_unrelated_slow_node_finishes(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    child_started = threading.Event()
+
+    def action(name: str) -> Callable[[object, object, PreparedNodeInputs], None]:
+        def execute(_runtime: object, _cancellation: object, inputs: PreparedNodeInputs) -> None:
+            if name == "a_slow":
+                assert child_started.wait(timeout=5), "a ready child was held behind unrelated work"
+            elif name == "c_child":
+                assert inputs.entries["b_parent"].snapshot.path.read_bytes() == b"b_parent"
+                child_started.set()
+            (workspace / name).write_bytes(name.encode())
+
+        return execute
+
+    nodes = tuple(
+        IncrementalNode(
+            id=name,
+            domain="producer",
+            depends_on=("b_parent",) if name == "c_child" else (),
+            outputs={name: workspace / name},
+            key=lambda _deps, name=name: _node_key(name),
+            execute=action(name),
+            metadata=lambda _deps: {},
+            materialize_inputs=(
+                _materialize_inputs(workspace, name, {"b_parent": "b_parent"})
+                if name == "c_child"
+                else None
+            ),
+        )
+        for name in ("a_slow", "b_parent", "c_child")
+    )
+    result = IncrementalDAGExecutor(
+        cache=IncrementalCache(state, implementation="dag-test-v1"),
+        workspace_root=workspace,
+        runtime_factory=object,
+        runtime_close=lambda _runtime: None,
+        max_workers=2,
+    ).execute(nodes)
+    assert result.summary.producer_misses == 3
+    assert child_started.is_set()
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_lazy_hit_validates_unused_content_without_materializing(
+    tmp_path: Path,
+    corrupt: bool,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    cache = IncrementalCache(state, implementation="dag-test-v1")
+    seed = tmp_path / "seed"
+    seed.write_bytes(b"trusted")
+    key = _node_key("unused-hit")
+    with cache.lease() as lease:
+        record = lease.store("producer", key, {"artifact": seed})
+    if corrupt:
+        cache._blob_path(record.outputs[0].digest, create=False).write_bytes(b"corrupt")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    output = workspace / "unused"
+    executor = IncrementalDAGExecutor(
+        cache=cache,
+        workspace_root=workspace,
+        runtime_factory=lambda: pytest.fail("a cache hit must not initialize the runtime"),
+        runtime_close=lambda _runtime: None,
+        max_workers=1,
+        materialize_cache_hits=False,
+    )
+    nodes = (
+        IncrementalNode(
+            id="hit",
+            domain="producer",
+            depends_on=(),
+            outputs={"artifact": output},
+            key=lambda _deps: key,
+            execute=lambda *_args: pytest.fail("a hit must not run"),
+            metadata=lambda _deps: {},
+        ),
+    )
+    if corrupt:
+        with pytest.raises(IncrementalExecutionError, match="integrity validation"):
+            executor.execute(nodes)
+    else:
+        result = executor.execute(nodes)
+        assert result.summary.producer_hits == 1
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("mutation", ["content", "redirect", "cancel", "close-failure"])
+def test_lazy_hit_revalidation_blocks_publication_after_runtime_mutation(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    from reprobit.cache import CachePoisonError
+    from reprobit.process import CancellationToken
+
+    state = tmp_path / "state"
+    state.mkdir()
+    cache = IncrementalCache(state, implementation="dag-test-v1")
+    seed = tmp_path / "seed"
+    seed.write_bytes(b"trusted")
+    parent_key = _node_key("lazy-parent")
+    child_key = _node_key("lazy-child")
+    with cache.lease() as lease:
+        parent_record = lease.store("producer", parent_key, {"parent": seed})
+    blob = cache._blob_path(parent_record.outputs[0].digest, create=False)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    def child(
+        _runtime: object, cancellation: CancellationToken, inputs: PreparedNodeInputs
+    ) -> None:
+        assert not (workspace / "parent").exists()
+        assert inputs.entries["parent"].snapshot.path.read_bytes() == b"trusted"
+        (workspace / "child").write_bytes(b"child")
+        if mutation == "cancel":
+            cancellation.cancel("test cancellation after writing output")
+
+    def close(_runtime: object) -> None:
+        if mutation == "content":
+            blob.write_bytes(b"corrupt")
+        elif mutation == "redirect":
+            blob.unlink()
+            blob.symlink_to(seed)
+        elif mutation == "close-failure":
+            raise RuntimeError("namespace close failed")
+
+    expected_error = {
+        "content": CachePoisonError,
+        "redirect": CachePoisonError,
+        "cancel": IncrementalExecutionError,
+        "close-failure": RuntimeError,
+    }[mutation]
+    with pytest.raises(expected_error):
+        IncrementalDAGExecutor(
+            cache=cache,
+            workspace_root=workspace,
+            runtime_factory=object,
+            runtime_close=close,
+            max_workers=2,
+            materialize_cache_hits=False,
+        ).execute(
+            (
+                IncrementalNode(
+                    id="parent",
+                    domain="producer",
+                    depends_on=(),
+                    outputs={"parent": workspace / "parent"},
+                    key=lambda _deps: parent_key,
+                    execute=lambda *_args: pytest.fail("parent must be a cache hit"),
+                    metadata=lambda _deps: {},
+                ),
+                IncrementalNode(
+                    id="child",
+                    domain="producer",
+                    depends_on=("parent",),
+                    outputs={"child": workspace / "child"},
+                    key=lambda _deps: child_key,
+                    execute=child,
+                    metadata=lambda _deps: {},
+                    materialize_inputs=_materialize_inputs(
+                        workspace, "child", {"parent": "parent"}
+                    ),
+                ),
+            )
+        )
+    with cache.lease() as lease:
+        assert lease.lookup("producer", child_key) is None

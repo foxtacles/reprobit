@@ -14,10 +14,6 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Protocol
 
-from reprobit.classic_donor_retune_candidates import (
-    DEFAULT_REPAIR_RETUNE_RADIUS,
-    DEFAULT_RETUNE_CANDIDATES,
-)
 from reprobit.classic_incremental_context import SeedObject
 from reprobit.classic_legacy_repair import (
     LegacyInstallRepair,
@@ -41,9 +37,7 @@ from reprobit.classic_repair_authority import (
     LegacyInterventionEdit,
     apply_classic_authority_edits,
 )
-from reprobit.classic_repair_discovery import DEFAULT_DISCOVERY_CANDIDATES
 from reprobit.classic_repair_probe import (
-    DEFAULT_RETUNE_PROBE_CANDIDATES,
     ClassicDonorRetuneRefusal,
 )
 from reprobit.classic_repair_probe_cache import (
@@ -61,7 +55,16 @@ from reprobit.classic_repair_session import (
     RepairRefusal,
     apply_classic_receipt_repairs,
 )
-from reprobit.cli_build import (
+from reprobit.cli_output import count_phrase
+from reprobit.composition_ledger import (
+    COMPOSED_BODY_LEDGER_RELATIVE,
+    ComposedBodyLedger,
+    read_ledger,
+)
+from reprobit.intervention_metadata import ClassicRecipeFamily, ClassicRecipeRole
+from reprobit.model import AuthenticityPolicy
+from reprobit.producer_graph import producer_graph_digest
+from reprobit.project_execution import (
     BuildRequest,
     ExecutionProgress,
     ProjectExecutionOptions,
@@ -70,15 +73,6 @@ from reprobit.cli_build import (
     VerifyResult,
     execute_build,
 )
-from reprobit.cli_output import count_phrase
-from reprobit.cli_project import apply_source_lock, plan_source_lock
-from reprobit.composition_ledger import (
-    COMPOSED_BODY_LEDGER_RELATIVE,
-    ComposedBodyLedger,
-    read_ledger,
-)
-from reprobit.model import AuthenticityPolicy
-from reprobit.producer_graph import producer_graph_digest
 from reprobit.project_loader import load_project_tree
 from reprobit.repair import (
     RepairCandidate,
@@ -108,16 +102,22 @@ from reprobit.repair_unit_admission import (
 )
 from reprobit.schema import (
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     LegacyOracleInstallIntervention,
     ProjectBundle,
     ProjectSpec,
     classic_debug_companion_paths,
     classic_function_donor_ids,
 )
+from reprobit.search_limits import (
+    DEFAULT_DISCOVERY_CANDIDATES,
+    DEFAULT_REPAIR_RETUNE_RADIUS,
+    DEFAULT_RETUNE_CANDIDATES,
+    MAX_REPAIR_ADJUSTMENT_ROUNDS,
+    MAX_REPAIR_CANDIDATES,
+)
 from reprobit.source_lock import receipt_source_input
+from reprobit.source_lock_workflow import apply_source_lock, plan_source_lock
 from reprobit.source_regeneration import (
     RegenerationPlan,
     SourceRegenerationError,
@@ -128,9 +128,6 @@ from reprobit.staged_project import StagedProject
 from reprobit.state import KeepWorkspace
 from reprobit.strict_json import canonical_json
 from reprobit.transactions import TransactionResult
-
-MAX_REPAIR_ADJUSTMENT_ROUNDS = 24
-MAX_REPAIR_CANDIDATES = DEFAULT_RETUNE_PROBE_CANDIDATES
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,6 +208,8 @@ class RepairWorkflowResult:
 class RepairSessionState:
     """Mutable accounting and loop guards for one bounded repair run."""
 
+    adjustment_limit: int
+    candidate_limit: int
     changed_records: set[str] = field(default_factory=set)
     affected_units: set[str] = field(default_factory=set)
     measured_checks: int = 0
@@ -231,23 +230,75 @@ class RepairSessionState:
     pass_number: int = 0
     last_outcome: str | None = None
 
+    def require_adjustment_round(self) -> None:
+        if self.adjustment_rounds >= self.adjustment_limit:
+            raise RepairWorkflowError(
+                "automatic repair reached its limit of "
+                f"{self.adjustment_limit} saved-guidance adjustment rounds"
+            )
 
-def _record_transition(
-    state: RepairSessionState,
-    changed: Sequence[str],
-    *,
-    empty_error: str,
-    outcome: str,
-    consume_round: bool = True,
-) -> None:
-    """Record one proven authority mutation and its next-pass explanation."""
+    def consume_candidates(self, used: int, *, search: str) -> None:
+        self.compiled_candidates = _consume_candidate_budget(
+            self.compiled_candidates,
+            used,
+            limit=self.candidate_limit,
+            search=search,
+        )
 
-    if not changed:
-        raise RepairWorkflowError(empty_error)
-    state.changed_records.update(changed)
-    if consume_round:
-        state.adjustment_rounds += 1
-    state.last_outcome = outcome
+    def begin_pass(self, bundle: ProjectBundle) -> None:
+        self.pass_number += 1
+        if self.initial_function_actions is None:
+            self.initial_function_actions = sum(
+                isinstance(item, LegacyOracleInstallIntervention)
+                or getattr(item, "role", None) is ClassicRecipeRole.FUNCTION
+                for item in bundle.interventions
+            )
+        maximum_analyses = self.initial_function_actions + self.adjustment_limit + 1
+        if self.pass_number > maximum_analyses:
+            raise RepairWorkflowError("automatic repair exceeded its monotonic analysis bound")
+        fingerprint = _authority_fingerprint(bundle)
+        if fingerprint in self.seen_authority:
+            raise RepairWorkflowError(
+                "automatic repair reached a previously checked saved-guidance state"
+            )
+        self.seen_authority.add(fingerprint)
+
+    def result(self, compile_cache: ClassicDonorCompileStore) -> RepairWorkflowResult:
+        return RepairWorkflowResult(
+            changed_records=tuple(
+                sorted(self.changed_records, key=lambda item: (item.casefold(), item))
+            ),
+            affected_units=tuple(sorted(self.affected_units, key=str.casefold)),
+            measured_checks=self.measured_checks,
+            retired_actions=self.retired_actions,
+            removed_donors=self.removed_donors,
+            donor_retunes=self.donor_retunes,
+            compiled_candidates=self.compiled_candidates,
+            passes=self.pass_number,
+            reauthored_actions=self.reauthored_actions,
+            discovered_actions=self.discovered_actions,
+            replayed_candidates=compile_cache.memory_hits + compile_cache.disk_hits,
+            admitted_units=self.admitted_units,
+            source_retunes=self.source_retunes,
+            adjustment_rounds=self.adjustment_rounds,
+        )
+
+    def record_transition(
+        self,
+        changed: Sequence[str],
+        *,
+        empty_error: str,
+        outcome: str,
+        consume_round: bool = True,
+    ) -> None:
+        """Record one proven authority mutation and its next-pass explanation."""
+
+        if not changed:
+            raise RepairWorkflowError(empty_error)
+        self.changed_records.update(changed)
+        if consume_round:
+            self.adjustment_rounds += 1
+        self.last_outcome = outcome
 
 
 class RepairAnalysisError(RuntimeError):
@@ -484,6 +535,671 @@ def _publish_legacy_no_window_resolution(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _RepairContext:
+    """Inputs shared by the ordered repair stages of one private attempt."""
+
+    options: RepairWorkflowOptions
+    progress: ExecutionProgress
+    staged_root: Path
+    spec: ProjectSpec
+    cache_root: Path
+    state: RepairSessionState
+    compile_cache: ClassicDonorCompileStore
+    probe_options: RepairProbeOptions
+    settle_target_ids: frozenset[str]
+    link_layout_hint: ClassicLinkLayoutHint | None
+
+
+@dataclass(frozen=True, slots=True)
+class _LegacyFallout:
+    refusals: tuple[RepairRefusal, ...]
+    fallbacks: tuple[tuple[LegacyRepairRefusal, LegacyInstallRepair], ...]
+    failures: tuple[str, ...]
+    no_window_resolution: LegacyNoWindowResolution | None
+
+
+@dataclass(frozen=True, slots=True)
+class _RetirementOutcome:
+    changed: bool
+    failures: tuple[str, ...]
+
+
+def _analyze_repair_pass(
+    context: _RepairContext,
+    ledger: ComposedBodyLedger | None,
+) -> RepairAnalysisResult:
+    """Measure the current guidance, then census remaining functions when needed."""
+
+    options = context.options
+    progress = context.progress
+    staged_root = context.staged_root
+    cache_root = context.cache_root
+    state = context.state
+    settle_target_ids = context.settle_target_ids
+
+    if settle_target_ids:
+        progress_description = (
+            f"repair pass {state.pass_number}: checking a remaining link layout mismatch"
+        )
+    else:
+        progress_description = f"repair pass {state.pass_number}: checking affected source files"
+    if state.last_outcome is not None and settle_target_ids:
+        progress_description = (
+            "repair pass "
+            f"{state.pass_number}: checking the link layout again ({state.last_outcome})"
+        )
+    elif state.last_outcome is not None:
+        progress_description = (
+            f"repair pass {state.pass_number}: checking again ({state.last_outcome})"
+        )
+    analysis = analyze_classic_repair(
+        options,
+        progress,
+        staged_root=staged_root,
+        cache_root=cache_root,
+        progress_description=progress_description,
+        seed_census=False,
+    )
+    if not analysis.measured_repairs and analysis.completed and ledger is not None:
+        analysis = analyze_classic_repair(
+            options,
+            progress,
+            staged_root=staged_root,
+            cache_root=cache_root,
+            progress_description=(
+                f"repair pass {state.pass_number}: checking remaining source files"
+            ),
+            seed_census=True,
+        )
+    state.affected_units.update(item.unit_id for item in analysis.measured_repairs)
+    state.affected_units.update(item.unit_id for item in analysis.structural_refusals)
+    return analysis
+
+
+def _repair_measured_checks(
+    context: _RepairContext,
+    analysis: RepairAnalysisResult,
+) -> bool:
+    """Refresh measured checks before attempting any structural repair."""
+
+    staged_root = context.staged_root
+    spec = context.spec
+    state = context.state
+
+    if analysis.measured_repairs:
+        state.require_adjustment_round()
+        changed = apply_classic_receipt_repairs(
+            staged_root,
+            spec,
+            analysis.measured_repairs,
+        )
+        state.measured_checks += len(analysis.measured_repairs)
+        state.record_transition(
+            changed,
+            empty_error="measured repair reported success without changing saved guidance",
+            outcome="refreshed " + count_phrase(len(analysis.measured_repairs), "saved check"),
+        )
+        return True
+    return False
+
+
+def _repair_unrecorded_functions(
+    context: _RepairContext,
+    bundle: ProjectBundle,
+    ledger: ComposedBodyLedger | None,
+    analysis: RepairAnalysisResult,
+) -> bool:
+    """Admit and discover fallout absent from the saved function records."""
+
+    progress = context.progress
+    staged_root = context.staged_root
+    spec = context.spec
+    state = context.state
+    compile_cache = context.compile_cache
+    probe_options = context.probe_options
+    candidate_limit = context.state.candidate_limit
+
+    if ledger is not None:
+        census = plan_repair_census(bundle, ledger, getattr(analysis, "seed_objects", None) or {})
+        if census.missing:
+            raise RepairWorkflowError(
+                "the edit removed functions used by the last accepted build: "
+                + _listed_census(census.missing)
+            )
+        if census.unplanned:
+            # Fallout in a unit the plan never listed: admit the unit (plan
+            # entry plus empty shards) so the next pass can record it.
+            state.require_adjustment_round()
+            try:
+                admitted = plan_translation_unit_admissions(bundle, census.unplanned)
+                changed = apply_translation_unit_admissions(staged_root, spec, admitted)
+            except TranslationUnitAdmissionError as exc:
+                raise RepairWorkflowError(
+                    "automatic repair could not add saved guidance for newly affected "
+                    f"source files ({_listed_census(census.unplanned)}): " + _one_line(exc)
+                ) from exc
+            state.admitted_units += len(admitted)
+            state.record_transition(
+                changed,
+                empty_error=(
+                    "source-file admission reported success without changing saved guidance"
+                ),
+                outcome="added " + count_phrase(len(admitted), "affected source build"),
+            )
+            return True
+        if census.refusals:
+            state.require_adjustment_round()
+            remaining_candidates = candidate_limit - state.compiled_candidates
+            if remaining_candidates <= 0:
+                raise RepairWorkflowError(
+                    "automatic repair reached --candidate-limit "
+                    f"after testing {candidate_limit} repair choices"
+                )
+            state.affected_units.update(item.unit_id for item in census.refusals)
+            discovery = probe_classic_carrier_discovery(
+                probe_options,
+                progress,
+                census.refusals,
+                candidate_budget=remaining_candidates,
+                tried_states={
+                    key: frozenset(value) for key, value in state.discovered_shapes.items()
+                },
+                compile_cache=compile_cache,
+            )
+            state.consume_candidates(
+                discovery.compiled_candidates,
+                search="newly affected function discovery",
+            )
+            for unit_id, digests in getattr(discovery, "tried_states", {}).items():
+                state.discovered_shapes.setdefault(unit_id, set()).update(digests)
+            if not discovery.repairs:
+                unresolved = ", ".join(
+                    f"{unit_id} {action_id}: {reason}"
+                    for unit_id, action_id, reason in discovery.unresolved[:8]
+                )
+                raise RepairWorkflowError(
+                    "automatic repair could not restore newly affected functions: "
+                    + (unresolved or "no carrier state settled it")
+                )
+            changed = apply_classic_discovery_repairs(staged_root, spec, discovery.repairs)
+            resolved = sum(len(item.resolutions) for item in discovery.repairs)
+            state.discovered_actions += resolved
+            state.record_transition(
+                changed,
+                empty_error=("new-function check reported success without changing saved guidance"),
+                outcome="added " + count_phrase(resolved, "function repair"),
+            )
+            return True
+    return False
+
+
+def _repair_source_layout(
+    context: _RepairContext,
+    bundle: ProjectBundle,
+) -> bool:
+    """Try the bounded source-layout stage after function composition is settled."""
+
+    progress = context.progress
+    staged_root = context.staged_root
+    spec = context.spec
+    state = context.state
+    probe_options = context.probe_options
+    settle_target_ids = context.settle_target_ids
+    link_layout_hint = context.link_layout_hint
+    candidate_limit = context.state.candidate_limit
+
+    if any(
+        isinstance(item, ClassicRecipeIntervention)
+        and item.role is ClassicRecipeRole.PROJECT
+        and item.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
+        for item in bundle.interventions
+    ):
+        remaining_candidates = max(0, candidate_limit - state.compiled_candidates)
+        source_result = probe_classic_project_overlay_repairs(
+            probe_options,
+            progress,
+            candidate_budget=remaining_candidates,
+            settle_target_ids=settle_target_ids,
+            link_layout_hint=link_layout_hint,
+        )
+        state.consume_candidates(
+            source_result.compiled_candidates,
+            search="source-layout repair",
+        )
+        if source_result.repair is not None:
+            state.require_adjustment_round()
+            changed = apply_classic_project_overlay_repair(
+                staged_root,
+                spec,
+                source_result.repair,
+            )
+            if not changed:
+                raise RepairWorkflowError(
+                    "source-layout repair reported success without changing saved guidance"
+                )
+            try:
+                regeneration = plan_source_regeneration(staged_root)
+                apply_source_regeneration(staged_root, regeneration)
+            except SourceRegenerationError as exc:
+                raise RepairWorkflowError(
+                    "source-layout repair could not refresh its saved output checks: "
+                    + _one_line(exc)
+                ) from exc
+            state.source_retunes += 1
+            state.record_transition(
+                (*changed, *regeneration.changed_documents),
+                empty_error=(
+                    "source-layout regeneration reported success without changing saved guidance"
+                ),
+                outcome="adjusted one source layout",
+            )
+            return True
+        if source_result.checked and source_result.reason is not None:
+            if source_result.exhausted:
+                raise RepairWorkflowError(
+                    "automatic repair reached --candidate-limit "
+                    f"after testing {candidate_limit} repair choices"
+                )
+            raise RepairWorkflowError(
+                "automatic repair could not find a safe source layout for "
+                f"{source_result.source_path or 'an affected source'}: "
+                + _one_line(source_result.reason)
+            )
+    return False
+
+
+def _prepare_legacy_fallout(
+    context: _RepairContext,
+    bundle: ProjectBundle,
+    analysis: RepairAnalysisResult,
+    receipts: tuple[ClassicProofReceipt, ...],
+) -> _LegacyFallout:
+    """Capture legacy fallback evidence before donor searches alter its source."""
+
+    unavailable_legacy = [
+        refusal
+        for refusal in analysis.structural_refusals
+        if isinstance(refusal.intervention, LegacyOracleInstallIntervention)
+        and (refusal.legacy_oracle is None or refusal.materials.donor_object is None)
+    ]
+    if unavailable_legacy:
+        detail = next(
+            (
+                refusal.reason
+                if refusal.legacy_oracle is None
+                else "fresh donor material is unavailable"
+            )
+            for refusal in unavailable_legacy
+        )
+        raise RepairWorkflowError(
+            "automatic repair cannot inspect the saved legacy oracle before donor search: "
+            + _one_line(detail)
+        )
+
+    structural_refusals: list[RepairRefusal] = []
+    legacy_fallbacks: list[tuple[LegacyRepairRefusal, LegacyInstallRepair]] = []
+    legacy_failures: list[str] = []
+    no_window_resolution: LegacyNoWindowResolution | None = None
+    for refusal in analysis.structural_refusals:
+        if not isinstance(refusal.intervention, LegacyOracleInstallIntervention):
+            structural_refusals.append(refusal)
+            continue
+        assert refusal.legacy_oracle is not None
+        assert refusal.materials.donor_object is not None
+        try:
+            repaired = reauthor_legacy_simulated_elision(
+                refusal.intervention,
+                refusal.receipt,
+                refusal.materials.seed_object,
+                refusal.materials.donor_object,
+                refusal.legacy_oracle.retail_body,
+                refusal.legacy_oracle.auxiliary_bodies,
+            )
+        except LegacyNoWindowError:
+            try:
+                no_window_resolution = plan_legacy_no_window_resolution(
+                    bundle.interventions,
+                    receipts,
+                    intervention=refusal.intervention,
+                    receipt=refusal.receipt,
+                    seed_object=refusal.materials.seed_object,
+                    donor_object=refusal.materials.donor_object,
+                    retail_body=refusal.legacy_oracle.retail_body,
+                    build_target=refusal.unit.plan.build_target,
+                )
+            except LegacyRepairError as exc:
+                legacy_failures.append(str(exc))
+                structural_refusals.append(refusal)
+                continue
+            else:
+                break
+        except (LegacyRepairError, RuntimeError, ValueError) as exc:
+            legacy_failures.append(str(exc))
+            structural_refusals.append(refusal)
+            continue
+        with_baseline = replace(refusal, baseline_repair=repaired)
+        structural_refusals.append(with_baseline)
+        legacy_fallbacks.append((with_baseline, repaired))
+    return _LegacyFallout(
+        tuple(structural_refusals),
+        tuple(legacy_fallbacks),
+        tuple(legacy_failures),
+        no_window_resolution,
+    )
+
+
+def _resolve_obsolete_quarantine(
+    context: _RepairContext,
+    bundle: ProjectBundle,
+    no_window_resolution: LegacyNoWindowResolution | None,
+) -> bool:
+    """Remove or replace an obsolete quarantine using the already proven plan."""
+
+    staged_root = context.staged_root
+    state = context.state
+
+    if no_window_resolution is not None:
+        state.require_adjustment_round()
+        changed = _publish_legacy_no_window_resolution(
+            staged_root,
+            bundle.spec,
+            no_window_resolution,
+        )
+        state.removed_donors += len(no_window_resolution.removed_donors)
+        if no_window_resolution.replaced:
+            state.reauthored_actions += 1
+            outcome = "replaced 1 obsolete quarantine record"
+        else:
+            state.retired_actions += 1
+            outcome = "removed 1 obsolete quarantine record"
+        state.record_transition(
+            changed,
+            empty_error="legacy dequarantine reported success without changing saved guidance",
+            outcome=outcome,
+        )
+        return True
+    return False
+
+
+def _retire_redundant_adjustments(
+    context: _RepairContext,
+    bundle: ProjectBundle,
+    current_refusals: tuple[RepairRefusal, ...],
+    receipts: tuple[ClassicProofReceipt, ...],
+) -> _RetirementOutcome:
+    """Retire proven redundant adjustments without consuming a search round."""
+
+    staged_root = context.staged_root
+    spec = context.spec
+    state = context.state
+
+    retirement_failures: list[str] = []
+    retirement_candidates: list[
+        tuple[
+            ClassicRecipeIntervention,
+            ClassicProofReceipt,
+            ClassicDispatchMaterials,
+        ]
+    ] = []
+    for refusal in current_refusals:
+        if isinstance(refusal.intervention, LegacyOracleInstallIntervention):
+            continue
+        candidate = (refusal.intervention, refusal.receipt, refusal.materials)
+        try:
+            plan_redundant_action_retirements(
+                bundle.interventions,
+                receipts,
+                (candidate,),
+            )
+        except RedundantActionRepairError as exc:
+            retirement_failures.append(str(exc))
+            continue
+        retirement_candidates.append(candidate)
+
+    if retirement_candidates:
+        try:
+            plan = plan_redundant_action_retirements(
+                bundle.interventions,
+                receipts,
+                tuple(retirement_candidates),
+            )
+        except RedundantActionRepairError as exc:
+            raise RepairWorkflowError(
+                "automatic repair could not combine its proven obsolete adjustments: "
+                + _one_line(exc)
+            ) from exc
+        changed = apply_classic_authority_edits(
+            staged_root,
+            spec,
+            interventions=plan.intervention_edits,
+            receipts=plan.receipt_edits,
+        )
+        state.retired_actions += len(retirement_candidates)
+        state.removed_donors += len(plan.removed_donors)
+        state.record_transition(
+            changed,
+            empty_error=(
+                "redundant-action retirement reported success without changing saved guidance"
+            ),
+            outcome="removed "
+            + count_phrase(len(retirement_candidates), "obsolete function record"),
+            consume_round=False,
+        )
+        return _RetirementOutcome(True, tuple(retirement_failures))
+    return _RetirementOutcome(False, tuple(retirement_failures))
+
+
+def _reauthor_existing_functions(
+    context: _RepairContext,
+    current_refusals: tuple[RepairRefusal, ...],
+) -> bool:
+    """Prefer bodies already emitted by available donors before compiling more."""
+
+    staged_root = context.staged_root
+    spec = context.spec
+    state = context.state
+
+    # Before compiling anything: a refused function whose goal body another
+    # donor of its unit (or its own donor, under a cheaper family) already
+    # emits is re-authored onto that donor from the captured fresh objects.
+    try:
+        reauthor_plan = plan_function_reauthoring(
+            tuple(
+                item
+                for item in current_refusals
+                if not isinstance(item.intervention, LegacyOracleInstallIntervention)
+            )
+        )
+    except ClassicReauthorError as exc:
+        raise RepairWorkflowError(
+            "automatic repair could not plan function re-authoring: " + _one_line(exc)
+        ) from exc
+    if reauthor_plan.reauthorings:
+        state.require_adjustment_round()
+        changed = apply_classic_authority_edits(
+            staged_root,
+            spec,
+            interventions=reauthor_plan.intervention_edits,
+            receipts=reauthor_plan.receipt_edits,
+            additions=reauthor_plan.additions,
+            dependencies=reauthor_plan.dependency_edits,
+        )
+        state.reauthored_actions += len(reauthor_plan.reauthorings)
+        state.record_transition(
+            changed,
+            empty_error=("function re-authoring reported success without changing saved guidance"),
+            outcome="updated " + count_phrase(len(reauthor_plan.reauthorings), "function record"),
+        )
+        return True
+    return False
+
+
+def _repair_donor_fallout(
+    context: _RepairContext,
+    bundle: ProjectBundle,
+    current_refusals: tuple[RepairRefusal, ...],
+    legacy_fallbacks: tuple[tuple[LegacyRepairRefusal, LegacyInstallRepair], ...],
+) -> bool:
+    """Retune donors, discover carriers, then use a proven legacy fallback."""
+
+    progress = context.progress
+    staged_root = context.staged_root
+    spec = context.spec
+    state = context.state
+    compile_cache = context.compile_cache
+    probe_options = context.probe_options
+    candidate_limit = context.state.candidate_limit
+
+    donor_refusals = tuple(
+        refusal
+        for refusal in current_refusals
+        if (
+            isinstance(refusal.intervention, LegacyOracleInstallIntervention)
+            or refusal.intervention.role is ClassicRecipeRole.FUNCTION
+        )
+        and refusal.intervention.dependencies
+    )
+    if donor_refusals:
+        state.require_adjustment_round()
+        remaining_candidates = candidate_limit - state.compiled_candidates
+        if remaining_candidates <= 0:
+            if legacy_fallbacks:
+                changed = _publish_legacy_fallbacks(staged_root, bundle.spec, legacy_fallbacks)
+                state.reauthored_actions += len(legacy_fallbacks)
+                state.record_transition(
+                    changed,
+                    empty_error=(
+                        "legacy re-authoring reported success without changing saved guidance"
+                    ),
+                    outcome="narrowed " + count_phrase(len(legacy_fallbacks), "quarantine record"),
+                )
+                return True
+            raise RepairWorkflowError(
+                "automatic repair reached --candidate-limit "
+                f"after testing {candidate_limit} repair choices"
+            )
+        active_group_keys = frozenset(
+            key for refusal in donor_refusals for key in _donor_group_keys(refusal)
+        )
+        deferred_group_keys = frozenset(state.exhausted_groups & active_group_keys)
+        excluded_group_keys = (
+            deferred_group_keys if active_group_keys - deferred_group_keys else frozenset()
+        )
+        frozen_abandoned = {key: frozenset(value) for key, value in state.abandoned_states.items()}
+        discovery_refusals = tuple(
+            item
+            for item in donor_refusals
+            if not isinstance(item.intervention, LegacyOracleInstallIntervention)
+        )
+        donor_discovery = None
+        unresolved_discovery: tuple[tuple[str, str, str], ...] = ()
+        with ClassicRepairProbeSession(probe_options, progress) as probe_session:
+            probe = probe_classic_donor_repairs(
+                probe_options,
+                progress,
+                donor_refusals,
+                candidate_budget=remaining_candidates,
+                abandoned_states=frozen_abandoned,
+                compile_cache=compile_cache,
+                excluded_groups=excluded_group_keys,
+                session=probe_session,
+            )
+            state.consume_candidates(
+                probe.compiled_candidates,
+                search="donor repair",
+            )
+            state.exhausted_groups.update(
+                (refusal.unit_id, refusal.donor_id)
+                for refusal in probe.refusals
+                if getattr(refusal, "exhausted", False)
+            )
+            if not probe.repairs and excluded_group_keys:
+                # Nothing fresh settled: give the deferred groups their final attempt.
+                remaining_candidates = candidate_limit - state.compiled_candidates
+                if remaining_candidates > 0:
+                    probe = probe_classic_donor_repairs(
+                        probe_options,
+                        progress,
+                        donor_refusals,
+                        candidate_budget=remaining_candidates,
+                        abandoned_states=frozen_abandoned,
+                        compile_cache=compile_cache,
+                        session=probe_session,
+                    )
+                    state.consume_candidates(
+                        probe.compiled_candidates,
+                        search="donor repair",
+                    )
+                    state.exhausted_groups.update(
+                        (refusal.unit_id, refusal.donor_id)
+                        for refusal in probe.refusals
+                        if getattr(refusal, "exhausted", False)
+                    )
+            if not probe.repairs and discovery_refusals:
+                remaining_candidates = candidate_limit - state.compiled_candidates
+                donor_discovery = probe_classic_carrier_discovery(
+                    probe_options,
+                    progress,
+                    discovery_refusals,
+                    candidate_budget=remaining_candidates,
+                    tried_states={
+                        key: frozenset(value) for key, value in state.discovered_shapes.items()
+                    },
+                    compile_cache=compile_cache,
+                    session=probe_session,
+                )
+                state.consume_candidates(
+                    donor_discovery.compiled_candidates,
+                    search="carrier discovery",
+                )
+                unresolved_discovery = donor_discovery.unresolved
+                for unit_id, digests in getattr(donor_discovery, "tried_states", {}).items():
+                    state.discovered_shapes.setdefault(unit_id, set()).update(digests)
+        # The runtime is closed before any authority mutation below.
+        if probe.repairs:
+            changed = apply_classic_donor_repairs(staged_root, spec, probe.repairs)
+            for repair in probe.repairs:
+                if getattr(repair, "abandoned_state", ""):
+                    state.abandoned_states.setdefault((repair.unit_id, repair.donor_id), set()).add(
+                        repair.abandoned_state
+                    )
+            state.donor_retunes += len(probe.repairs)
+            state.record_transition(
+                changed,
+                empty_error="donor repair reported success without changing saved guidance",
+                outcome="adjusted " + count_phrase(len(probe.repairs), "compiler choice"),
+            )
+            return True
+        if donor_discovery is not None and donor_discovery.repairs:
+            changed = apply_classic_discovery_repairs(staged_root, spec, donor_discovery.repairs)
+            resolved = sum(len(item.resolutions) for item in donor_discovery.repairs)
+            state.discovered_actions += resolved
+            state.record_transition(
+                changed,
+                empty_error=("carrier discovery reported success without changing saved guidance"),
+                outcome="added " + count_phrase(resolved, "function repair"),
+            )
+            return True
+        if legacy_fallbacks:
+            changed = _publish_legacy_fallbacks(staged_root, bundle.spec, legacy_fallbacks)
+            state.reauthored_actions += len(legacy_fallbacks)
+            state.record_transition(
+                changed,
+                empty_error=(
+                    "legacy re-authoring reported success without changing saved guidance"
+                ),
+                outcome="narrowed " + count_phrase(len(legacy_fallbacks), "quarantine record"),
+            )
+            return True
+        if probe.best_refusal is not None:
+            raise _probe_refusal_error(
+                probe.best_refusal,
+                unresolved_discovery,
+            )
+    return False
+
+
 def repair_classic_records(
     options: RepairWorkflowOptions,
     progress: ExecutionProgress,
@@ -494,650 +1210,54 @@ def repair_classic_records(
     settle_target_ids: frozenset[str] = frozenset(),
     link_layout_hint: ClassicLinkLayoutHint | None = None,
 ) -> RepairWorkflowResult:
-    """Repair measured, redundant, then nearby-donor fallout until composition is clean.
+    """Run the ordered repair stages until a fresh analysis finds no fallout."""
 
-    The explicit round and command-wide candidate limits can accommodate
-    large shared-header repairs while keeping every search bounded.
-    """
-
-    adjustment_limit = options.adjustment_rounds
-    candidate_limit = options.candidate_limit
-    probe_options = options.probes(staged_root)
-    state = RepairSessionState()
-    # Donor groups whose complete bounded candidate set already failed once in this
-    # command.  Their saved state has not changed, so they are deferred until every
-    # other group is settled and then given one final attempt, instead of burning
-    # the same thousands of compiles in every round.
-    # Donor states this command saved and then moved away from; a later round
-    # must not return a donor to one of them (two consumers would otherwise
-    # trade it back and forth until the fingerprint guard stops the run).
-    # Carrier states discovery already compiled per unit in this command.
-    # Donor compiles are pure functions of their seat and compile epoch: never
-    # compile one twice, in this command or in a later one.
+    state = RepairSessionState(options.adjustment_rounds, options.candidate_limit)
     compile_cache = ClassicDonorCompileStore(probe_store_directory(cache_root))
-    # The composed-body ledger of the last accepted verify, when this state
-    # directory holds one, lets every clean pass census unrecorded fallout: a
-    # function without a saved record whose fresh seed body left the body the
-    # linker selected at verify time would change the image just like a
-    # refused record does, so it is discovered and recorded before the repair
-    # reports success.
+    context = _RepairContext(
+        options,
+        progress,
+        staged_root,
+        spec,
+        cache_root,
+        state,
+        compile_cache,
+        options.probes(staged_root),
+        settle_target_ids,
+        link_layout_hint,
+    )
     saved_ledger = _composed_body_ledger(cache_root)
-
     while True:
-        state.pass_number += 1
         bundle = load_project_tree(staged_root)
+        state.begin_pass(bundle)
         ledger = _ledger_for_bundle(saved_ledger, bundle)
-        if state.initial_function_actions is None:
-            state.initial_function_actions = sum(
-                isinstance(item, LegacyOracleInstallIntervention)
-                or getattr(item, "role", None) is ClassicRecipeRole.FUNCTION
-                for item in bundle.interventions
-            )
-        maximum_analyses = state.initial_function_actions + adjustment_limit + 1
-        if state.pass_number > maximum_analyses:
-            raise RepairWorkflowError("automatic repair exceeded its monotonic analysis bound")
-        fingerprint = _authority_fingerprint(bundle)
-        if fingerprint in state.seen_authority:
-            raise RepairWorkflowError(
-                "automatic repair reached a previously checked saved-guidance state"
-            )
-        state.seen_authority.add(fingerprint)
-        if settle_target_ids:
-            progress_description = (
-                f"repair pass {state.pass_number}: checking a remaining link layout mismatch"
-            )
-        else:
-            progress_description = (
-                f"repair pass {state.pass_number}: checking affected source files"
-            )
-        if state.last_outcome is not None and settle_target_ids:
-            progress_description = (
-                "repair pass "
-                f"{state.pass_number}: checking the link layout again ({state.last_outcome})"
-            )
-        elif state.last_outcome is not None:
-            progress_description = (
-                f"repair pass {state.pass_number}: checking again ({state.last_outcome})"
-            )
-        analysis = analyze_classic_repair(
-            options,
-            progress,
-            staged_root=staged_root,
-            cache_root=cache_root,
-            progress_description=progress_description,
-            seed_census=False,
-        )
-        if not analysis.measured_repairs and analysis.completed and ledger is not None:
-            analysis = analyze_classic_repair(
-                options,
-                progress,
-                staged_root=staged_root,
-                cache_root=cache_root,
-                progress_description=(
-                    f"repair pass {state.pass_number}: checking remaining source files"
-                ),
-                seed_census=True,
-            )
-        state.affected_units.update(item.unit_id for item in analysis.measured_repairs)
-        state.affected_units.update(item.unit_id for item in analysis.structural_refusals)
-
-        if analysis.measured_repairs:
-            if state.adjustment_rounds >= adjustment_limit:
-                raise RepairWorkflowError(
-                    "automatic repair reached its limit of "
-                    f"{adjustment_limit} saved-guidance adjustment rounds"
-                )
-            changed = apply_classic_receipt_repairs(
-                staged_root,
-                spec,
-                analysis.measured_repairs,
-            )
-            state.measured_checks += len(analysis.measured_repairs)
-            _record_transition(
-                state,
-                changed,
-                empty_error="measured repair reported success without changing saved guidance",
-                outcome="refreshed " + count_phrase(len(analysis.measured_repairs), "saved check"),
-            )
+        analysis = _analyze_repair_pass(context, ledger)
+        if _repair_measured_checks(context, analysis):
             continue
-
         if analysis.completed:
-            if ledger is not None:
-                census = plan_repair_census(
-                    bundle, ledger, getattr(analysis, "seed_objects", None) or {}
-                )
-                if census.missing:
-                    raise RepairWorkflowError(
-                        "the edit removed functions used by the last accepted build: "
-                        + _listed_census(census.missing)
-                    )
-                if census.unplanned:
-                    # Fallout in a unit the plan never listed: admit the unit (plan
-                    # entry plus empty shards) so the next pass can record it.
-                    if state.adjustment_rounds >= adjustment_limit:
-                        raise RepairWorkflowError(
-                            "automatic repair reached its limit of "
-                            f"{adjustment_limit} saved-guidance adjustment rounds"
-                        )
-                    try:
-                        admitted = plan_translation_unit_admissions(bundle, census.unplanned)
-                        changed = apply_translation_unit_admissions(staged_root, spec, admitted)
-                    except TranslationUnitAdmissionError as exc:
-                        raise RepairWorkflowError(
-                            "automatic repair could not add saved guidance for newly affected "
-                            f"source files ({_listed_census(census.unplanned)}): " + _one_line(exc)
-                        ) from exc
-                    state.admitted_units += len(admitted)
-                    _record_transition(
-                        state,
-                        changed,
-                        empty_error=(
-                            "source-file admission reported success without changing saved guidance"
-                        ),
-                        outcome="added " + count_phrase(len(admitted), "affected source build"),
-                    )
-                    continue
-                if census.refusals:
-                    if state.adjustment_rounds >= adjustment_limit:
-                        raise RepairWorkflowError(
-                            "automatic repair reached its limit of "
-                            f"{adjustment_limit} saved-guidance adjustment rounds"
-                        )
-                    remaining_candidates = candidate_limit - state.compiled_candidates
-                    if remaining_candidates <= 0:
-                        raise RepairWorkflowError(
-                            "automatic repair reached --candidate-limit "
-                            f"after testing {candidate_limit} repair choices"
-                        )
-                    state.affected_units.update(item.unit_id for item in census.refusals)
-                    discovery = probe_classic_carrier_discovery(
-                        probe_options,
-                        progress,
-                        census.refusals,
-                        candidate_budget=remaining_candidates,
-                        tried_states={
-                            key: frozenset(value) for key, value in state.discovered_shapes.items()
-                        },
-                        compile_cache=compile_cache,
-                    )
-                    state.compiled_candidates = _consume_candidate_budget(
-                        state.compiled_candidates,
-                        discovery.compiled_candidates,
-                        limit=candidate_limit,
-                        search="newly affected function discovery",
-                    )
-                    for unit_id, digests in getattr(discovery, "tried_states", {}).items():
-                        state.discovered_shapes.setdefault(unit_id, set()).update(digests)
-                    if not discovery.repairs:
-                        unresolved = ", ".join(
-                            f"{unit_id} {action_id}: {reason}"
-                            for unit_id, action_id, reason in discovery.unresolved[:8]
-                        )
-                        raise RepairWorkflowError(
-                            "automatic repair could not restore newly affected functions: "
-                            + (unresolved or "no carrier state settled it")
-                        )
-                    changed = apply_classic_discovery_repairs(staged_root, spec, discovery.repairs)
-                    resolved = sum(len(item.resolutions) for item in discovery.repairs)
-                    state.discovered_actions += resolved
-                    _record_transition(
-                        state,
-                        changed,
-                        empty_error=(
-                            "new-function check reported success without changing saved guidance"
-                        ),
-                        outcome="added " + count_phrase(resolved, "function repair"),
-                    )
-                    continue
-            if any(
-                isinstance(item, ClassicRecipeIntervention)
-                and item.role is ClassicRecipeRole.PROJECT
-                and item.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
-                for item in bundle.interventions
-            ):
-                remaining_candidates = max(0, candidate_limit - state.compiled_candidates)
-                source_result = probe_classic_project_overlay_repairs(
-                    probe_options,
-                    progress,
-                    candidate_budget=remaining_candidates,
-                    settle_target_ids=settle_target_ids,
-                    link_layout_hint=link_layout_hint,
-                )
-                state.compiled_candidates = _consume_candidate_budget(
-                    state.compiled_candidates,
-                    source_result.compiled_candidates,
-                    limit=candidate_limit,
-                    search="source-layout repair",
-                )
-                if source_result.repair is not None:
-                    if state.adjustment_rounds >= adjustment_limit:
-                        raise RepairWorkflowError(
-                            "automatic repair reached its limit of "
-                            f"{adjustment_limit} saved-guidance adjustment rounds"
-                        )
-                    changed = apply_classic_project_overlay_repair(
-                        staged_root,
-                        spec,
-                        source_result.repair,
-                    )
-                    if not changed:
-                        raise RepairWorkflowError(
-                            "source-layout repair reported success without changing saved guidance"
-                        )
-                    try:
-                        regeneration = plan_source_regeneration(staged_root)
-                        apply_source_regeneration(staged_root, regeneration)
-                    except SourceRegenerationError as exc:
-                        raise RepairWorkflowError(
-                            "source-layout repair could not refresh its saved output checks: "
-                            + _one_line(exc)
-                        ) from exc
-                    state.source_retunes += 1
-                    _record_transition(
-                        state,
-                        (*changed, *regeneration.changed_documents),
-                        empty_error=(
-                            "source-layout regeneration reported success without changing saved "
-                            "guidance"
-                        ),
-                        outcome="adjusted one source layout",
-                    )
-                    continue
-                if source_result.checked and source_result.reason is not None:
-                    if source_result.exhausted:
-                        raise RepairWorkflowError(
-                            "automatic repair reached --candidate-limit "
-                            f"after testing {candidate_limit} repair choices"
-                        )
-                    raise RepairWorkflowError(
-                        "automatic repair could not find a safe source layout for "
-                        f"{source_result.source_path or 'an affected source'}: "
-                        + _one_line(source_result.reason)
-                    )
-            return RepairWorkflowResult(
-                changed_records=tuple(
-                    sorted(state.changed_records, key=lambda item: (item.casefold(), item))
-                ),
-                affected_units=tuple(sorted(state.affected_units, key=str.casefold)),
-                measured_checks=state.measured_checks,
-                retired_actions=state.retired_actions,
-                removed_donors=state.removed_donors,
-                donor_retunes=state.donor_retunes,
-                compiled_candidates=state.compiled_candidates,
-                passes=state.pass_number,
-                reauthored_actions=state.reauthored_actions,
-                discovered_actions=state.discovered_actions,
-                replayed_candidates=compile_cache.memory_hits + compile_cache.disk_hits,
-                admitted_units=state.admitted_units,
-                source_retunes=state.source_retunes,
-                adjustment_rounds=state.adjustment_rounds,
-            )
+            if _repair_unrecorded_functions(context, bundle, ledger, analysis):
+                continue
+            if _repair_source_layout(context, bundle):
+                continue
+            return state.result(compile_cache)
 
         receipts = _classic_receipts(bundle)
-        unavailable_legacy = [
-            refusal
-            for refusal in analysis.structural_refusals
-            if isinstance(refusal.intervention, LegacyOracleInstallIntervention)
-            and (refusal.legacy_oracle is None or refusal.materials.donor_object is None)
-        ]
-        if unavailable_legacy:
-            detail = next(
-                (
-                    refusal.reason
-                    if refusal.legacy_oracle is None
-                    else "fresh donor material is unavailable"
-                )
-                for refusal in unavailable_legacy
-            )
-            raise RepairWorkflowError(
-                "automatic repair cannot inspect the saved legacy oracle before donor search: "
-                + _one_line(detail)
-            )
-
-        structural_refusals: list[RepairRefusal] = []
-        legacy_fallbacks: list[tuple[LegacyRepairRefusal, LegacyInstallRepair]] = []
-        legacy_failures: list[str] = []
-        no_window_resolution: LegacyNoWindowResolution | None = None
-        for refusal in analysis.structural_refusals:
-            if not isinstance(refusal.intervention, LegacyOracleInstallIntervention):
-                structural_refusals.append(refusal)
-                continue
-            assert refusal.legacy_oracle is not None
-            assert refusal.materials.donor_object is not None
-            try:
-                repaired = reauthor_legacy_simulated_elision(
-                    refusal.intervention,
-                    refusal.receipt,
-                    refusal.materials.seed_object,
-                    refusal.materials.donor_object,
-                    refusal.legacy_oracle.retail_body,
-                    refusal.legacy_oracle.auxiliary_bodies,
-                )
-            except LegacyNoWindowError:
-                try:
-                    no_window_resolution = plan_legacy_no_window_resolution(
-                        bundle.interventions,
-                        receipts,
-                        intervention=refusal.intervention,
-                        receipt=refusal.receipt,
-                        seed_object=refusal.materials.seed_object,
-                        donor_object=refusal.materials.donor_object,
-                        retail_body=refusal.legacy_oracle.retail_body,
-                        build_target=refusal.unit.plan.build_target,
-                    )
-                except LegacyRepairError as exc:
-                    legacy_failures.append(str(exc))
-                    structural_refusals.append(refusal)
-                else:
-                    break
-            except (LegacyRepairError, RuntimeError, ValueError) as exc:
-                legacy_failures.append(str(exc))
-                structural_refusals.append(refusal)
-                continue
-            with_baseline = replace(refusal, baseline_repair=repaired)
-            structural_refusals.append(with_baseline)
-            legacy_fallbacks.append((with_baseline, repaired))
-        if no_window_resolution is not None:
-            if state.adjustment_rounds >= adjustment_limit:
-                raise RepairWorkflowError(
-                    "automatic repair reached its limit of "
-                    f"{adjustment_limit} saved-guidance adjustment rounds"
-                )
-            changed = _publish_legacy_no_window_resolution(
-                staged_root,
-                bundle.spec,
-                no_window_resolution,
-            )
-            state.removed_donors += len(no_window_resolution.removed_donors)
-            if no_window_resolution.replaced:
-                state.reauthored_actions += 1
-                outcome = "replaced 1 obsolete quarantine record"
-            else:
-                state.retired_actions += 1
-                outcome = "removed 1 obsolete quarantine record"
-            _record_transition(
-                state,
-                changed,
-                empty_error="legacy dequarantine reported success without changing saved guidance",
-                outcome=outcome,
-            )
+        legacy = _prepare_legacy_fallout(context, bundle, analysis, receipts)
+        if _resolve_obsolete_quarantine(context, bundle, legacy.no_window_resolution):
             continue
-        current_refusals = tuple(structural_refusals)
-
-        retirement_failures: list[str] = []
-        retirement_candidates: list[
-            tuple[
-                ClassicRecipeIntervention,
-                ClassicProofReceipt,
-                ClassicDispatchMaterials,
-            ]
-        ] = []
-        for refusal in current_refusals:
-            if isinstance(refusal.intervention, LegacyOracleInstallIntervention):
-                continue
-            candidate = (refusal.intervention, refusal.receipt, refusal.materials)
-            try:
-                plan_redundant_action_retirements(
-                    bundle.interventions,
-                    receipts,
-                    (candidate,),
-                )
-            except RedundantActionRepairError as exc:
-                retirement_failures.append(str(exc))
-                continue
-            retirement_candidates.append(candidate)
-
-        if retirement_candidates:
-            try:
-                plan = plan_redundant_action_retirements(
-                    bundle.interventions,
-                    receipts,
-                    tuple(retirement_candidates),
-                )
-            except RedundantActionRepairError as exc:
-                raise RepairWorkflowError(
-                    "automatic repair could not combine its proven obsolete adjustments: "
-                    + _one_line(exc)
-                ) from exc
-            changed = apply_classic_authority_edits(
-                staged_root,
-                spec,
-                interventions=plan.intervention_edits,
-                receipts=plan.receipt_edits,
-            )
-            state.retired_actions += len(retirement_candidates)
-            state.removed_donors += len(plan.removed_donors)
-            _record_transition(
-                state,
-                changed,
-                empty_error=(
-                    "redundant-action retirement reported success without changing saved guidance"
-                ),
-                outcome="removed "
-                + count_phrase(len(retirement_candidates), "obsolete function record"),
-                consume_round=False,
-            )
+        retirement = _retire_redundant_adjustments(context, bundle, legacy.refusals, receipts)
+        if retirement.changed:
             continue
-
-        # Before compiling anything: a refused function whose goal body another
-        # donor of its unit (or its own donor, under a cheaper family) already
-        # emits is re-authored onto that donor from the captured fresh objects.
-        try:
-            reauthor_plan = plan_function_reauthoring(
-                tuple(
-                    item
-                    for item in current_refusals
-                    if not isinstance(item.intervention, LegacyOracleInstallIntervention)
-                )
-            )
-        except ClassicReauthorError as exc:
-            raise RepairWorkflowError(
-                "automatic repair could not plan function re-authoring: " + _one_line(exc)
-            ) from exc
-        if reauthor_plan.reauthorings:
-            if state.adjustment_rounds >= adjustment_limit:
-                raise RepairWorkflowError(
-                    "automatic repair reached its limit of "
-                    f"{adjustment_limit} saved-guidance adjustment rounds"
-                )
-            changed = apply_classic_authority_edits(
-                staged_root,
-                spec,
-                interventions=reauthor_plan.intervention_edits,
-                receipts=reauthor_plan.receipt_edits,
-                additions=reauthor_plan.additions,
-                dependencies=reauthor_plan.dependency_edits,
-            )
-            state.reauthored_actions += len(reauthor_plan.reauthorings)
-            _record_transition(
-                state,
-                changed,
-                empty_error=(
-                    "function re-authoring reported success without changing saved guidance"
-                ),
-                outcome="updated "
-                + count_phrase(len(reauthor_plan.reauthorings), "function record"),
-            )
+        if _reauthor_existing_functions(context, legacy.refusals):
             continue
-
-        donor_refusals = tuple(
-            refusal
-            for refusal in current_refusals
-            if (
-                isinstance(refusal.intervention, LegacyOracleInstallIntervention)
-                or refusal.intervention.role is ClassicRecipeRole.FUNCTION
-            )
-            and refusal.intervention.dependencies
+        if _repair_donor_fallout(context, bundle, legacy.refusals, legacy.fallbacks):
+            continue
+        reasons = (
+            *(item.reason for item in legacy.refusals),
+            *legacy.failures,
+            *retirement.failures,
         )
-        if donor_refusals:
-            if state.adjustment_rounds >= adjustment_limit:
-                raise RepairWorkflowError(
-                    "automatic repair reached its limit of "
-                    f"{adjustment_limit} saved-guidance adjustment rounds"
-                )
-            remaining_candidates = candidate_limit - state.compiled_candidates
-            if remaining_candidates <= 0:
-                if legacy_fallbacks:
-                    changed = _publish_legacy_fallbacks(staged_root, bundle.spec, legacy_fallbacks)
-                    state.reauthored_actions += len(legacy_fallbacks)
-                    _record_transition(
-                        state,
-                        changed,
-                        empty_error=(
-                            "legacy re-authoring reported success without changing saved guidance"
-                        ),
-                        outcome="narrowed "
-                        + count_phrase(len(legacy_fallbacks), "quarantine record"),
-                    )
-                    continue
-                raise RepairWorkflowError(
-                    "automatic repair reached --candidate-limit "
-                    f"after testing {candidate_limit} repair choices"
-                )
-            active_group_keys = frozenset(
-                key for refusal in donor_refusals for key in _donor_group_keys(refusal)
-            )
-            deferred_group_keys = frozenset(state.exhausted_groups & active_group_keys)
-            excluded_group_keys = (
-                deferred_group_keys if active_group_keys - deferred_group_keys else frozenset()
-            )
-            frozen_abandoned = {
-                key: frozenset(value) for key, value in state.abandoned_states.items()
-            }
-            discovery_refusals = tuple(
-                item
-                for item in donor_refusals
-                if not isinstance(item.intervention, LegacyOracleInstallIntervention)
-            )
-            donor_discovery = None
-            unresolved_discovery: tuple[tuple[str, str, str], ...] = ()
-            with ClassicRepairProbeSession(probe_options, progress) as probe_session:
-                probe = probe_classic_donor_repairs(
-                    probe_options,
-                    progress,
-                    donor_refusals,
-                    candidate_budget=remaining_candidates,
-                    abandoned_states=frozen_abandoned,
-                    compile_cache=compile_cache,
-                    excluded_groups=excluded_group_keys,
-                    session=probe_session,
-                )
-                state.compiled_candidates = _consume_candidate_budget(
-                    state.compiled_candidates,
-                    probe.compiled_candidates,
-                    limit=candidate_limit,
-                    search="donor repair",
-                )
-                state.exhausted_groups.update(
-                    (refusal.unit_id, refusal.donor_id)
-                    for refusal in probe.refusals
-                    if getattr(refusal, "exhausted", False)
-                )
-                if not probe.repairs and excluded_group_keys:
-                    # Nothing fresh settled: give the deferred groups their final attempt.
-                    remaining_candidates = candidate_limit - state.compiled_candidates
-                    if remaining_candidates > 0:
-                        probe = probe_classic_donor_repairs(
-                            probe_options,
-                            progress,
-                            donor_refusals,
-                            candidate_budget=remaining_candidates,
-                            abandoned_states=frozen_abandoned,
-                            compile_cache=compile_cache,
-                            session=probe_session,
-                        )
-                        state.compiled_candidates = _consume_candidate_budget(
-                            state.compiled_candidates,
-                            probe.compiled_candidates,
-                            limit=candidate_limit,
-                            search="donor repair",
-                        )
-                        state.exhausted_groups.update(
-                            (refusal.unit_id, refusal.donor_id)
-                            for refusal in probe.refusals
-                            if getattr(refusal, "exhausted", False)
-                        )
-                if not probe.repairs and discovery_refusals:
-                    remaining_candidates = candidate_limit - state.compiled_candidates
-                    donor_discovery = probe_classic_carrier_discovery(
-                        probe_options,
-                        progress,
-                        discovery_refusals,
-                        candidate_budget=remaining_candidates,
-                        tried_states={
-                            key: frozenset(value) for key, value in state.discovered_shapes.items()
-                        },
-                        compile_cache=compile_cache,
-                        session=probe_session,
-                    )
-                    state.compiled_candidates = _consume_candidate_budget(
-                        state.compiled_candidates,
-                        donor_discovery.compiled_candidates,
-                        limit=candidate_limit,
-                        search="carrier discovery",
-                    )
-                    unresolved_discovery = donor_discovery.unresolved
-                    for unit_id, digests in getattr(donor_discovery, "tried_states", {}).items():
-                        state.discovered_shapes.setdefault(unit_id, set()).update(digests)
-            # The runtime is closed before any authority mutation below.
-            if probe.repairs:
-                changed = apply_classic_donor_repairs(staged_root, spec, probe.repairs)
-                for repair in probe.repairs:
-                    if getattr(repair, "abandoned_state", ""):
-                        state.abandoned_states.setdefault(
-                            (repair.unit_id, repair.donor_id), set()
-                        ).add(repair.abandoned_state)
-                state.donor_retunes += len(probe.repairs)
-                _record_transition(
-                    state,
-                    changed,
-                    empty_error="donor repair reported success without changing saved guidance",
-                    outcome="adjusted " + count_phrase(len(probe.repairs), "compiler choice"),
-                )
-                continue
-            if donor_discovery is not None and donor_discovery.repairs:
-                changed = apply_classic_discovery_repairs(
-                    staged_root, spec, donor_discovery.repairs
-                )
-                resolved = sum(len(item.resolutions) for item in donor_discovery.repairs)
-                state.discovered_actions += resolved
-                _record_transition(
-                    state,
-                    changed,
-                    empty_error=(
-                        "carrier discovery reported success without changing saved guidance"
-                    ),
-                    outcome="added " + count_phrase(resolved, "function repair"),
-                )
-                continue
-            if legacy_fallbacks:
-                changed = _publish_legacy_fallbacks(staged_root, bundle.spec, legacy_fallbacks)
-                state.reauthored_actions += len(legacy_fallbacks)
-                _record_transition(
-                    state,
-                    changed,
-                    empty_error=(
-                        "legacy re-authoring reported success without changing saved guidance"
-                    ),
-                    outcome="narrowed " + count_phrase(len(legacy_fallbacks), "quarantine record"),
-                )
-                continue
-            if probe.best_refusal is not None:
-                raise _probe_refusal_error(
-                    probe.best_refusal,
-                    unresolved_discovery,
-                )
-            probe_reasons: list[str] = []
-        else:
-            probe_reasons = []
-
-        reasons = [
-            *(item.reason for item in current_refusals),
-            *legacy_failures,
-            *retirement_failures,
-            *probe_reasons,
-        ]
-        detail = next((" ".join(reason.split()) for reason in reasons if reason), "unknown fallout")
+        detail = next((_one_line(reason) for reason in reasons if reason), "unknown fallout")
         raise RepairWorkflowError("automatic repair could not find a safe adjustment: " + detail)
 
 
@@ -1492,8 +1612,6 @@ def execute_repair_attempt(
 
 
 __all__ = [
-    "MAX_REPAIR_ADJUSTMENT_ROUNDS",
-    "MAX_REPAIR_CANDIDATES",
     "RepairAnalysisError",
     "RepairAnalysisResult",
     "RepairAttemptFailure",

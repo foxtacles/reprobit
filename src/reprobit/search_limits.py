@@ -1,0 +1,24 @@
+"""Shared bounds for declaration discovery and automatic repair.
+
+These values are data so CLI help can describe search limits without loading
+the compiler, discovery, or repair implementations.
+"""
+
+DEFAULT_RETUNE_RADIUS = 4
+DEFAULT_REPAIR_RETUNE_RADIUS = 8
+MAX_RETUNE_RADIUS = 64
+DEFAULT_RETUNE_CANDIDATES = 64
+MAX_RETUNE_CANDIDATES = 4096
+
+DEFAULT_DISCOVERY_CANDIDATES = 64
+# 505 declaration shapes plus runs of 1..500 at each of three placements.
+MAX_DISCOVERY_CANDIDATES = 2005
+DEFAULT_DISCOVERY_WINDOW = 8
+
+DEFAULT_RETUNE_PROBE_WINDOW = 8
+MAX_RETUNE_PROBE_WINDOW = 16
+DEFAULT_RETUNE_PROBE_CANDIDATES = 256
+MAX_RETUNE_PROBE_CANDIDATES = 65536
+
+MAX_REPAIR_ADJUSTMENT_ROUNDS = 24
+MAX_REPAIR_CANDIDATES = DEFAULT_RETUNE_PROBE_CANDIDATES

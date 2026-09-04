@@ -55,13 +55,15 @@ from reprobit.coff_format import (
     detailed_relocations,
     section_definitions,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest
 from reprobit.schema import (
     ClassicField,
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
 )
 from reprobit.strict_json import JsonValue, canonical_json
 

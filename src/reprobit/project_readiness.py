@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from reprobit.backends import BackendError, ExecutionBackend, backend_for_host
 from reprobit.cli_output import NextStep, count_phrase
 from reprobit.project_loader import load_project, load_project_tree
 from reprobit.schema import SourceManifestDocument, ToolchainLock
@@ -124,6 +125,7 @@ def inspect_project_readiness(
     check_local_environment: bool = False,
     local_toolchain_root: str | Path | None = None,
     prior_toolchain_report: ToolchainDoctorReport | None = None,
+    local_backend: ExecutionBackend | None = None,
 ) -> ProjectReadiness:
     """Aggregate missing authority instead of failing one file at a time."""
 
@@ -259,6 +261,33 @@ def inspect_project_readiness(
                 None if local_ready else setup_command,
             )
         )
+        try:
+            backend = local_backend if local_backend is not None else backend_for_host()
+            backend_report = backend.doctor(execute_probe=False)
+        except (BackendError, OSError) as error:
+            backend_ready = False
+            backend_detail = str(error)
+        else:
+            backend_ready = backend_report.ok
+            failures = tuple(
+                f"{check.name}: {check.detail}"
+                for check in backend_report.checks
+                if check.required and not check.passed
+            )
+            backend_detail = (
+                "required host tools available (execution probe not run)"
+                if backend_ready
+                else "; ".join(failures)
+            )
+        items.append(
+            ReadinessItem(
+                "local_backend",
+                "Execution backend",
+                backend_ready,
+                backend_detail,
+                None if backend_ready else NextStep(("rbit", "doctor", candidate)),
+            )
+        )
     items.extend(
         [
             ReadinessItem(
@@ -376,7 +405,9 @@ def inspect_project_readiness(
                 broken=bool(unparseable),
             )
         )
-    prerequisites_ready = all(item.ready for item in items if item.id != "local_toolchain")
+    prerequisites_ready = all(
+        item.ready for item in items if item.id not in {"local_toolchain", "local_backend"}
+    )
     validation_detail = "not checked until the project files above are ready"
     validated = False
     repairable_source_drift = False

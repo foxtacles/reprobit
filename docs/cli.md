@@ -427,7 +427,9 @@ rbit status .
 `status` checks that each saved project file exists and that every JSON record
 parses; it does not validate schemas or cross-file agreement until every file is
 present (then it runs the same check as `validate`). It also checks that this
-machine can find the remembered compiler. Rows marked `[  ]` are missing;
+machine can find the remembered compiler and the required backend tools.
+These availability checks do not launch the execution probe; use
+`rbit doctor . --execute-probe` to exercise it. Rows marked `[  ]` are missing;
 `[!!]` marks a file that exists but cannot be read and points to `validate`.
 The exit status is 1 until every check passes.
 
@@ -581,7 +583,12 @@ summary explains what was reused and why each rebuilt step was rebuilt (a step
 built for the first time on this machine reads
 `not cached on this machine yet (first build of this step)`). Use
 `rbit build . --cold` for a non-certifying developer build with no cache reads
-or writes.
+or writes. Both developer modes use the same current source files: edits to
+already admitted files without affected reviewed interventions can build
+without changing committed records. An edit that invalidates an intervention
+still requires `repair`, including a shared header found in that compiler's
+recursive inputs. Cold builds resolve those dependencies afresh before applying
+reviewed transforms. `verify` always checks the committed source records.
 
 `build`, `verify`, `repair`, and `discover grind` run independent steps in
 parallel. Without `--jobs COUNT` the worker count is the number of CPUs the

@@ -42,13 +42,13 @@ from reprobit.classic_orchestration import (
     classic_rdata_repack_authority,
     classic_terminal_pipeline_authority,
 )
+from reprobit.classic_runtime_dependencies import ClassicCompilerDependencyReplay
 from reprobit.classic_runtime_donor import ClassicWarmDonorDependencyReplay
 from reprobit.classic_runtime_producer import ClassicProducerExecution
 from reprobit.classic_runtime_warm import (
-    ClassicWarmCompilerReplay,
     ClassicWarmCompilerTransformResult,
 )
-from reprobit.incremental import DeveloperAuthority
+from reprobit.developer_authority import DeveloperAuthority
 from reprobit.incremental_executor import IncrementalProgress, PreparedNodeInputs
 from reprobit.model import Digest, Scope
 from reprobit.producer_graph import (
@@ -203,9 +203,9 @@ class _FakeWarmExecutor:
         node_id: str,
         *,
         cancellation: object,
-    ) -> ClassicWarmCompilerReplay:
+    ) -> ClassicCompilerDependencyReplay:
         del cancellation
-        return ClassicWarmCompilerReplay(
+        return ClassicCompilerDependencyReplay(
             MsvcSbrTrace(
                 r"R:\build",
                 (MsvcSbrSource(self.sources[node_id], None),),
@@ -3179,13 +3179,13 @@ def test_generated_epoch_waits_for_all_ordinary_transforms_and_resources(
             node_id: str,
             *,
             cancellation: object,
-        ) -> ClassicWarmCompilerReplay:
+        ) -> ClassicCompilerDependencyReplay:
             if node_id != ordinary.id:
                 return super().replay_warm_compiler_dependencies(
                     node_id,
                     cancellation=cancellation,
                 )
-            return ClassicWarmCompilerReplay(
+            return ClassicCompilerDependencyReplay(
                 MsvcSbrTrace(
                     r"R:\build",
                     (

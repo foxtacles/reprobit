@@ -10,8 +10,13 @@ from pathlib import Path
 from typing import Protocol
 
 from reprobit.build import BuildPlan
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+)
 from reprobit.model import Artifact, ByteRange, Certificate, Digest, ProvenanceNode
-from reprobit.schema import ClassicRecipeFamily, ProjectBundle
+from reprobit.schema import (
+    ProjectBundle,
+)
 from reprobit.verify import ComparisonReceipt, SealedFileOracle
 
 

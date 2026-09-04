@@ -68,6 +68,10 @@ from reprobit.classic.source_overlay import (
     _validate_project_overlay_sources,
 )
 from reprobit.classic.source_overlay_claims import _relative
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest, SemanticProof
 from reprobit.producer_graph import (
     ProducerGraphDocument,
@@ -78,9 +82,7 @@ from reprobit.producer_graph import (
     toolchain_document_digest,
 )
 from reprobit.schema import (
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     ProjectBundle,
 )
 from reprobit.strict_json import canonical_json

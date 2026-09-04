@@ -7,17 +7,12 @@ import stat
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import dataclass
-from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from threading import Lock
 from typing import TYPE_CHECKING
 
 from reprobit.binary import ByteIdentityError
 from reprobit.classic_execution_records import ClassicActiveCompilerEpoch
-from reprobit.classic_includes import (
-    MsvcSbrTrace,
-    parse_msvc_sbr,
-)
 from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
     apply_classic_terminal_pipeline,
@@ -26,8 +21,9 @@ from reprobit.classic_orchestration import (
 from reprobit.classic_project import (
     ClassicProjectError,
 )
-from reprobit.classic_runtime_environment import (
-    _run,
+from reprobit.classic_runtime_dependencies import (
+    ClassicCompilerDependencyReplay,
+    replay_compiler_dependencies,
 )
 from reprobit.classic_runtime_files import (
     _safe_relative,
@@ -46,7 +42,6 @@ from reprobit.model import Digest
 from reprobit.msvc42_debug_companion import stabilize_msvc42_debug_companion
 from reprobit.process import (
     CancellationToken,
-    CommandFailed,
     ProcessSupervisor,
 )
 from reprobit.producer_graph import (
@@ -175,47 +170,6 @@ def _secure_publish_new_bytes(payload: bytes, destination: Path) -> SecureFileSn
         raise ClassicProjectError(
             f"classic warm bytes could not safely publish {destination}: {exc}"
         ) from exc
-
-
-def _erase_warm_replay_arena(arena: Path, *, replay_root: Path) -> None:
-    """Erase every regular discard output and its exact run-private arena."""
-
-    arena = Path(os.path.abspath(arena))
-    replay_root = Path(os.path.abspath(replay_root))
-    if arena.parent != replay_root or arena.is_symlink() or not arena.is_dir():
-        raise ClassicProjectError(f"classic warm replay arena is redirected: {arena}")
-    try:
-        entries = tuple(arena.iterdir())
-    except OSError as exc:
-        raise ClassicProjectError(
-            f"classic warm replay arena cannot be enumerated: {arena}"
-        ) from exc
-    for entry in entries:
-        if entry.is_symlink() or not entry.is_file():
-            raise ClassicProjectError(
-                f"classic warm replay produced a non-regular discard entry: {entry}"
-            )
-        _secure_remove_regular(entry)
-    try:
-        arena.rmdir()
-    except OSError as exc:
-        raise ClassicProjectError(
-            f"classic warm replay arena could not be erased: {arena}"
-        ) from exc
-
-
-@dataclass(frozen=True, slots=True)
-class ClassicWarmCompilerReplay:
-    """Dependency-only result from a discarded `/Fr` compiler invocation."""
-
-    trace: MsvcSbrTrace | None
-    reason: str | None
-
-    def __post_init__(self) -> None:
-        if (self.trace is None) == (self.reason is None):
-            raise ClassicProjectError(
-                "classic warm compiler replay requires exactly one result state"
-            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -675,88 +629,16 @@ class ClassicWarmExecution:
         compiler_node_id: str,
         *,
         cancellation: CancellationToken,
-    ) -> ClassicWarmCompilerReplay:
+    ) -> ClassicCompilerDependencyReplay:
         """Run and discard one `/Fr` invocation used only as a cache hint."""
 
         node = self._warm_node(compiler_node_id)
-        if node.role is not ProducerRole.COMPILER:
-            raise ClassicProjectError("classic warm dependency replay requires a compiler node")
         supervisor, _active_epoch = self._warm_epoch(
             generated=node.id in self.overlay.generated_node_inputs
         )
-        replay_root = self.build_root / ".reprobit-warm-replay"
-        replay_root.mkdir(exist_ok=True)
-        arena = replay_root / sha256(node.id.encode("utf-8")).hexdigest()[:20]
-        arena.mkdir(exist_ok=False)
-        try:
-            object_path = arena / "discard.obj"
-            pdb_path = arena / "discard.pdb"
-            sbr_path = arena / "dependencies.sbr"
-            object_logical = self.producer.logical_for_host_path(object_path)
-            pdb_logical = self.producer.logical_for_host_path(pdb_path)
-            sbr_logical = self.producer.logical_for_host_path(sbr_path)
-            arguments: list[str] = []
-            object_count = 0
-            pdb_count = 0
-            for argument in self.producer.node_arguments(node):
-                folded = argument.casefold()
-                if folded.startswith(("/fr", "-fr")):
-                    return ClassicWarmCompilerReplay(
-                        None, "committed compiler argv already contains /Fr"
-                    )
-                if folded.startswith(("/fo", "-fo")):
-                    arguments.append(f"/Fo{object_logical}")
-                    object_count += 1
-                elif folded.startswith(("/fd", "-fd")):
-                    arguments.append(f"/Fd{pdb_logical}")
-                    pdb_count += 1
-                else:
-                    arguments.append(argument)
-            if object_count != 1 or pdb_count != 1:
-                return ClassicWarmCompilerReplay(
-                    None, "compiler replay could not isolate exactly one OBJ/PDB pair"
-                )
-            arguments.append(f"/Fr{sbr_logical}")
-            lane = self.producer.lane_pool.acquire()
-            try:
-                try:
-                    result, _spec = _run(
-                        supervisor,
-                        (str(self.producer.role_commands[ProducerRole.COMPILER]), *arguments),
-                        cwd=self.producer.producer_cwd(lane, self.build_root),
-                        environment=lane.environment,
-                        timeout=self.producer.compile_timeout,
-                        log=(
-                            self.session_root / "logs" / "warm-dependency-replay" / f"{node.id}.log"
-                        ),
-                        cancellation=cancellation,
-                        windows_lineage_planner=(lane.windows_lineage_planner),
-                    )
-                except CommandFailed as exc:
-                    cancellation.raise_if_cancelled()
-                    return ClassicWarmCompilerReplay(
-                        None, f"discarded compiler replay failed: {exc}"
-                    )
-            finally:
-                self.producer.lane_pool.release(lane)
-            if not result.succeeded:
-                return ClassicWarmCompilerReplay(
-                    None,
-                    f"discarded compiler replay returned {result.returncode}: {result.output_tail}",
-                )
-            try:
-                actual_sbr = self.producer.compiler_companion_output(sbr_path)
-                trace = parse_msvc_sbr(actual_sbr.read_bytes())
-            except (OSError, ValueError) as exc:
-                return ClassicWarmCompilerReplay(
-                    None, f"discarded compiler replay trace is unusable: {exc}"
-                )
-            # The replay OBJ/PDB are deliberately neither registered nor
-            # returned.  Their different bytes can never substitute for the
-            # normal invocation.
-            return ClassicWarmCompilerReplay(trace, None)
-        finally:
-            _erase_warm_replay_arena(arena, replay_root=replay_root)
+        return replay_compiler_dependencies(
+            self.producer, supervisor, node, cancellation=cancellation
+        )
 
     def execute_warm_terminal(
         self,
@@ -820,7 +702,6 @@ class ClassicWarmExecution:
 
 
 __all__ = [
-    "ClassicWarmCompilerReplay",
     "ClassicWarmCompilerTransformResult",
     "ClassicWarmExecution",
 ]

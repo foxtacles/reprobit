@@ -421,6 +421,7 @@ def command_setup(args: argparse.Namespace, output: CLIOutput) -> int:
         check_local_environment=True,
         local_toolchain_root=selected_root,
         prior_toolchain_report=toolchain_report,
+        local_backend=backend,
     )
     lines = [
         (

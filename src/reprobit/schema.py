@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from enum import StrEnum
 from itertools import pairwise
 from pathlib import Path, PurePosixPath
-from types import MappingProxyType
 from typing import Annotated, Any, Literal, Self, TypeAlias
 
 from pydantic import (
@@ -23,6 +22,18 @@ from pydantic import (
 )
 from pydantic import JsonValue as PydanticJsonValue
 
+from reprobit.intervention_metadata import (
+    CLASSIC_RECIPE_FAMILIES_BY_ROLE as CLASSIC_RECIPE_FAMILIES_BY_ROLE,
+)
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily as ClassicRecipeFamily,
+)
+from reprobit.intervention_metadata import (
+    ClassicRecipeRole as ClassicRecipeRole,
+)
+from reprobit.intervention_metadata import (
+    classic_recipe_family_role as classic_recipe_family_role,
+)
 from reprobit.model import (
     AuthenticityPolicy,
     BuildTarget,
@@ -535,114 +546,6 @@ class BinarySurgeryIntervention(InterventionBase):
     method: BinarySurgeryMethod
     source_artifacts: Annotated[tuple[Identifier, ...], Field(min_length=1)]
     output_digest: Digest
-
-
-class ClassicRecipeFamily(StrEnum):
-    """Closed classic recipe families supported by the current proof model.
-
-    ``source_overlay_graph`` is project-level authority: after its closed typed-source
-    proof and any exact sparse declaration-counterfactual compiler audits, rendered
-    bytes may enter the primary compiler seat with origin
-    ``certified-project-overlay``.
-    ``donor_source_overlay`` remains donor-private and cannot enter a primary project
-    compiler seat.
-    """
-
-    DECLARATION_SHAPE = "declaration_shape"
-    DONOR_SOURCE_OVERLAY = "donor_source_overlay"
-    FORWARD_DECLARATION_RUN = "forward_declaration_run"
-    PAD_SHAPE = "pad_shape"
-    EXTERN_RUN_PAIR = "extern_run_pair"
-    FORWARD_RUN_WITH_SHAPE = "forward_run_with_shape"
-    DECLARATION_RUN_TRIPLE = "declaration_run_triple"
-    PREFIX_FORWARD_AFTER_INCLUDES_EXTERN = "prefix_forward_after_includes_extern"
-    EQUAL_BODY_STRICT = "equal_body_strict"
-    EQUAL_BODY_EH_STRUCTURAL_LOCAL = "equal_body_eh_structural_local"
-    SAME_SLOT_RESIZE = "same_slot_resize"
-    EQUAL_BODY_EH_RELOC_LAYOUT = "equal_body_eh_reloc_layout"
-    RETAIL_EXACT_RELOC_DIVERGENT = "retail_exact_reloc_divergent"
-    RETAIL_EXACT_DONOR_REWRITING = "retail_exact_donor_rewriting"
-    RETAIL_EXACT_INSTRUCTION_MOSAIC = "retail_exact_instruction_mosaic"
-    RETAIL_EXACT_REGISTER_BIJECTION = "retail_exact_register_bijection"
-    RETAIL_EXACT_SOURCE_EQUAL_BODY = "retail_exact_source_equal_body"
-    RETAIL_EXACT_COMPOSED_REWRITING = "retail_exact_composed_rewriting"
-    RETAIL_EXACT_SOURCE_TARGET_CLOSURE = "retail_exact_source_target_closure"
-    RETAIL_EXACT_WEB_RECOLOUR = "retail_exact_web_recolour"
-    RETAIL_EXACT_CROSS_TU_COMPLETE_TARGET_RESIZE = "retail_exact_cross_tu_complete_target_resize"
-    RETAIL_EXACT_REGISTER_BIJECTION_REENCODING = "retail_exact_register_bijection_reencoding"
-    RETAIL_EXACT_SAME_TU_INSTRUCTION_HYBRID_RESIZE = (
-        "retail_exact_same_tu_instruction_hybrid_resize"
-    )
-    RETAIL_EXACT_SIMULATED_ELISION = "retail_exact_simulated_elision"
-    SOURCE_OVERLAY_GRAPH = "source_overlay_graph"
-    ARCHIVE_ADMISSION = "archive_admission"
-    IMAGE_METADATA = "image_metadata"
-    IMAGE_LINK_ORDER = "image_link_order"
-    IMAGE_BINARY_REPACK = "image_binary_repack"
-
-
-class ClassicRecipeRole(StrEnum):
-    FUNCTION = "function"
-    DONOR = "donor"
-    PROJECT = "project"
-
-
-CLASSIC_RECIPE_FAMILIES_BY_ROLE: Mapping[ClassicRecipeRole, frozenset[ClassicRecipeFamily]] = (
-    MappingProxyType(
-        {
-            ClassicRecipeRole.DONOR: frozenset(
-                {
-                    ClassicRecipeFamily.DECLARATION_SHAPE,
-                    ClassicRecipeFamily.DONOR_SOURCE_OVERLAY,
-                    ClassicRecipeFamily.FORWARD_DECLARATION_RUN,
-                    ClassicRecipeFamily.PAD_SHAPE,
-                    ClassicRecipeFamily.EXTERN_RUN_PAIR,
-                    ClassicRecipeFamily.FORWARD_RUN_WITH_SHAPE,
-                    ClassicRecipeFamily.DECLARATION_RUN_TRIPLE,
-                    ClassicRecipeFamily.PREFIX_FORWARD_AFTER_INCLUDES_EXTERN,
-                }
-            ),
-            ClassicRecipeRole.FUNCTION: frozenset(
-                {
-                    ClassicRecipeFamily.EQUAL_BODY_STRICT,
-                    ClassicRecipeFamily.EQUAL_BODY_EH_STRUCTURAL_LOCAL,
-                    ClassicRecipeFamily.SAME_SLOT_RESIZE,
-                    ClassicRecipeFamily.EQUAL_BODY_EH_RELOC_LAYOUT,
-                    ClassicRecipeFamily.RETAIL_EXACT_RELOC_DIVERGENT,
-                    ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING,
-                    ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC,
-                    ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION,
-                    ClassicRecipeFamily.RETAIL_EXACT_SOURCE_EQUAL_BODY,
-                    ClassicRecipeFamily.RETAIL_EXACT_COMPOSED_REWRITING,
-                    ClassicRecipeFamily.RETAIL_EXACT_SOURCE_TARGET_CLOSURE,
-                    ClassicRecipeFamily.RETAIL_EXACT_WEB_RECOLOUR,
-                    ClassicRecipeFamily.RETAIL_EXACT_CROSS_TU_COMPLETE_TARGET_RESIZE,
-                    ClassicRecipeFamily.RETAIL_EXACT_REGISTER_BIJECTION_REENCODING,
-                    ClassicRecipeFamily.RETAIL_EXACT_SAME_TU_INSTRUCTION_HYBRID_RESIZE,
-                }
-            ),
-            ClassicRecipeRole.PROJECT: frozenset(
-                {
-                    ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH,
-                    ClassicRecipeFamily.IMAGE_METADATA,
-                    ClassicRecipeFamily.IMAGE_LINK_ORDER,
-                    ClassicRecipeFamily.IMAGE_BINARY_REPACK,
-                }
-            ),
-        }
-    )
-)
-
-
-def classic_recipe_family_role(
-    family: ClassicRecipeFamily,
-) -> ClassicRecipeRole | None:
-    """Return the one runtime-supported role for a classic family."""
-
-    return next(
-        (role for role, families in CLASSIC_RECIPE_FAMILIES_BY_ROLE.items() if family in families),
-        None,
-    )
 
 
 _FORBIDDEN_CLASSIC_FIELDS = frozenset(
@@ -2053,7 +1956,6 @@ def write_project_document_schemas(directory: str | Path) -> None:
 
 
 __all__ = [
-    "CLASSIC_RECIPE_FAMILIES_BY_ROLE",
     "AuthenticitySettings",
     "BinarySurgeryIntervention",
     "BinarySurgeryMethod",
@@ -2063,9 +1965,7 @@ __all__ = [
     "ClassicGroupOrderPlan",
     "ClassicProofReceipt",
     "ClassicProofRedaction",
-    "ClassicRecipeFamily",
     "ClassicRecipeIntervention",
-    "ClassicRecipeRole",
     "ClassicSdkArchiveAuthority",
     "ClassicTargetGate",
     "ClassicTranslationUnitPlan",
@@ -2110,7 +2010,6 @@ __all__ = [
     "candidate_auxiliary_donor_ids",
     "classic_debug_companion_paths",
     "classic_function_donor_ids",
-    "classic_recipe_family_role",
     "intervention_authority_digest",
     "legacy_allowlist_digest",
     "project_document_schemas",

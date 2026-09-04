@@ -38,8 +38,6 @@ from reprobit.classic.source_overlay import (
 )
 from reprobit.classic.source_overlay_claims import _HEADER_SUFFIXES, _SOURCE_SUFFIXES
 from reprobit.classic_donor_retune_candidates import (
-    DEFAULT_REPAIR_RETUNE_RADIUS,
-    DEFAULT_RETUNE_CANDIDATES,
     _apply_overlay_moves,
     _overlay_knob_seats,
     _OverlayKnobSeat,
@@ -60,15 +58,18 @@ from reprobit.classic_runtime_probe import (
     ClassicCompilerSourceEpochOutput,
     ClassicProbeExecution,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole
 from reprobit.schema import (
     ClassicField,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     ProjectBundle,
 )
+from reprobit.search_limits import DEFAULT_REPAIR_RETUNE_RADIUS, DEFAULT_RETUNE_CANDIDATES
 from reprobit.strict_json import JsonValue, canonical_json
 
 

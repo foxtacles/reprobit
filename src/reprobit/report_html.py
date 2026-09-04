@@ -18,6 +18,7 @@ from reprobit.report_html_components import (
     page_shell,
     render_content,
     short_digest,
+    table,
 )
 from reprobit.report_html_format import (
     cost_class_label,
@@ -90,9 +91,20 @@ def _status_copy(report: Report) -> tuple[str, str, str]:
     )
 
 
-def _claim(label: str, value: bool, *, warning: bool = False) -> str:
+def _claim(
+    label: str,
+    value: bool,
+    *,
+    warning: bool = False,
+    failure_href: str | None = None,
+) -> str:
     tone = "ok" if value else ("warn" if warning else "bad")
     state = "passed" if value else ("exception" if warning else "not passed")
+    if not value and failure_href is not None:
+        return (
+            f'<a class="claim {tone}" href="{escape(failure_href)}">'
+            f"{escape(label)}: {escape(state)}</a>"
+        )
     return f'<span class="claim {tone}">{escape(label)}: {escape(state)}</span>'
 
 
@@ -104,14 +116,21 @@ def _render_overview(report: Report) -> str:
     tone, heading, explanation = _status_copy(report)
     claims = "".join(
         (
-            _claim("Byte identity", report.verdict.byte_exact),
-            _claim("Logic checks", report.verdict.logic_certified),
+            _claim("Byte identity", report.verdict.byte_exact, failure_href="#failed-targets"),
+            _claim("Logic checks", report.verdict.logic_certified, failure_href="#failed-logic"),
             _claim(
                 "Built from declared inputs",
                 report.verdict.toolchain_origin,
                 warning=report.verdict.quarantined,
+                failure_href=(
+                    "#quarantine-details"
+                    if report.verdict.quarantined
+                    else "#failed-audit"
+                    if report.proof.audit_issues
+                    else "#evidence-details"
+                ),
             ),
-            _claim("Built from scratch", report.verdict.cold),
+            _claim("Built from scratch", report.verdict.cold, failure_href="#identity-details"),
         )
     )
     quarantine = ""
@@ -138,6 +157,98 @@ def _render_overview(report: Report) -> str:
   <p class="lede">{escape(explanation)}</p>
   <div class="claim-row" aria-label="Result checks">{claims}</div>
   {quarantine}
+</section>"""
+
+
+def _render_failed_checks(report: Report) -> str:
+    if (
+        report.verdict.byte_exact
+        and report.verdict.logic_certified
+        and not report.proof.audit_issues
+    ):
+        return ""
+    sections: list[str] = []
+    if not report.verdict.byte_exact:
+        comparisons = {item.id: item for item in report.proof.runtime.preimage.targets}
+        target_rows: list[tuple[Content, ...]] = []
+        for target in report.targets:
+            if target.byte_exact:
+                continue
+            comparison = comparisons.get(target.id)
+            offset = comparison.first_difference_offset if comparison is not None else None
+            target_rows.append(
+                (
+                    code(target.id),
+                    code(target.artifact, css_class="path"),
+                    code(f"0x{offset:x} ({offset:,})") if offset is not None else "Not recorded",
+                    f"{target.candidate_size - target.oracle_size:+,} bytes"
+                    if target.candidate_size is not None
+                    else "Not recorded",
+                )
+            )
+        sections.append(
+            '<div id="failed-targets"><h3>Target mismatches</h3>'
+            "<p>Offsets are zero-based positions in the output file. Size change is rebuilt "
+            "output minus reference; a zero size change can still contain different bytes.</p>"
+            + table(
+                ("Target", "Artifact", "First differing byte (hex / decimal)", "Size change"),
+                tuple(target_rows),
+                caption="Mismatch locations from the recorded comparison receipts",
+                empty_message="No target comparison was recorded.",
+            )
+            + '<p><a href="#outcome-details">Open full comparison records</a></p></div>'
+        )
+    if not report.verdict.logic_certified:
+        scopes = {item.intervention_id: item.scope for item in report.costs.interventions}
+        failed_rows: list[tuple[Content, ...]] = []
+        for certificate in report.proof.certificates:
+            scope = scopes.get(certificate.intervention_id)
+            for obligation in certificate.obligations:
+                if obligation.passed:
+                    continue
+                failed_rows.append(
+                    (
+                        code(certificate.intervention_id),
+                        join_markup(
+                            tuple(code(part) for part in _scope_key(scope) if part is not None),
+                            separator=" · ",
+                        )
+                        if scope is not None
+                        else "Not recorded",
+                        code(obligation.name),
+                        obligation.detail or "No diagnostic detail recorded.",
+                    )
+                )
+        sections.append(
+            '<div id="failed-logic"><h3>Failed logic checks</h3>'
+            + table(
+                ("Intervention", "Scope (target / TU / function)", "Failed obligation", "Detail"),
+                tuple(failed_rows),
+                caption="Failed proof obligations",
+                empty_message=(
+                    "No failed obligation was recorded. Review the audit findings for missing "
+                    "or untrusted evidence."
+                ),
+            )
+            + '<p><a href="#evidence-details">Open evidence coverage and audit</a></p></div>'
+        )
+    if report.proof.audit_issues:
+        sections.append(
+            '<div id="failed-audit"><h3>Audit findings</h3>'
+            + table(
+                ("Claim", "Code", "Message"),
+                tuple(
+                    (code(item.claim), code(item.code), item.message)
+                    for item in report.proof.audit_issues
+                ),
+                caption="Unresolved audit findings",
+            )
+            + "</div>"
+        )
+    return f"""
+<section class="section" id="failed-checks" aria-labelledby="failed-checks-title">
+  <p class="eyebrow">Start here</p><h2 id="failed-checks-title">Checks needing attention</h2>
+  {"".join(sections)}
 </section>"""
 
 
@@ -169,7 +280,7 @@ def _render_target_cards(report: Report) -> str:
         comparison_link = (
             ""
             if target.byte_exact
-            else '<p><a href="#outcome-details">Open comparison records</a></p>'
+            else '<p><a href="#failed-targets">Inspect mismatch details</a></p>'
         )
         cards.append(
             f"""<article class="card">
@@ -230,7 +341,7 @@ def _render_costs(report: Report) -> str:
   <div class="section-heading"><div><p class="eyebrow">Intervention effort</p>
     <h2 id="costs-title">Cost overview</h2></div>
     <p><strong>0</strong> relative points</p></div>
-  <div class="card"><h3>No interventions were needed</h3>
+  <div class="card"><h3>No interventions recorded</h3>
     <p>This run reached its result without any ReproBit intervention cost.</p></div>
 </section>"""
     class_bars = tuple(
@@ -519,8 +630,14 @@ def _render_next_steps(report: Report) -> str:
 def _render_navigation(report: Report) -> str:
     links = [
         ("Overview", "#overview"),
-        ("Targets", "#targets"),
     ]
+    if (
+        not report.verdict.byte_exact
+        or not report.verdict.logic_certified
+        or report.proof.audit_issues
+    ):
+        links.append(("Checks needing attention", "#failed-checks"))
+    links.append(("Targets", "#targets"))
     if report.proof.supplemental_outputs:
         links.append(("Comparison files", "#debug-companions"))
     links.append(("Costs", "#costs"))
@@ -542,6 +659,7 @@ def render_report_html(
 
     sections = (
         _render_overview(report),
+        _render_failed_checks(report),
         _render_target_cards(report),
         _render_debug_companions(report),
         _render_costs(report),

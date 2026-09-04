@@ -37,7 +37,7 @@ from reprobit.state import KeepWorkspace, report_publication_lease
 from reprobit.transactions import CASTransaction, TransactionResult
 
 if TYPE_CHECKING:
-    from reprobit.cli_build import VerifyResult
+    from reprobit.project_execution import VerifyResult
 
 
 class RepairError(RuntimeError):

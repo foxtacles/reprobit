@@ -10,14 +10,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from reprobit.cli_build import (
-    NULL_EXECUTION_PROGRESS,
-    ProjectExecutionOptions,
-    VerifyRequest,
-    execute_verify,
-    execution_options_from_cli,
-    prepare_producer_graph_run,
-)
+from reprobit.cli_build import execution_options_from_cli
 from reprobit.cli_environment import resolve_classic_execution_inputs
 from reprobit.cli_output import CLIOutput, NextStep, human_command, next_step_fields
 from reprobit.cli_paths import (
@@ -48,6 +41,13 @@ from reprobit.discovery_project import (
 )
 from reprobit.discovery_project_grind_cli import project_state_root
 from reprobit.progress import ProgressKind
+from reprobit.project_execution import (
+    NULL_EXECUTION_PROGRESS,
+    ProjectExecutionOptions,
+    VerifyRequest,
+    execute_verify,
+    prepare_producer_graph_run,
+)
 from reprobit.project_loader import load_project_tree
 from reprobit.state import KeepWorkspace
 from reprobit.strict_json import canonical_json

@@ -10,12 +10,14 @@ from typing import Protocol
 
 from reprobit.classic.semantic_errors import ClassicSemanticError
 from reprobit.implementation import scoped_package_import_closure_digest
-from reprobit.model import Digest, SemanticProof
-from reprobit.schema import (
+from reprobit.intervention_metadata import (
     CLASSIC_RECIPE_FAMILIES_BY_ROLE,
     ClassicRecipeFamily,
-    ClassicRecipeIntervention,
     ClassicRecipeRole,
+)
+from reprobit.model import Digest, SemanticProof
+from reprobit.schema import (
+    ClassicRecipeIntervention,
 )
 from reprobit.strict_json import canonical_json
 

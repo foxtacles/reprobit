@@ -23,8 +23,9 @@ from reprobit.classic_runtime_preparation import (
     ClassicProducerGraphPreparedRun,
     prepare_classic_producer_graph_run,
 )
+from reprobit.developer_authority import DeveloperAuthority
 from reprobit.execution import BuildExecutionReceipt
-from reprobit.incremental import DeveloperAuthority, IncrementalBuildSummary
+from reprobit.incremental import IncrementalBuildSummary
 from reprobit.incremental_executor import (
     IncrementalNode,
     IncrementalProgress,

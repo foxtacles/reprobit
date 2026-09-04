@@ -6,11 +6,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+)
 from reprobit.model import Digest
 from reprobit.schema import (
     BuildPlanDocument,
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ProjectBundle,
     SourceManifestDocument,
@@ -24,6 +26,17 @@ if TYPE_CHECKING:
 
 class SourceAuthorityError(ValueError):
     """Committed source or overlay authority no longer describes current bytes."""
+
+
+class SourceInputMismatch(SourceAuthorityError):
+    """One admitted source input changed, with its diagnostic kept separately."""
+
+    def __init__(self, detail: str) -> None:
+        self.detail = detail
+        super().__init__(
+            "saved ReproBit guidance no longer matches the edited source; "
+            f"run rbit repair . Details: {detail}"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,10 +230,7 @@ def inspect_source_authority(
                     f"{mismatch}. This is checkout drift, not an intervention change: "
                     f"{drift_hint}. Do not run repair for this mismatch."
                 )
-            raise SourceAuthorityError(
-                "saved ReproBit guidance no longer matches the edited source; "
-                f"run rbit repair . Details: {mismatch}"
-            )
+            raise SourceInputMismatch(mismatch)
         verified_digests[entry.path] = digest
         if data is not None:
             effective[entry.path] = data
@@ -345,6 +355,7 @@ def validate_source_authority(
 __all__ = [
     "SourceAuthorityError",
     "SourceAuthorityReport",
+    "SourceInputMismatch",
     "TranslationUnitPinStatus",
     "inspect_source_authority",
     "validate_source_authority",

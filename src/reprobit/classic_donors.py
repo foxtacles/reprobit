@@ -20,13 +20,15 @@ from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, cast
 
+from reprobit.intervention_metadata import (
+    CLASSIC_RECIPE_FAMILIES_BY_ROLE,
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest
 from reprobit.schema import (
-    CLASSIC_RECIPE_FAMILIES_BY_ROLE,
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
 )
 from reprobit.strict_json import JsonValue, canonical_json
 

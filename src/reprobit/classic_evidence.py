@@ -34,6 +34,9 @@ from reprobit.execution import (
     SupplementalOutputFileAttestation,
     classic_semantic_obligation_name,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+)
 from reprobit.model import (
     Artifact,
     ArtifactKind,
@@ -54,7 +57,6 @@ from reprobit.producer_graph import (
     materialize_reference,
 )
 from reprobit.schema import (
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
     LegacyOracleInstallIntervention,
     intervention_authority_digest,

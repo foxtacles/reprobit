@@ -5,38 +5,35 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from reprobit.classic_donor_retune_candidates import (
-    DEFAULT_REPAIR_RETUNE_RADIUS,
-    DEFAULT_RETUNE_CANDIDATES,
-    MAX_RETUNE_CANDIDATES,
-    MAX_RETUNE_RADIUS,
-)
-from reprobit.classic_repair_discovery import (
-    DEFAULT_DISCOVERY_CANDIDATES,
-    MAX_DISCOVERY_CANDIDATES,
-)
-from reprobit.classic_repair_probe import (
-    DEFAULT_RETUNE_PROBE_CANDIDATES,
-    MAX_RETUNE_PROBE_CANDIDATES,
-)
-from reprobit.cli_build import execute_verify, execution_options_from_cli
+from reprobit.cli_build import execution_options_from_cli
 from reprobit.cli_output import CLIOutput, count_phrase, human_command
 from reprobit.cli_paths import CLIError, project_root, safe_project_path
 from reprobit.cli_state import state_root
 from reprobit.model import AuthenticityPolicy
 from reprobit.progress import bounded_exception_notes, exception_detail
+from reprobit.project_execution import execute_verify
 from reprobit.repair import (
     RepairError,
     capture_repair_report_preimages,
     capture_repair_snapshot,
 )
 from reprobit.repair_workflow import (
-    MAX_REPAIR_ADJUSTMENT_ROUNDS,
     RepairAttemptFailure,
     RepairWorkflowError,
     RepairWorkflowOptions,
     execute_repair_attempt,
     repair_classic_records,
+)
+from reprobit.search_limits import (
+    DEFAULT_DISCOVERY_CANDIDATES,
+    DEFAULT_REPAIR_RETUNE_RADIUS,
+    DEFAULT_RETUNE_CANDIDATES,
+    DEFAULT_RETUNE_PROBE_CANDIDATES,
+    MAX_DISCOVERY_CANDIDATES,
+    MAX_REPAIR_ADJUSTMENT_ROUNDS,
+    MAX_RETUNE_CANDIDATES,
+    MAX_RETUNE_PROBE_CANDIDATES,
+    MAX_RETUNE_RADIUS,
 )
 from reprobit.state import KeepWorkspace
 

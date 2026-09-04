@@ -32,6 +32,7 @@ advanced behavior without interrupting that path.
 ```console
 rbit init . --target program
 rbit setup .
+# Add /reference/ and /build/ to .gitignore before reviewing source files.
 rbit source preview .
 rbit source lock .
 # Put the reference binary at reference/program.exe, then:
@@ -68,7 +69,7 @@ touch `CMakeLists.txt`. `status` now lists everything that is still missing:
 ```console
 $ rbit status .
 Project: /path/to/project
-Project and machine: 2/11 checks ready
+Project and machine: 3/12 checks ready
 [  ] Compiler lock: run rbit setup to create reprobit/toolchain.lock.json
 [  ] Source lock: run rbit source preview to finish reviewing and locking the tracked files
 [  ] Protected references: place the original at reference/grind-progress.exe
@@ -95,7 +96,7 @@ Environment ready for Microsoft Visual C++ 4.2
 Compiler: /Users/you/Library/Application Support/ReproBit/toolchains/msvc_4_2
 Project lock: created
 Project: /path/to/project
-Project and machine: 3/11 checks ready
+Project and machine: 4/12 checks ready
 [  ] Source lock: run rbit source preview to finish reviewing and locking the tracked files
 [  ] Protected references: place the original at reference/grind-progress.exe
 ...
@@ -117,6 +118,12 @@ counts as a build-ready project. Run `setup` once on each machine that will
 build the project.
 
 ## 3. Review and lock the source files
+
+Before locking, add `/reference/` and `/build/` to `.gitignore` unless you
+intend to commit those directories. `init` adds ignores for ReproBit's local
+state; these project output and reference directories are your choice. Finish
+these edits now: tracked `.gitignore` files belong to the source read set, so
+editing one after `source lock` requires reviewing and locking it again.
 
 ```console
 $ rbit source preview .
@@ -144,9 +151,8 @@ path is reported as a removal.
 
 Copy the original executable to the declared oracle path
 (`reference/grind-progress.exe` here). ReproBit never redistributes reference
-binaries, and `init` does not ignore `reference/` for you: add `/reference/` and
-`/build/` to the project's `.gitignore` unless you intend to commit them (the
-shipped examples do exactly that).
+binaries. The ignores added before source review keep these inputs and build
+outputs out of Git (the shipped examples do the same).
 
 If you expect to use automatic grind after the first verification, also place
 the available reference objects under `reference/`. Name each one after its
@@ -192,19 +198,17 @@ extract halves separately.
 ```console
 $ rbit status .
 Project: /path/to/project
-Project and machine ready: 11/11 checks passed
+Project and machine ready: 12/12 checks passed
 
 $ git status --short
 ?? .gitignore
-?? reference/
 ?? reprobit.toml
 ?? reprobit/
 ```
 
 Commit `.gitignore`, `reprobit.toml`, and `reprobit/` (the compiler lock, the
 source lock, the build plan, the build graph, and one empty intervention and
-proof document per target and per source file). `reference/` appears because
-step 4 did not ignore it yet. `rbit validate .` loads every saved JSON file,
+proof document per target and per source file). `rbit validate .` loads every saved JSON file,
 rejects duplicate keys and IDs, checks cross-document references and dependency
 cycles, compares current files with their recorded hashes, and never runs a
 build:

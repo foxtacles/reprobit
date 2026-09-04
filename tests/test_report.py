@@ -1426,7 +1426,7 @@ def test_report_identity_rejects_public_verdict_and_timing_tampering() -> None:
         timings=(StageTiming(stage="build", seconds=1.0),),
     )
     rendered = render_report_html(report)
-    assert "No interventions were needed" not in rendered
+    assert "No interventions recorded" not in rendered
     assert 'id="cost-class-chart-title"' in rendered
     assert 'id="cost-target-chart-title"' in rendered
     assert 'id="cost-hotspot-chart-title"' in rendered
@@ -1448,7 +1448,7 @@ def test_report_identity_rejects_public_verdict_and_timing_tampering() -> None:
     mismatched_html = render_report_html(mismatched)
     assert "Inspect <code>program</code> before changing interventions." in mismatched_html
     assert "target comparison records" in mismatched_html
-    assert '<a href="#outcome-details">Open comparison records</a>' in mismatched_html
+    assert '<a href="#failed-targets">Inspect mismatch details</a>' in mismatched_html
 
     logic_failed = report.model_copy(
         update={
@@ -1479,6 +1479,184 @@ def test_report_identity_rejects_public_verdict_and_timing_tampering() -> None:
     payload["timings"][0]["seconds"] = 2.0
     with pytest.raises(ValidationError, match="run_id does not bind"):
         Report.model_validate_json(canonical_json(payload))
+
+
+def failure_report(
+    *,
+    mismatch_offset: int | None = None,
+    candidate_size: int = 100,
+    failed_logic: bool = False,
+    missing_certificate: bool = False,
+    failed_origin: bool = False,
+) -> Report:
+    """Keep failure-rendering fixtures bound to valid runtime and proof receipts."""
+
+    base = proof_report()
+    project = bundle()
+    intervention = stabilize_intervention().model_copy(
+        update={"scope": Scope(target="program", translation_unit="main", function="entry()")}
+    )
+    project = project.model_copy(
+        update={
+            "intervention_documents": (
+                project.intervention_documents[0].model_copy(
+                    update={"interventions": (intervention,)}
+                ),
+            ),
+        }
+    )
+    certificate = base.certificates[0].model_copy(
+        update={
+            "intervention_authority_digest": intervention_authority_digest(intervention),
+            "intervention_cost_digest": intervention_cost_row_digest(
+                calculate_intervention_cost(intervention)
+            ),
+            "obligations": (
+                ProofObligation(
+                    name="semantic-equivalence",
+                    passed=not failed_logic,
+                    evidence_digest=digest(b"semantic-equivalence") if not failed_logic else None,
+                    detail="Expected <return> 17 & received 23" if failed_logic else None,
+                ),
+            ),
+        }
+    )
+    candidate = digest(b"mismatched") if mismatch_offset is not None else digest(b"oracle")
+    preimage = base.runtime.preimage
+    runtime = RuntimeProofBinding.create(
+        RuntimeBindingPreimage(
+            build=preimage.build.model_copy(
+                update={
+                    "outputs": (
+                        preimage.build.outputs[0].model_copy(
+                            update={"digest": candidate, "size": candidate_size}
+                        ),
+                    ),
+                }
+            ),
+            targets=(
+                preimage.targets[0].model_copy(
+                    update={
+                        "candidate_digest": candidate,
+                        "candidate_size": candidate_size,
+                        "byte_exact": mismatch_offset is None,
+                        "first_difference_offset": mismatch_offset,
+                    }
+                ),
+            ),
+        )
+    )
+    issues = []
+    if failed_logic or missing_certificate:
+        issues.append(
+            AuditIssueSummary(
+                claim="logic",
+                code="missing-certificate" if missing_certificate else "failed-certificate",
+                message="Inspect stabilize.program",
+            )
+        )
+    if failed_origin:
+        issues.append(
+            AuditIssueSummary(
+                claim="origin", code="untraced-artifact", message="Output ancestry is incomplete"
+            )
+        )
+    proof = ProofReport.create(
+        runtime=runtime,
+        artifacts=(
+            base.artifacts[0].model_copy(update={"digest": candidate, "size": candidate_size}),
+        ),
+        provenance=base.provenance,
+        certificates=() if missing_certificate else (certificate,),
+        producers=(
+            base.producers[0].model_copy(
+                update={"artifact_digest": candidate, "artifact_size": candidate_size}
+            ),
+        ),
+        audit_issues=tuple(issues),
+        adapter=base.adapter,
+        providers=base.providers,
+        package=base.package,
+    )
+    report = Report.from_bundle(
+        project,
+        Verdict(
+            cold=True,
+            byte_exact=mismatch_offset is None,
+            logic_certified=not (failed_logic or missing_certificate),
+            toolchain_origin=not failed_origin,
+        ),
+        evidence=proof.summary,
+        proof=proof,
+        target_results={"program": mismatch_offset is None},
+        target_artifacts={"program": (candidate_size, candidate)},
+    )
+    return Report.model_validate_json(canonical_json(report))
+
+
+@pytest.mark.parametrize(
+    ("offset", "candidate_size", "expected_offset", "expected_delta"),
+    (
+        (0, 100, "0x0 (0)", "+0 bytes"),
+        (73, 107, "0x49 (73)", "+7 bytes"),
+        (95, 95, "0x5f (95)", "-5 bytes"),
+    ),
+)
+def test_html_surfaces_mismatch_receipts_before_costs(
+    offset: int,
+    candidate_size: int,
+    expected_offset: str,
+    expected_delta: str,
+) -> None:
+    rendered = render_report_html(
+        failure_report(mismatch_offset=offset, candidate_size=candidate_size)
+    )
+
+    assert expected_offset in rendered
+    assert expected_delta in rendered
+    assert "Offsets are zero-based" in rendered
+    assert 'href="#failed-targets">Byte identity: not passed</a>' in rendered
+    assert 'href="#failed-targets">Inspect mismatch details</a>' in rendered
+    assert rendered.index(expected_offset) < rendered.index('id="costs"')
+    assert rendered.index(expected_offset) < rendered.index("<details")
+
+
+def test_html_surfaces_failed_obligations_and_scope_without_opening_advanced() -> None:
+    rendered = render_report_html(failure_report(failed_logic=True))
+
+    detail = "Expected &lt;return&gt; 17 &amp; received 23"
+    assert detail in rendered
+    assert "Expected <return>" not in rendered
+    assert "<code>semantic-equivalence</code>" in rendered
+    assert "<code>program</code> · <code>main</code> · <code>entry()</code>" in rendered
+    assert 'href="#failed-logic">Logic checks: not passed</a>' in rendered
+    assert rendered.index(detail) < rendered.index('id="costs"')
+    assert rendered.index(detail) < rendered.index("<details")
+    assert 'id="failed-targets"' not in rendered
+
+
+def test_html_explains_missing_certificates_without_inventing_failed_obligations() -> None:
+    rendered = render_report_html(failure_report(missing_certificate=True))
+
+    assert "No failed obligation was recorded" in rendered
+    assert rendered.index("missing-certificate") < rendered.index("<details")
+    assert "<code>semantic-equivalence</code>" not in rendered
+
+
+def test_html_clean_results_do_not_show_failure_sections() -> None:
+    rendered = render_report_html(failure_report())
+
+    assert "Checks needing attention" not in rendered
+    assert 'href="#failed-' not in rendered
+
+
+def test_html_surfaces_origin_audit_when_other_checks_pass() -> None:
+    rendered = render_report_html(failure_report(failed_origin=True))
+
+    assert 'href="#failed-audit">Built from declared inputs: not passed</a>' in rendered
+    assert rendered.index("Output ancestry is incomplete") < rendered.index('id="costs"')
+    assert 'id="failed-logic"' not in rendered
+    assert 'id="failed-targets"' not in rendered
 
 
 def test_evidence_digest_changes_final_run_identity() -> None:

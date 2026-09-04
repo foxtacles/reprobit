@@ -3,7 +3,8 @@
 The cache is deliberately outside ReproBit's authenticity boundary.  Cold
 verification does not construct this type.  Warm developer builds may use it
 to avoid repeating producer work, but every record and blob is independently
-validated before use and restored by copying into the fresh run workspace.
+validated before use. Consumers copy needed outputs into fresh private
+workspaces; an unused cache hit can remain a content-validated receipt.
 """
 
 from __future__ import annotations
@@ -795,6 +796,25 @@ class CacheLease:
         for output in record.outputs:
             self._probe_blob(output)
         return record
+
+    def validate_record(self, record: CacheRecord) -> None:
+        """Authenticate every output without creating disposable transport copies.
+
+        Even an otherwise unused hit must reject corrupt content. No digest or
+        path decision is retained across calls: a later consumer copy and the
+        pre-publication boundary independently revalidate current bytes.
+        """
+
+        self._require_open()
+        if record.implementation != self.cache.implementation or not record.outputs:
+            raise CacheError("cache validation request differs from its implementation")
+        checked: set[tuple[str, int]] = set()
+        for output in record.outputs:
+            identity = (output.digest, output.size)
+            if identity in checked:
+                continue
+            self._validate_existing_blob(output)
+            checked.add(identity)
 
     def records(self, domain: str) -> tuple[CacheRecord, ...]:
         """Return one validated implementation/domain record snapshot.

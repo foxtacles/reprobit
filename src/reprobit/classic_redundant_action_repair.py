@@ -11,10 +11,12 @@ from reprobit.classic_repair_authority import (
     ClassicReceiptEdit,
 )
 from reprobit.coff_format import CoffObject, coff_body
+from reprobit.intervention_metadata import (
+    ClassicRecipeRole,
+)
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     Intervention,
     candidate_auxiliary_donor_ids,
 )

@@ -25,6 +25,7 @@ import reprobit.classic_orchestration as classic_orchestration
 import reprobit.classic_publication as classic_publication
 import reprobit.classic_repair_probe_execution as classic_repair_probe_execution
 import reprobit.classic_runtime as classic_runtime
+import reprobit.classic_runtime_dependencies as classic_runtime_dependencies
 import reprobit.classic_runtime_donor as classic_runtime_donor
 import reprobit.classic_runtime_environment as classic_runtime_environment
 import reprobit.classic_runtime_files as classic_runtime_files
@@ -3760,6 +3761,7 @@ def test_cold_progress_withholds_completion_until_runtime_close(
 ) -> None:
     events: list[tuple[int, int, str, str]] = []
     executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
+    executor.developer_authority = None
     executor._progress = classic_runtime_producer.ClassicProgressReporter(
         2,
         lambda completed, total, phase, node_id, _kind, _reason: events.append(
@@ -4415,6 +4417,8 @@ def test_discarded_warm_dependency_replay_erases_arena_after_parse_failure(
     executor.session_root = session_root
     executor.overlay = SimpleNamespace(generated_node_inputs=MappingProxyType({}))
     executor.producer = SimpleNamespace(
+        build_root=build_root,
+        session_root=session_root,
         role_commands=MappingProxyType({ProducerRole.COMPILER: Path("compiler")}),
         compile_timeout=30.0,
         lane_pool=cast(classic_runtime_environment._LazyExecutionLanePool, pool),
@@ -4439,7 +4443,7 @@ def test_discarded_warm_dependency_replay_erases_arena_after_parse_failure(
         (arenas[0] / "dependencies.sbr").write_bytes(b"not-an-sbr")
         return ProcessResult(("compiler",), 0, b"", 1, 0.01), object()
 
-    monkeypatch.setattr(classic_runtime_warm, "_run", run)
+    monkeypatch.setattr(classic_runtime_dependencies, "_run", run)
     replay = executor.replay_warm_compiler_dependencies(
         node.id,
         cancellation=CancellationToken(),
@@ -4459,7 +4463,7 @@ def test_discarded_warm_dependency_replay_erases_arena_after_parse_failure(
         )
         raise ProcessTimedOut(spec, b"")
 
-    monkeypatch.setattr(classic_runtime_warm, "_run", time_out)
+    monkeypatch.setattr(classic_runtime_dependencies, "_run", time_out)
     with pytest.raises(ProcessTimedOut):
         executor.replay_warm_compiler_dependencies(
             node.id,
@@ -4473,7 +4477,7 @@ def test_discarded_warm_dependency_replay_erases_arena_after_parse_failure(
         result = ProcessResult(spec.argv, 2, b"expected replay miss", 1, 0.01)
         raise CommandFailed(result, spec)
 
-    monkeypatch.setattr(classic_runtime_warm, "_run", fail)
+    monkeypatch.setattr(classic_runtime_dependencies, "_run", fail)
     replay = executor.replay_warm_compiler_dependencies(
         node.id,
         cancellation=CancellationToken(),

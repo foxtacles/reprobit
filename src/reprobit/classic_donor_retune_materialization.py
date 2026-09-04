@@ -11,7 +11,6 @@ from typing import TYPE_CHECKING, cast
 from reprobit.classic.overlay_document import render_classic_overlay_proposal
 from reprobit.classic_donor_retune_candidates import (
     MAX_INSERTED_RUN_COUNT,
-    MAX_RETUNE_RADIUS,
     DonorRetuneCandidate,
     DonorRetuneChange,
     DonorRetuneError,
@@ -25,13 +24,16 @@ from reprobit.classic_donors import (
     merge_candidate_constraints,
     validate_donor_recipe,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest
 from reprobit.schema import (
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
 )
+from reprobit.search_limits import MAX_RETUNE_RADIUS
 from reprobit.strict_json import JsonValue
 
 if TYPE_CHECKING:

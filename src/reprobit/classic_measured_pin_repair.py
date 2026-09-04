@@ -32,11 +32,13 @@ from reprobit.classic_project import (
     ClassicProjectError,
 )
 from reprobit.coff_format import CoffObject, CoffSection, coff_body, detailed_relocations
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.schema import (
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     NativeJsonValue,
 )
 

@@ -71,6 +71,9 @@ from reprobit.classic_runtime_graph import (
 from reprobit.execution import (
     StepExecutionReceipt,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+)
 from reprobit.model import Digest
 from reprobit.process import (
     CancellationToken,
@@ -84,7 +87,6 @@ from reprobit.producer_graph import (
     ProducerRole,
 )
 from reprobit.schema import (
-    ClassicRecipeFamily,
     ProjectBundle,
 )
 from reprobit.sealed_namespace import (

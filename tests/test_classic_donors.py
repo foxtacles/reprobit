@@ -22,6 +22,7 @@ from reprobit.classic_donors import (
     prepare_donor_compile_request,
     validate_donor_recipe,
 )
+from reprobit.intervention_metadata import CLASSIC_RECIPE_METADATA
 from reprobit.model import Scope
 from reprobit.schema import (
     ClassicField,
@@ -199,6 +200,7 @@ def test_all_declaration_carrier_families_produce_closed_requests() -> None:
     assert {request.family for request in requests} == DONOR_FAMILIES - {
         ClassicRecipeFamily.DONOR_SOURCE_OVERLAY
     }
+    assert all(CLASSIC_RECIPE_METADATA[request.family].coverage.implemented for request in requests)
     assert all(request.staged_source == "s.cpp" for request in requests)
     assert all(request.intervention_id == "donor_sample" for request in requests)
     for intervention, request in zip(interventions, requests, strict=True):
@@ -315,6 +317,7 @@ def _seat_digest(tokens: list[str]) -> str:
 
 
 def test_donor_private_overlay_uses_the_shared_typed_renderer() -> None:
+    assert CLASSIC_RECIPE_METADATA[ClassicRecipeFamily.DONOR_SOURCE_OVERLAY].coverage.implemented
     source = b"int value;\n"
     header = b"int header_value;\n"
     generated = b"class Spare;\n"

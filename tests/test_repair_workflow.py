@@ -13,6 +13,7 @@ from reprobit.classic_legacy_repair import (
     LegacyInstallRepair,
     LegacyNoWindowError,
     LegacyOracleMaterial,
+    LegacyRepairError,
 )
 from reprobit.classic_project import ClassicDispatchMaterials
 from reprobit.classic_redundant_action_repair import RedundantActionRepairError
@@ -752,6 +753,81 @@ def test_zero_window_legacy_resolution_runs_before_any_donor_probe(
     assert result.reauthored_actions == int(replaced)
     assert result.retired_actions == int(not replaced)
     assert result.removed_donors == int(not replaced)
+
+
+@pytest.mark.parametrize("earlier_success", [False, True])
+def test_failed_zero_window_resolution_retains_refusal_without_a_stale_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    earlier_success: bool,
+) -> None:
+    def refusal(identity: str) -> LegacyRepairRefusal:
+        receipt = ClassicProofReceipt(
+            id=f"proof.{identity}",
+            intervention_id=identity,
+            family=ClassicRecipeFamily.RETAIL_EXACT_SIMULATED_ELISION,
+        )
+        authority_range = OracleInstallRange(
+            preimage_range=ByteRange(offset=1, length=1),
+            output_range=ByteRange(offset=1, length=1),
+            oracle_range=ByteRange(offset=1, length=1),
+        )
+        action = LegacyOracleInstallIntervention.freeze(
+            id=identity,
+            scope=Scope(target="program", translation_unit="tu.legacy", function=identity),
+            rationale="Finite fixture quarantine.",
+            dependencies=("donor.legacy",),
+            proof_receipt_digest=Digest.from_bytes(b"old proof"),
+            preimage_digest=Digest.from_bytes(b"old body"),
+            oracle_body_digest=Digest.from_bytes(b"retail"),
+            oracle_target="program",
+            oracle_address=0x401000,
+            ranges=(authority_range,),
+            byte_count=1,
+            maximum_oracle_payload_bytes=6,
+        )
+        return LegacyRepairRefusal(
+            unit_id="tu.legacy",
+            action_index=0,
+            intervention=action,
+            receipt=receipt,
+            materials=ClassicDispatchMaterials(seed_object=b"seed", donor_object=b"donor"),
+            unit=cast(Any, SimpleNamespace(plan=SimpleNamespace(build_target="program"))),
+            reason="saved legacy action no longer composes",
+            legacy_oracle=LegacyOracleMaterial(b"retail", {}),
+        )
+
+    failed = refusal("legacy.failed")
+    successful = refusal("legacy.successful")
+    prior_repair = LegacyInstallRepair(successful.intervention, successful.receipt, b"output")
+    refusals = (successful, failed) if earlier_success else (failed,)
+
+    def reauthor(action: LegacyOracleInstallIntervention, *_args: object) -> LegacyInstallRepair:
+        if action.id == successful.intervention.id:
+            return prior_repair
+        raise LegacyNoWindowError("no windows")
+
+    def no_safe_resolution(*_args: object, **_kwargs: object) -> object:
+        raise LegacyRepairError("no safe dequarantine")
+
+    monkeypatch.setattr(subject, "reauthor_legacy_simulated_elision", reauthor)
+    monkeypatch.setattr(subject, "plan_legacy_no_window_resolution", no_safe_resolution)
+    fallout = subject._prepare_legacy_fallout(
+        cast(Any, object()),
+        cast(Any, SimpleNamespace(interventions=tuple(item.intervention for item in refusals))),
+        cast(Any, _analysis(completed=False, refusals=refusals)),
+        tuple(item.receipt for item in refusals),
+    )
+
+    assert fallout.failures == ("no safe dequarantine",)
+    assert fallout.no_window_resolution is None
+    assert fallout.refusals[-1] is failed
+    assert failed.baseline_repair is None
+    assert len(fallout.refusals) == len(refusals)
+    if earlier_success:
+        assert fallout.fallbacks == ((fallout.refusals[0], prior_repair),)
+        assert fallout.refusals[0].baseline_repair is prior_repair
+    else:
+        assert fallout.fallbacks == ()
 
 
 @pytest.mark.parametrize(

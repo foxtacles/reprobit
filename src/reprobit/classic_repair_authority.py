@@ -9,12 +9,14 @@ from pathlib import Path, PurePosixPath
 from typing import cast
 
 from reprobit.authority_snapshot import AuthoritySnapshotError, json_authority_members
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest, is_identifier
 from reprobit.schema import (
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     InterventionDocument,
     LegacyAllowlistEntry,
     LegacyOracleInstallIntervention,

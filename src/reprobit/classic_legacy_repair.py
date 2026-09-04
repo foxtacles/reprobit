@@ -44,13 +44,15 @@ from reprobit.discovery_authoring import (
     DiscoveryAuthoringError,
     build_measured_function_record,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import ByteRange, Digest, Scope
 from reprobit.oracle_pe32 import LegacyInstallError, PE32VirtualAddressReader
 from reprobit.schema import (
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     Intervention,
     LegacyOracleInstallIntervention,
     OracleInstallRange,

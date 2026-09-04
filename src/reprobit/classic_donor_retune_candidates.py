@@ -19,20 +19,22 @@ from reprobit.classic_donors import (
     generate_forward_run,
     generate_pad_shape,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest
 from reprobit.schema import (
     ClassicField,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
+)
+from reprobit.search_limits import (
+    DEFAULT_RETUNE_CANDIDATES,
+    DEFAULT_RETUNE_RADIUS,
+    MAX_RETUNE_CANDIDATES,
+    MAX_RETUNE_RADIUS,
 )
 from reprobit.strict_json import JsonValue, canonical_json
-
-DEFAULT_RETUNE_RADIUS = 4
-DEFAULT_REPAIR_RETUNE_RADIUS = 8
-MAX_RETUNE_RADIUS = 64
-DEFAULT_RETUNE_CANDIDATES = 64
-MAX_RETUNE_CANDIDATES = 4096
 
 RetunePathPart: TypeAlias = str | int
 RetuneScalar: TypeAlias = int | str
@@ -1160,13 +1162,8 @@ def enumerate_donor_retune_candidates(
 
 
 __all__ = [
-    "DEFAULT_REPAIR_RETUNE_RADIUS",
-    "DEFAULT_RETUNE_CANDIDATES",
-    "DEFAULT_RETUNE_RADIUS",
     "INSERTED_RUN_STEM",
     "INSERTED_RUN_WIDTH",
-    "MAX_RETUNE_CANDIDATES",
-    "MAX_RETUNE_RADIUS",
     "DonorRetuneCandidate",
     "DonorRetuneChange",
     "DonorRetuneError",

@@ -7,10 +7,6 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Literal, TypeVar, cast
 
-from reprobit.classic_donor_retune_candidates import (
-    DEFAULT_REPAIR_RETUNE_RADIUS,
-    DEFAULT_RETUNE_CANDIDATES,
-)
 from reprobit.classic_link_layout_repair import ClassicLinkLayoutHint
 from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
@@ -28,13 +24,11 @@ from reprobit.classic_repair_authority import (
     apply_classic_authority_edits,
 )
 from reprobit.classic_repair_discovery import (
-    DEFAULT_DISCOVERY_CANDIDATES,
     ClassicDiscoveryRepair,
     ClassicDiscoveryResult,
     probe_carrier_discovery,
 )
 from reprobit.classic_repair_probe import (
-    DEFAULT_RETUNE_PROBE_CANDIDATES,
     ClassicDonorRetuneProbeResult,
     ClassicDonorRetuneRepair,
     probe_bounded_donor_retunes,
@@ -46,16 +40,22 @@ from reprobit.classic_repair_probe_execution import (
 )
 from reprobit.classic_repair_session import ClassicRepairRefusal, RepairRefusal
 from reprobit.classic_runtime_probe import ClassicDonorProbeProgress, ClassicProbeExecution
-from reprobit.cli_build import (
+from reprobit.cli_environment import resolve_classic_execution_inputs
+from reprobit.cli_state import state_root
+from reprobit.progress import ProgressKind
+from reprobit.project_execution import (
     ExecutionProgress,
     ProjectExecutionOptions,
     prepare_producer_graph_run,
 )
-from reprobit.cli_environment import resolve_classic_execution_inputs
-from reprobit.cli_state import state_root
-from reprobit.progress import ProgressKind
 from reprobit.project_loader import load_project_tree
 from reprobit.schema import ProjectBundle, ProjectSpec
+from reprobit.search_limits import (
+    DEFAULT_DISCOVERY_CANDIDATES,
+    DEFAULT_REPAIR_RETUNE_RADIUS,
+    DEFAULT_RETUNE_CANDIDATES,
+    DEFAULT_RETUNE_PROBE_CANDIDATES,
+)
 from reprobit.state import KeepWorkspace, RunArena
 
 if TYPE_CHECKING:

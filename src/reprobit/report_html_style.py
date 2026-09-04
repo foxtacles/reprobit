@@ -190,6 +190,7 @@ pre > code { white-space: pre; }
 .callout h2 { color: #653806; font-size: 1.08rem; }
 .callout p { margin-bottom: .25rem; }
 .section { margin-top: 2rem; scroll-margin-top: 4.5rem; }
+#failed-targets, #failed-logic, #failed-audit { scroll-margin-top: 4.5rem; }
 .section-heading { display: flex; align-items: end; justify-content: space-between; gap: 1rem; }
 .section-heading p { margin: 0 0 .85rem; color: var(--muted); }
 .card-grid {

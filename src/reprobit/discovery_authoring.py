@@ -30,13 +30,15 @@ from reprobit.classic_project import (
     ClassicFamilyDispatcher,
     ClassicProjectError,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest, Scope
 from reprobit.schema import (
     ClassicField,
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     InterventionDocument,
     ProofDocument,
 )

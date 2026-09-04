@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from fractions import Fraction
 
-from reprobit.costs import CostClass, FunctionCost
+from reprobit.costs import (
+    FunctionCost,
+)
+from reprobit.intervention_metadata import (
+    CostClass,
+)
 
 
 def yes_no(value: bool) -> str:

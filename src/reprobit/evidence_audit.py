@@ -26,6 +26,9 @@ from reprobit.execution import (
     classic_semantic_obligation_name,
 )
 from reprobit.formats import FormatError, Pe32Image, parse_pe32
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+)
 from reprobit.model import (
     Artifact,
     ArtifactKind,
@@ -39,7 +42,6 @@ from reprobit.model import (
 )
 from reprobit.paths import normalize_logical_path
 from reprobit.schema import (
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
     LegacyOracleInstallIntervention,
     ProjectBundle,

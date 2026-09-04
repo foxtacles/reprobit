@@ -42,15 +42,17 @@ from reprobit.discovery_project import (
     stage_grind_project,
 )
 from reprobit.execution import classic_semantic_obligation_name
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest
 from reprobit.msvc_discovery_coff import qualify_msvc_reference_object
 from reprobit.progress import ProgressKind
 from reprobit.project_loader import load_project_tree
 from reprobit.report import Report
 from reprobit.schema import (
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     InterventionDocument,
     LegacyOracleInstallIntervention,
     ProofDocument,

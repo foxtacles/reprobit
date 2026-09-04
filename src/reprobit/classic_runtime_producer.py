@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import time
 from collections.abc import Callable, Mapping, Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import Lock
@@ -61,6 +61,7 @@ from reprobit.classic_runtime_receipts import (
     _internal_step,
     _step_receipt,
 )
+from reprobit.dag_queue import DependencyQueue
 from reprobit.execution import StepExecutionReceipt
 from reprobit.model import Digest
 from reprobit.paths import (
@@ -1111,37 +1112,39 @@ class ClassicProducerExecution:
         include_trace_epoch: str | None = None,
         compiler_namespace_id: str | None = None,
     ) -> list[StepExecutionReceipt]:
-        pending = {node.id: node for node in nodes}
-        receipts: list[StepExecutionReceipt] = []
-        while pending:
-            ready = tuple(
-                node
-                for node in sorted(pending.values(), key=lambda item: item.id.casefold())
-                if set(node.depends_on).issubset(completed)
+        by_id = {node.id: node for node in nodes}
+        if len(by_id) != len(nodes):
+            raise ClassicProjectError("producer graph phase repeats a node")
+        try:
+            ready_queue = DependencyQueue(
+                {node.id: node.depends_on for node in nodes}, completed=completed
             )
-            if not ready:
-                waiting = {
-                    node.id: sorted(set(node.depends_on) - completed) for node in pending.values()
-                }
-                raise ClassicProjectError(f"producer graph phase cannot make progress: {waiting}")
-            with ThreadPoolExecutor(max_workers=min(self.jobs, len(ready))) as pool:
-                futures = {
-                    pool.submit(
-                        self.run_node,
-                        supervisor,
-                        node,
-                        cancellation,
-                        receipt_step_id=f"{step_id_prefix}{node.id}",
-                        log_namespace=log_namespace,
-                        include_authority=include_authority,
-                        include_trace_epoch=include_trace_epoch,
-                        compiler_namespace_id=compiler_namespace_id,
-                    ): node
-                    for node in ready
-                }
-                try:
-                    for future in as_completed(futures):
-                        node = futures[future]
+        except ValueError as exc:
+            raise ClassicProjectError(f"producer graph phase cannot make progress: {exc}") from exc
+        receipts: list[StepExecutionReceipt] = []
+        if not nodes:
+            return receipts
+        with ThreadPoolExecutor(max_workers=min(self.jobs, len(nodes))) as pool:
+            running: dict[Future[tuple[StepExecutionReceipt, ...]], ProducerNode] = {}
+            try:
+                while ready_queue:
+                    for node_id in ready_queue.take_ready(self.jobs - len(running)):
+                        node = by_id[node_id]
+                        future = pool.submit(
+                            self.run_node,
+                            supervisor,
+                            node,
+                            cancellation,
+                            receipt_step_id=f"{step_id_prefix}{node.id}",
+                            log_namespace=log_namespace,
+                            include_authority=include_authority,
+                            include_trace_epoch=include_trace_epoch,
+                            compiler_namespace_id=compiler_namespace_id,
+                        )
+                        running[future] = node
+                    done, _pending = wait(running, return_when=FIRST_COMPLETED)
+                    for future in sorted(done, key=lambda item: running[item].id.casefold()):
+                        node = running.pop(future)
                         try:
                             node_receipts = future.result()
                         except Exception as exc:
@@ -1163,19 +1166,15 @@ class ClassicProducerExecution:
                             producer_receipt.step_id,
                         )
                         for include_receipt in node_receipts[1:]:
-                            self._progress.emit(
-                                "resource-dependencies",
-                                include_receipt.step_id,
-                            )
-                except BaseException:
-                    cancellation.cancel("classic producer graph sibling failed")
-                    supervisor.cancel_all()
-                    for future in futures:
-                        future.cancel()
-                    raise
-            for node in ready:
-                completed.add(node.id)
-                del pending[node.id]
+                            self._progress.emit("resource-dependencies", include_receipt.step_id)
+                        completed.add(node.id)
+                        ready_queue.finish(node.id)
+            except BaseException:
+                cancellation.cancel("classic producer graph sibling failed")
+                supervisor.cancel_all()
+                for future in running:
+                    future.cancel()
+                raise
         return receipts
 
     def _analysis_link_plan(

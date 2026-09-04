@@ -19,6 +19,7 @@ from reprobit.schema import (
     ClassicRecipeIntervention,
     ClassicRecipeRole,
     classic_debug_companion_paths,
+    source_manifest_digest,
 )
 
 ROOT = Path(__file__).parents[1]
@@ -279,7 +280,12 @@ def test_authenticated_msvc42_repair_handles_shared_header_and_publishes_atomica
     assert no_search_completion["compiler_candidates"] == 0
     assert no_search_completion["donor_retunes"] == 0
     assert no_search_completion["retired_actions"] == 0
-    assert no_search_completion["changed_records"] == ["reprobit/source-manifest.json"]
+    expected_no_search_changes = [
+        "reprobit/build-plan.json",
+        "reprobit/interventions/tu.transform.json",
+        "reprobit/source-manifest.json",
+    ]
+    assert no_search_completion["changed_records"] == expected_no_search_changes
     assert no_search_completion["transaction_id"]
     assert no_search_completion["transaction_id"] != completion["transaction_id"]
     assert Digest.from_path(project / "build/repair.exe") == Digest.from_path(reference)
@@ -293,7 +299,39 @@ def test_authenticated_msvc42_repair_handles_shared_header_and_publishes_atomica
         relative
         for relative in authority_after_no_search
         if authority_after_no_search[relative] != authority_after_first_repair[relative]
-    } == {"reprobit/source-manifest.json"}
+    } == set(expected_no_search_changes)
+    no_search_bundle = load_project_tree(project)
+    assert no_search_bundle.source_manifest is not None
+    assert no_search_bundle.build_plan is not None
+    assert repaired_bundle.build_plan is not None
+    current_source_digest = Digest.from_path(transform)
+    expected_units = tuple(
+        unit.model_copy(update={"source_digest": current_source_digest})
+        if unit.id == "tu.transform"
+        else unit
+        for unit in repaired_bundle.build_plan.translation_units
+    )
+    assert no_search_bundle.build_plan == repaired_bundle.build_plan.model_copy(
+        update={
+            "source_manifest_digest": source_manifest_digest(no_search_bundle.source_manifest),
+            "translation_units": expected_units,
+        }
+    )
+    transform_shard = next(
+        document
+        for document in no_search_bundle.intervention_documents
+        if document.translation_unit_id == "tu.transform"
+    )
+    prior_transform_shard = next(
+        document
+        for document in repaired_bundle.intervention_documents
+        if document.translation_unit_id == "tu.transform"
+    )
+    assert transform_shard.interventions == ()
+    assert transform_shard == prior_transform_shard.model_copy(
+        update={"source_digest": current_source_digest}
+    )
+    assert no_search_bundle.proof_documents == repaired_bundle.proof_documents
     no_search_report = Report.model_validate_json(report_path.read_bytes())
     assert no_search_report.verdict.cold is True
     assert no_search_report.verdict.byte_exact is True

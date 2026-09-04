@@ -65,7 +65,7 @@ pair and are only needed for an explicit POSIX override. Pass both or neither
 ```text
 $ rbit status .
 Project: …/project
-Project and machine: 9/11 checks ready
+Project and machine: 10/12 checks ready
 [!!] Interventions: reprobit/interventions/tu.transform.json is not valid JSON; run rbit validate
 Next: rbit validate …/project
 

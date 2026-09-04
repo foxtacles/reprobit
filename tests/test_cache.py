@@ -1416,3 +1416,34 @@ def test_gc_collects_old_records_across_implementation_namespaces(
     result = first.gc(older_than_seconds=1800)
     assert result.removed_records == 2
     assert result.removed_blobs == 1
+
+
+@pytest.mark.parametrize("operation", ["validate", "restore"])
+def test_oversized_poison_is_refused_before_payload_io(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    source = tmp_path / "source.obj"
+    source.write_bytes(b"expected")
+    cache = IncrementalCache(state, implementation="test-implementation-v1")
+    with cache.lease() as lease:
+        record = lease.store("producer", _key("oversized-before-io"), {"artifact": source})
+    blob = cache._blob_path(record.outputs[0].digest, create=False)
+    blob.write_bytes(b"unexpectedly oversized" * 1000)
+    destination = tmp_path / "restore"
+    destination.mkdir()
+
+    def unexpected_io(*_args: object, **_kwargs: object) -> object:
+        pytest.fail("an oversized cache blob must be rejected before hashing or copying")
+
+    monkeypatch.setattr(cache_module, "digest_relative_file", unexpected_io)
+    monkeypatch.setattr(cache_module, "atomic_copy_new_relative", unexpected_io)
+    with cache.lease() as lease, pytest.raises(CachePoisonError, match="wrong size"):
+        if operation == "validate":
+            lease.validate_record(record)
+        else:
+            lease.restore(record, {"artifact": destination / "artifact"}, allowed_root=destination)
+    assert not (destination / "artifact").exists()

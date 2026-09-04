@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,8 +41,11 @@ def test_setup_creates_and_rechecks_the_project_toolchain_lock(
     toolchain = _fake_toolchain(tmp_path / "toolchain")
     monkeypatch.setattr("reprobit.onboarding.verify_msvc42", lambda _root: None)
     monkeypatch.setattr(
-        "reprobit.onboarding._backend_failures",
-        lambda _backend, *, execute_probe: (),
+        "reprobit.onboarding.selected_backend",
+        lambda _args: SimpleNamespace(
+            identifier="fixture",
+            doctor=lambda *, execute_probe: BackendDoctorReport("fixture", "fixture", ()),
+        ),
     )
     doctor_calls = 0
     real_doctor = ClassicMSVCToolchain.doctor
@@ -103,12 +107,18 @@ def test_doctor_checks_the_compiler_remembered_for_the_project(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    # This case exercises the saved setting; an integration compiler supplied
+    # by the host environment intentionally has higher selection precedence.
+    monkeypatch.delenv("REPROBIT_MSVC_4_2_ROOT", raising=False)
     project = tmp_path / "sample"
     toolchain = _fake_toolchain(tmp_path / "toolchain")
     monkeypatch.setattr("reprobit.onboarding.verify_msvc42", lambda _root: None)
     monkeypatch.setattr(
-        "reprobit.onboarding._backend_failures",
-        lambda _backend, *, execute_probe: (),
+        "reprobit.onboarding.selected_backend",
+        lambda _args: SimpleNamespace(
+            identifier="fixture",
+            doctor=lambda *, execute_probe: BackendDoctorReport("fixture", "fixture", ()),
+        ),
     )
     assert main(["init", str(project)]) == 0
     assert (

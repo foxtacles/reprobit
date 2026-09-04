@@ -29,9 +29,15 @@ from reprobit.classic_execution_records import (
     ClassicProducerGraphExecutionRecord,
     ClassicRuntimeEvidenceInputs,
 )
+from reprobit.classic_includes import (
+    ClassicIncludeTraceError,
+    SealedIncludeAuthority,
+    resolve_msvc_include_trace,
+)
 from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
     apply_classic_terminal_pipeline,
+    classic_compiler_translation_unit_authority,
     classic_rdata_repack,
 )
 from reprobit.classic_project import (
@@ -43,6 +49,10 @@ from reprobit.classic_publication import (
     ClassicPublicationError,
     ClassicPublicationRequest,
     publish_classic_output_set,
+)
+from reprobit.classic_runtime_dependencies import (
+    compiler_include_parameters,
+    replay_compiler_dependencies,
 )
 from reprobit.classic_runtime_environment import (
     _toolchain_tree_files,
@@ -57,6 +67,11 @@ from reprobit.classic_runtime_files import (
 from reprobit.classic_runtime_graph import (
     ClassicCompileRecord,
     ClassicProducerTarget,
+)
+from reprobit.developer_authority import (
+    DeveloperAuthority,
+    IncrementalAuthorityError,
+    require_fresh_protected_recursive_inputs,
 )
 from reprobit.execution import (
     BuildExecutionReceipt,
@@ -223,7 +238,8 @@ class ClassicProducerGraphRuntimeEvidenceProvider:
     def issue(self, context: RuntimeEvidenceContext) -> RuntimeEvidence:
         if self._provisional:
             raise ClassicProjectError(
-                "provisional measured receipt repair cannot issue authenticity evidence"
+                "non-certifying developer or provisional repair execution cannot issue "
+                "authenticity evidence"
             )
         inputs = self._inputs
         if inputs is None:
@@ -272,8 +288,12 @@ class ClassicProducerGraphBuildExecutor:
         donors: ClassicDonorComposition,
         evidence_provider: ClassicProducerGraphRuntimeEvidenceProvider,
         progress: ClassicProgressReporter,
+        developer_authority: DeveloperAuthority | None = None,
     ) -> None:
         self.bundle = bundle
+        if developer_authority is not None and developer_authority.bundle != bundle:
+            raise ClassicProjectError("developer source authority differs from the prepared bundle")
+        self.developer_authority = developer_authority
         self.project_root = project_root
         self.session_root = session_root
         self.build_root = build_root
@@ -445,7 +465,10 @@ class ClassicProducerGraphBuildExecutor:
         required_outputs: Iterable[Path] = (),
     ) -> BuildExecutionReceipt:
         revalidate_classic_validator_implementation()
-        self.producer.begin_certifying()
+        if self.developer_authority is None:
+            self.producer.begin_certifying()
+        else:
+            self.producer.begin_developer()
         try:
             receipt = self._execute(plan, cold=cold, required_outputs=required_outputs)
         except BaseException as original:
@@ -506,6 +529,73 @@ class ClassicProducerGraphBuildExecutor:
             librarians,
             linkers,
         )
+
+    def _check_developer_recursive_inputs(
+        self,
+        supervisor: ProcessSupervisor,
+        nodes: Sequence[ProducerNode],
+        include_authority: SealedIncludeAuthority,
+        cancellation: CancellationToken,
+    ) -> None:
+        """Reject changed protected headers before any reviewed object transform.
+
+        Cold certification never enters this path. Developer builds resolve the
+        same discarded compiler trace used by cached builds, against the current
+        sealed source epoch, and fail closed if that trace cannot be established.
+        """
+
+        authority = self.developer_authority
+        if authority is None or not authority.changed_paths or not authority.protected_sources:
+            return
+        units = classic_compiler_translation_unit_authority(self.bundle, self.graph)
+        compiler_id = self.role_tool_ids[ProducerRole.COMPILER]
+        compiler = next(tool for tool in self.bundle.toolchain_lock.tools if tool.id == compiler_id)
+        compiler_logical = (
+            self.bundle.spec.paths.toolchain + "\\" + compiler.path.replace("/", "\\")
+        )
+        for node in nodes:
+            unit = units.get(node.id)
+            if unit is None or unit.source.casefold() not in authority.protected_sources:
+                continue
+            replay = replay_compiler_dependencies(
+                self.producer, supervisor, node, cancellation=cancellation
+            )
+            if replay.trace is None:
+                raise IncrementalAuthorityError(
+                    "cannot revalidate recursive inputs for protected "
+                    f"translation unit {unit.id!r}: {replay.reason}; run rbit repair ."
+                )
+            lane = self.producer.lane_pool.acquire()
+            try:
+                source, cwd, directories, environment, force_includes = compiler_include_parameters(
+                    node,
+                    bundle=self.bundle,
+                    compiler_logical=compiler_logical,
+                    environment=lane.environment,
+                )
+            finally:
+                self.producer.lane_pool.release(lane)
+            try:
+                reads = resolve_msvc_include_trace(
+                    replay.trace,
+                    expected_working_directory=cwd,
+                    expected_source=source,
+                    include_directories=directories,
+                    environment_directories=environment,
+                    force_includes=force_includes,
+                    authority=include_authority,
+                )
+            except ClassicIncludeTraceError as error:
+                raise IncrementalAuthorityError(
+                    "cannot revalidate recursive inputs for protected "
+                    f"translation unit {unit.id!r}: {error}; run rbit repair ."
+                ) from error
+            require_fresh_protected_recursive_inputs(
+                authority,
+                translation_unit_id=unit.id,
+                source=unit.source,
+                recursive_logical_paths=(read.logical_path for read in reads),
+            )
 
     def _run_compiler_epochs(
         self,
@@ -600,6 +690,9 @@ class ClassicProducerGraphBuildExecutor:
             ),
             phase="ordinary compiler/resource phase",
         )
+        self._check_developer_recursive_inputs(
+            supervisor, ordinary, ordinary_include_authority, cancellation
+        )
         _require_unchanged_tree(
             effective_ordinary_source_seal,
             root=self.effective_root,
@@ -648,6 +741,9 @@ class ClassicProducerGraphBuildExecutor:
                 path for node in generated for path in self.producer.node_outputs(node)
             ),
             phase="generated compiler phase",
+        )
+        self._check_developer_recursive_inputs(
+            supervisor, generated, generated_include_authority, cancellation
         )
         steps.append(self.overlay.capture_effective_compiler_products())
         if self.overlay_witnesses:

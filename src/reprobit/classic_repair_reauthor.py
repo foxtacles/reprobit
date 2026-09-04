@@ -54,12 +54,14 @@ from reprobit.discovery_authoring import (
     DiscoveryAuthoringError,
     build_measured_function_record,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Scope
 from reprobit.schema import (
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     classic_function_donor_ids,
 )
 

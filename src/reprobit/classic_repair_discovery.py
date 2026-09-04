@@ -78,22 +78,24 @@ from reprobit.discovery_authoring import (
     build_declaration_shape_donor,
     build_measured_function_record,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest, Scope
 from reprobit.schema import (
     ClassicField,
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     classic_function_donor_ids,
+)
+from reprobit.search_limits import (
+    DEFAULT_DISCOVERY_CANDIDATES,
+    DEFAULT_DISCOVERY_WINDOW,
+    MAX_DISCOVERY_CANDIDATES,
 )
 from reprobit.strict_json import canonical_json
 
-DEFAULT_DISCOVERY_CANDIDATES = 64
-# Every declaration shape (505) plus forward declaration runs of 1..500 declarations
-# at each of the three placements (1500): the closed carrier states discovery may try.
-MAX_DISCOVERY_CANDIDATES = 2005
-DEFAULT_DISCOVERY_WINDOW = 8
 _FORWARD_RUN_PREFIX = "RbDsc"
 _FORWARD_RUN_WIDTH = 3
 _FORWARD_RUN_PLACEMENTS = ("suffix", "prefix", "after_includes")
@@ -818,8 +820,6 @@ def probe_carrier_discovery(
 
 
 __all__ = [
-    "DEFAULT_DISCOVERY_CANDIDATES",
-    "MAX_DISCOVERY_CANDIDATES",
     "ClassicDiscoveryProbeError",
     "ClassicDiscoveryRepair",
     "ClassicDiscoveryResolution",

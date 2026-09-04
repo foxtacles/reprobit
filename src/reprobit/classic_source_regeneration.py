@@ -20,10 +20,12 @@ from reprobit.classic_donors import (
     derive_special_seat_proof,
     render_declaration_carrier_source,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeRole,
+)
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
 )
 from reprobit.strict_json import canonical_json
 

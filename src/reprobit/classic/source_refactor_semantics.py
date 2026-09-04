@@ -27,11 +27,13 @@ from reprobit.classic.source_proofs import (
     require_target_source_refactor_identity,
     select_source_permutation_window,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest
 from reprobit.schema import (
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
 )
 from reprobit.strict_json import canonical_json
 

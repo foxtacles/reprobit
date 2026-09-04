@@ -47,22 +47,20 @@ from reprobit.classic_runtime_graph import (
     _graph_role_bindings,
     _graph_system_library_map,
 )
-from reprobit.incremental import (
-    PRODUCER_IMPLEMENTATION_DIGEST,
-    DeveloperAuthority,
-    revalidate_producer_implementation,
-)
+from reprobit.developer_authority import DeveloperAuthority
+from reprobit.incremental import PRODUCER_IMPLEMENTATION_DIGEST, revalidate_producer_implementation
 from reprobit.incremental_executor import IncrementalProgress
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+)
 from reprobit.model import Digest
 from reprobit.paths import normalize_logical_path
 from reprobit.producer_graph import (
     ProducerNode,
     ProducerRole,
-    materialize_argument,
     producer_graph_digest,
 )
 from reprobit.schema import (
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ProducerGraphBuildAdapter,
     ProjectBundle,
@@ -320,36 +318,6 @@ def _warm_cache_environment(
             raise ClassicIncrementalError("warm Wine environment lacks one PATH")
         values["WINEPATH"] = values.pop(path_keys[0])
     return MappingProxyType(dict(sorted(values.items(), key=lambda item: item[0].casefold())))
-
-
-def _compiler_parameters(
-    node: ProducerNode,
-    *,
-    bundle: ProjectBundle,
-    compiler_logical: str,
-    environment: Mapping[str, str],
-) -> tuple[str, str, tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
-    arguments = tuple(
-        materialize_argument(
-            value,
-            source_root=bundle.spec.paths.source,
-            build_root=bundle.spec.paths.build,
-            toolchain_root=bundle.spec.paths.toolchain,
-        )
-        for value in node.arguments
-    )
-    parsed = validate_compile_arguments([compiler_logical, *arguments])
-    source = cast(str, parsed["source_token"])
-    include_directories = tuple(
-        cast(tuple[int, str, bool], item)[1]
-        for item in cast(Sequence[object], parsed["include_paths"])
-    )
-    force_includes = tuple(
-        cast(tuple[int, str, bool], item)[1]
-        for item in cast(Sequence[object], parsed["force_includes"])
-    )
-    include_environment = tuple(item for item in environment["INCLUDE"].split(";") if item)
-    return source, bundle.spec.paths.build, include_directories, include_environment, force_includes
 
 
 def _logical_absolute(value: str, *, working_directory: str) -> str:

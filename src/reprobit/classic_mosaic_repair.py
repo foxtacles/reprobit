@@ -44,6 +44,10 @@ from reprobit.classic_retail_repair import (
 )
 from reprobit.coff_format import CoffMetadataIndex, CoffObject, coff_body, detailed_relocations
 from reprobit.discovery_contracts import DiscoveryError
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+    ClassicRecipeRole,
+)
 from reprobit.model import Digest
 from reprobit.msvc_discovery_coff import (
     msvc_relocation_spans,
@@ -61,9 +65,7 @@ from reprobit.oracle_pe32 import PE32VirtualAddressReader
 from reprobit.schema import (
     ClassicField,
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
 )
 from reprobit.strict_json import JsonValue, canonical_json
 

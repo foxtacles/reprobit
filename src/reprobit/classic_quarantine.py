@@ -21,11 +21,13 @@ from reprobit.classic.legacy_elision import (
     SIMULATED_ELISION_KIND,
     compose_retail_exact_simulated_elision,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeFamily,
+)
 from reprobit.model import ByteRange, Digest
 from reprobit.oracle_pe32 import LegacyInstallError, PE32VirtualAddressReader
 from reprobit.schema import (
     ClassicProofReceipt,
-    ClassicRecipeFamily,
     LegacyOracleInstallIntervention,
     legacy_allowlist_digest,
 )

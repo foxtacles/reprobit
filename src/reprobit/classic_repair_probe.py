@@ -16,8 +16,6 @@ from typing import Literal
 
 from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 from reprobit.classic_donor_retune_candidates import (
-    DEFAULT_REPAIR_RETUNE_RADIUS,
-    DEFAULT_RETUNE_CANDIDATES,
     DonorRetuneChange,
     DonorRetuneError,
     enumerate_donor_retune_candidates,
@@ -59,19 +57,24 @@ from reprobit.classic_runtime_probe import (
     ClassicDonorProbeProgress,
     ClassicProbeExecution,
 )
+from reprobit.intervention_metadata import (
+    ClassicRecipeRole,
+)
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeIntervention,
-    ClassicRecipeRole,
     LegacyOracleInstallIntervention,
     classic_function_donor_ids,
 )
+from reprobit.search_limits import (
+    DEFAULT_REPAIR_RETUNE_RADIUS,
+    DEFAULT_RETUNE_CANDIDATES,
+    DEFAULT_RETUNE_PROBE_CANDIDATES,
+    DEFAULT_RETUNE_PROBE_WINDOW,
+    MAX_RETUNE_PROBE_CANDIDATES,
+    MAX_RETUNE_PROBE_WINDOW,
+)
 from reprobit.strict_json import canonical_json
-
-DEFAULT_RETUNE_PROBE_WINDOW = 8
-MAX_RETUNE_PROBE_WINDOW = 16
-DEFAULT_RETUNE_PROBE_CANDIDATES = 256
-MAX_RETUNE_PROBE_CANDIDATES = 65536
 
 
 class ClassicDonorRetuneProbeError(RuntimeError):
@@ -938,10 +941,6 @@ def probe_bounded_donor_retunes(
 
 
 __all__ = [
-    "DEFAULT_RETUNE_PROBE_CANDIDATES",
-    "DEFAULT_RETUNE_PROBE_WINDOW",
-    "MAX_RETUNE_PROBE_CANDIDATES",
-    "MAX_RETUNE_PROBE_WINDOW",
     "ClassicDonorRetuneAttemptRefusal",
     "ClassicDonorRetuneAttemptStage",
     "ClassicDonorRetuneProbeError",
