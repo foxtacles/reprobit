@@ -33,6 +33,13 @@ jobs:
           python-version: ${{ matrix.python }}
           cache: pip
       - run: python -m pip install -e ".[test]"
+      - name: Check native Windows file boundaries
+        if: runner.os == 'Windows'
+        run: >-
+          python -m pytest -q -x
+          tests/test_windows_metadata_contract.py
+          tests/test_exact_tree_windows_move.py
+          tests/test_secure_paths_windows.py
       - run: python -m pytest
 
   lowest-bounds:
@@ -197,6 +204,12 @@ jobs:
           --profile msvc_4_2
           --toolchain-root "$env:REPROBIT_MSVC_4_2_ROOT"
           --execute-probe
+      - name: Check native Windows file boundaries
+        run: >-
+          python -m pytest -q -x
+          tests/test_windows_metadata_contract.py
+          tests/test_exact_tree_windows_move.py
+          tests/test_secure_paths_windows.py
       - name: Run the full suite with the authenticated compiler
         run: >-
           python -m pytest -q

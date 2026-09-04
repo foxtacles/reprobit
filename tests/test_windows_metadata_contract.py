@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import struct
 import time
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from reprobit import secure_paths_windows as windows
 from reprobit.classic_repair_probe_cache import ProbeStoreGCResult, gc_probe_store
 from reprobit.model import Digest
 from reprobit.secure_path_contracts import SecureFileSnapshot, SecurePathError
+from reprobit.secure_paths import atomic_publish_relative_if_current, reseal_relative_file
 
 _VOLUME = 0x1234567889ABCDEF
 _INDEX = 0xFEDCBA9876543210
@@ -201,16 +203,33 @@ def test_windows_new_handle_closes_when_full_identity_query_fails(
 
 
 @_NATIVE
-def test_windows_admits_stat_bound_nested_output_and_rejects_replacement(tmp_path: Path) -> None:
+def test_windows_admits_stat_bound_nested_output_and_rejects_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     seat = tmp_path / "seat"
     seat.mkdir()
     authority = {
         ".": (tmp_path.stat().st_dev, tmp_path.stat().st_ino),
         "seat": (seat.stat().st_dev, seat.stat().st_ino),
     }
-    snapshot = windows.atomic_publish_relative_if_current(
+    original_chain = windows._HeldWindowsRoot.parent_chain
+    pinned = False
+
+    def chain(held: Any, relative: object, **kwargs: Any) -> Any:
+        nonlocal pinned
+        result = original_chain(held, relative, **kwargs)
+        # No child file is open yet: the ancestor lease itself must pin its name.
+        assert tuple(seat.iterdir()) == ()
+        with pytest.raises(OSError):
+            seat.rename(tmp_path / "racing-seat")
+        pinned = True
+        return result
+
+    monkeypatch.setattr(windows._HeldWindowsRoot, "parent_chain", chain)
+    snapshot = atomic_publish_relative_if_current(
         tmp_path, "seat/file.bin", b"first", expected=None, expected_directories=authority
     )
+    assert pinned
     metadata = snapshot.path.stat()
     assert (snapshot.device, snapshot.inode, snapshot.mtime_ns) == (
         metadata.st_dev,
@@ -220,7 +239,7 @@ def test_windows_admits_stat_bound_nested_output_and_rejects_replacement(tmp_pat
     seat.rename(tmp_path / "old-seat")
     seat.mkdir()
     with pytest.raises(SecurePathError, match="directory changed before use"):
-        windows.atomic_publish_relative_if_current(
+        atomic_publish_relative_if_current(
             tmp_path,
             "seat/second.bin",
             b"second",
@@ -228,6 +247,92 @@ def test_windows_admits_stat_bound_nested_output_and_rejects_replacement(tmp_pat
             expected_directories=authority,
         )
     assert not (seat / "second.bin").exists()
+
+
+def _make_existing_directory_a_junction(api: Any, seat: Path, target: Path) -> None:
+    """Apply a native reparse record without renaming the held directory."""
+
+    substitute = ("\\??\\" + str(target)).encode("utf-16-le")
+    display = str(target).encode("utf-16-le")
+    payload = (
+        struct.pack("<HHHH", 0, len(substitute), len(substitute) + 2, len(display))
+        + substitute
+        + b"\0\0"
+        + display
+        + b"\0\0"
+    )
+    record = struct.pack("<IHH", 0xA0000003, len(payload), 0) + payload
+    ctypes, wintypes = api.ctypes, api.wintypes
+    api.kernel32.DeviceIoControl.argtypes = [
+        wintypes.HANDLE,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        ctypes.POINTER(wintypes.DWORD),
+        ctypes.c_void_p,
+    ]
+    api.kernel32.DeviceIoControl.restype = wintypes.BOOL
+    handle = api.kernel32.CreateFileW(
+        str(seat), 0x100, 0x1 | 0x2 | 0x4, None, 3, 0x00200000 | 0x02000000, None
+    )
+    assert handle != ctypes.c_void_p(-1).value, api.get_last_error()
+    try:
+        returned = wintypes.DWORD()
+        buffer = ctypes.create_string_buffer(record)
+        assert api.kernel32.DeviceIoControl(
+            handle, 0x000900A4, buffer, len(record), None, 0, ctypes.byref(returned), None
+        ), api.get_last_error()
+    finally:
+        api.close(handle)
+
+
+@_NATIVE
+def test_windows_pinned_ancestor_reparse_change_cannot_publish_outside(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    project, outside = tmp_path / "project", tmp_path / "outside"
+    seat = project / "seat"
+    seat.mkdir(parents=True)
+    outside.mkdir()
+    (outside / "keep.txt").write_bytes(b"untouched")
+    expected = {"seat": (seat.stat().st_dev, seat.stat().st_ino)}
+    original_chain = windows._HeldWindowsRoot.parent_chain
+    original_open = windows._WindowsHandles.open_relative
+    redirected = False
+    outside_creations: list[str] = []
+
+    def chain(held: Any, relative: object, **kwargs: Any) -> Any:
+        nonlocal redirected
+        result = original_chain(held, relative, **kwargs)
+        if not redirected:
+            _make_existing_directory_a_junction(held.api, seat, outside)
+            redirected = True
+        return result
+
+    def open_relative(api: Any, parent: object, name: str, **kwargs: Any) -> object:
+        received = original_open(api, parent, name, **kwargs)
+        if redirected and kwargs.get("create"):
+            outside_creations.extend(
+                path.name for path in outside.iterdir() if path.name != "keep.txt"
+            )
+        return received
+
+    monkeypatch.setattr(windows._HeldWindowsRoot, "parent_chain", chain)
+    monkeypatch.setattr(windows._WindowsHandles, "open_relative", open_relative)
+    with pytest.raises(SecurePathError):
+        atomic_publish_relative_if_current(
+            project,
+            "seat/file.bin",
+            b"candidate",
+            expected=None,
+            expected_directories=expected,
+        )
+    assert redirected
+    assert outside_creations == []
+    assert tuple(path.name for path in outside.iterdir()) == ("keep.txt",)
+    assert (outside / "keep.txt").read_bytes() == b"untouched"
 
 
 @_NATIVE
@@ -255,9 +360,7 @@ def test_windows_probe_gc_preserves_recent_files_without_hashing_them(tmp_path: 
 def test_windows_guarded_replacement_retains_write_exclusion(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    first = windows.atomic_publish_relative_if_current(
-        tmp_path, "outcome.json", b"first", expected=None
-    )
+    first = atomic_publish_relative_if_current(tmp_path, "outcome.json", b"first", expected=None)
     original_open = windows._WindowsHandles.open_relative
     verified = False
 
@@ -272,10 +375,8 @@ def test_windows_guarded_replacement_retains_write_exclusion(
         return original_open(api, parent, name, **kwargs)
 
     monkeypatch.setattr(windows._WindowsHandles, "open_relative", open_relative)
-    second = windows.atomic_publish_relative_if_current(
-        tmp_path, "outcome.json", b"second", expected=first
-    )
+    second = atomic_publish_relative_if_current(tmp_path, "outcome.json", b"second", expected=first)
     assert verified
-    assert windows.reseal_relative_file(tmp_path, "outcome.json", expected=second) == second
+    assert reseal_relative_file(tmp_path, "outcome.json", expected=second) == second
     assert second.path.read_bytes() == b"second"
     assert tuple(path.name for path in tmp_path.iterdir()) == ("outcome.json",)

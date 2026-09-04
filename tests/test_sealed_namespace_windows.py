@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, cast
 
@@ -39,8 +40,18 @@ class _LazyLeaseHolder:
 
     def get(self) -> SealedNamespaceLease:
         if self._lease is None:
-            self._creator_threads.append(threading.current_thread())
-            self._lease = SealedNamespaceLease(trees=(self._tree,))
+
+            def create() -> SealedNamespaceLease:
+                self._creator_threads.append(threading.current_thread())
+                return SealedNamespaceLease(trees=(self._tree,))
+
+            # End the creator's lifetime explicitly; DAG execution may keep
+            # its own worker alive across dependent nodes.
+            with ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="namespace-creator"
+            ) as creator:
+                self._lease = creator.submit(create).result()
+            assert not self._creator_threads[-1].is_alive()
         return self._lease
 
     def close(self) -> None:
@@ -199,7 +210,8 @@ def test_windows_namespace_watcher_survives_dependent_build_waves(tmp_path: Path
         )
     )
 
-    assert action_threads[0] is creator_threads[0]
+    assert len(creator_threads) == 1
+    assert action_threads[0] is not creator_threads[0]
     assert action_threads[1] is not creator_threads[0]
     assert not creator_threads[0].is_alive()
 
@@ -223,7 +235,8 @@ def test_windows_namespace_watcher_detects_transient_change_after_creator_exit(
         _inputs: PreparedNodeInputs,
     ) -> None:
         runtime.get()
-        assert threading.current_thread() is creator_threads[0]
+        assert threading.current_thread() is not creator_threads[0]
+        assert not creator_threads[0].is_alive()
         first.write_bytes(b"object")
 
     def second_wave(

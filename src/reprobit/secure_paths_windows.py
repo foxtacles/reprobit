@@ -349,10 +349,10 @@ class _WindowsHandles:
     def root(self, path: Path, *, deny_other_writes: bool = False) -> Any:
         handle = self.kernel32.CreateFileW(
             str(path),
-            self._FILE_LIST_DIRECTORY
-            | self._FILE_TRAVERSE
+            self._FILE_TRAVERSE
             | self._FILE_READ_ATTRIBUTES
-            | self._SYNCHRONIZE,
+            | self._SYNCHRONIZE
+            | (self._FILE_LIST_DIRECTORY if deny_other_writes else 0),
             0x1 if deny_other_writes else self._SHARE_ALL,
             None,
             3,
@@ -383,6 +383,7 @@ class _WindowsHandles:
         delete: bool = False,
         allow_missing: bool = False,
         deny_other_writes: bool = False,
+        deny_other_deletes: bool = False,
         read_data: bool = True,
         exclusive: bool = False,
         allow_redirect: bool = False,
@@ -406,8 +407,9 @@ class _WindowsHandles:
         handle = self.wintypes.HANDLE()
         access = self._FILE_READ_ATTRIBUTES | self._SYNCHRONIZE
         if directory:
-            # Every held directory can become FILE_RENAME_INFO.RootDirectory.
-            access |= self._FILE_LIST_DIRECTORY | self._FILE_TRAVERSE
+            access |= self._FILE_TRAVERSE
+            if read_data:
+                access |= self._FILE_LIST_DIRECTORY
         elif write:
             access |= self._GENERIC_READ | self._GENERIC_WRITE
         elif read_data:
@@ -424,6 +426,9 @@ class _WindowsHandles:
         create_options = self._DIRECTORY_OPTIONS if directory else self._FILE_OPTIONS
         if allow_redirect:
             create_options &= ~0x40  # FILE_NON_DIRECTORY_FILE
+        sharing = (
+            0x1 if deny_other_writes else (0x1 | 0x2 if deny_other_deletes else self._SHARE_ALL)
+        )
         status = int(
             self.ntdll.NtCreateFile(
                 self.ctypes.byref(handle),
@@ -432,7 +437,7 @@ class _WindowsHandles:
                 self.ctypes.byref(status_block),
                 None,
                 0x80,
-                0x1 if deny_other_writes else self._SHARE_ALL,
+                sharing,
                 disposition,
                 create_options,
                 None,
@@ -727,7 +732,11 @@ class _HeldWindowsRoot:
                     component,
                     directory=True,
                     create=create and expected is None,
-                    deny_other_writes=expected is not None,
+                    # Pin the directory name while allowing child publication.
+                    # NT rename reopens its destination directory for WRITE_DATA;
+                    # LIST_DIRECTORY access or denied write sharing conflicts.
+                    deny_other_deletes=expected is not None,
+                    read_data=False,
                 )
                 if child is None:
                     raise SecurePathError(f"native path component is absent: {component!r}")
