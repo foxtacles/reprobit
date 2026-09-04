@@ -6,6 +6,7 @@ from typing import Any, cast
 
 import pytest
 
+from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 from reprobit.classic_donors import (
     DONOR_FAMILIES,
     DonorCompileRequest,
@@ -387,15 +388,32 @@ def test_donor_private_overlay_uses_the_shared_typed_renderer() -> None:
         "src/unit.h": _digest(header),
     }
 
-    request = prepare_donor_compile_request(
-        intervention,
-        source_path="src/unit.cpp",
-        clean_source=source,
-        effective_source=source,
-        receipts=[receipt],
-        clean_sources={"src/unit.cpp": source, "src/unit.h": header},
-    )
+    with ClassicOverlayRenderSession() as session:
+        request = prepare_donor_compile_request(
+            intervention,
+            source_path="src/unit.cpp",
+            clean_source=source,
+            effective_source=source,
+            receipts=[receipt],
+            clean_sources={"src/unit.cpp": source, "src/unit.h": header},
+            overlay_render_session=session,
+        )
+        after_first = session.stats
+        repeated = prepare_donor_compile_request(
+            intervention,
+            source_path="src/unit.cpp",
+            clean_source=source,
+            effective_source=source,
+            receipts=[receipt],
+            clean_sources={"src/unit.cpp": source, "src/unit.h": header},
+            overlay_render_session=session,
+        )
+        after_second = session.stats
 
+    assert repeated == request
+    assert after_second.token_index_builds == after_first.token_index_builds
+    assert after_second.token_index_hits > after_first.token_index_hits
+    assert after_second.anchor_batch_hits > after_first.anchor_batch_hits
     assert request.files["s.cpp"] == effective
     assert "inc/source/src/unit.cpp" not in request.files
     assert request.files["inc/source/src/unit.h"] == effective_header

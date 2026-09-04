@@ -11,6 +11,7 @@ import pytest
 
 from reprobit.classic.overlay_document import render_classic_overlay_proposal
 from reprobit.classic.overlay_generator import render_classic_overlay_generator
+from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 from reprobit.classic_donor_retune_candidates import (
     DonorRetuneCandidate,
     DonorRetuneChange,
@@ -1315,6 +1316,40 @@ def test_overlay_insertion_materializes_with_its_run_rendered_at_the_boundary() 
         canonical_overlay_operations=canonical_operations,
     )
     assert started.changes[0].kind == "insert"
+
+
+def test_overlay_materialization_reuses_a_supplied_render_session() -> None:
+    saved, receipt, clean_sources, canonical_operations = _materializable_overlay_donor()
+    candidates = enumerate_donor_retune_candidates(
+        saved,
+        radius=1,
+        limit=64,
+        carrier_sources=clean_sources,
+    )
+    inserted = [candidate for candidate in candidates if candidate.changes[0].kind == "insert"]
+
+    with ClassicOverlayRenderSession() as session:
+        first = materialize_donor_retune_candidate(
+            inserted[0],
+            receipt,
+            clean_sources=clean_sources,
+            canonical_overlay_operations=canonical_operations,
+            overlay_render_session=session,
+        )
+        after_first = session.stats
+        second = materialize_donor_retune_candidate(
+            inserted[1],
+            receipt,
+            clean_sources=clean_sources,
+            canonical_overlay_operations=canonical_operations,
+            overlay_render_session=session,
+        )
+        after_second = session.stats
+
+    assert first.intervention != second.intervention
+    assert first.receipt != second.receipt
+    assert after_second.token_index_builds == after_first.token_index_builds
+    assert after_second.token_index_hits > after_first.token_index_hits
 
 
 def test_overlay_insertion_is_refused_when_mixed_with_knob_moves_or_misdescribed() -> None:

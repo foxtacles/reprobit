@@ -114,6 +114,14 @@ class ClassicProgressReporter:
         self.completed = 0
         self._lock = Lock()
 
+    def ensure_remaining(self, remaining: int) -> None:
+        """Grow the total enough to report ``remaining`` more completed units."""
+
+        if remaining < 0:
+            raise ClassicProjectError("classic progress remaining work cannot be negative")
+        with self._lock:
+            self.total = max(self.total, self.completed + remaining)
+
     def emit(self, phase: str, node_id: str) -> None:
         with self._lock:
             self.completed += 1
@@ -323,12 +331,18 @@ class ClassicProducerExecution:
         self._resource_dependency_receipts: dict[str, ResourceDependencyReceipt] = {}
         self._namespace_payload_intern: dict[tuple[str, int], bytes] = {}
         self._compiler_namespaces: dict[str, ClassicCompilerNamespaceReceipt] = {}
+        self._captured_compiler_namespace_ids: set[str] = set()
 
     def begin_certifying(self) -> None:
         self._claim_mode("certifying")
 
     def begin_developer(self) -> None:
         self._claim_mode("developer")
+
+    def ensure_progress_capacity(self, remaining: int) -> None:
+        """Allow a dynamically discovered producer wave to report its work."""
+
+        self._progress.ensure_remaining(remaining)
 
     def _claim_mode(self, mode: Literal["certifying", "developer"]) -> None:
         if not self._runtime_open:
@@ -527,7 +541,7 @@ class ClassicProducerExecution:
     ) -> ClassicCompilerNamespaceReceipt:
         """Capture one shared complete readable namespace over-approximation."""
 
-        if namespace_id in self._compiler_namespaces:
+        if namespace_id in self._captured_compiler_namespace_ids:
             raise ClassicProjectError(
                 f"compiler namespace ID is already captured: {namespace_id!r}"
             )
@@ -596,7 +610,62 @@ class ClassicProducerExecution:
         )
         receipt = ClassicCompilerNamespaceReceipt(evidence, reads)
         self._compiler_namespaces[namespace_id] = receipt
+        self._captured_compiler_namespace_ids.add(namespace_id)
         return receipt
+
+    def release_noncertifying_compiler_epoch(
+        self,
+        namespace_id: str,
+        *,
+        node_ids: Sequence[str],
+        epoch: str,
+    ) -> None:
+        """Release one consumed developer probe epoch's internal receipts."""
+
+        if self._mode != "developer":
+            raise ClassicProjectError(
+                "compiler namespace release is limited to non-certifying execution"
+            )
+        requested = tuple(node_ids)
+        if not requested or len(requested) != len(set(requested)):
+            raise ClassicProjectError(
+                "compiler namespace release requires unique non-empty node IDs"
+            )
+        keys = tuple((node_id, epoch) for node_id in requested)
+        with self._evidence_lock:
+            namespace = self._compiler_namespaces.get(namespace_id)
+            if namespace is None:
+                raise ClassicProjectError(
+                    f"compiler namespace is not available for release: {namespace_id!r}"
+                )
+            indexed: list[ClassicProducerReadReceipt] = []
+            for key in keys:
+                matches = tuple(self._compiler_reads.get(key, ()))
+                if len(matches) != 1:
+                    raise ClassicProjectError(
+                        f"compiler {key[0]!r} has {len(matches)} {epoch!r} read receipts"
+                    )
+                receipt = matches[0]
+                if (
+                    receipt.namespace_id != namespace_id
+                    or receipt.namespace_digest != namespace.evidence.namespace_digest
+                    or receipt.namespace_count != len(namespace.evidence.members)
+                ):
+                    raise ClassicProjectError(
+                        f"compiler {key[0]!r} {epoch} namespace receipt changed"
+                    )
+                indexed.append(receipt)
+            indexed_ids = {id(receipt) for receipt in indexed}
+            if sum(id(receipt) in indexed_ids for receipt in self._producer_reads) != len(indexed):
+                raise ClassicProjectError(
+                    f"compiler namespace {namespace_id!r} read receipts changed"
+                )
+            for key in keys:
+                del self._compiler_reads[key]
+            self._producer_reads[:] = [
+                receipt for receipt in self._producer_reads if id(receipt) not in indexed_ids
+            ]
+            del self._compiler_namespaces[namespace_id]
 
     def compiler_epoch_invocation(
         self, node: ProducerNode, *, epoch: str

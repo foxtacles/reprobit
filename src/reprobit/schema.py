@@ -1715,6 +1715,25 @@ def candidate_auxiliary_donor_ids(
     return tuple(sorted(donor_ids))
 
 
+def classic_function_donor_ids(
+    intervention: ClassicRecipeIntervention,
+    receipt: ClassicProofReceipt,
+) -> frozenset[str]:
+    """Return every primary and candidate-selected donor used by a function record."""
+
+    if intervention.role is not ClassicRecipeRole.FUNCTION:
+        raise ValueError(f"intervention {intervention.id!r} is not a classic function")
+    if receipt.intervention_id != intervention.id or receipt.family is not intervention.family:
+        raise ValueError(f"proof receipt does not match classic function {intervention.id!r}")
+    parameters = {field.name: field.value for field in intervention.parameters}
+    return frozenset(
+        (
+            *intervention.dependencies,
+            *candidate_auxiliary_donor_ids(parameters, receipt.expected_values),
+        )
+    )
+
+
 def _validate_classic_donor_beneficiaries(
     interventions: tuple[Intervention, ...],
     receipts: tuple[ClassicProofReceipt, ...],
@@ -1961,6 +1980,7 @@ __all__ = [
     "VerifierSpec",
     "candidate_auxiliary_donor_ids",
     "classic_debug_companion_paths",
+    "classic_function_donor_ids",
     "intervention_authority_digest",
     "legacy_allowlist_digest",
     "project_document_schemas",

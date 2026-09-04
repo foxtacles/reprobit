@@ -209,6 +209,7 @@ def test_authenticated_msvc42_repair_handles_shared_header_and_publishes_atomica
     assert completion["retired_actions"] == 1
     assert completion["removed_donors"] == 1
     assert completion["repaired_translation_units"] == 1
+    assert completion["compiler_candidates"] == 0
     assert completion["donor_candidates"] == 0
     assert completion["changed_records"] == [
         "reprobit/build-plan.json",

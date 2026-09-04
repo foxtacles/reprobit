@@ -233,18 +233,101 @@ def test_boundary_seat_with_tokens_on_the_wrong_side_is_left_alone() -> None:
     assert rewitness_operations(ops, b"int beta;\nint alpha;\n") is None
 
 
-def test_token_seats_are_left_alone() -> None:
-    ops: list[dict[str, object]] = [
+def _token_seat(boundary: str) -> list[dict[str, object]]:
+    before = ["int", "alpha", ";"]
+    after = ["int", "omega", ";"]
+    return [
         {
             "op": "insert",
             "anchor": {
-                "ctx": _seat_digest(["int", "alpha", ";", "<SEAT>", "int", "omega", ";"]),
-                "b": 3,
-                "a": 3,
-                "at": "before_token",
+                "ctx": _seat_digest([*before, "<SEAT>", *after]),
+                "b": len(before),
+                "a": len(after),
+                "at": boundary,
             },
             "gen": {"k": "fwd", "id": "Spare"},
         }
     ]
+
+
+def test_token_seat_without_a_clean_preimage_is_left_alone() -> None:
+    ops = _token_seat("before_token")
     edited = b"int beta;\nint alpha;\nint omega;\n"
     assert rewitness_operations(ops, edited) is None
+
+
+@pytest.mark.parametrize(
+    ("boundary", "edited"),
+    [
+        ("before_token", b"int alpha;\nint beta;\nint omega;\n"),
+        ("after_token", b"int alpha;\nint beta;\nint omega;\n"),
+    ],
+)
+def test_token_seat_is_rewitnessed_from_its_clean_preimage(boundary: str, edited: bytes) -> None:
+    ops = _token_seat(boundary)
+    with pytest.raises(SourceEditError):
+        _render(edited, ops)
+
+    rescued = rewitness_operations(ops, edited, clean_preimage=_ORIGINAL)
+    assert rescued is not None
+    updated_ops, changes = rescued
+    assert updated_ops[0]["anchor"]["ctx"] != ops[0]["anchor"]["ctx"]
+    assert {location for location, _, _ in changes} == {"0 anchor.ctx"}
+
+    rendered = _render(edited, updated_ops)
+    if boundary == "before_token":
+        assert rendered.index(b"int beta;") < rendered.index(b"class Spare;")
+        assert rendered.index(b"class Spare;") < rendered.index(b"int omega;")
+    else:
+        assert rendered.index(b"int alpha;") < rendered.index(b"class Spare;")
+        assert rendered.index(b"class Spare;") < rendered.index(b"int beta;")
+
+
+def test_token_seat_requires_its_exact_old_anchor() -> None:
+    ops = _token_seat("before_token")
+    edited = b"int alpha;\nint beta;\nint omega;\n"
+    mismatched_preimage = b"int sigma;\nint omega;\n"
+    assert rewitness_operations(ops, edited, clean_preimage=mismatched_preimage) is None
+
+
+@pytest.mark.parametrize(
+    ("boundary", "preimage", "edited"),
+    [
+        (
+            "before_token",
+            b"int omega;\nint alpha;\nint omega;\n",
+            b"int alpha;\nint beta;\nint omega;\n",
+        ),
+        (
+            "after_token",
+            b"int alpha;\nint omega;\nint alpha;\n",
+            b"int alpha;\nint beta;\nint omega;\n",
+        ),
+    ],
+)
+def test_token_seat_requires_a_unique_one_sided_window_in_its_clean_preimage(
+    boundary: str, preimage: bytes, edited: bytes
+) -> None:
+    ops = _token_seat(boundary)
+    assert b"class Spare;" in _render(preimage, ops)
+    assert rewitness_operations(ops, edited, clean_preimage=preimage) is None
+
+
+@pytest.mark.parametrize(
+    ("boundary", "edited"),
+    [
+        (
+            "before_token",
+            b"int omega;\nint alpha;\nint beta;\nint omega;\n",
+        ),
+        (
+            "after_token",
+            b"int alpha;\nint beta;\nint omega;\nint alpha;\n",
+        ),
+    ],
+)
+def test_token_seat_counts_one_sided_duplicates_at_edited_source_edges(
+    boundary: str, edited: bytes
+) -> None:
+    ops = _token_seat(boundary)
+    assert rewitness_operations(ops, edited, clean_preimage=_ORIGINAL) is None

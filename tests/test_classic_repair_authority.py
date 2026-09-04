@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from reprobit.classic_repair_authority import (
     ClassicAuthorityRepairError,
     ClassicInterventionEdit,
+    ClassicProjectOverlayEdit,
     ClassicReceiptEdit,
     ClassicRecordAddition,
     apply_classic_authority_edits,
@@ -65,12 +67,132 @@ def _function() -> ClassicRecipeIntervention:
     )
 
 
+def _project_overlay() -> ClassicRecipeIntervention:
+    operations = [
+        {
+            "op": "insert",
+            "anchor": {"at": "end", "ctx": "0" * 64, "a": 0},
+            "gen": {
+                "k": "seq",
+                "lines": 3,
+                "items": [
+                    {
+                        "k": "member_probe",
+                        "line": 1,
+                        "lines": 2,
+                        "function_identifier": "Probe",
+                    },
+                    {"k": "empty_class", "line": 3, "id": "Unused000"},
+                ],
+            },
+        }
+    ]
+    values = {
+        "graph": {"generated_tus": [], "link_admissions": []},
+        "outputs": [
+            {
+                "clean": "1" * 64,
+                "effective": "2" * 64,
+                "ops": operations,
+                "path": "src/unit.cpp",
+                "size": 10,
+            }
+        ],
+        "schema": 2,
+    }
+    return ClassicRecipeIntervention(
+        id="project.fixture",
+        scope=Scope(target="program"),
+        rationale="Render one typed project source overlay.",
+        family=ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH,
+        role=ClassicRecipeRole.PROJECT,
+        build_target="program",
+        parameters=tuple(
+            ClassicField(name=name, value=value)  # type: ignore[arg-type]
+            for name, value in sorted(values.items())
+        ),
+    )
+
+
+def _project_overlay_after(
+    before: ClassicRecipeIntervention,
+    operations: list[object],
+) -> ClassicRecipeIntervention:
+    values = {field.name: field.value for field in before.parameters}
+    outputs = [dict(item) for item in values["outputs"]]  # type: ignore[union-attr]
+    outputs[0]["ops"] = operations
+    outputs[0]["effective"] = "3" * 64
+    outputs[0]["size"] = 12
+    values["outputs"] = outputs
+    return ClassicRecipeIntervention.model_validate(
+        {
+            **before.model_dump(mode="python"),
+            "parameters": tuple(
+                {"name": name, "value": value} for name, value in sorted(values.items())
+            ),
+        }
+    )
+
+
+def test_project_overlay_edit_accepts_only_a_trailing_inert_declaration() -> None:
+    before = _project_overlay()
+    operations = deepcopy(
+        next(field.value for field in before.parameters if field.name == "outputs")[0]["ops"]
+    )
+    sequence = operations[0]["gen"]
+    sequence["items"].append({"k": "empty_class", "line": 4, "id": "Unused001"})
+    sequence["lines"] = 4
+    after = _project_overlay_after(before, operations)
+
+    assert ClassicProjectOverlayEdit(before, after).after == after
+
+    assert ClassicProjectOverlayEdit(after, before).after == before
+
+
+@pytest.mark.parametrize(
+    "change",
+    ["helper", "pin-only", "missing-line", "reorder", "non-tail"],
+)
+def test_project_overlay_edit_rejects_broader_or_unbound_changes(change: str) -> None:
+    before = _project_overlay()
+    operations = deepcopy(
+        next(field.value for field in before.parameters if field.name == "outputs")[0]["ops"]
+    )
+    sequence = operations[0]["gen"]
+    if change == "helper":
+        sequence["items"][0]["function_identifier"] = "ChangedProbe"
+    elif change == "missing-line":
+        sequence["items"].append({"k": "empty_class", "id": "Unused001"})
+        sequence["lines"] = 4
+    elif change == "reorder":
+        sequence["items"] = list(reversed(sequence["items"]))
+    elif change == "non-tail":
+        sequence["items"].insert(0, {"k": "empty_class", "line": 1, "id": "Unused001"})
+        sequence["lines"] = 4
+    after = _project_overlay_after(before, operations)
+
+    with pytest.raises(ClassicAuthorityRepairError):
+        ClassicProjectOverlayEdit(before, after)
+
+
 def _receipt() -> ClassicProofReceipt:
     return ClassicProofReceipt(
         id="proof.donor.fixture",
         intervention_id="donor.fixture",
         family=ClassicRecipeFamily.DECLARATION_SHAPE,
         expected_values={"rendered_sha256": "before"},
+    )
+
+
+def _function_receipt(
+    intervention: ClassicRecipeIntervention,
+    identifier: str,
+) -> ClassicProofReceipt:
+    return ClassicProofReceipt(
+        id=identifier,
+        intervention_id=intervention.id,
+        family=intervention.family,
+        expected_values={"expected_body_length": 8},
     )
 
 
@@ -279,6 +401,124 @@ def test_addition_must_carry_its_own_receipt_and_a_unit_scope() -> None:
                 family=homeless.family,
             ),
         )
+
+
+def test_reauthoring_preserves_the_independent_action_and_receipt_slots(
+    tmp_path: Path,
+) -> None:
+    spec = _spec()
+    intervention_path, proof_path = _shard(tmp_path, spec, "unit.fixture")
+    before_interventions = InterventionDocument.model_validate_json(intervention_path.read_bytes())
+    before_proofs = ProofDocument.model_validate_json(proof_path.read_bytes())
+    old = _function().model_copy(update={"id": "function.old"})
+    trailing = _function().model_copy(
+        update={
+            "id": "function.trailing",
+            "scope": Scope(
+                target="program",
+                translation_unit="unit.fixture",
+                function="?Trailing@@YAXXZ",
+            ),
+            "symbol": "?Trailing@@YAXXZ",
+        }
+    )
+    old_receipt = _function_receipt(old, "proof.function.old")
+    trailing_receipt = _function_receipt(trailing, "proof.function.trailing")
+    intervention_path.write_bytes(
+        canonical_json(
+            before_interventions.model_copy(
+                update={
+                    "interventions": (
+                        before_interventions.interventions[0],
+                        old,
+                        trailing,
+                    )
+                }
+            )
+        )
+    )
+    # The old action and receipt deliberately occupy different indices.
+    proof_path.write_bytes(
+        canonical_json(
+            before_proofs.model_copy(
+                update={
+                    "expected_observations": (
+                        trailing_receipt,
+                        before_proofs.expected_observations[0],
+                        old_receipt,
+                    )
+                }
+            )
+        )
+    )
+    replacement = old.model_copy(update={"id": "function.replacement"})
+    replacement_receipt = _function_receipt(replacement, "proof.function.replacement")
+
+    apply_classic_authority_edits(
+        tmp_path,
+        spec,
+        interventions=(ClassicInterventionEdit(old, None),),
+        receipts=(ClassicReceiptEdit(old_receipt, None),),
+        additions=(
+            ClassicRecordAddition(
+                replacement,
+                replacement_receipt,
+                replaces_intervention_id=old.id,
+            ),
+        ),
+    )
+
+    interventions = InterventionDocument.model_validate_json(intervention_path.read_bytes())
+    assert [item.id for item in interventions.interventions] == [
+        "donor.fixture",
+        "function.replacement",
+        "function.trailing",
+    ]
+    proofs = ProofDocument.model_validate_json(proof_path.read_bytes())
+    assert [item.id for item in proofs.expected_observations] == [
+        "proof.function.trailing",
+        "proof.donor.fixture",
+        "proof.function.replacement",
+    ]
+
+
+def test_addition_requires_exactly_one_matching_proof_shard(tmp_path: Path) -> None:
+    spec = _spec()
+    intervention_path, proof_path = _shard(tmp_path, spec, "unit.fixture")
+    function = _function()
+    receipt = _function_receipt(function, "proof.function.fixture")
+    addition = ClassicRecordAddition(function, receipt)
+
+    proof_path.unlink()
+    intervention_before = intervention_path.read_bytes()
+    with pytest.raises(ClassicAuthorityRepairError, match="without documents"):
+        apply_classic_authority_edits(tmp_path, spec, additions=(addition,))
+    assert intervention_path.read_bytes() == intervention_before
+
+    proof_path.write_bytes(
+        canonical_json(
+            ProofDocument(
+                schema_version=3,
+                target_id="program",
+                translation_unit_id="unit.fixture",
+                expected_observations=(_receipt(),),
+            )
+        )
+    )
+    duplicate_path = proof_path.with_name("unit.fixture-copy.json")
+    duplicate_path.write_bytes(
+        canonical_json(
+            ProofDocument(
+                schema_version=3,
+                target_id="program",
+                translation_unit_id="unit.fixture",
+            )
+        )
+    )
+    before = {path: path.read_bytes() for path in (intervention_path, proof_path, duplicate_path)}
+    with pytest.raises(ClassicAuthorityRepairError, match="more than one proof document"):
+        apply_classic_authority_edits(tmp_path, spec, additions=(addition,))
+    assert {path: path.read_bytes() for path in before} == before
 
 
 def test_dependency_edit_drops_only_parameters_bound_to_the_previous_donor() -> None:

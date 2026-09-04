@@ -24,6 +24,7 @@ from types import TracebackType
 from typing import Self
 
 from reprobit.atomic_io import write_json_atomic
+from reprobit.composition_ledger import COMPOSED_BODY_LEDGER_RELATIVE
 from reprobit.state_lock import AdvisoryFileLock as _AdvisoryFileLock
 from reprobit.state_lock import StateError as _StateError
 
@@ -65,6 +66,10 @@ class StateStatus:
     cache_stale_leases: int = 0
     cache_current_records: int = 0
     cache_obsolete_records: int = 0
+    repair_probe_cache_bytes: int = 0
+    repair_probe_cache_files: int = 0
+    repair_ledger_bytes: int = 0
+    repair_ledger_files: int = 0
 
     @property
     def run_bytes(self) -> int:
@@ -76,11 +81,23 @@ class StateStatus:
 
     @property
     def total_bytes(self) -> int:
-        return self.run_bytes + self.cache_bytes + self.report_bytes
+        return (
+            self.run_bytes
+            + self.cache_bytes
+            + self.repair_probe_cache_bytes
+            + self.repair_ledger_bytes
+            + self.report_bytes
+        )
 
     @property
     def total_files(self) -> int:
-        return self.run_files + self.cache_files + self.report_files
+        return (
+            self.run_files
+            + self.cache_files
+            + self.repair_probe_cache_files
+            + self.repair_ledger_files
+            + self.report_files
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,6 +113,8 @@ class GCResult:
     report_bytes: int = 0
     cache_removed_records: int = 0
     cache_removed_blobs: int = 0
+    repair_probe_cache_files: int = 0
+    repair_probe_cache_bytes: int = 0
     cache_active_leases: int = 0
     cache_skipped_recent_records: int = 0
     dry_run: bool = False
@@ -343,6 +362,24 @@ class StateStore:
             paths.append(grind)
         return tuple(paths)
 
+    def _repair_ledger_usage(self) -> tuple[int, int]:
+        """Measure the one persistent repair ledger owned by ReproBit."""
+
+        ledger_root = self.root / COMPOSED_BODY_LEDGER_RELATIVE[0]
+        ledger = ledger_root / COMPOSED_BODY_LEDGER_RELATIVE[1]
+        if not os.path.lexists(ledger_root):
+            return 0, 0
+        if ledger_root.is_symlink() or not ledger_root.is_dir():
+            raise _StateError(f"repair ledger root is not a real directory: {ledger_root}")
+        if not os.path.lexists(ledger):
+            return 0, 0
+        if ledger.is_symlink() or not ledger.is_file():
+            raise _StateError(f"repair ledger is not a real file: {ledger}")
+        ledger_stat = ledger.stat(follow_symlinks=False)
+        if not stat.S_ISREG(ledger_stat.st_mode):
+            raise _StateError(f"repair ledger is not a real file: {ledger}")
+        return ledger_stat.st_size, 1
+
     @staticmethod
     def _report_usage(paths: tuple[Path, ...]) -> tuple[int, int]:
         total_bytes = 0
@@ -441,6 +478,15 @@ class StateStore:
         else:
             cache_bytes, cache_files = 0, 0
             cache_status = None
+        from reprobit.classic_repair_probe_cache import (
+            probe_store_directory,
+            probe_store_usage,
+        )
+
+        probe_store = probe_store_directory(self.root)
+        if os.path.lexists(probe_store) and (probe_store.is_symlink() or not probe_store.is_dir()):
+            raise _StateError(f"probe store is not a real directory: {probe_store}")
+        repair_probe_cache_files, repair_probe_cache_bytes = probe_store_usage(self.root)
         try:
             report_paths = self._managed_report_paths()
             report_bytes, report_files = self._report_usage(report_paths)
@@ -449,6 +495,7 @@ class StateStore:
             # scanning it. A later status invocation will observe the new set.
             report_paths = self._managed_report_paths()
             report_bytes, report_files = self._report_usage(report_paths)
+        repair_ledger_bytes, repair_ledger_files = self._repair_ledger_usage()
         return StateStatus(
             self.root,
             tuple(runs),
@@ -464,6 +511,10 @@ class StateStore:
             cache_obsolete_records=(
                 cache_status.obsolete_records if cache_status is not None else 0
             ),
+            repair_probe_cache_bytes=repair_probe_cache_bytes,
+            repair_probe_cache_files=repair_probe_cache_files,
+            repair_ledger_bytes=repair_ledger_bytes,
+            repair_ledger_files=repair_ledger_files,
         )
 
     def gc(
@@ -494,6 +545,8 @@ class StateStore:
         reclaimed = 0
         cache_removed_records = 0
         cache_removed_blobs = 0
+        repair_probe_cache_files = 0
+        repair_probe_cache_bytes = 0
         cache_active_leases = 0
         cache_skipped_recent_records = 0
         reports_removed: tuple[Path, ...] = ()
@@ -586,11 +639,10 @@ class StateStore:
             if os.path.lexists(probe_store):
                 if probe_store.is_symlink() or not probe_store.is_dir():
                     raise _StateError(f"probe store is not a real directory: {probe_store}")
-                _files, probe_bytes = probe_store_usage(self.root)
+                repair_probe_cache_files, repair_probe_cache_bytes = probe_store_usage(self.root)
                 if not dry_run:
                     shutil.rmtree(probe_store)
-                removed.append(probe_store)
-                reclaimed += probe_bytes
+                reclaimed += repair_probe_cache_bytes
         if include_reports and os.path.lexists(self.root):
             with _maintenance_gate(self.root):
                 reports_removed = self._managed_report_paths()
@@ -612,6 +664,8 @@ class StateStore:
             report_bytes=report_bytes,
             cache_removed_records=cache_removed_records,
             cache_removed_blobs=cache_removed_blobs,
+            repair_probe_cache_files=repair_probe_cache_files,
+            repair_probe_cache_bytes=repair_probe_cache_bytes,
             cache_active_leases=cache_active_leases,
             cache_skipped_recent_records=cache_skipped_recent_records,
             dry_run=dry_run,

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import Counter
 from collections.abc import Mapping, Sequence
+from itertools import permutations, product
+from math import factorial
 from typing import Any, cast
 
 from reprobit.binary import ByteIdentityError
@@ -40,13 +42,17 @@ from .compiler_state_foundation import (
     _tokens,
 )
 
+_MAX_SCHEDULE_PAIRINGS = 32
 
-def _schedule_candidate(
+
+def _schedule_window(
     source_tokens: Sequence[bytes],
     target_tokens: Sequence[bytes],
     source_instructions: Sequence[_Instruction],
     target_instructions: Sequence[_Instruction],
-) -> tuple[int, int, list[int]] | None:
+) -> tuple[int, int] | None:
+    """Locate the first closed permutation window without choosing a pairing."""
+
     if len(source_tokens) != len(target_tokens):
         return None
     first = next(
@@ -68,20 +74,87 @@ def _schedule_candidate(
         target_end = int(target_instructions[stop - 1]["offset"]) + int(
             target_instructions[stop - 1]["length"]
         )
-        if source_end != target_end:
-            continue
-        source_window = list(source_tokens[first:stop])
-        target_window = list(target_tokens[first:stop])
-        if Counter(source_window) != Counter(target_window):
-            continue
-        counts = Counter(source_window)
-        if any(count != 1 for count in counts.values()):
-            raise ClassicSemanticError(
-                "MSVC 4.20 compiler-state code schedule has no unique instruction pairing"
-            )
-        positions = {token: index for index, token in enumerate(source_window)}
-        return first, stop, [positions[token] for token in target_window]
+        if source_end == target_end and Counter(source_tokens[first:stop]) == Counter(
+            target_tokens[first:stop]
+        ):
+            return first, stop
     return None
+
+
+def _schedule_pairing_candidates(
+    source_tokens: Sequence[bytes],
+    target_tokens: Sequence[bytes],
+    source_instructions: Sequence[_Instruction],
+    target_instructions: Sequence[_Instruction],
+) -> tuple[tuple[int, int, list[int]], ...]:
+    """Enumerate the bounded instruction pairings for one closed window."""
+
+    window = _schedule_window(
+        source_tokens,
+        target_tokens,
+        source_instructions,
+        target_instructions,
+    )
+    if window is None:
+        return ()
+    first, stop = window
+    source_window = list(source_tokens[first:stop])
+    target_window = list(target_tokens[first:stop])
+    distinct = tuple(dict.fromkeys(source_window))
+    choices: list[tuple[tuple[int, ...], ...]] = []
+    candidate_count = 1
+    for token in distinct:
+        source_positions = tuple(
+            index for index, candidate in enumerate(source_window) if candidate == token
+        )
+        candidate_count *= factorial(len(source_positions))
+        if candidate_count > _MAX_SCHEDULE_PAIRINGS:
+            raise ClassicSemanticError(
+                "MSVC 4.20 compiler-state code schedule exceeds its closed pairing bound"
+            )
+        options = tuple(permutations(source_positions))
+        choices.append(options)
+
+    candidates: list[tuple[int, int, list[int]]] = []
+    target_positions = {
+        token: tuple(index for index, candidate in enumerate(target_window) if candidate == token)
+        for token in distinct
+    }
+    for selection in product(*choices):
+        order = [-1] * len(source_window)
+        for token, source_positions in zip(distinct, selection, strict=True):
+            for target_position, source_position in zip(
+                target_positions[token], source_positions, strict=True
+            ):
+                order[target_position] = source_position
+        candidates.append((first, stop, order))
+    return tuple(candidates)
+
+
+def _schedule_candidate(
+    source_tokens: Sequence[bytes],
+    target_tokens: Sequence[bytes],
+    source_instructions: Sequence[_Instruction],
+    target_instructions: Sequence[_Instruction],
+) -> tuple[int, int, list[int]] | None:
+    window = _schedule_window(
+        source_tokens,
+        target_tokens,
+        source_instructions,
+        target_instructions,
+    )
+    if window is None:
+        return None
+    first, stop = window
+    source_window = list(source_tokens[first:stop])
+    target_window = list(target_tokens[first:stop])
+    counts = Counter(source_window)
+    if any(count != 1 for count in counts.values()):
+        raise ClassicSemanticError(
+            "MSVC 4.20 compiler-state code schedule has no unique instruction pairing"
+        )
+    positions = {token: index for index, token in enumerate(source_window)}
+    return first, stop, [positions[token] for token in target_window]
 
 
 def _stack_normalized_tokens(

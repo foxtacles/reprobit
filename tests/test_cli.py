@@ -67,7 +67,7 @@ from reprobit.model import (
 from reprobit.producer_graph import (
     ProducerGraphError,
 )
-from reprobit.progress import ProgressKind
+from reprobit.progress import ProgressEvent, ProgressKind
 from reprobit.project_loader import load_project, load_project_tree
 from reprobit.report import (
     BuildExecutionSummary,
@@ -3444,7 +3444,25 @@ def test_incremental_analysis_node_has_a_plain_language_progress_label() -> None
         _friendly_incremental_phase("transform", "analysis-link.program")
         == "Creating comparison files"
     )
-    assert _friendly_incremental_phase("transform", "object.program") == "Transform"
+    assert _friendly_incremental_phase("producer", "compiler.program.0001") == "Compiling source"
+    assert _friendly_incremental_phase("counterfactual-audit", "compiler.program.0001") == (
+        "Checking generated source"
+    )
+    assert _friendly_incremental_phase("producer", "resource.program.0002") == (
+        "Compiling resources"
+    )
+    assert _friendly_incremental_phase("producer", "librarian.program") == "Building libraries"
+    assert _friendly_incremental_phase("producer", "linker.program") == "Linking targets"
+    assert _friendly_incremental_phase("transform", "transform.compiler.program.0001") == (
+        "Applying saved adjustments"
+    )
+    assert _friendly_incremental_phase("transform", "terminal.program") == (
+        "Finalizing target outputs"
+    )
+    assert _friendly_incremental_phase("transform", "object.program") == "Preparing build outputs"
+    assert _friendly_incremental_phase("publication", "target-set") == (
+        "Saving reusable build results"
+    )
 
 
 def test_producer_progress_is_structured_for_ndjson_and_restrained_for_text() -> None:
@@ -3483,6 +3501,8 @@ def test_producer_progress_is_structured_for_ndjson_and_restrained_for_text() ->
     assert events[0]["kind"] == "phase_started"
     assert events[1]["kind"] == "cache_miss"
     assert events[1]["reason"] == "recursive header changed"
+    assert events[1]["phase"] == "compile"
+    assert events[1]["node_id"] == "unit.one"
     assert events[2]["kind"] == "phase_started"
     assert events[2]["phase"] == "analyze"
     assert events[3]["kind"] == "cache_hit"
@@ -3501,10 +3521,39 @@ def test_producer_progress_is_structured_for_ndjson_and_restrained_for_text() ->
     assert len(lines) == 5
     assert lines[0] == "build..."
     assert "1/100" in lines[1]
+    assert "Compiling source" in lines[1]
+    assert "unit.one" not in lines[1]
     assert "cache 0 hit/1 miss" in lines[1]
     assert "10/100" in lines[2]
     assert "100/100" in lines[3]
+    assert "Saving verified targets" in lines[3]
+    assert "publish.program" not in lines[3]
     assert lines[4].startswith("build: complete")
+    assert "execute:" not in lines[4]
+
+
+def test_redirected_text_heartbeats_are_useful_without_being_noisy() -> None:
+    human = StringIO()
+    output = CLIOutput("text", StringIO(), human, heartbeat_seconds=5)
+    output._observe_progress(ProgressEvent(1, ProgressKind.PHASE_STARTED, "execute", "build", 0))
+    for sequence, elapsed in enumerate((5.0, 10.0, 15.0, 20.0), start=2):
+        output._observe_progress(
+            ProgressEvent(
+                sequence,
+                ProgressKind.HEARTBEAT,
+                "producer",
+                "build",
+                elapsed,
+                completed=3,
+                total=10,
+                node_id="compiler.program.0001",
+            )
+        )
+
+    assert human.getvalue().splitlines() == [
+        "build...",
+        "build... (3/10; Compiling source; 15.0s elapsed)",
+    ]
 
 
 def test_interactive_producer_progress_is_transient_on_success() -> None:
@@ -3661,6 +3710,12 @@ def test_state_status_and_clean_expose_retained_workspace_lifecycle(
     capsys.readouterr()
     state = project / ".reprobit-state"
     state.mkdir()
+    probe_store = state / "repair-probes" / "v1" / "ab"
+    probe_store.mkdir(parents=True)
+    (probe_store / "abcd.bin").write_bytes(b"x" * 100)
+    ledger = state / "ledger" / "composed-bodies.json"
+    ledger.parent.mkdir()
+    ledger.write_bytes(b"ledger!")
     with RunArena(
         state,
         kind="build",
@@ -3686,7 +3741,30 @@ def test_state_status_and_clean_expose_retained_workspace_lifecycle(
         status = events[-1]
         assert status["event"] == "state_status"
         assert status["run_bytes"] >= 2048
+        assert status["repair_search_cache_bytes"] == 100
+        assert status["repair_search_cache_files"] == 1
+        assert status["repair_ledger_bytes"] == 7
+        assert status["repair_ledger_files"] == 1
+        assert status["total_bytes"] == (
+            status["run_bytes"]
+            + status["cache_bytes"]
+            + status["repair_search_cache_bytes"]
+            + status["repair_ledger_bytes"]
+            + status["report_bytes"]
+        )
+        assert status["total_files"] == (
+            status["run_files"]
+            + status["cache_files"]
+            + status["repair_search_cache_files"]
+            + status["repair_ledger_files"]
+            + status["report_files"]
+        )
         assert status["runs"][0]["outcome"] == "succeeded"
+
+        assert main(["state", "status", str(project)]) == 0
+        human_status = capsys.readouterr().out
+        assert "repair search cache: 1 file, 100 B" in human_status
+        assert "saved repair data: 1 file, 7 B" in human_status
 
         assert main(["clean", str(project), "--preview"]) == 0
         assert retained.is_dir()
@@ -3705,9 +3783,24 @@ def test_state_status_and_clean_expose_retained_workspace_lifecycle(
         assert "reusable incremental cache was kept" in cleaned
         assert "(s)" not in cleaned
 
+        assert main(["--format", "ndjson", "clean", str(project), "--cache", "--preview"]) == 0
+        cache_preview = json.loads(capsys.readouterr().out.splitlines()[-1])
+        assert cache_preview["event"] == "cleanup_preview"
+        assert cache_preview["active_cache_leases"] == 1
+        assert cache_preview["repair_search_cache_files"] == 1
+        assert cache_preview["repair_search_cache_bytes"] == 100
+        assert cache_preview["candidates"] == []
+        assert cache_preview["next_command"] is not None
+        assert "Incremental cache cleanup is currently skipped" in cache_preview["message"]
+        assert "1 repair search cache file (100 B)" in cache_preview["message"]
+        assert probe_store.is_dir()
+
         assert main(["clean", str(project), "--cache"]) == 0
         skipped = capsys.readouterr().out
-        assert "Cache cleanup was skipped because 1 active build" in skipped
+        assert "Incremental cache cleanup was skipped because 1 active build" in skipped
+        assert "Removed 1 repair search cache file (100 B)" in skipped
+        assert "Removed 0 inactive workspaces" in skipped
+        assert not probe_store.exists()
         assert cache.status().records == 1
 
     assert (
@@ -4312,6 +4405,7 @@ def test_primary_help_uses_human_terms_for_common_workflows(
     assert "review and lock the source files a build may read" in top_level
     assert "check exact bytes and trust evidence" in top_level
     assert "find and review low-cost compiler adjustments" in top_level
+    assert "discover grind did not find or save the requested result" in top_level
     assert "portable project read set" not in top_level
     assert "cold exact solution" not in top_level
 
@@ -4748,6 +4842,8 @@ def test_quiet_silences_redirected_text_progress_but_keeps_results_and_failures(
     loud_lines = loud.getvalue().splitlines()
     assert loud_lines[0] == "build..."
     assert any("s elapsed)" in line and line.startswith("build... (") for line in loud_lines)
+    assert any("Compiling source" in line for line in loud_lines if "s elapsed)" in line)
+    assert not any("compile: unit.one" in line for line in loud_lines)
     assert loud_lines[-1].startswith("build: complete")
 
     # With --quiet the same run writes nothing to the progress channel while

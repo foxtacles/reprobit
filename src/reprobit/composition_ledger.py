@@ -22,11 +22,13 @@ from typing import Literal
 
 from pydantic import Field
 
+from reprobit.atomic_io import write_json_atomic
 from reprobit.coff_format import CoffObject, coff_body
 from reprobit.model import StrictModel
-from reprobit.strict_json import canonical_json, strict_load
+from reprobit.strict_json import strict_load
 
 LEDGER_SCHEMA_VERSION: Literal[1] = 1
+COMPOSED_BODY_LEDGER_RELATIVE = ("ledger", "composed-bodies.json")
 _IMAGE_SCN_CNT_CODE = 0x20
 
 
@@ -166,9 +168,7 @@ def census_unrecorded_fallout(
 
 def write_ledger(path: Path, ledger: ComposedBodyLedger) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    staged = path.with_name(path.name + ".tmp")
-    staged.write_bytes(canonical_json(ledger.model_dump(mode="json")))
-    staged.replace(path)
+    write_json_atomic(path, ledger.model_dump(mode="json"))
 
 
 def read_ledger(path: Path) -> ComposedBodyLedger:
@@ -183,6 +183,7 @@ def ledger_translation_units(ledger: ComposedBodyLedger) -> Iterable[str]:
 
 
 __all__ = [
+    "COMPOSED_BODY_LEDGER_RELATIVE",
     "LEDGER_SCHEMA_VERSION",
     "ComposedBodyLedger",
     "ComposedTargetLedger",

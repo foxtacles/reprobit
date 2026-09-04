@@ -11,10 +11,14 @@ from reprobit.msvc42_pdb import (
     MSVC42_PDB_CANONICALIZATION_POLICY,
     CanonicalizedMsvc42Pdb,
     Msvc42PdbIdentity,
+    Msvc42PdbModule,
+    Msvc42PdbPublicSymbol,
+    Msvc42PdbSectionContribution,
     PdbCanonicalizationCategory,
     PdbCanonicalizationRange,
     canonicalize_msvc42_pdb,
     read_msvc42_pdb_identity,
+    read_msvc42_pdb_link_map,
 )
 from reprobit.small_msf import SMALL_MSF_MAGIC, SmallMsf
 
@@ -39,13 +43,61 @@ def _stream_table(
     return bytes(data)
 
 
-def _sc40(*, seed: int) -> bytes:
+def _sc40(
+    *,
+    seed: int,
+    section: int = 1,
+    offset: int = 0x120,
+    size: int = 0x44,
+    characteristics: int = 0x60000020,
+    module_index: int = 3,
+) -> bytes:
     data = bytearray(20)
-    struct.pack_into("<H", data, 0, 1)
+    struct.pack_into("<H", data, 0, section)
     data[2:4] = bytes((seed, seed + 1))
-    struct.pack_into("<IIIH", data, 4, 0x120, 0x44, 0x60000020, 3)
+    struct.pack_into("<IIIH", data, 4, offset, size, characteristics, module_index)
     data[18:20] = bytes((seed + 2, seed + 3))
     return bytes(data)
+
+
+def _modi(
+    *,
+    stream_number: int,
+    symbol_size: int,
+    module_name: str,
+    object_name: str,
+    module_index: int,
+) -> bytes:
+    fixed = bytearray(48)
+    struct.pack_into("<I", fixed, 0, 0x11223344 + module_index)
+    fixed[4:24] = _sc40(seed=0x41 + module_index * 4, module_index=module_index)
+    struct.pack_into("<HHIIIH", fixed, 24, 1, stream_number, symbol_size, 0, 0, 1)
+    fixed[42:44] = b"\x51\x52"
+    struct.pack_into("<I", fixed, 44, 0x55667788 + module_index)
+    names = module_name.encode("latin-1") + b"\0" + object_name.encode("latin-1") + b"\0"
+    return bytes(fixed) + names + b"\x61" * ((-(len(fixed) + len(names))) % 4)
+
+
+def _public_symbol_record(*, section: int, offset: int, type_index: int, name: str) -> bytes:
+    encoded_name = name.encode("latin-1")
+    assert 0 < len(encoded_name) <= 0xFF
+    data = bytearray(
+        struct.pack("<HHIHHB", 0, 0x0203, offset, section, type_index, len(encoded_name))
+    )
+    data.extend(encoded_name)
+    data.extend(b"\0" * (-len(data) % 4))
+    struct.pack_into("<H", data, 0, len(data) - 2)
+    return bytes(data)
+
+
+def _psi(*record_offsets: int) -> bytes:
+    symbol_hash = b"HASH"
+    address_map = b"".join(struct.pack("<I", offset) for offset in record_offsets)
+    return (
+        struct.pack("<IIIIH2xII", len(symbol_hash), len(address_map), 0, 0, 0, 0, 0)
+        + symbol_hash
+        + address_map
+    )
 
 
 def _gproc_record() -> bytes:
@@ -80,28 +132,96 @@ def _synthetic_pdb(
     page_count: int = 32,
     active_fpm: int = 9,
     extra_free_pages: tuple[int, ...] = (),
+    with_link_map: bool = False,
 ) -> bytes:
-    module = struct.pack("<I", 1) + _gproc_record() + struct.pack("<HH", 2, 0x0006)
+    first_module = struct.pack("<I", 1) + _gproc_record() + struct.pack("<HH", 2, 0x0006)
     tpi_record = struct.pack("<HH", 2, 0x1001)
     tpi = struct.pack("<IHHIH2x", 19951122, 0x1000, 0x1001, len(tpi_record), 5)
     tpi += tpi_record
     tpi_hash = struct.pack("<H", 0x77) + struct.pack("<H2sI", 0x1000, b"\x22\x33", 0)
     pdb_info = struct.pack("<III", 19950814, 0x66778899, 7) + b"named-payload"
 
-    fixed = bytearray(48)
-    struct.pack_into("<I", fixed, 0, 0x11223344)
-    fixed[4:24] = _sc40(seed=0x41)
-    struct.pack_into("<HHIIIH", fixed, 24, 1, 4, len(module), 0, 0, 1)
-    fixed[42:44] = b"\x51\x52"
-    struct.pack_into("<I", fixed, 44, 0x55667788)
-    names = b"module\0object.obj\0"
-    name_padding = b"\x61" * ((-(len(fixed) + len(names))) % 4)
-    modi = bytes(fixed) + names + name_padding
+    modi = _modi(
+        stream_number=4,
+        symbol_size=len(first_module),
+        module_name="module",
+        object_name="object.obj",
+        module_index=0,
+    )
+    section_contributions = _sc40(seed=0x31)
+    public_stream = 0xFFFF
+    symbol_record_stream = 0xFFFF
+    extra_payloads: list[bytes] = []
+    if with_link_map:
+        second_module = first_module
+        modi += _modi(
+            stream_number=6,
+            symbol_size=len(second_module),
+            module_name="module-é",
+            object_name="second.obj",
+            module_index=1,
+        )
+        section_contributions = b"".join(
+            (
+                _sc40(
+                    seed=0x31,
+                    section=2,
+                    offset=0x100,
+                    size=8,
+                    characteristics=0x40403040,
+                    module_index=0,
+                ),
+                _sc40(
+                    seed=0x35,
+                    section=2,
+                    offset=0x108,
+                    size=8,
+                    characteristics=0x40403040,
+                    module_index=1,
+                ),
+            )
+        )
+        hidden = _public_symbol_record(section=1, offset=0x80, type_index=0, name="hidden")
+        first_public = _public_symbol_record(
+            section=2,
+            offset=0x100,
+            type_index=0x12,
+            name="?first@@",
+        )
+        second_public = _public_symbol_record(
+            section=2,
+            offset=0x108,
+            type_index=0x34,
+            name="?second-é@@",
+        )
+        symbol_records = hidden + first_public + second_public
+        public_stream = 7
+        symbol_record_stream = 8
+        extra_payloads = [
+            second_module,
+            _psi(len(hidden), len(hidden) + len(first_public)),
+            symbol_records,
+        ]
     dbi_header = bytearray(24)
-    struct.pack_into("<HHH", dbi_header, 0, 0xFFFF, 0xFFFF, 0xFFFF)
+    struct.pack_into(
+        "<HHH",
+        dbi_header,
+        0,
+        0xFFFF,
+        public_stream,
+        symbol_record_stream,
+    )
     dbi_header[6:8] = b"\x71\x72"
-    struct.pack_into("<IIII", dbi_header, 8, len(modi), 20, 0, 0)
-    dbi = bytes(dbi_header) + modi + _sc40(seed=0x31)
+    struct.pack_into(
+        "<IIII",
+        dbi_header,
+        8,
+        len(modi),
+        len(section_contributions),
+        0,
+        0,
+    )
+    dbi = bytes(dbi_header) + modi + section_contributions
 
     old_table = _stream_table(
         [
@@ -110,8 +230,8 @@ def _synthetic_pdb(
             (16, 0xA3000030, (19,)),
         ]
     )
-    payloads = [old_table, pdb_info, tpi, dbi, module, tpi_hash]
-    stream_pages = (20, 21, 22, 23, 24, 25)
+    payloads = [old_table, pdb_info, tpi, dbi, first_module, tpi_hash, *extra_payloads]
+    stream_pages = tuple(range(20, 20 + len(payloads)))
     directory = _stream_table(
         [
             (len(payload), 0xB0000000 + index * 0x10101, (stream_pages[index],))
@@ -132,7 +252,8 @@ def _synthetic_pdb(
         0xCAFEBABE,
     )
     struct.pack_into("<H", data, 60, 30)
-    free_pages = (17, 18, 19, 20, 26, 27, 28, 29, 31, *range(32, page_count))
+    nonfree_pages = {*stream_pages[1:], 30}
+    free_pages = tuple(page for page in range(17, page_count) if page not in nonfree_pages)
     for page in free_pages:
         data[active_fpm * PAGE_SIZE + page // 8] |= 1 << (page % 8)
     for page in (17, 18, 19, 26, 27, 28, 29, 31, *extra_free_pages):
@@ -197,6 +318,79 @@ def test_canonicalizer_requires_the_raw_nb10_identity_binding() -> None:
             link_time=LINK_TIME,
             expected_input_identity=wrong,
         )
+
+
+def test_link_map_exposes_zero_based_modules_sc40_and_psi_publics() -> None:
+    raw = _synthetic_pdb(with_link_map=True)
+
+    link_map = read_msvc42_pdb_link_map(raw)
+
+    assert link_map.identity == Msvc42PdbIdentity(19950814, 0x66778899, 7)
+    assert link_map.modules == (
+        Msvc42PdbModule(0, 4, "module", "object.obj"),
+        Msvc42PdbModule(1, 6, "module-é", "second.obj"),
+    )
+    assert link_map.contributions == (
+        Msvc42PdbSectionContribution(2, 0x100, 8, 0x40403040, 0),
+        Msvc42PdbSectionContribution(2, 0x108, 8, 0x40403040, 1),
+    )
+    assert tuple((public.section, public.offset, public.name) for public in link_map.publics) == (
+        (2, 0x100, "?first@@"),
+        (2, 0x108, "?second-é@@"),
+    )
+    assert all(isinstance(public, Msvc42PdbPublicSymbol) for public in link_map.publics)
+    assert all(public.name != "hidden" for public in link_map.publics)
+
+
+def test_link_map_facts_survive_canonicalization() -> None:
+    raw = _synthetic_pdb(with_link_map=True)
+    before = read_msvc42_pdb_link_map(raw)
+
+    after = read_msvc42_pdb_link_map(_canonicalize(raw).data)
+
+    assert after.modules == before.modules
+    assert after.contributions == before.contributions
+    assert after.publics == before.publics
+    assert after.identity == Msvc42PdbIdentity(19950814, LINK_TIME, 7)
+
+
+def test_link_map_rejects_an_out_of_range_sc40_module() -> None:
+    malformed = bytearray(_synthetic_pdb(with_link_map=True))
+    parsed = SmallMsf(bytes(malformed))
+    dbi = parsed.read_stream(3, "test DBI")
+    module_bytes = struct.unpack_from("<I", dbi, 8)[0]
+    module_index = parsed.stream_ranges(
+        3,
+        24 + module_bytes + 16,
+        2,
+        "SC40 module index",
+    )[0][0]
+    struct.pack_into("<H", malformed, module_index, 2)
+
+    with pytest.raises(ByteIdentityError, match="out-of-range module index"):
+        read_msvc42_pdb_link_map(bytes(malformed))
+
+
+def test_link_map_rejects_a_misaligned_psi_address_map() -> None:
+    malformed = bytearray(_synthetic_pdb(with_link_map=True))
+    parsed = SmallMsf(bytes(malformed))
+    address_map_size = parsed.stream_ranges(7, 4, 4, "PSI address-map size")[0][0]
+    struct.pack_into("<I", malformed, address_map_size, 2)
+
+    with pytest.raises(ByteIdentityError, match="address map is not aligned"):
+        read_msvc42_pdb_link_map(bytes(malformed))
+
+
+def test_link_map_rejects_a_psi_entry_that_is_not_s_pub32() -> None:
+    malformed = bytearray(_synthetic_pdb(with_link_map=True))
+    parsed = SmallMsf(bytes(malformed))
+    psi = parsed.read_stream(7, "test PSI")
+    symbol_offset = struct.unpack_from("<I", psi, 32)[0]
+    record_type = parsed.stream_ranges(8, symbol_offset + 2, 2, "public record type")[0][0]
+    struct.pack_into("<H", malformed, record_type, 0x0204)
+
+    with pytest.raises(ByteIdentityError, match="non-S_PUB32_16t"):
+        read_msvc42_pdb_link_map(bytes(malformed))
 
 
 @pytest.mark.parametrize("active_fpm", [1, 9])

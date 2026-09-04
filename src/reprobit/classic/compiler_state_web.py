@@ -29,7 +29,7 @@ from .compiler_state_foundation import (
     _ScheduleDeclaration,
     _tokens,
 )
-from .compiler_state_schedule import _schedule_candidate
+from .compiler_state_schedule import _schedule_window
 
 
 def _try_register_bijection(
@@ -88,11 +88,10 @@ def _try_register_bijection(
             "MSVC 4.20 compiler-state register region contains a funclet entry"
         )
     # A register web can end at an interior boundary of a pending schedule.
-    # Keep discovery bounded to boundaries supplied by the one exact
-    # structural permutation already visible in the paired compiler images;
-    # the bijection primitive still proves dead entry/exit and the caller then
-    # proves the schedule independently.
-    structural_candidate = _schedule_candidate(
+    # Keep discovery bounded to a closed structural permutation window.  Its
+    # boundaries do not depend on choosing between duplicate-token pairings;
+    # any eventual pairing is proved independently by the caller.
+    structural_window = _schedule_window(
         _tokens(
             state.body,
             source_instructions,
@@ -111,8 +110,8 @@ def _try_register_bijection(
         target_instructions,
     )
     region_ends = {end}
-    if structural_candidate is not None:
-        schedule_first, schedule_stop, _order = structural_candidate
+    if structural_window is not None:
+        schedule_first, schedule_stop = structural_window
         region_ends.update(
             boundary
             for boundary in (

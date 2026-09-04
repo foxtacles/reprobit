@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import gc
+import json
 import threading
 import time
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -15,6 +18,7 @@ from reprobit import classic_repair_probe_execution as subject
 from reprobit.classic_runtime_probe import ClassicDonorProbeInput, ClassicDonorProbeOutput
 from reprobit.execution import StepExecutionReceipt
 from reprobit.model import Digest
+from reprobit.strict_json import canonical_json
 
 
 def _unit(seat: str, source: str = "src/unit.cpp", rendered: bytes = b"int x;\n") -> Any:
@@ -52,6 +56,18 @@ def _output(donor_id: str, payload: bytes = b"object") -> ClassicDonorProbeOutpu
         b"pdb",
         StepExecutionReceipt("probe", 0, 1, 0.25, digest, digest),
     )
+
+
+def _entry_path(directory: Path, epoch: str, key: store_module.ProbeSeatKey) -> Path:
+    name = store_module._entry_name(epoch, key)
+    return directory / store_module.PROBE_STORE_VERSION / name[:2] / f"{name}.bin"
+
+
+def _replace_header(encoded: bytes, **updates: object) -> bytes:
+    newline = encoded.index(b"\n")
+    header = json.loads(encoded[:newline])
+    header.update(updates)
+    return canonical_json(header) + encoded[newline + 1 :]
 
 
 def _stream(
@@ -101,10 +117,8 @@ def test_cached_seat_is_replayed_under_the_new_probe_id(monkeypatch: pytest.Monk
     second = _stream(prepared, [("probe_3", "probe_4")], cache=cache)
 
     assert sorted(compiled) == ["probe_1", "probe_2", "probe_4"]
-    assert sorted(item.donor_id for item in first) == ["probe_1", "probe_2"]
-    assert second[0].donor_id == "probe_3"  # replayed before any compile
-    replayed = next(item for item in second if item.donor_id == "probe_3")
-    assert replayed.object_payload == b"object of probe_1"
+    assert sorted(first) == ["probe_1", "probe_2"]
+    assert second[0] == "probe_3"  # replayed before any compile
     assert cache.memory_hits == 1 and cache.misses == 3 and len(cache) == 3
 
 
@@ -141,15 +155,21 @@ def test_refusals_are_cached_and_replayed_with_the_new_donor_id(
     monkeypatch.setattr(subject, "_compile_output", failing_compile)
     prepared = {"probe_1": (_unit("seat-a"), 0), "probe_2": (_unit("seat-a"), 0)}
     cache = store_module.ClassicDonorCompileStore()
+    observed: list[Any] = []
 
-    first = _stream(prepared, [("probe_1",)], jobs=1, cache=cache)
-    second = _stream(prepared, [("probe_2",)], jobs=1, cache=cache)
+    def evaluate(outcomes: tuple[Any, ...]) -> bool:
+        observed.extend(outcomes)
+        return False
+
+    first = _stream(prepared, [("probe_1",)], jobs=1, cache=cache, evaluate=evaluate)
+    second = _stream(prepared, [("probe_2",)], jobs=1, cache=cache, evaluate=evaluate)
 
     assert calls == 1
-    assert isinstance(first[0], subject.ClassicDonorCompileRefusal)
-    assert isinstance(second[0], subject.ClassicDonorCompileRefusal)
-    assert (first[0].donor_id, second[0].donor_id) == ("probe_1", "probe_2")
-    assert second[0].reason == first[0].reason
+    assert first == ("probe_1",)
+    assert second == ("probe_2",)
+    assert all(isinstance(item, subject.ClassicDonorCompileRefusal) for item in observed)
+    assert (observed[0].donor_id, observed[1].donor_id) == ("probe_1", "probe_2")
+    assert observed[1].reason == observed[0].reason
 
 
 def test_without_a_cache_every_seat_compiles(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -235,12 +255,53 @@ def test_streaming_keeps_workers_busy_and_stops_pulling_after_settlement(
     )
 
     assert peak == 2
-    assert "never" not in started and "never" not in {item.donor_id for item in outcomes}
+    assert "never" not in started and "never" not in outcomes
     # Everything that had started was still recorded, including the slow one.
-    assert {item.donor_id for item in outcomes} == set(started)
-    assert "slow" in {item.donor_id for item in outcomes}
+    assert set(outcomes) == set(started)
+    assert "slow" in outcomes
     # Windows were pulled lazily: the last one was never requested.
     assert ("never",) not in pulled
+
+
+def test_streaming_does_not_retain_evaluated_payloads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class TrackedOutcome:
+        __slots__ = ("__weakref__", "donor_id", "payload")
+
+        def __init__(self, donor_id: str) -> None:
+            self.donor_id = donor_id
+            self.payload = bytearray(4096)
+
+    donor_ids = tuple(f"probe_{index}" for index in range(32))
+    prepared = {donor_id: (_unit(f"seat-{donor_id}"), 0) for donor_id in donor_ids}
+    references: list[weakref.ReferenceType[TrackedOutcome]] = []
+    live_high_water = 0
+
+    def compile_outcome(*args: Any) -> TrackedOutcome:
+        return TrackedOutcome(args[-1])
+
+    def evaluate(outcomes: tuple[Any, ...]) -> bool:
+        nonlocal live_high_water
+        references.append(weakref.ref(outcomes[0]))
+        gc.collect()
+        live_high_water = max(
+            live_high_water, sum(reference() is not None for reference in references)
+        )
+        return False
+
+    monkeypatch.setattr(subject, "_compile_output", compile_outcome)
+    completed = _stream(
+        prepared,
+        [(donor_id,) for donor_id in donor_ids],
+        jobs=1,
+        evaluate=evaluate,
+    )
+    gc.collect()
+
+    assert completed == donor_ids
+    assert live_high_water <= 2
+    assert all(reference() is None for reference in references)
 
 
 def test_store_round_trips_outputs_through_its_directory(tmp_path: Path) -> None:
@@ -270,6 +331,166 @@ def test_store_round_trips_outputs_through_its_directory(tmp_path: Path) -> None
 
     assert reader.get("epoch-b", key, donor_id="other") is None
     assert reader.get("epoch-a", ("program", "src/unit.cpp", "seat-b"), donor_id="x") is None
+
+
+def test_store_never_follows_a_symlinked_entry_parent(tmp_path: Path) -> None:
+    directory = tmp_path / "repair-probes"
+    outside = tmp_path / "outside"
+    directory.mkdir()
+    outside.mkdir()
+    (directory / store_module.PROBE_STORE_VERSION).symlink_to(outside, target_is_directory=True)
+    key = ("program", "src/unit.cpp", "seat-a")
+    entry = _entry_path(directory, "epoch-a", key)
+    outside_entry = outside / entry.relative_to(directory / store_module.PROBE_STORE_VERSION)
+    outside_entry.parent.mkdir()
+    encoded = store_module._encode_output("epoch-a", key, _output("outside"))
+    assert encoded is not None
+    outside_entry.write_bytes(encoded)
+
+    reader = store_module.ClassicDonorCompileStore(directory)
+    assert reader.get("epoch-a", key, donor_id="reader") is None
+    assert outside_entry.read_bytes() == encoded
+
+    writer = store_module.ClassicDonorCompileStore(directory)
+    writer.put("epoch-a", key, _output("writer", b"replacement"))
+    assert writer.stored == 0
+    assert outside_entry.read_bytes() == encoded
+
+
+def test_store_discards_an_oversized_entry_before_reading_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "repair-probes"
+    key = ("program", "src/unit.cpp", "seat-a")
+    entry = _entry_path(directory, "epoch-a", key)
+    entry.parent.mkdir(parents=True)
+    entry.write_bytes(b"x" * 65)
+    monkeypatch.setattr(store_module, "_MAX_PROBE_ENTRY_BYTES", 64)
+
+    def unexpected_read(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("oversized cache entry was read")
+
+    monkeypatch.setattr(store_module, "read_relative_file", unexpected_read)
+    reader = store_module.ClassicDonorCompileStore(directory)
+
+    assert reader.get("epoch-a", key, donor_id="reader") is None
+    assert not entry.exists()
+
+
+def test_store_discards_a_compression_bomb(tmp_path: Path) -> None:
+    directory = tmp_path / "repair-probes"
+    key = ("program", "src/unit.cpp", "seat-a")
+    entry = _entry_path(directory, "epoch-a", key)
+    entry.parent.mkdir(parents=True)
+    encoded = store_module._encode_output("epoch-a", key, _output("bomb", b"x" * 1_000_000))
+    assert encoded is not None
+    entry.write_bytes(_replace_header(encoded, object_length=1))
+
+    reader = store_module.ClassicDonorCompileStore(directory)
+    assert reader.get("epoch-a", key, donor_id="reader") is None
+    assert not entry.exists()
+
+
+def test_store_rejects_an_oversized_declared_payload_before_decompression(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = tmp_path / "repair-probes"
+    key = ("program", "src/unit.cpp", "seat-a")
+    entry = _entry_path(directory, "epoch-a", key)
+    entry.parent.mkdir(parents=True)
+    encoded = store_module._encode_output("epoch-a", key, _output("oversized"))
+    assert encoded is not None
+    entry.write_bytes(
+        _replace_header(
+            encoded,
+            object_length=store_module._MAX_PROBE_PAYLOAD_BYTES + 1,
+        )
+    )
+
+    def unexpected_decompressor() -> object:
+        raise AssertionError("oversized declared payload was decompressed")
+
+    monkeypatch.setattr(store_module.zlib, "decompressobj", unexpected_decompressor)
+    reader = store_module.ClassicDonorCompileStore(directory)
+
+    assert reader.get("epoch-a", key, donor_id="reader") is None
+    assert not entry.exists()
+
+
+def test_disk_backed_successes_use_a_bounded_lru(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = _output("first", b"a" * 16)
+    second = _output("second", b"b" * 16)
+    third = _output("third", b"c" * 16)
+    monkeypatch.setattr(
+        store_module,
+        "_MAX_DISK_BACKED_MEMORY_BYTES",
+        store_module._output_payload_bytes(first) * 2,
+    )
+    keys = {
+        name: ("program", "src/unit.cpp", f"seat-{name}") for name in ("first", "second", "third")
+    }
+    store = store_module.ClassicDonorCompileStore(tmp_path / "repair-probes")
+
+    store.put("epoch-a", keys["first"], first)
+    store.put("epoch-a", keys["second"], second)
+    assert store.get("epoch-a", keys["first"], donor_id="first-again") is not None
+    store.put("epoch-a", keys["third"], third)
+
+    assert len(store) == 2
+    assert store.get("epoch-a", keys["first"], donor_id="first-latest") is not None
+    assert store.memory_hits == 2
+    assert store.get("epoch-a", keys["second"], donor_id="second-again") is not None
+    assert store.disk_hits == 1
+    assert store.get("epoch-a", keys["third"], donor_id="third-again") is not None
+    assert store.disk_hits == 2
+    assert len(list((tmp_path / "repair-probes").rglob("*.bin"))) == 3
+
+
+def test_disk_backed_lru_never_evicts_refusals(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    output = _output("first", b"a" * 16)
+    monkeypatch.setattr(
+        store_module,
+        "_MAX_DISK_BACKED_MEMORY_BYTES",
+        store_module._output_payload_bytes(output),
+    )
+    store = store_module.ClassicDonorCompileStore(tmp_path / "repair-probes")
+    refusal_key = ("program", "src/unit.cpp", "seat-refusal")
+
+    store.put(
+        "epoch-a",
+        refusal_key,
+        store_module.ClassicDonorCompileRefusal("refusal", "compiler rejected input"),
+    )
+    store.put("epoch-a", ("program", "src/unit.cpp", "seat-first"), output)
+    store.put(
+        "epoch-a",
+        ("program", "src/unit.cpp", "seat-second"),
+        _output("second", b"b" * 16),
+    )
+
+    assert len(store) == 2
+    replayed = store.get("epoch-a", refusal_key, donor_id="refusal-again")
+    assert isinstance(replayed, store_module.ClassicDonorCompileRefusal)
+    assert replayed.donor_id == "refusal-again"
+    assert store.memory_hits == 1
+
+
+def test_directoryless_store_keeps_all_successes_in_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(store_module, "_MAX_DISK_BACKED_MEMORY_BYTES", 0)
+    store = store_module.ClassicDonorCompileStore()
+    keys = [("program", "src/unit.cpp", f"seat-{index}") for index in range(3)]
+    for index, key in enumerate(keys):
+        store.put("epoch-a", key, _output(f"probe-{index}", bytes([index])))
+
+    assert len(store) == 3
+    assert all(store.get("epoch-a", key, donor_id="again") is not None for key in keys)
+    assert store.memory_hits == 3
 
 
 def test_store_discards_a_damaged_entry_and_never_persists_refusals(tmp_path: Path) -> None:

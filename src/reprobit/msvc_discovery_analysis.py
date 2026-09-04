@@ -204,7 +204,7 @@ def _record_mosaic_product(
         reference_body=analysis.reference_normalized,
         seed_boundaries=analysis.seed_instruction_boundaries,
         reference_boundaries=analysis.reference_instruction_boundaries,
-        relocation_spans=spans,
+        excluded_spans=spans,
         mismatch=analysis.mismatch,
     )
     if not ranges:

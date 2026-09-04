@@ -14,15 +14,24 @@ from reprobit.classic_source_regeneration import (
 
 
 class _Reader:
+    def __init__(self, preimages: dict[str, bytes] | None = None) -> None:
+        self._preimages = preimages or {}
+
     def read(self, relative: str, *, wanted_by: str) -> bytes:  # pragma: no cover - unused
         raise AssertionError("the batch helper never reads source")
 
+    def read_clean_preimage(self, relative: str, *, expected_sha256: str) -> bytes | None:
+        candidate = self._preimages.get(relative)
+        if candidate is None or digest_bytes(candidate) != expected_sha256:
+            return None
+        return candidate
 
-def _context() -> _ClassicRegenerationContext:
+
+def _context(preimages: dict[str, bytes] | None = None) -> _ClassicRegenerationContext:
     return _ClassicRegenerationContext(
         documents={},
         plan_relative="reprobit/build-plan.json",
-        reader=_Reader(),
+        reader=_Reader(preimages),
         error_type=ValueError,
     )
 
@@ -33,16 +42,19 @@ def _item(path: str, *, stale: bool, reloc: bool) -> dict[str, Any]:
     if reloc:
         operations.append({"op": "delete", "gen": {"k": "reloc"}})
     return {
-        "rendering": {"path": path},
+        "rendering": {"path": path, "operations": operations},
         "path": path,
         "label": f"donor rendering {path!r}",
         "clean_key": "renderings[0].clean_sha256",
         "rendered_key": "renderings[0].rendered_sha256",
         "operations": operations,
+        "operation_prefix": [],
+        "private_operations": operations,
         "current": clean,
         "current_digest": digest_bytes(clean),
         "pinned_clean": "stale" if stale else digest_bytes(clean),
         "pinned_rendered": "pinned-rendered",
+        "document_name": "donor.json",
     }
 
 
@@ -90,6 +102,46 @@ def _recording_render(calls: list[tuple[str, ...]]) -> Any:
         return _Result(list(paths))
 
     return fake_render
+
+
+def _seat_digest(tokens: list[str]) -> str:
+    return digest_bytes("\0".join(tokens).encode("ascii"))
+
+
+def _token_item(path: str) -> tuple[dict[str, Any], bytes]:
+    preimage = b"int alpha;\nint omega;\n"
+    current = b"int alpha;\nint beta;\nint omega;\n"
+    operations = [
+        {
+            "id": "op_spare",
+            "op": "insert",
+            "anchor": {
+                "ctx": _seat_digest(["int", "alpha", ";", "<SEAT>", "int", "omega", ";"]),
+                "b": 3,
+                "a": 3,
+                "at": "before_token",
+            },
+            "gen": {"k": "fwd", "id": "Spare"},
+        }
+    ]
+    return (
+        {
+            "rendering": {"path": path, "operations": operations},
+            "path": path,
+            "label": f"donor rendering {path!r}",
+            "clean_key": "renderings[0].clean_sha256",
+            "rendered_key": "renderings[0].rendered_sha256",
+            "operations": operations,
+            "operation_prefix": [],
+            "private_operations": operations,
+            "current": current,
+            "current_digest": digest_bytes(current),
+            "pinned_clean": digest_bytes(preimage),
+            "pinned_rendered": "pinned-rendered",
+            "document_name": "donor.json",
+        },
+        preimage,
+    )
 
 
 def test_an_unchanged_relocation_donor_is_still_rendered(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -145,6 +197,42 @@ def test_batch_render_failure_is_reported_against_the_donor(
 
     with pytest.raises(ValueError, match="donor d0 cannot be re-rendered"):
         _render_donor_relocation_batch(_context(), prepared, label="donor d0")
+
+
+def test_rewitnessed_operations_are_not_kept_when_the_closed_batch_still_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    token_item, preimage = _token_item("include/unit.h")
+    relocation_partner = _item("src/unit.cpp", stale=False, reloc=True)
+    calls: list[tuple[str, ...]] = []
+
+    def reject_batch(declarations: Any, clean_inputs: Any, **_: Any) -> _Result:
+        paths = tuple(str(item["path"]) for item in declarations)
+        assert tuple(sorted(clean_inputs)) == tuple(sorted(paths))
+        calls.append(paths)
+        if len(calls) == 1:
+            raise ValueError("token context resolved 0 seats")
+        raise ValueError("producer/consumer dependency universe differs")
+
+    monkeypatch.setattr(overlay_document, "render_classic_overlay_proposal", reject_batch)
+    original_operations = token_item["rendering"]["operations"]
+    original_context = original_operations[0]["anchor"]["ctx"]
+    context = _context({"include/unit.h": preimage})
+
+    with pytest.raises(ValueError, match="producer/consumer dependency universe differs"):
+        _render_donor_relocation_batch(
+            context,
+            [token_item, relocation_partner],
+            label="donor d0",
+        )
+
+    assert calls == [
+        ("include/unit.h", "src/unit.cpp"),
+        ("include/unit.h", "src/unit.cpp"),
+    ]
+    assert token_item["rendering"]["operations"] is original_operations
+    assert original_operations[0]["anchor"]["ctx"] == original_context
+    assert context.changes == []
 
 
 def test_a_single_rendering_donor_renders_alone_and_nothing_renders_nothing(

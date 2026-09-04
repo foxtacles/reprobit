@@ -391,7 +391,7 @@ def command_discover_project_grind(
             return None
 
     with output.producer_activity(
-        "Finding and proving low-cost adjustments across the project"
+        "finding and proving low-cost adjustments across the project"
     ) as progress:
         result = run_project_auto_grind(
             root,
@@ -484,8 +484,8 @@ def command_discover_project_grind(
         if published_exact:
             message = (
                 f"Saved {result.published} locally proven adjustment"
-                f"{'s' if result.published != 1 else ''}; the final cold build matched every "
-                "target exactly.\n"
+                f"{'s' if result.published != 1 else ''}; the final build from "
+                "scratch matched every target exactly.\n"
                 "Earlier adjustments in this pass were admitted only as local progress; the "
                 "exact final build is the project certification gate.\n"
                 f"{report_line}\n"

@@ -328,7 +328,7 @@ def command_discover_grind(
     root = project_root(args.project)
     state_root = project_state_root(root)
     report_directory = state_root / "reports" / "grind"
-    with output.producer_activity("Finding and proving a low-cost adjustment") as progress:
+    with output.producer_activity("finding and proving a low-cost adjustment") as progress:
         result = run_project_grind(
             root,
             plan_relative=args.plan,
@@ -414,9 +414,9 @@ def command_discover_grind(
         else "Grind report: unavailable (see the nonfatal warning above)"
     )
     cold_report_line = (
-        f"Cold verification: {cold_report_html}"
+        f"Fresh verification: {cold_report_html}"
         if cold_report_html is not None
-        else "Cold verification report: unavailable"
+        else "Fresh verification report: unavailable"
     )
 
     if solution is None:

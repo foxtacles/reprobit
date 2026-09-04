@@ -43,6 +43,7 @@ from reprobit.classic_includes import (
 )
 from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
+    classic_unit_oracle_targets,
     compose_classic_unit,
 )
 from reprobit.classic_project import (
@@ -241,14 +242,22 @@ class ClassicDonorComposition:
             return tuple(self._donor_semantic_lanes)
 
     def bind_legacy_oracles(self, oracles: Mapping[str, PE32VirtualAddressReader]) -> None:
-        """Install opaque VA readers after CLI oracle sealing and before execution."""
+        """Install the exact opaque VA readers needed by this execution."""
 
         if self._started or self._legacy_oracles:
             raise ClassicProjectError("legacy oracle capabilities are already bound or used")
-        required = {item.oracle_target for unit in self.units for item in unit.legacy_actions}
+        required = set().union(
+            *(
+                classic_unit_oracle_targets(
+                    unit,
+                    repair=getattr(self, "measured_receipt_repair", None) is not None,
+                )
+                for unit in self.units
+            )
+        )
         if set(oracles) != required:
             raise ClassicProjectError(
-                "legacy oracle capability set differs; "
+                "oracle capability set differs; "
                 f"missing={sorted(required - set(oracles))}, "
                 f"extra={sorted(set(oracles) - required)}"
             )

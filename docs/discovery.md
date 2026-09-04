@@ -57,7 +57,7 @@ update, and tests later functions against the newly saved state. It does **not**
 claim that the executable is closer overall or that the project is certified.
 Only a final fresh, byte-exact build can make that claim.
 Within each function, progress mode tries candidates cheapest-first and moves on
-as soon as one passes the cold local proof. Preview and exact-only approval keep
+as soon as one passes the local proof from scratch. Preview and exact-only approval keep
 searching the bounded set for a complete project match.
 
 Use the copyable command shown in the report. A typical multi-mismatch loop is:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 from types import SimpleNamespace
 from typing import Any
@@ -71,6 +72,19 @@ def _receipt(intervention: ClassicRecipeIntervention, **values: object) -> Class
     )
 
 
+def _prepared(donor: ClassicRecipeIntervention) -> ClassicPreparedDonor:
+    return ClassicPreparedDonor(
+        donor,
+        prepare_donor_compile_request(
+            donor,
+            source_path="src/unit.cpp",
+            clean_source=SOURCE,
+            effective_source=SOURCE,
+            receipts=(_receipt(donor),),
+        ),
+    )
+
+
 def _goal_object() -> bytes:
     goal_body = bytearray(coff_fixture.BODY)
     goal_body[0] = 0x90
@@ -87,16 +101,7 @@ def _fixture(
     seed = coff_fixture.make_coff()
     goal = GOAL
     donor = _saved_donor(1, 1)
-    prepared = ClassicPreparedDonor(
-        donor,
-        prepare_donor_compile_request(
-            donor,
-            source_path="src/unit.cpp",
-            clean_source=SOURCE,
-            effective_source=SOURCE,
-            receipts=(_receipt(donor),),
-        ),
-    )
+    prepared = _prepared(donor)
     action = ClassicRecipeIntervention(
         id="function.saved",
         scope=Scope(target="program", translation_unit="unit.fixture", function=SYMBOL),
@@ -178,7 +183,7 @@ def _fake_windows(objects: dict[int, bytes], compiled: list[str]) -> Any:
         progress: Any = None,
         planned_candidates: int,
         cache: Any = None,
-    ) -> tuple[ClassicDonorProbeOutput, ...]:
+    ) -> tuple[str, ...]:
         by_id = {unit.donors[0].intervention.id: unit for unit in units}
         outputs: list[ClassicDonorProbeOutput] = []
         for window in windows:
@@ -192,7 +197,7 @@ def _fake_windows(objects: dict[int, bytes], compiled: list[str]) -> Any:
                 progress(len(outputs), planned_candidates, batch[-1].donor_id)
             if evaluate(tuple(batch)):
                 break
-        return tuple(outputs)
+        return tuple(output.donor_id for output in outputs)
 
     return fake
 
@@ -227,6 +232,11 @@ def test_discovery_reauthors_a_record_on_the_first_fresh_shape_carrying_its_goal
     assert [item.how for item in repair.resolutions] == ["reauthor"]
     assert repair.resolutions[0].family == "equal_body_strict"
     added = {item.intervention.role: item.intervention for item in repair.additions}
+    assert {
+        item.replaces_intervention_id
+        for item in repair.additions
+        if item.intervention.role is ClassicRecipeRole.FUNCTION
+    } == {"function.saved"}
     donor = added[ClassicRecipeRole.DONOR]
     function = added[ClassicRecipeRole.FUNCTION]
     # The saved donor is (1,1); cheapest-first the untried shapes run (1,2), (1,3), (2,2), ...
@@ -239,6 +249,181 @@ def test_discovery_reauthors_a_record_on_the_first_fresh_shape_carrying_its_goal
         "donor.saved": None,
     }
     assert repair.dependency_edits == ()
+
+
+def test_discovery_reauthors_an_exact_cross_tu_normalized_goal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal, _seed, goal = _fixture(
+        ClassicRecipeFamily.RETAIL_EXACT_CROSS_TU_COMPLETE_TARGET_RESIZE,
+        expected_normalized_body_sha256=GOAL_DIGEST,
+    )
+    monkeypatch.setattr(
+        subject,
+        "probe_donor_compile_windows",
+        _fake_windows({"default": goal}, []),
+    )
+
+    result = subject.probe_carrier_discovery(
+        _Handle(),  # type: ignore[arg-type]
+        (refusal,),
+        clean_sources={"src/unit.cpp": SOURCE},
+        effective_sources={"src/unit.cpp": SOURCE},
+        per_unit=1,
+        window_size=1,
+    )
+
+    assert result.unresolved == ()
+    assert result.repairs[0].resolutions[0].family == ClassicRecipeFamily.EQUAL_BODY_STRICT.value
+
+
+def test_discovery_never_downgrades_a_semantic_mosaic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal, _seed, goal = _fixture(
+        ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC,
+        expected_body_sha256=GOAL_DIGEST,
+    )
+    action = refusal.intervention.model_copy(
+        update={
+            "parameters": (
+                ClassicField(name="instruction_ranges", value=[]),
+                ClassicField(name="target_source_refactor", value={"kind": "fixture"}),
+            )
+        }
+    )
+    receipt = refusal.receipt.model_copy(update={"family": action.family})
+    unit = replace(
+        refusal.unit,
+        functions=(action,),
+        actions=(action,),
+        receipts=tuple(
+            receipt if item.intervention_id == action.id else item for item in refusal.unit.receipts
+        ),
+    )
+    guarded = replace(
+        refusal,
+        intervention=action,
+        receipt=receipt,
+        unit=unit,
+        retail_body=_body(goal),
+    )
+    attempted: list[str] = []
+
+    def reject_mosaic(
+        *_args: object,
+        donor_objects: dict[str, bytes],
+        donor_interventions: dict[str, ClassicRecipeIntervention],
+        donor_sources: dict[str, bytes | None],
+        donor_shape_identifiers: dict[str, frozenset[str]],
+    ) -> None:
+        fresh = set(donor_objects) - {"donor.saved"}
+        assert len(fresh) == 1
+        (donor_id,) = fresh
+        assert donor_objects[donor_id] == goal
+        assert donor_id in donor_interventions
+        assert donor_sources[donor_id] == SOURCE
+        assert donor_id in donor_shape_identifiers
+        attempted.append(donor_id)
+        raise subject.MosaicRepairError("fixture mosaic refusal")
+
+    monkeypatch.setattr(subject, "reauthor_instruction_mosaic", reject_mosaic)
+    monkeypatch.setattr(
+        subject,
+        "build_measured_function_record",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("semantic downgrade")),
+    )
+    monkeypatch.setattr(
+        subject,
+        "probe_donor_compile_windows",
+        _fake_windows({"default": goal}, []),
+    )
+
+    result = subject.probe_carrier_discovery(
+        _Handle(),  # type: ignore[arg-type]
+        (guarded,),
+        clean_sources={"src/unit.cpp": SOURCE},
+        effective_sources={"src/unit.cpp": SOURCE},
+        per_unit=1,
+        window_size=1,
+    )
+
+    assert attempted
+    assert result.repairs == ()
+    assert "saved mosaic semantics could not be preserved" in result.unresolved[0][2]
+
+
+def test_discovery_reauthoring_retires_orphaned_auxiliary_donors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal, seed, goal = _fixture(
+        ClassicRecipeFamily.RETAIL_EXACT_RELOC_DIVERGENT,
+        expected_body_sha256=GOAL_DIGEST,
+    )
+    parameter_donor = _saved_donor(2, 2).model_copy(update={"id": "donor.parameter"})
+    receipt_donor = _saved_donor(2, 3).model_copy(update={"id": "donor.receipt"})
+    action = refusal.intervention.model_copy(
+        update={
+            "parameters": (ClassicField(name="target_donor", value=parameter_donor.id),),
+        }
+    )
+    receipt = refusal.receipt.model_copy(
+        update={
+            "expected_values": {
+                **refusal.receipt.expected_values,
+                "complete_donor": receipt_donor.id,
+            }
+        }
+    )
+    unit = replace(
+        refusal.unit,
+        donors=(*refusal.unit.donors, _prepared(parameter_donor), _prepared(receipt_donor)),
+        functions=(action,),
+        actions=(action,),
+        receipts=(
+            *(
+                item
+                for item in refusal.unit.receipts
+                if item.intervention_id != refusal.intervention.id
+            ),
+            _receipt(parameter_donor),
+            _receipt(receipt_donor),
+            receipt,
+        ),
+    )
+    refusal = replace(
+        refusal,
+        intervention=action,
+        receipt=receipt,
+        unit=unit,
+        unit_donor_objects={
+            **refusal.unit_donor_objects,
+            parameter_donor.id: seed,
+            receipt_donor.id: seed,
+        },
+    )
+    monkeypatch.setattr(
+        subject,
+        "probe_donor_compile_windows",
+        _fake_windows({"default": seed, 1: goal}, []),
+    )
+
+    result = subject.probe_carrier_discovery(
+        _Handle(),  # type: ignore[arg-type]
+        (refusal,),
+        clean_sources={"src/unit.cpp": SOURCE},
+        effective_sources={"src/unit.cpp": SOURCE},
+        per_unit=1,
+        window_size=1,
+    )
+
+    edits = {edit.before.id: edit.after for edit in result.repairs[0].intervention_edits}
+    assert edits[parameter_donor.id] is None
+    assert edits[receipt_donor.id] is None
+    assert {edit.before.id for edit in result.repairs[0].receipt_edits} >= {
+        f"proof.{parameter_donor.id}",
+        f"proof.{receipt_donor.id}",
+    }
 
 
 def test_discovery_repoints_a_rewriting_record_whose_donor_body_comes_back(
@@ -256,16 +441,23 @@ def test_discovery_repoints_a_rewriting_record_whose_donor_body_comes_back(
     repaired_receipt = refusal.receipt.model_copy(
         update={"expected_values": {**refusal.receipt.expected_values, "expected_seed_length": 1}}
     )
+
+    def repair_repoint(action: Any, _receipt: Any, materials: Any) -> Any:
+        if action.dependencies[0] == "donor.saved" or materials.donor_object != goal:
+            pytest.fail("re-pointing must validate against the discovered donor object")
+        assert materials.donor_source == SOURCE
+        assert materials.target_donor_source == SOURCE
+        assert materials.shape_identifiers
+        return SimpleNamespace(
+            receipt=repaired_receipt,
+            changed_keys=("expected_seed_length",),
+            candidate=object(),
+        )
+
     monkeypatch.setattr(
         subject,
         "repair_measured_pins",
-        lambda action, receipt, materials: (
-            SimpleNamespace(
-                receipt=repaired_receipt, changed_keys=("expected_seed_length",), candidate=object()
-            )
-            if action.dependencies[0] != "donor.saved" and materials.donor_object == goal
-            else pytest.fail("re-pointing must validate against the discovered donor object")
-        ),
+        repair_repoint,
     )
 
     result = subject.probe_carrier_discovery(
@@ -465,6 +657,35 @@ def test_discovery_never_prepares_two_states_that_share_a_compiler_arena() -> No
     ]
     assert forward_runs
     assert len(forward_runs) < 3 * 500
+
+
+def test_discovery_caps_preparation_at_the_command_candidate_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refusal, _seed, _goal = _fixture(
+        ClassicRecipeFamily.EQUAL_BODY_STRICT,
+        expected_body_sha256=GOAL_DIGEST,
+    )
+    prepared_limits: list[int] = []
+
+    def prepare_spy(*args: object, **kwargs: object) -> tuple[tuple[str, str], ...]:
+        del args
+        prepared_limits.append(kwargs["per_unit"])  # type: ignore[arg-type]
+        return ()
+
+    monkeypatch.setattr(subject, "_prepare_attempts", prepare_spy)
+
+    result = subject.probe_carrier_discovery(
+        _Handle(),  # type: ignore[arg-type]
+        (refusal,),
+        clean_sources={"src/unit.cpp": SOURCE},
+        effective_sources={"src/unit.cpp": SOURCE},
+        per_unit=32,
+        candidate_budget=3,
+    )
+
+    assert prepared_limits == [3]
+    assert result.compiled_candidates == 0
 
 
 def test_discovery_repoints_a_goal_body_no_closed_family_can_host(

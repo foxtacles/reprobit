@@ -9,7 +9,11 @@ from dataclasses import dataclass
 from itertools import pairwise
 
 from reprobit.binary import require
-from reprobit.pe32 import Pe32Headers, parse_pe32_headers
+from reprobit.pe32 import (
+    Pe32Headers,
+    parse_pe32_headers,
+    pe32_highlow_relocation_offsets,
+)
 
 from .foundation import (
     canonical_json_bytes,
@@ -21,8 +25,6 @@ from .foundation import (
 )
 
 IMAGE_ORDINAL_FLAG32 = 0x80000000
-IMAGE_REL_BASED_ABSOLUTE = 0
-IMAGE_REL_BASED_HIGHLOW = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,34 +196,7 @@ class _PE32Imports:
         return tuple(entries)
 
     def highlow_relocation_offsets(self) -> set[int]:
-        if self.reloc_rva == 0 and self.reloc_size == 0:
-            return set()
-        require(
-            self.reloc_rva != 0 and self.reloc_size >= 8,
-            "base-relocation directory is malformed",
-        )
-        start = self.rva_to_offset(self.reloc_rva, self.reloc_size)
-        end = start + self.reloc_size
-        offset = start
-        sites: set[int] = set()
-        while offset < end:
-            page_rva, block_size = struct.unpack_from("<II", self.data, offset)
-            require(page_rva % 0x1000 == 0, "base-relocation page is not aligned")
-            require(block_size >= 8 and block_size % 4 == 0, "invalid base-relocation block")
-            require(block_size <= end - offset, "base-relocation block extends past directory")
-            for entry_offset in range(offset + 8, offset + block_size, 2):
-                value = struct.unpack_from("<H", self.data, entry_offset)[0]
-                kind, page_offset = value >> 12, value & 0x0FFF
-                if kind == IMAGE_REL_BASED_ABSOLUTE:
-                    continue
-                if kind != IMAGE_REL_BASED_HIGHLOW:
-                    continue
-                site = self.rva_to_offset(page_rva + page_offset, 4)
-                require(site not in sites, "duplicate HIGHLOW base-relocation site")
-                sites.add(site)
-            offset += block_size
-        require(offset == end, "base-relocation directory was not consumed")
-        return sites
+        return set(pe32_highlow_relocation_offsets(self.data))
 
     def layout_digest(self) -> str:
         rows = []

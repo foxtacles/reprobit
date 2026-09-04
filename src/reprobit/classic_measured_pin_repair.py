@@ -650,6 +650,14 @@ def _seat_observations(seed: CoffObject, donor: CoffObject, symbol: str) -> dict
     }
 
 
+def measure_mosaic_seat_observations(
+    seed: CoffObject, donor: CoffObject, symbol: str
+) -> dict[str, object]:
+    """Measure the compiler-object observations used by mosaic receipts."""
+
+    return _seat_observations(seed, donor, symbol)
+
+
 def _seat_observation_measurements(
     intervention: ClassicRecipeIntervention,
     receipt: ClassicProofReceipt,
@@ -954,5 +962,6 @@ __all__ = [
     "MeasuredPinRepair",
     "MeasuredPinRepairError",
     "MeasuredPinRepairStage",
+    "measure_mosaic_seat_observations",
     "repair_measured_pins",
 ]

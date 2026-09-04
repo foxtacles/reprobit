@@ -600,9 +600,20 @@ def test_state_gc_cache_cleanup_also_removes_the_probe_store(tmp_path: Path) -> 
     probe_store.mkdir(parents=True)
     (probe_store / "abcd.bin").write_bytes(b"x" * 100)
 
+    status = StateStore(state).status()
+    assert status.cache_bytes == 0
+    assert status.cache_files == 0
+    assert status.repair_probe_cache_bytes == 100
+    assert status.repair_probe_cache_files == 1
+    assert status.total_bytes == 100
+    assert status.total_files == 1
+
     preview = StateStore(state).gc(dry_run=True, include_cache=True)
     assert (state / "repair-probes").is_dir()
-    assert preview.reclaimed_bytes >= 100
+    assert preview.reclaimed_bytes == status.repair_probe_cache_bytes
+    assert preview.repair_probe_cache_files == status.repair_probe_cache_files
+    assert preview.repair_probe_cache_bytes == status.repair_probe_cache_bytes
+    assert preview.removed == ()
 
     kept = StateStore(state).gc()
     assert (state / "repair-probes").is_dir()
@@ -610,5 +621,21 @@ def test_state_gc_cache_cleanup_also_removes_the_probe_store(tmp_path: Path) -> 
 
     result = StateStore(state).gc(include_cache=True)
     assert not (state / "repair-probes").exists()
-    assert result.reclaimed_bytes >= 100
-    assert state / "repair-probes" in result.removed
+    assert result.reclaimed_bytes == status.repair_probe_cache_bytes
+    assert result.repair_probe_cache_files == status.repair_probe_cache_files
+    assert result.repair_probe_cache_bytes == status.repair_probe_cache_bytes
+    assert result.removed == ()
+
+
+def test_state_status_counts_the_persistent_repair_ledger(tmp_path: Path) -> None:
+    state = tmp_path / "state"
+    ledger = state / "ledger" / "composed-bodies.json"
+    ledger.parent.mkdir(parents=True)
+    ledger.write_bytes(b"ledger")
+
+    status = StateStore(state).status()
+
+    assert status.repair_ledger_bytes == 6
+    assert status.repair_ledger_files == 1
+    assert status.total_bytes == 6
+    assert status.total_files == 1

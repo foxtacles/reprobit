@@ -52,6 +52,8 @@ _REFACTOR_WITNESS_PATHS: Mapping[str, tuple[tuple[str, ...], ...]] = {
 class _SourceReader(Protocol):
     def read(self, relative: str, *, wanted_by: str) -> bytes: ...
 
+    def read_clean_preimage(self, relative: str, *, expected_sha256: str) -> bytes | None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class _ClassicRegenerationChange:
@@ -158,6 +160,32 @@ def _set_parameter(
     context.reject(f"intervention parameter is missing: {name!r}")
 
 
+def _rewitness_rendering_operations(
+    context: _ClassicRegenerationContext,
+    operations: list[Any],
+    clean: bytes,
+    *,
+    path: str,
+    expected_clean: object,
+) -> tuple[list[Any], list[tuple[str, str, str]]] | None:
+    """Re-witness one operation list from its exact committed clean input."""
+
+    from reprobit.classic.anchor_rewitness import rewitness_operations
+
+    clean_preimage = None
+    if any(
+        isinstance(operation, Mapping)
+        and any(
+            isinstance(operation.get(key), Mapping)
+            and operation[key].get("at") in {"before_token", "after_token"}
+            for key in ("anchor", "from", "to")
+        )
+        for operation in operations
+    ) and isinstance(expected_clean, str):
+        clean_preimage = context.reader.read_clean_preimage(path, expected_sha256=expected_clean)
+    return rewitness_operations(operations, clean, clean_preimage=clean_preimage)
+
+
 def _render_or_rewitness(
     context: _ClassicRegenerationContext,
     declaration: dict[str, Any],
@@ -169,23 +197,33 @@ def _render_or_rewitness(
 ) -> tuple[str, int, bytes]:
     """Render strictly; on anchor drift, re-witness once and render again.
 
-    Anchor re-witnessing only rescues the three mechanical drifts admitted by
+    Anchor re-witnessing only rescues the mechanical drifts admitted by
     :mod:`reprobit.classic.anchor_rewitness` (blank lines at a recorded seat,
     a token move away from a seam whose literal seat pair still resolves
-    uniquely, and edited tokens beside a file-boundary seat).  Anything else
-    rejects with the original error.  A successful
-    rescue persists the updated operations into the reviewed document and
-    reports every changed witness digest.
+    uniquely, edited tokens beside a file-boundary seat, and an unchanged
+    one-sided token window proved by the exact committed clean input).
+    Anything else rejects with the original error.  A successful rescue
+    persists the updated operations into the reviewed document and reports
+    every changed witness digest.
     """
 
-    from reprobit.classic.anchor_rewitness import rewitness_operations
     from reprobit.classic.overlay_document import render_classic_overlay_proposal
 
     try:
         result = render_classic_overlay_proposal([declaration], {str(declaration["path"]): clean})
     except ValueError as exc:
         operations = declaration.get("ops")
-        rescued = rewitness_operations(operations, clean) if isinstance(operations, list) else None
+        rescued = (
+            _rewitness_rendering_operations(
+                context,
+                operations,
+                clean,
+                path=str(declaration["path"]),
+                expected_clean=output.get("clean"),
+            )
+            if isinstance(operations, list)
+            else None
+        )
         if rescued is None:
             context.reject(f"{label} cannot be re-rendered: {exc}", cause=exc)
         updated_operations, witness_changes = rescued
@@ -454,6 +492,7 @@ def _prepare_donor_renderings(
         ):
             context.reject(f"{label} has malformed operations")
         rendered_operations = list(operations)
+        operation_prefix: list[dict[str, Any]] = []
         replay = values.get("canonical_overlay_replay")
         if replay is not None:
             if replay != "owning_translation_unit_v1":
@@ -465,7 +504,8 @@ def _prepare_donor_renderings(
                         f"{label} replays a canonical overlay output that "
                         "no source overlay declares"
                     )
-                rendered_operations = [*canonical, *rendered_operations]
+                operation_prefix = list(canonical)
+                rendered_operations = [*operation_prefix, *rendered_operations]
         current = context.reader.read(path, wanted_by=label)
         prepared.append(
             {
@@ -475,10 +515,13 @@ def _prepare_donor_renderings(
                 "clean_key": clean_key,
                 "rendered_key": rendered_key,
                 "operations": rendered_operations,
+                "operation_prefix": operation_prefix,
+                "private_operations": operations,
                 "current": current,
                 "current_digest": _digest(current),
                 "pinned_clean": str(expected_values[clean_key]),
                 "pinned_rendered": str(expected_values[rendered_key]),
+                "document_name": document_name,
             }
         )
     return prepared
@@ -508,20 +551,62 @@ def _render_donor_relocation_batch(
     if not prepared:
         return {}
 
-    declarations = [
-        {
-            "path": item["path"],
-            "clean": item["current_digest"],
-            "effective": item["pinned_rendered"],
-            "ops": item["operations"],
-        }
-        for item in prepared
-    ]
     clean_inputs = {item["path"]: item["current"] for item in prepared}
+
+    def render(
+        replacements: Mapping[int, list[Any]] | None = None,
+    ) -> Any:
+        declarations = [
+            {
+                "path": item["path"],
+                "clean": item["current_digest"],
+                "effective": item["pinned_rendered"],
+                "ops": (
+                    [*item["operation_prefix"], *replacements[index]]
+                    if replacements is not None and index in replacements
+                    else item["operations"]
+                ),
+            }
+            for index, item in enumerate(prepared)
+        ]
+        return render_classic_overlay_proposal(declarations, clean_inputs)
+
     try:
-        result = render_classic_overlay_proposal(declarations, clean_inputs)
+        result = render()
     except ValueError as exc:
-        context.reject(f"{label} cannot be re-rendered: {exc}", cause=exc)
+        replacements: dict[int, list[Any]] = {}
+        witness_changes: dict[int, list[tuple[str, str, str]]] = {}
+        for index, item in enumerate(prepared):
+            rescued = _rewitness_rendering_operations(
+                context,
+                item["private_operations"],
+                item["current"],
+                path=item["path"],
+                expected_clean=item["pinned_clean"],
+            )
+            if rescued is None:
+                continue
+            replacements[index], witness_changes[index] = rescued
+        if not replacements:
+            context.reject(f"{label} cannot be re-rendered: {exc}", cause=exc)
+        try:
+            # Keep every rendering in the retry so relocation producers and
+            # consumers are validated as one closed donor batch.
+            result = render(replacements)
+        except ValueError as retry_exc:
+            context.reject(f"{label} cannot be re-rendered: {retry_exc}", cause=retry_exc)
+        for index, updated_operations in replacements.items():
+            item = prepared[index]
+            item["rendering"]["operations"] = updated_operations
+            item["private_operations"] = updated_operations
+            item["operations"] = [*item["operation_prefix"], *updated_operations]
+            for location, old_digest, new_digest in witness_changes[index]:
+                context.record(
+                    item["document_name"],
+                    f"{item['label']} operation {location}",
+                    old_digest,
+                    new_digest,
+                )
     return {receipt.path: receipt.output_digest for receipt in result.receipts}
 
 

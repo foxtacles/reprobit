@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from types import MappingProxyType
 
 from reprobit.binary import ByteIdentityError
@@ -27,14 +28,21 @@ from .compiler_state_foundation import (
     _Instruction,
     _instructions,
     _relocation_parts,
+    _RelocationRecord,
     _require_relocation_semantics,
 )
 from .compiler_state_prologue import _try_saved_prologue_web_permutation
 from .compiler_state_schedule import _apply_schedules
+from .compiler_state_schedule_web import _try_atomic_schedule_register_web
 from .compiler_state_web import _prove_register_web_recolour, _try_register_bijection
-from .relational_projection import derive_equality_compare_reversals
+from .relational_projection import (
+    derive_equality_compare_reversals,
+    equality_compare_reversal_images,
+    equality_compare_reversal_preimages,
+)
 
 _THEOREM = "msvc-4.20-compiler-state-code-image-v1"
+_MAX_SOURCE_ALGEBRAIC_IMAGES = 15
 
 
 def _try_commutative_operand_forms(
@@ -88,6 +96,112 @@ def _try_equality_compare_reversals(
         "declaration": declaration,
         "proof": proof,
     }
+
+
+def _try_algebraic_residual(
+    state: _ImageState,
+    pair: CompilerStateCodePair,
+    source_records: Mapping[int, Mapping[str, object]],
+) -> tuple[_ImageState, list[dict[str, object]]]:
+    """Try the closed algebraic projections that can finish an exact image."""
+
+    for projector in (_try_commutative_operand_forms, _try_equality_compare_reversals):
+        projected = projector(state, pair, source_records)
+        if projected is not None:
+            image, proof = projected
+            return image, [proof]
+    return state, []
+
+
+def _try_web_with_algebraic_residual(
+    state: _ImageState,
+    pair: CompilerStateCodePair,
+    source_records: Mapping[int, _RelocationRecord],
+    target_records: Mapping[int, _RelocationRecord],
+    *,
+    frame_pointer_free: bool,
+) -> tuple[_ImageState, list[dict[str, object]]] | None:
+    """Prove a register web through one uniquely rejoining algebraic preimage."""
+
+    preimages = equality_compare_reversal_preimages(
+        state.body,
+        pair.effective_body,
+        target_records,
+        frozenset(pair.external_entries),
+        f"MSVC 4.20 compiler-state algebraic bridge {pair.owner!r}",
+    )
+    candidates: list[tuple[_ImageState, list[dict[str, object]]]] = []
+    for preimage in preimages:
+        try:
+            web_state, web_proof = _prove_register_web_recolour(
+                state,
+                replace(pair, effective_body=preimage),
+                source_records,
+                target_records,
+                frame_pointer_free=frame_pointer_free,
+            )
+        except ClassicSemanticError:
+            continue
+        image, residual = _try_algebraic_residual(web_state, pair, source_records)
+        if image.body == pair.effective_body:
+            candidates.append((image, [web_proof, *residual]))
+    if len(candidates) != 1:
+        return None
+    return candidates[0]
+
+
+def _try_atomic_schedule_web_with_source_algebraic(
+    state: _ImageState,
+    pair: CompilerStateCodePair,
+    source_records: Mapping[int, _RelocationRecord],
+    target_records: Mapping[int, _RelocationRecord],
+    compiler_identity: Msvc420CompilerIdentity | None,
+) -> tuple[_ImageState, list[dict[str, object]]] | None:
+    """Prove a unique atomic schedule/web, optionally after one equality image."""
+
+    candidates: list[tuple[_ImageState, list[dict[str, object]]]] = []
+    direct = _try_atomic_schedule_register_web(
+        state,
+        pair,
+        source_records,
+        target_records,
+        compiler_identity,
+    )
+    if direct is not None:
+        image, proof = direct
+        return image, [proof]
+
+    images = equality_compare_reversal_images(
+        state.body,
+        source_records,
+        frozenset(pair.external_entries),
+        f"MSVC 4.20 compiler-state source algebraic bridge {pair.owner!r}",
+    )
+    if len(images) > _MAX_SOURCE_ALGEBRAIC_IMAGES:
+        return None
+    for candidate_body in images:
+        algebraic = _try_equality_compare_reversals(
+            state,
+            replace(pair, effective_body=candidate_body),
+            source_records,
+        )
+        if algebraic is None:
+            continue
+        algebraic_state, algebraic_proof = algebraic
+        fused = _try_atomic_schedule_register_web(
+            algebraic_state,
+            pair,
+            source_records,
+            target_records,
+            compiler_identity,
+        )
+        if fused is None:
+            continue
+        image, fused_proof = fused
+        candidates.append((image, [algebraic_proof, fused_proof]))
+    if len(candidates) > 1:
+        return None
+    return candidates[0] if candidates else None
 
 
 def _paired_frame_pointer_free_proof(
@@ -219,6 +333,21 @@ def _prove_pair(
         )
         steps.extend(schedules)
     if state.body != pair.effective_body:
+        current_records = {
+            offset: _clean_records[original]
+            for offset, original in zip(state.relocation_offsets, clean_offsets, strict=True)
+        }
+        atomic = _try_atomic_schedule_web_with_source_algebraic(
+            state,
+            pair,
+            current_records,
+            effective_records,
+            compiler_identity,
+        )
+        if atomic is not None:
+            state, atomic_steps = atomic
+            steps.extend(atomic_steps)
+    if state.body != pair.effective_body:
         bijection = _try_register_bijection(
             state,
             pair,
@@ -262,24 +391,30 @@ def _prove_pair(
             offset: source_base_records[original]
             for offset, original in zip(state.relocation_offsets, source_base_offsets, strict=True)
         }
-        commutative = _try_commutative_operand_forms(state, pair, current_records)
-        if commutative is not None:
-            state, proof = commutative
-            steps.append(proof)
+        state, algebraic = _try_algebraic_residual(state, pair, current_records)
+        steps.extend(algebraic)
         if state.body != pair.effective_body:
-            relational = _try_equality_compare_reversals(state, pair, current_records)
-            if relational is not None:
-                state, proof = relational
+            try:
+                state, proof = _prove_register_web_recolour(
+                    state,
+                    pair,
+                    current_records,
+                    effective_records,
+                    frame_pointer_free=frame_pointer_free_proof is not None,
+                )
                 steps.append(proof)
-        if state.body != pair.effective_body:
-            state, proof = _prove_register_web_recolour(
-                state,
-                pair,
-                current_records,
-                effective_records,
-                frame_pointer_free=frame_pointer_free_proof is not None,
-            )
-            steps.append(proof)
+            except ClassicSemanticError as web_error:
+                bridged = _try_web_with_algebraic_residual(
+                    state,
+                    pair,
+                    current_records,
+                    effective_records,
+                    frame_pointer_free=frame_pointer_free_proof is not None,
+                )
+                if bridged is None:
+                    raise web_error
+                state, bridge_steps = bridged
+                steps.extend(bridge_steps)
     if state.body != pair.effective_body:
         raise ClassicSemanticError(
             f"MSVC 4.20 compiler-state code pair {pair.owner!r} fails exact image rejoin"

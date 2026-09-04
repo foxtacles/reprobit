@@ -480,5 +480,5 @@ def test_save_exit_status_reports_whether_the_requested_publication_happened(
 
     assert status == expected_status
     activity = machine.getvalue()
-    assert "Finding and proving a low-cost adjustment" in activity
+    assert "finding and proving a low-cost adjustment" in activity
     assert "low-cost exact intervention" not in activity

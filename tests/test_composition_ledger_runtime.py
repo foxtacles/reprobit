@@ -160,7 +160,12 @@ def test_ledger_from_run_reads_the_executor_like_the_runtime(tmp_path: Path) -> 
     assert (function.provider, function.translation_unit_id) == ("build/a.obj", "tu.a")
 
 
-def test_verify_records_the_ledger_only_when_it_could_be_derived(tmp_path: Path) -> None:
+def test_verify_records_the_ledger_only_when_it_could_be_derived(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from contextlib import contextmanager
+
     from reprobit import cli_build
     from reprobit.composition_ledger import read_ledger
 
@@ -170,12 +175,25 @@ def test_verify_records_the_ledger_only_when_it_could_be_derived(tmp_path: Path)
         def emit(self, kind: str, message: str, **fields: object) -> None:
             emitted.append((kind, message, fields))
 
+    leases: list[Path] = []
+
+    @contextmanager
+    def publication_lease(path: Path):  # type: ignore[no-untyped-def]
+        leases.append(path)
+        yield
+
+    monkeypatch.setattr(cli_build, "report_publication_lease", publication_lease)
+
     ledger, error = cli_build._composed_body_ledger(object())
     assert ledger is None and error is not None and "AttributeError" in error
+    stale = tmp_path / "ledger" / "composed-bodies.json"
+    stale.parent.mkdir()
+    stale.write_bytes(b"old ledger\n")
     cli_build._publish_composed_body_ledger(Output(), tmp_path, ledger, error)  # type: ignore[arg-type]
     assert emitted[-1][0] == "composed_body_ledger"
     assert emitted[-1][2]["outcome"] == "skipped"
-    assert not (tmp_path / "ledger").exists()
+    assert "removed the older saved repair data" in emitted[-1][1]
+    assert not stale.exists()
 
     graph = _graph("a.obj", "core.lib")
     for name, first in (("a", 0x90), ("b", 0x91), ("c", 0x92)):
@@ -192,3 +210,14 @@ def test_verify_records_the_ledger_only_when_it_could_be_derived(tmp_path: Path)
     assert emitted[-1][2]["outcome"] == "succeeded"
     assert emitted[-1][2]["functions"] == 1
     assert read_ledger(tmp_path / "ledger" / "composed-bodies.json") == derived
+
+    def fail_write(*_args: object, **_kwargs: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(cli_build, "write_ledger", fail_write)
+    cli_build._publish_composed_body_ledger(Output(), tmp_path, derived, None)  # type: ignore[arg-type]
+    assert emitted[-1][2]["outcome"] == "skipped"
+    assert "disk full" in emitted[-1][1]
+    assert "removed the older saved repair data" in emitted[-1][1]
+    assert not stale.exists()
+    assert leases == [tmp_path, tmp_path, tmp_path]

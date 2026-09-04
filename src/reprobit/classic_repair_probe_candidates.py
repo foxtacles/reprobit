@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from hashlib import sha256
+from typing import TYPE_CHECKING
 
 from reprobit.classic.source_refactor_semantics import validate_donor_source_semantics
 from reprobit.classic_donor_retune_candidates import DonorRetuneCandidate
@@ -13,22 +14,37 @@ from reprobit.classic_donor_retune_materialization import (
     materialize_donor_retune_candidate,
 )
 from reprobit.classic_donors import matching_candidate_constraints, prepare_donor_compile_request
+from reprobit.classic_legacy_repair import (
+    LegacyInstallRepair,
+    LegacyRepairError,
+    reauthor_legacy_simulated_elision,
+)
 from reprobit.classic_measured_pin_repair import (
     MeasuredPinRepair,
     MeasuredPinRepairError,
     repair_measured_pins,
+)
+from reprobit.classic_mosaic_repair import (
+    MosaicRepairError,
+    instruction_mosaic_semantics_required,
+    reauthor_instruction_mosaic,
 )
 from reprobit.classic_orchestration import (
     ClassicPreparedDonor,
     ClassicPreparedUnit,
 )
 from reprobit.classic_project import ClassicDispatchMaterials
+from reprobit.classic_relational_repair import (
+    RelationalRepairError,
+    reauthor_relational_donor_rewriting,
+)
 from reprobit.classic_repair_authority import (
     ClassicInterventionEdit,
     ClassicReceiptEdit,
     ClassicRecordAddition,
 )
-from reprobit.classic_repair_session import ClassicRepairRefusal
+from reprobit.classic_repair_session import ClassicRepairRefusal, RepairRefusal
+from reprobit.classic_retail_repair import RetailRepairError, retail_body_goal_digest
 from reprobit.classic_runtime_probe import ClassicDonorProbeOutput
 from reprobit.coff_format import CoffObject, coff_body
 from reprobit.discovery_authoring import (
@@ -36,12 +52,18 @@ from reprobit.discovery_authoring import (
     DiscoveryAuthoringError,
     build_measured_function_record,
 )
+from reprobit.model import Scope
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ClassicRecipeRole,
+    LegacyOracleInstallIntervention,
+    classic_function_donor_ids,
 )
+
+if TYPE_CHECKING:
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 
 
 def _parameters(intervention: ClassicRecipeIntervention) -> dict[str, object]:
@@ -87,6 +109,7 @@ def prepare_retune_candidate(
     clean_sources: Mapping[str, bytes],
     effective_sources: Mapping[str, bytes],
     canonical_overlay_operations: Mapping[str, Sequence[Mapping[str, object]]],
+    overlay_render_session: ClassicOverlayRenderSession | None = None,
 ) -> tuple[MaterializedDonorRetuneCandidate, ClassicPreparedDonor]:
     """Materialize and semantically close one nearby donor authority state."""
 
@@ -100,6 +123,7 @@ def prepare_retune_candidate(
         donor_receipt,
         clean_sources=clean_inputs,
         canonical_overlay_operations=operations,
+        overlay_render_session=overlay_render_session,
     )
     source_path = donor.request.logical_source
     clean_source = clean_sources.get(source_path)
@@ -114,6 +138,7 @@ def prepare_retune_candidate(
         receipts=_candidate_receipts(unit, donor_receipt, materialized.receipt),
         clean_sources=clean_inputs,
         canonical_overlay_operations=operations,
+        overlay_render_session=overlay_render_session,
     )
     consumers = tuple(
         function for function in unit.functions if donor.intervention.id in function.dependencies
@@ -186,32 +211,44 @@ def _rendered_source(
 
 
 def _candidate_materials(
-    failure: ClassicRepairRefusal,
+    failure: RepairRefusal,
     donor: ClassicPreparedDonor,
     materialized: MaterializedDonorRetuneCandidate,
     output: ClassicDonorProbeOutput,
 ) -> ClassicDispatchMaterials:
     action = failure.intervention
     donor_id = materialized.intervention.id
-    if not action.dependencies or action.dependencies[0] != donor_id:
-        raise ValueError(
-            f"action {action.id!r} does not name retuned donor {donor_id!r} as primary"
+    if isinstance(action, LegacyOracleInstallIntervention):
+        if not action.dependencies or action.dependencies[0] != donor_id:
+            raise ValueError(
+                f"legacy action {action.id!r} does not name retuned donor {donor_id!r} as primary"
+            )
+        rendered_source = _rendered_source(donor, output)
+        return replace(
+            failure.materials,
+            donor_object=output.object_payload,
+            target_donor_object=output.object_payload,
+            donor_source=rendered_source,
+            target_donor_source=rendered_source,
+            shape_identifiers=donor.request.carrier_identifiers,
         )
+    if donor_id not in classic_function_donor_ids(action, failure.receipt):
+        raise ValueError(f"action {action.id!r} does not name retuned donor {donor_id!r}")
+    rendered_source = _rendered_source(donor, output)
+    primary_retuned = action.dependencies[0] == donor_id
     values = matching_candidate_constraints(action, (failure.receipt,)).materialize()
     target_id = values.get("target_donor")
     complete_id = values.get("complete_donor")
     instruction_id = values.get("instruction_donor")
-    rendered_source = _rendered_source(donor, output)
+    target_retuned = target_id == donor_id or (target_id is None and primary_retuned)
     additional = dict(failure.materials.additional_donor_objects)
     if donor_id in additional:
         additional[donor_id] = output.object_payload
     return replace(
         failure.materials,
-        donor_object=output.object_payload,
+        donor_object=(output.object_payload if primary_retuned else failure.materials.donor_object),
         target_donor_object=(
-            output.object_payload
-            if target_id in {None, donor_id}
-            else failure.materials.target_donor_object
+            output.object_payload if target_retuned else failure.materials.target_donor_object
         ),
         complete_donor_object=(
             output.object_payload
@@ -223,11 +260,9 @@ def _candidate_materials(
             if instruction_id == donor_id
             else failure.materials.instruction_donor_object
         ),
-        donor_source=rendered_source,
+        donor_source=(rendered_source if primary_retuned else failure.materials.donor_source),
         target_donor_source=(
-            rendered_source
-            if target_id in {None, donor_id}
-            else failure.materials.target_donor_source
+            rendered_source if target_retuned else failure.materials.target_donor_source
         ),
         instruction_donor_source=(
             rendered_source
@@ -235,14 +270,19 @@ def _candidate_materials(
             else failure.materials.instruction_donor_source
         ),
         additional_donor_objects=additional,
-        shape_identifiers=donor.request.carrier_identifiers,
+        shape_identifiers=(
+            donor.request.carrier_identifiers
+            if primary_retuned
+            else failure.materials.shape_identifiers
+        ),
     )
 
 
 def _consumer_refusal(
     unit: ClassicPreparedUnit,
     consumer: ClassicRecipeIntervention,
-    template: ClassicRepairRefusal,
+    receipt: ClassicProofReceipt,
+    template: RepairRefusal,
 ) -> ClassicRepairRefusal:
     """Describe a currently composing consumer of the retuned donor as a pseudo-refusal.
 
@@ -252,11 +292,15 @@ def _consumer_refusal(
     ones that happened to fail.
     """
 
-    receipts = [item for item in unit.receipts if item.intervention_id == consumer.id]
-    if len(receipts) != 1:
-        raise ValueError(f"consumer {consumer.id!r} requires one proof receipt")
-    receipt = receipts[0]
     objects = template.unit_donor_objects
+    seed_object = template.action_preimages.get(consumer.id)
+    if seed_object is None:
+        raise ValueError(f"consumer {consumer.id!r} has no captured composition preimage")
+    action_indices = tuple(
+        index for index, action in enumerate(unit.actions) if action.id == consumer.id
+    )
+    if len(action_indices) != 1:
+        raise ValueError(f"consumer {consumer.id!r} requires one action position")
     values = matching_candidate_constraints(consumer, (receipt,)).materialize()
     primary_id = consumer.dependencies[0]
     if primary_id not in objects:
@@ -278,14 +322,19 @@ def _consumer_refusal(
             if not isinstance(donor_id, str) or donor_id not in objects:
                 raise ValueError(f"consumer {consumer.id!r} names an uncaptured donor variant")
             additional[donor_id] = objects[donor_id]
+    prepared = {item.intervention.id: item for item in unit.donors}
+    primary = prepared.get(primary_id)
+    if primary is None:
+        raise ValueError(f"consumer {consumer.id!r} primary donor {primary_id!r} was not prepared")
     sources = {
-        item.intervention.id: item.request.logical_outputs.get(unit.plan.source)
-        for item in unit.donors
+        donor_id: item.request.logical_outputs.get(unit.plan.source)
+        for donor_id, item in prepared.items()
     }
     target_id = values.get("target_donor")
     instruction_id = values.get("instruction_donor")
     materials = replace(
         template.materials,
+        seed_object=seed_object,
         donor_object=objects[primary_id],
         target_donor_object=named("target_donor") if target_id is not None else objects[primary_id],
         complete_donor_object=named("complete_donor"),
@@ -296,39 +345,79 @@ def _consumer_refusal(
             sources.get(instruction_id) if isinstance(instruction_id, str) else None
         ),
         additional_donor_objects=additional,
+        shape_identifiers=primary.request.carrier_identifiers,
         candidate_constraints=values,
     )
-    return replace(template, intervention=consumer, receipt=receipt, materials=materials)
+    return ClassicRepairRefusal(
+        unit_id=template.unit_id,
+        action_index=action_indices[0],
+        intervention=consumer,
+        receipt=receipt,
+        materials=materials,
+        unit=unit,
+        reason=template.reason,
+        unit_donor_objects=template.unit_donor_objects,
+        retail_body=template.unit_retail_bodies.get(consumer.id),
+        unit_retail_bodies=template.unit_retail_bodies,
+        action_preimages=template.action_preimages,
+    )
 
 
 def other_consumers(
     unit: ClassicPreparedUnit,
     donor_id: str,
-    failures: Sequence[ClassicRepairRefusal],
+    failures: Sequence[RepairRefusal],
 ) -> tuple[ClassicRepairRefusal, ...]:
     """Pseudo-refusals for the donor's consumers that are not among the captured failures."""
 
-    if not failures or not failures[0].unit_donor_objects:
+    if not failures:
         return ()
     failed = {item.intervention.id for item in failures}
-    return tuple(
-        _consumer_refusal(unit, function, failures[0])
-        for function in unit.functions
-        if donor_id in function.dependencies and function.id not in failed
-    )
+    earliest_failure = min(item.action_index for item in failures)
+    action_positions: dict[str, int] = {}
+    for index, action in enumerate(unit.actions):
+        if action.id in action_positions:
+            raise ValueError(f"unit repeats action {action.id!r}")
+        action_positions[action.id] = index
+    uncaptured_legacy: list[str] = []
+    for action in unit.legacy_actions:
+        if donor_id not in action.dependencies or action.id in failed:
+            continue
+        position = action_positions.get(action.id)
+        if position is None:
+            raise ValueError(f"legacy consumer {action.id!r} has no action position")
+        if position < earliest_failure:
+            uncaptured_legacy.append(action.id)
+    if uncaptured_legacy:
+        raise ValueError(f"donor {donor_id!r} has uncaptured legacy consumers: {uncaptured_legacy}")
+    if not failures[0].unit_donor_objects:
+        return ()
+    consumers: list[ClassicRepairRefusal] = []
+    for function in unit.functions:
+        if function.id in failed:
+            continue
+        position = action_positions.get(function.id)
+        if position is None:
+            raise ValueError(f"consumer {function.id!r} has no action position")
+        if position >= earliest_failure:
+            continue
+        receipts = tuple(item for item in unit.receipts if item.intervention_id == function.id)
+        if len(receipts) != 1:
+            raise ValueError(f"consumer {function.id!r} requires one proof receipt")
+        receipt = receipts[0]
+        if donor_id not in classic_function_donor_ids(function, receipt):
+            continue
+        consumers.append(_consumer_refusal(unit, function, receipt, failures[0]))
+    return tuple(consumers)
 
 
 @dataclass(frozen=True, slots=True)
 class RetunedActionReauthoring:
     """A consumer the retuned donor serves under a new record instead of its saved one.
 
-    The candidate emits the consumer's exact retail body, but the saved record's
-    family cannot compose it from that state (an equal-length family over a
-    resized body, a mosaic over a body that no longer needs one).  The saved
-    record and its receipt are removed and the function is re-authored onto
-    the same donor with the cheapest closed family that proves the body --
-    what the re-authoring stage does from saved donor objects, here from a
-    retune candidate.
+    The candidate either emits the consumer's retail body or reaches it through
+    a proved relational rewrite, but the saved family cannot compose that state.
+    The saved record and receipt are replaced by the cheapest closed proof.
     """
 
     action: ClassicRecipeIntervention
@@ -337,31 +426,121 @@ class RetunedActionReauthoring:
     saved_refusal: str
 
 
-def _goal_body_digest(receipt: ClassicProofReceipt) -> str | None:
-    goal = receipt.expected_values.get("expected_body_sha256")
-    return goal if isinstance(goal, str) and len(goal) == 64 else None
+def _goal_body_digest(
+    action: ClassicRecipeIntervention, receipt: ClassicProofReceipt
+) -> str | None:
+    try:
+        return retail_body_goal_digest(action, receipt)
+    except RetailRepairError:
+        return None
 
 
 def _reauthor_retuned_action(
-    failure: ClassicRepairRefusal,
+    failure: RepairRefusal,
     materials: ClassicDispatchMaterials,
     saved_refusal: MeasuredPinRepairError,
+    donor: ClassicPreparedDonor,
+    materialized: MaterializedDonorRetuneCandidate,
+    output: ClassicDonorProbeOutput,
 ) -> RetunedActionReauthoring | None:
-    """Re-author a refused consumer whose exact retail body the candidate emits."""
+    """Re-author a refused consumer when a closed proof reaches its retail body."""
 
     action = failure.intervention
-    goal = _goal_body_digest(failure.receipt)
     if (
-        action.role is not ClassicRecipeRole.FUNCTION
+        not isinstance(action, ClassicRecipeIntervention)
+        or action.role is not ClassicRecipeRole.FUNCTION
         or action.symbol is None
-        or goal is None
         or not action.dependencies
         or not isinstance(materials.seed_object, bytes)
-        or not isinstance(materials.donor_object, bytes)
     ):
         return None
+    if (
+        isinstance(failure, ClassicRepairRefusal)
+        and action.family is ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC
+        and failure.retail_body is not None
+    ):
+        donor_id = donor.intervention.id
+        donor_objects = dict(failure.unit_donor_objects)
+        donor_objects[donor_id] = output.object_payload
+        donor_interventions = {
+            item.intervention.id: (
+                materialized.intervention if item.intervention.id == donor_id else item.intervention
+            )
+            for item in failure.unit.donors
+        }
+        donor_sources = {
+            item.intervention.id: (
+                _rendered_source(donor, output)
+                if item.intervention.id == donor_id
+                else item.request.logical_outputs.get(failure.unit.plan.source)
+            )
+            for item in failure.unit.donors
+        }
+        donor_shapes = {
+            item.intervention.id: (
+                donor.request.carrier_identifiers
+                if item.intervention.id == donor_id
+                else item.request.carrier_identifiers
+            )
+            for item in failure.unit.donors
+        }
+        try:
+            mosaic = reauthor_instruction_mosaic(
+                action,
+                failure.receipt,
+                materials,
+                failure.retail_body,
+                donor_objects=donor_objects,
+                donor_interventions=donor_interventions,
+                donor_sources=donor_sources,
+                donor_shape_identifiers=donor_shapes,
+            )
+        except MosaicRepairError:
+            if instruction_mosaic_semantics_required(action):
+                return None
+        else:
+            return RetunedActionReauthoring(
+                action,
+                failure.receipt,
+                ClassicRecordAddition(
+                    mosaic.intervention,
+                    mosaic.receipt,
+                    replaces_intervention_id=action.id,
+                ),
+                str(saved_refusal),
+            )
+    if instruction_mosaic_semantics_required(action):
+        return None
+    if isinstance(failure, ClassicRepairRefusal) and failure.retail_body is not None:
+        try:
+            relational = reauthor_relational_donor_rewriting(
+                action,
+                failure.receipt,
+                materials,
+                failure.retail_body,
+                donor_id=donor.intervention.id,
+                donor_object=output.object_payload,
+                donor_source=_rendered_source(donor, output),
+                shape_identifiers=donor.request.carrier_identifiers,
+            )
+        except RelationalRepairError:
+            pass
+        else:
+            return RetunedActionReauthoring(
+                action,
+                failure.receipt,
+                ClassicRecordAddition(
+                    relational.intervention,
+                    relational.receipt,
+                    replaces_intervention_id=action.id,
+                ),
+                str(saved_refusal),
+            )
+    goal = _goal_body_digest(action, failure.receipt)
+    if goal is None:
+        return None
     try:
-        candidate = CoffObject(materials.donor_object)
+        candidate = CoffObject(output.object_payload)
         body = coff_body(candidate, candidate.function_section(action.symbol))
     except Exception:
         return None
@@ -375,38 +554,42 @@ def _reauthor_retuned_action(
                 build_target=action.build_target,
                 symbol=action.symbol,
                 family=family,
-                donor_id=action.dependencies[0],
+                donor_id=donor.intervention.id,
                 seed_object=materials.seed_object,
-                donor_object=materials.donor_object,
+                donor_object=output.object_payload,
             )
         except DiscoveryAuthoringError:
             continue
         return RetunedActionReauthoring(
             action,
             failure.receipt,
-            ClassicRecordAddition(record.intervention, record.receipt),
+            ClassicRecordAddition(
+                record.intervention,
+                record.receipt,
+                replaces_intervention_id=action.id,
+            ),
             str(saved_refusal),
         )
     return None
 
 
 def validate_retuned_actions(
-    failures: Sequence[ClassicRepairRefusal],
+    failures: Sequence[RepairRefusal],
     donor: ClassicPreparedDonor,
     materialized: MaterializedDonorRetuneCandidate,
     output: ClassicDonorProbeOutput,
-) -> tuple[MeasuredPinRepair | RetunedActionReauthoring, ...]:
+) -> tuple[MeasuredPinRepair | RetunedActionReauthoring | LegacyInstallRepair, ...]:
     """Replay the ordinary composer for every captured consumer failure.
 
     Callers pass the captured failures followed by the donor's other consumers
     (see :func:`other_consumers`), so a candidate that would break a function
     the donor still serves is refused rather than traded for the failing one.
-    A consumer whose saved family refuses the candidate although the candidate
-    emits the consumer's exact retail body is re-authored onto the retuned
-    donor under the cheapest closed family (:class:`RetunedActionReauthoring`).
+    A consumer whose saved family refuses the candidate is re-authored when the
+    candidate either emits its retail body or reaches it through a closed
+    relational proof (:class:`RetunedActionReauthoring`).
     """
 
-    repaired: list[MeasuredPinRepair | RetunedActionReauthoring] = []
+    repaired: list[MeasuredPinRepair | RetunedActionReauthoring | LegacyInstallRepair] = []
     for failure in failures:
         try:
             materials = _candidate_materials(failure, donor, materialized, output)
@@ -414,10 +597,50 @@ def validate_retuned_actions(
             raise MeasuredPinRepairError(
                 f"action {failure.intervention.id!r} rejected candidate: {exc}"
             ) from exc
+        if isinstance(failure.intervention, LegacyOracleInstallIntervention):
+            if failure.legacy_oracle is None or materials.donor_object is None:
+                raise MeasuredPinRepairError(
+                    f"action {failure.intervention.id!r} lacks its captured legacy oracle"
+                )
+            baseline = failure.baseline_repair
+            try:
+                candidate = reauthor_legacy_simulated_elision(
+                    failure.intervention,
+                    failure.receipt,
+                    materials.seed_object,
+                    materials.donor_object,
+                    failure.legacy_oracle.retail_body,
+                    failure.legacy_oracle.auxiliary_bodies,
+                )
+            except LegacyRepairError as exc:
+                raise MeasuredPinRepairError(
+                    f"action {failure.intervention.id!r} rejected candidate: {exc}",
+                    stage="ordinary_validation",
+                ) from exc
+            if baseline is not None:
+                candidate_cost = (
+                    candidate.intervention.byte_count,
+                    len(candidate.intervention.ranges),
+                )
+                baseline_cost = (
+                    baseline.intervention.byte_count,
+                    len(baseline.intervention.ranges),
+                )
+                if candidate_cost >= baseline_cost:
+                    raise MeasuredPinRepairError(
+                        f"action {failure.intervention.id!r} rejected candidate: legacy "
+                        f"authority cost {candidate_cost} does not improve current safe cost "
+                        f"{baseline_cost}",
+                        stage="ordinary_validation",
+                    )
+            repaired.append(candidate)
+            continue
         try:
             repaired.append(repair_measured_pins(failure.intervention, failure.receipt, materials))
         except MeasuredPinRepairError as exc:
-            reauthored = _reauthor_retuned_action(failure, materials, exc)
+            reauthored = _reauthor_retuned_action(
+                failure, materials, exc, donor, materialized, output
+            )
             if reauthored is None:
                 raise MeasuredPinRepairError(
                     f"action {failure.intervention.id!r} rejected candidate: {exc}",
@@ -434,9 +657,9 @@ def validate_retuned_actions(
 def retune_authority_edits(
     donor_before: ClassicPreparedDonor,
     donor_receipt: ClassicProofReceipt,
-    failures: Sequence[ClassicRepairRefusal],
+    failures: Sequence[RepairRefusal],
     materialized: MaterializedDonorRetuneCandidate,
-    repaired: Sequence[MeasuredPinRepair | RetunedActionReauthoring],
+    repaired: Sequence[MeasuredPinRepair | RetunedActionReauthoring | LegacyInstallRepair],
 ) -> tuple[
     tuple[ClassicInterventionEdit, ...],
     tuple[ClassicReceiptEdit, ...],
@@ -445,40 +668,185 @@ def retune_authority_edits(
     """Build exact typed edits after ordinary candidate admission.
 
     A re-authored consumer removes its saved record and receipt and adds the
-    new record; the donor's beneficiary set is unchanged because the new
-    record names the same function.
+    new record.  Its primary donor still names the same beneficiary; auxiliary
+    donors that the replacement no longer uses are reconciled too.
     """
 
-    intervention_edits: list[ClassicInterventionEdit] = [
-        ClassicInterventionEdit(donor_before.intervention, materialized.intervention),
-    ]
+    retuned_id = donor_before.intervention.id
+    intervention_edits: dict[str, ClassicInterventionEdit] = {
+        retuned_id: ClassicInterventionEdit(donor_before.intervention, materialized.intervention),
+    }
     receipts: dict[str, ClassicReceiptEdit] = {}
     additions: list[ClassicRecordAddition] = []
+    beneficiary_state: dict[
+        str,
+        tuple[
+            ClassicRecipeIntervention,
+            set[tuple[str, str, str]],
+            set[str],
+        ],
+    ] = {}
+
+    def record_intervention(edit: ClassicInterventionEdit) -> None:
+        previous = intervention_edits.get(edit.before.id)
+        if previous is not None and previous != edit:
+            raise ValueError(f"intervention {edit.before.id!r} produced conflicting repairs")
+        intervention_edits[edit.before.id] = edit
+
+    def record_receipt(edit: ClassicReceiptEdit) -> None:
+        previous = receipts.get(edit.before.id)
+        if previous is not None and previous != edit:
+            raise ValueError(f"receipt {edit.before.id!r} produced conflicting repairs")
+        receipts[edit.before.id] = edit
+
+    def consumer_donors(
+        unit: ClassicPreparedUnit,
+        consumer: ClassicRecipeIntervention | LegacyOracleInstallIntervention,
+    ) -> frozenset[str]:
+        if (
+            isinstance(consumer, ClassicRecipeIntervention)
+            and consumer.role is ClassicRecipeRole.FUNCTION
+        ):
+            matches = tuple(item for item in unit.receipts if item.intervention_id == consumer.id)
+            if len(matches) != 1:
+                raise ValueError(f"consumer {consumer.id!r} requires one proof receipt")
+            return classic_function_donor_ids(consumer, matches[0])
+        return frozenset(consumer.dependencies)
+
     if materialized.receipt != donor_receipt:
-        receipts[donor_receipt.id] = ClassicReceiptEdit(donor_receipt, materialized.receipt)
+        record_receipt(ClassicReceiptEdit(donor_receipt, materialized.receipt))
     for failure, result in zip(failures, repaired, strict=True):
+        if isinstance(result, LegacyInstallRepair):
+            if result.intervention.id != failure.intervention.id:
+                raise ValueError(
+                    f"legacy re-authoring of {result.intervention.id!r} does not answer "
+                    f"{failure.intervention.id!r}"
+                )
+            # Save the donor first.  The next analysis pass re-authors the
+            # existing legacy action from the now-current compiler object.
+            continue
         if isinstance(result, RetunedActionReauthoring):
             if result.action.id != failure.intervention.id:
                 raise ValueError(
                     f"re-authoring of {result.action.id!r} does not answer "
                     f"{failure.intervention.id!r}"
                 )
-            intervention_edits.append(ClassicInterventionEdit(result.action, None))
+            record_intervention(ClassicInterventionEdit(result.action, None))
             edit = ClassicReceiptEdit(result.receipt, None)
             additions.append(result.addition)
+            before_donors = classic_function_donor_ids(result.action, result.receipt)
+            after_donors = classic_function_donor_ids(
+                result.addition.intervention,
+                result.addition.receipt,
+            )
+            changed_donors = before_donors ^ after_donors
+            unit_donors = {item.intervention.id: item.intervention for item in failure.unit.donors}
+            unknown = changed_donors - unit_donors.keys()
+            if unknown:
+                raise ValueError(
+                    f"function {result.action.id!r} names donors outside its prepared unit: "
+                    f"{sorted(unknown)}"
+                )
+            key = (
+                result.action.scope.target,
+                result.action.scope.translation_unit or "",
+                result.action.scope.function or "",
+            )
+            for donor_id in unit_donors:
+                if donor_id not in changed_donors:
+                    continue
+                saved = unit_donors[donor_id]
+                state = beneficiary_state.setdefault(
+                    donor_id,
+                    (
+                        saved,
+                        {
+                            (
+                                scope.target,
+                                scope.translation_unit or "",
+                                scope.function or "",
+                            )
+                            for scope in saved.beneficiaries
+                        },
+                        {
+                            consumer.id
+                            for consumer in (
+                                *failure.unit.actions,
+                                *(item.intervention for item in failure.unit.donors),
+                            )
+                            if donor_id in consumer_donors(failure.unit, consumer)
+                        },
+                    ),
+                )
+                if state[0] != saved:
+                    raise ValueError(f"donor {donor_id!r} has conflicting prepared authority")
+                _saved, beneficiaries, consumers = state
+                if donor_id in before_donors:
+                    beneficiaries.discard(key)
+                    consumers.discard(result.action.id)
+                if donor_id in after_donors:
+                    beneficiaries.add(key)
+                    consumers.add(result.addition.intervention.id)
         else:
             if result.receipt == failure.receipt:
                 continue
             edit = ClassicReceiptEdit(failure.receipt, result.receipt)
-        previous = receipts.get(edit.before.id)
-        if previous is not None and previous != edit:
-            raise ValueError(f"receipt {edit.before.id!r} produced conflicting repairs")
-        receipts[edit.before.id] = edit
+        record_receipt(edit)
+    unit_receipts = {
+        item.intervention_id: item for failure in failures for item in failure.unit.receipts
+    }
+    for donor_id, (saved, beneficiaries, consumers) in beneficiary_state.items():
+        before = {
+            (scope.target, scope.translation_unit or "", scope.function or "")
+            for scope in saved.beneficiaries
+        }
+        if beneficiaries == before:
+            continue
+        if not beneficiaries and not consumers:
+            if donor_id == retuned_id:
+                if saved != donor_before.intervention:
+                    raise ValueError(
+                        f"retuned donor {donor_id!r} differs from its prepared authority"
+                    )
+                intervention_edits[donor_id] = ClassicInterventionEdit(
+                    donor_before.intervention, None
+                )
+            else:
+                record_intervention(ClassicInterventionEdit(saved, None))
+            orphan_receipt = unit_receipts.get(donor_id)
+            if donor_id == retuned_id and orphan_receipt is None:
+                raise ValueError(f"retuned donor {donor_id!r} has no proof receipt")
+            if orphan_receipt is not None:
+                edit = ClassicReceiptEdit(orphan_receipt, None)
+                if donor_id == retuned_id:
+                    if orphan_receipt != donor_receipt:
+                        raise ValueError(
+                            f"retuned donor {donor_id!r} has conflicting proof authority"
+                        )
+                    receipts[edit.before.id] = edit
+                else:
+                    record_receipt(edit)
+            continue
+        scopes = tuple(
+            Scope(target=target, translation_unit=unit_id, function=symbol)
+            for target, unit_id, symbol in sorted(beneficiaries)
+        )
+        if donor_id == retuned_id:
+            if saved != donor_before.intervention:
+                raise ValueError(f"retuned donor {donor_id!r} differs from its prepared authority")
+            intervention_edits[donor_id] = ClassicInterventionEdit(
+                donor_before.intervention,
+                materialized.intervention.model_copy(update={"beneficiaries": scopes}),
+            )
+        else:
+            record_intervention(
+                ClassicInterventionEdit(saved, saved.model_copy(update={"beneficiaries": scopes}))
+            )
     added_ids = [item.intervention.id for item in additions]
     if len(set(added_ids)) != len(added_ids):
         raise ValueError("re-authored records repeat an identifier")
     return (
-        tuple(intervention_edits),
+        tuple(intervention_edits.values()),
         tuple(receipts[key] for key in sorted(receipts, key=str.casefold)),
         tuple(additions),
     )

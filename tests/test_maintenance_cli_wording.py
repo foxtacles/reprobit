@@ -21,7 +21,7 @@ def test_repair_help_identifies_the_everyday_source_edit_workflow(
 
     assert stopped.value.code == 0
     help_text = " ".join(capsys.readouterr().out.split())
-    assert "already part of the project" in help_text
+    assert "project that already matched exactly" in help_text
     assert "shared header used by many source files" in help_text
     assert "For added or removed files, start with source preview" in help_text
     assert "prints a safe next command when one is available" in help_text

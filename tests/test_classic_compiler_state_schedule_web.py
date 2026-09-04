@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from typing import cast
+
 import pytest
 
-from reprobit.classic.compiler_state_foundation import CompilerStateCodePair
+from reprobit.classic.compiler_state_foundation import CompilerStateCodePair, _Instruction
 from reprobit.classic.compiler_state_projection import _prove_pair
+from reprobit.classic.compiler_state_schedule import _schedule_pairing_candidates
 from reprobit.classic.semantic_errors import ClassicSemanticError
 
 _LIST_INSERT_CLEAN = bytes.fromhex(
@@ -16,6 +19,21 @@ _LIST_INSERT_EFFECTIVE = bytes.fromhex(
     "89008940048d78088943048b480485ff890174148b5424188b0a890f8b5a04895f"
     "048b52088957088b4c2410ff46085f5e5b89018bc1c20c00"
 )
+
+
+def test_duplicate_schedule_pairing_search_refuses_before_factorial_expansion() -> None:
+    instructions = cast(
+        list[_Instruction],
+        [{"offset": index, "length": 1} for index in range(7)],
+    )
+
+    with pytest.raises(ClassicSemanticError, match="closed pairing bound"):
+        _schedule_pairing_candidates(
+            [b"a", *([b"b"] * 6)],
+            [*([b"b"] * 6), b"a"],
+            instructions,
+            instructions,
+        )
 
 
 def _allocation_relocation() -> dict[str, object]:

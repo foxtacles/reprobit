@@ -1,8 +1,9 @@
 # Project format
 
 Most people do not need to edit these files by hand. `rbit init`, `rbit source
-lock`, `rbit import cmake`, and accepted discovery results create or update
-them; review and commit the resulting changes like ordinary project files.
+lock`, `rbit source regenerate --apply`, `rbit import cmake`, `rbit repair`, and
+accepted discovery results create or update them; review and commit the
+resulting changes like ordinary project files.
 
 A project has a small `reprobit.toml` entry point and strict JSON files under
 `reprobit/`. After `rbit source lock`, `reprobit/source-manifest.json` lists the
@@ -113,12 +114,12 @@ them in `reprobit.toml`.
 | `project-v3.schema.json` | `project:3` | `reprobit.toml`, the human-edited entry point (`ProjectSpec`) | `rbit init`, then by hand |
 | `toolchain-lock-v3.schema.json` | `toolchain-lock:3` | `reprobit/toolchain.lock.json` (`ToolchainLock`) | `rbit setup`, `rbit toolchain lock` |
 | `source-manifest-v3.schema.json` | `source-manifest:3` | `reprobit/source-manifest.json`: the complete clean-source authority, separate from effective overlays and provenance (`SourceManifestDocument`) | `rbit source lock`, `rbit repair` |
-| `build-plan-v3.schema.json` | `build-plan:3` | `reprobit/build-plan.json`: declarative build authority not owned by intervention or proof shards (`BuildPlanDocument`) | `rbit import cmake` |
+| `build-plan-v3.schema.json` | `build-plan:3` | `reprobit/build-plan.json`: declarative build authority not owned by intervention or proof shards (`BuildPlanDocument`) | `rbit import cmake`, `rbit source regenerate --apply`, `rbit repair` |
 | `producer-graph-v3.schema.json` | `producer-graph:3` | `reprobit/producer-graph.json`: portable authority for every byte-producing child process (`ProducerGraphDocument`) | `rbit import cmake`, `rbit graph extract` |
-| `intervention-document-v3.schema.json` | `intervention-document:3` | one shard under `reprobit/interventions/` (`InterventionDocument`; see [interventions.md](interventions.md)) | `rbit import cmake` (empty initial records), `rbit discover grind --accept-exact`, by hand |
-| `proof-document-v3.schema.json` | `proof-document:3` | one shard under `reprobit/proofs/`: committed expected pins, never authoritative runtime proof results (`ProofDocument`) | `rbit import cmake` (empty initial records), `rbit discover grind --accept-exact`, `rbit repair` |
+| `intervention-document-v3.schema.json` | `intervention-document:3` | one shard under `reprobit/interventions/` (`InterventionDocument`; see [interventions.md](interventions.md)) | `rbit import cmake` (empty initial records), an accepted `rbit discover grind`, `rbit repair`, or by hand |
+| `proof-document-v3.schema.json` | `proof-document:3` | one shard under `reprobit/proofs/`: committed expected pins, never authoritative runtime proof results (`ProofDocument`) | `rbit import cmake` (empty initial records), an accepted `rbit discover grind`, `rbit repair`, or by hand |
 | `oracle-document-v3.schema.json` | `oracle-document:3` | one file under `reprobit/oracles/`: the protected reference digest and size for one target (`OracleDocument`) | `rbit import cmake` |
 | `catalog-v3.schema.json` | `catalog:3` | nothing on disk; the synthetic aggregate of every definition for tooling (`SchemaCatalog`) | — |
-| `report-v2.schema.json` | `report:2` | `report.json` written beside `report.html` by `rbit build`, `rbit verify`, and `rbit repair` (`Report`) | `rbit build`, `rbit verify`, `rbit repair` |
+| `report-v2.schema.json` | `report:2` | `report.json` written beside `report.html` by `rbit verify` and `rbit repair` (`Report`) | `rbit verify`, `rbit repair` |
 | `msvc-discovery-request-v1.schema.json` | `msvc-discovery-request:1` | the request file passed to `rbit discover run`; host toolchain and state paths stay in CLI flags (`MsvcDiscoveryRequest`; see [discovery.md](discovery.md#advanced-raw-request-campaigns)) | by hand |
 | `discovery-report-v1.schema.json` | `discovery-report:1` | the `<request>.report.json` that `rbit discover run` writes next to its HTML report (`DiscoveryCampaignReport`) | `rbit discover run` |

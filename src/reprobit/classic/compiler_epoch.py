@@ -25,7 +25,10 @@ from reprobit.classic.coff_projection import (
     _OrderedArchiveSeedDependency,
 )
 from reprobit.classic.coff_projection_code import _runtime_projection_equivalence_proof
-from reprobit.classic.coff_projection_runtime import _external_function_owner
+from reprobit.classic.coff_projection_runtime import (
+    _external_function_owner,
+    _RuntimeProjectionEquivalence,
+)
 from reprobit.classic.coff_projection_statements import _CODE_SECTION_PREFIXES
 from reprobit.classic.compiler_identity import issue_msvc420_compiler_identity
 from reprobit.classic.compiler_state_foundation import CompilerStateCompilerEvidence
@@ -834,6 +837,8 @@ def _validate_compiler_namespaces(
     referenced_ids: frozenset[str],
     sensitive_identifiers: frozenset[str],
     global_declaration_identifiers: frozenset[str] = frozenset(),
+    preprocessor_cache: dict[tuple[Digest, int], frozenset[tuple[str, str]]] | None = None,
+    identifier_cache: dict[tuple[Digest, int], frozenset[str]] | None = None,
 ) -> dict[str, _ValidatedCompilerNamespace]:
     indexed = _unique(evidences, lambda item: item.namespace_id, "compiler namespace")
     expected_ids = {item.casefold() for item in referenced_ids}
@@ -844,8 +849,8 @@ def _validate_compiler_namespaces(
             f"shared compiler namespace universe differs; missing={missing}, extra={extra}"
         )
     result: dict[str, _ValidatedCompilerNamespace] = {}
-    preprocessor_cache: dict[tuple[Digest, int], frozenset[tuple[str, str]]] = {}
-    identifier_cache: dict[tuple[Digest, int], frozenset[str]] = {}
+    mutation_cache = {} if preprocessor_cache is None else preprocessor_cache
+    declaration_cache = {} if identifier_cache is None else identifier_cache
     for folded, raw in indexed.items():
         if (
             not isinstance(raw, CompilerNamespaceEvidence)
@@ -865,14 +870,14 @@ def _validate_compiler_namespaces(
         )
         macro_mutations, sensitive_macro_mutation_origins = _namespace_preprocessor_mutations(
             raw.members,
-            cache=preprocessor_cache,
+            cache=mutation_cache,
             sensitive_identifiers=sensitive_identifiers,
         )
         global_declaration_origins = _namespace_global_declaration_origins(
             raw.members,
             bundle=bundle,
             identifiers=global_declaration_identifiers,
-            cache=identifier_cache,
+            cache=declaration_cache,
         )
         if global_declaration_origins:
             raise ClassicSemanticError(
@@ -935,6 +940,31 @@ class _ArtifactSemanticsDecision:
     runtime_projection_theorem: str | None
     runtime_projection_proof: Mapping[str, object] | None
     artifact_semantics_theorem: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectCompilerArtifactPair:
+    """The closed artifact proof for two outputs of one locked compiler."""
+
+    projection: _RuntimeProjectionEquivalence
+    coff_trace: Mapping[str, object]
+    decision: _ArtifactSemanticsDecision
+
+
+@dataclass(frozen=True, slots=True)
+class _ProjectCompilerEpochPair:
+    """The shared proof result for one effective/counterfactual compiler pair."""
+
+    counterfactual: _CoffObject
+    effective: _CoffObject
+    excluded_sections: frozenset[int]
+    helper_definitions: frozenset[str]
+    crt_pull_dependencies: tuple[_CrtPullLinkerDependency, ...]
+    ordered_archive_seed_dependencies: tuple[_OrderedArchiveSeedDependency, ...]
+    invocation_trace: Mapping[str, object]
+    projection: _RuntimeProjectionEquivalence
+    coff_trace: Mapping[str, object]
+    decision: _ArtifactSemanticsDecision
 
 
 def _artifact_semantics_decision(
@@ -1023,6 +1053,59 @@ def _artifact_semantics_decision(
     )
 
 
+def _project_compiler_artifact_pair(
+    *,
+    bundle: ProjectBundle,
+    compiler_invocation: CompilerEpochInvocation,
+    counterfactual: _CoffObject,
+    effective: _CoffObject,
+    excluded_sections: frozenset[int] = frozenset(),
+    crt_pull_dependencies: tuple[_CrtPullLinkerDependency, ...] = (),
+    ordered_archive_seed_dependencies: tuple[_OrderedArchiveSeedDependency, ...] = (),
+    projection_required: bool,
+) -> _ProjectCompilerArtifactPair:
+    """Apply the cold audit's closed COFF proof to one compiler-object pair."""
+
+    projection = _runtime_projection_equivalence_proof(
+        counterfactual,
+        effective,
+        excluded_effective_sections=excluded_sections,
+    )
+    compiler_identity = (
+        issue_msvc420_compiler_identity(bundle.toolchain_lock)
+        if bundle.spec.toolchain.profile == bundle.toolchain_lock.profile
+        else None
+    )
+    coff_trace = _coff_compiler_congruence_trace(
+        counterfactual,
+        effective,
+        excluded_effective_sections=excluded_sections,
+        projection_equivalence=projection,
+        crt_pull_dependencies=crt_pull_dependencies,
+        ordered_archive_seed_dependencies=ordered_archive_seed_dependencies,
+        compiler_state_identity=compiler_identity,
+        compiler_state_evidence=CompilerStateCompilerEvidence(
+            tool_id=compiler_invocation.tool_id,
+            tool_digest=compiler_invocation.tool_digest.value,
+            invocation_digest=compiler_invocation.invocation_digest.value,
+            arguments=compiler_invocation.arguments,
+        ),
+        compiler_state_projection_required=projection_required,
+    )
+    decision = _artifact_semantics_decision(
+        projection_required=projection_required,
+        projection_equal=projection.equivalent,
+        projection_byte_equal=projection.byte_equal,
+        projection_theorem=projection.theorem,
+        projection_proof=projection.proof,
+        compiler_state_projection=coff_trace.get("compiler_state_projection_proof"),
+        coff_trace=coff_trace,
+        counterfactual_digest=counterfactual.digest.model_dump(mode="json"),
+        effective_digest=effective.digest.model_dump(mode="json"),
+    )
+    return _ProjectCompilerArtifactPair(projection, coff_trace, decision)
+
+
 def _counterfactual_compiler_congruence_trace(
     *,
     bundle: ProjectBundle,
@@ -1089,6 +1172,86 @@ def _counterfactual_compiler_congruence_trace(
     }
 
 
+def _validate_project_compiler_epoch_pair(
+    *,
+    bundle: ProjectBundle,
+    graph: ProducerGraphDocument,
+    node: ProducerNode,
+    audit: ProjectOverlayCounterfactualAudit,
+    effective_invocation: CompilerEpochInvocation,
+    namespaces: Mapping[str, _ValidatedCompilerNamespace],
+    source_validation: _OverlaySourceValidation,
+    counterfactual: _CoffObject,
+    effective: _CoffObject,
+) -> _ProjectCompilerEpochPair:
+    """Validate one compiler pair with the same proof used by the cold audit."""
+
+    source_ref, _object_ref = _compiler_shape(node)
+    source_path = source_ref.removeprefix("source/").casefold()
+    helpers = source_validation.helpers_by_source.get(source_path, ())
+    excluded: frozenset[int] = frozenset()
+    extra_definitions: frozenset[str] = frozenset()
+    if helpers:
+        excluded, extra_definitions = _helper_delta_sections(
+            clean=counterfactual,
+            effective=effective,
+            helper_identifiers=helpers,
+        )
+    pull_dependencies = _crt_pull_linker_dependencies(
+        clean=counterfactual,
+        effective=effective,
+        excluded_sections=excluded,
+        helper_identifiers=source_validation.crt_pull_helpers_by_source.get(source_path, ()),
+    )
+    seed_dependencies = _seed_order_dependencies(
+        clean=counterfactual,
+        effective=effective,
+        excluded_sections=excluded,
+        seed_helpers=source_validation.ordered_archive_seed_helpers_by_source.get(
+            source_path,
+            (),
+        ),
+    )
+    invocation_trace = _counterfactual_compiler_congruence_trace(
+        bundle=bundle,
+        graph=graph,
+        node=node,
+        audit=audit,
+        effective_invocation=effective_invocation,
+        namespaces=namespaces,
+    )
+    projection_required = (
+        node.id in source_validation.compiler_epoch_plan.runtime_projection_node_ids
+    )
+    artifact_pair = _project_compiler_artifact_pair(
+        bundle=bundle,
+        compiler_invocation=effective_invocation,
+        counterfactual=counterfactual,
+        effective=effective,
+        excluded_sections=excluded,
+        crt_pull_dependencies=pull_dependencies,
+        ordered_archive_seed_dependencies=seed_dependencies,
+        projection_required=projection_required,
+    )
+    if projection_required and not artifact_pair.decision.proven:
+        raise ClassicSemanticError(
+            f"effective compiler {node.id!r} ({source_ref}) lacks a closed "
+            "artifact-semantics theorem"
+        )
+    return _ProjectCompilerEpochPair(
+        counterfactual,
+        effective,
+        excluded,
+        extra_definitions,
+        pull_dependencies,
+        seed_dependencies,
+        invocation_trace,
+        artifact_pair.projection,
+        artifact_pair.coff_trace,
+        artifact_pair.decision,
+    )
+
+
 def _project_compiler_audit_trace(
     *,
     bundle: ProjectBundle,
@@ -1110,11 +1273,6 @@ def _project_compiler_audit_trace(
     list[dict[str, object]],
     list[dict[str, object]],
 ]:
-    compiler_identity = (
-        issue_msvc420_compiler_identity(bundle.toolchain_lock)
-        if bundle.spec.toolchain.profile == bundle.toolchain_lock.profile
-        else None
-    )
     graph_compilers = {node.id: node for node in graph.nodes if node.role is ProducerRole.COMPILER}
     generated_tu_folded = {path.casefold() for path in generated_tus}
     _require_no_compiler_macro_capture(
@@ -1341,102 +1499,36 @@ def _project_compiler_audit_trace(
             f"counterfactual:{object_ref}",
         )
         effective = effective_objects[node_id]
-        counterfactual_objects[node_id] = counterfactual
-        relative = source_ref.removeprefix("source/")
-        helpers = source_validation.helpers_by_source.get(relative.casefold(), ())
-        crt_pull_helpers = source_validation.crt_pull_helpers_by_source.get(relative.casefold(), ())
-        ordered_archive_seed_helpers = source_validation.ordered_archive_seed_helpers_by_source.get(
-            relative.casefold(), ()
-        )
-        excluded: frozenset[int] = frozenset()
-        extra_definitions: frozenset[str] = frozenset()
-        if helpers:
-            excluded, extra_definitions = _helper_delta_sections(
-                clean=counterfactual,
-                effective=effective,
-                helper_identifiers=helpers,
-            )
-            helper_sections[node_id] = excluded
-        node_pull_dependencies = _crt_pull_linker_dependencies(
-            clean=counterfactual,
-            effective=effective,
-            excluded_sections=excluded,
-            helper_identifiers=crt_pull_helpers,
-        )
-        if node_pull_dependencies:
-            crt_pull_dependencies[node_id] = node_pull_dependencies
-        node_seed_dependencies = _seed_order_dependencies(
-            clean=counterfactual,
-            effective=effective,
-            excluded_sections=excluded,
-            seed_helpers=ordered_archive_seed_helpers,
-        )
-        if node_seed_dependencies:
-            ordered_archive_seed_dependencies[node_id] = node_seed_dependencies
         effective_invocation = raw_product.compiler_invocation
         if not isinstance(effective_invocation, CompilerEpochInvocation):
             raise ClassicSemanticError(f"effective compiler {node_id!r} lacks invocation evidence")
-        invocation_trace = _counterfactual_compiler_congruence_trace(
+        pair_proof = _validate_project_compiler_epoch_pair(
             bundle=bundle,
             graph=graph,
             node=node,
             audit=raw_audit,
             effective_invocation=effective_invocation,
             namespaces=namespaces,
+            source_validation=source_validation,
+            counterfactual=counterfactual,
+            effective=effective,
         )
+        counterfactual_objects[node_id] = pair_proof.counterfactual
+        if pair_proof.excluded_sections:
+            helper_sections[node_id] = pair_proof.excluded_sections
+        if pair_proof.crt_pull_dependencies:
+            crt_pull_dependencies[node_id] = pair_proof.crt_pull_dependencies
+        if pair_proof.ordered_archive_seed_dependencies:
+            ordered_archive_seed_dependencies[node_id] = (
+                pair_proof.ordered_archive_seed_dependencies
+            )
         projection_required = (
             node_id in source_validation.compiler_epoch_plan.runtime_projection_node_ids
         )
-        projection_equivalence = _runtime_projection_equivalence_proof(
-            counterfactual,
-            effective,
-            excluded_effective_sections=excluded,
-        )
-        projection_equal = projection_equivalence.equivalent
-        projection_byte_equal = projection_equivalence.byte_equal
-        projection_theorem = projection_equivalence.theorem
-        coff_trace = _coff_compiler_congruence_trace(
-            counterfactual,
-            effective,
-            excluded_effective_sections=excluded,
-            projection_equivalence=projection_equivalence,
-            crt_pull_dependencies=node_pull_dependencies,
-            ordered_archive_seed_dependencies=node_seed_dependencies,
-            compiler_state_identity=compiler_identity,
-            compiler_state_evidence=CompilerStateCompilerEvidence(
-                tool_id=effective_invocation.tool_id,
-                tool_digest=effective_invocation.tool_digest.value,
-                invocation_digest=effective_invocation.invocation_digest.value,
-                arguments=effective_invocation.arguments,
-            ),
-            compiler_state_projection_required=projection_required,
-        )
-        # ``compiler_state_only`` classifies an edit that may perturb compiler
-        # output; it does not promise byte-identical intermediate objects.  A
-        # projection-required edit nevertheless needs an explicit typed
-        # runtime theorem.  The broader COFF envelope remains a useful
-        # congruence check, but is not a substitute for that theorem.
-        compiler_state_projection = coff_trace.get("compiler_state_projection_proof")
-        decision = _artifact_semantics_decision(
-            projection_required=projection_required,
-            projection_equal=projection_equal,
-            projection_byte_equal=projection_byte_equal,
-            projection_theorem=projection_theorem,
-            projection_proof=projection_equivalence.proof,
-            compiler_state_projection=compiler_state_projection,
-            coff_trace=coff_trace,
-            counterfactual_digest=counterfactual.digest.model_dump(mode="json"),
-            effective_digest=effective.digest.model_dump(mode="json"),
-        )
-        runtime_projection_theorem = decision.runtime_projection_theorem
-        runtime_projection_proof: Mapping[str, object] | None = decision.runtime_projection_proof
-        artifact_semantics_proven = decision.proven
-        artifact_semantics_theorem = decision.artifact_semantics_theorem
-        if projection_required and not artifact_semantics_proven:
-            raise ClassicSemanticError(
-                f"effective compiler {node_id!r} ({source_ref}) lacks a closed "
-                "artifact-semantics theorem"
-            )
+        runtime_projection_theorem = pair_proof.decision.runtime_projection_theorem
+        runtime_projection_proof = pair_proof.decision.runtime_projection_proof
+        artifact_semantics_proven = pair_proof.decision.proven
+        artifact_semantics_theorem = pair_proof.decision.artifact_semantics_theorem
         trace.append(
             {
                 "node_id": node_id,
@@ -1455,9 +1547,9 @@ def _project_compiler_audit_trace(
                     "size": len(raw_product.payload),
                 },
                 "runtime_projection_required": projection_required,
-                "runtime_projection_equal": projection_byte_equal,
-                "runtime_projection_equivalent": projection_equal,
-                "runtime_projection_byte_equal": projection_byte_equal,
+                "runtime_projection_equal": pair_proof.projection.byte_equal,
+                "runtime_projection_equivalent": pair_proof.projection.equivalent,
+                "runtime_projection_byte_equal": pair_proof.projection.byte_equal,
                 "runtime_projection_theorem": runtime_projection_theorem,
                 "runtime_projection_proof": (
                     dict(runtime_projection_proof) if runtime_projection_proof is not None else None
@@ -1465,10 +1557,10 @@ def _project_compiler_audit_trace(
                 "artifact_semantics_required": projection_required,
                 "artifact_semantics_proven": artifact_semantics_proven,
                 "artifact_semantics_theorem": artifact_semantics_theorem,
-                "compiler_congruence": invocation_trace,
-                "coff_semantic_theorem": coff_trace,
-                "helper_sections": sorted(excluded),
-                "helper_definitions": sorted(extra_definitions),
+                "compiler_congruence": pair_proof.invocation_trace,
+                "coff_semantic_theorem": pair_proof.coff_trace,
+                "helper_sections": sorted(pair_proof.excluded_sections),
+                "helper_definitions": sorted(pair_proof.helper_definitions),
             }
         )
     return (

@@ -6,17 +6,23 @@ import argparse
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path, PurePosixPath
-from typing import TypeVar
+from typing import TypeVar, cast
 
 from reprobit.classic_donor_retune_candidates import (
     DEFAULT_REPAIR_RETUNE_RADIUS,
     DEFAULT_RETUNE_CANDIDATES,
 )
+from reprobit.classic_link_layout_repair import ClassicLinkLayoutHint
 from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
     canonical_overlay_operations,
 )
 from reprobit.classic_project import ClassicProjectError
+from reprobit.classic_project_overlay_repair import (
+    ClassicProjectOverlayRepair,
+    ClassicProjectOverlayRepairResult,
+    probe_project_overlay_repair,
+)
 from reprobit.classic_repair_authority import (
     ClassicInterventionEdit,
     ClassicReceiptEdit,
@@ -35,7 +41,7 @@ from reprobit.classic_repair_probe import (
     probe_bounded_donor_retunes,
 )
 from reprobit.classic_repair_probe_execution import ClassicDonorCompileCache
-from reprobit.classic_repair_session import ClassicRepairRefusal
+from reprobit.classic_repair_session import ClassicRepairRefusal, RepairRefusal
 from reprobit.classic_runtime_probe import ClassicDonorProbeProgress, ClassicProbeExecution
 from reprobit.cli_build import prepare_producer_graph_run
 from reprobit.cli_environment import (
@@ -87,9 +93,9 @@ def _source_payloads(
 
 
 def _bind_refusals_to_probe_units(
-    refusals: Sequence[ClassicRepairRefusal],
+    refusals: Sequence[RepairRefusal],
     units: Sequence[ClassicPreparedUnit],
-) -> tuple[ClassicRepairRefusal, ...]:
+) -> tuple[RepairRefusal, ...]:
     """Bind captured fallout to freshly prepared, identical TU authority."""
 
     by_id: dict[str, ClassicPreparedUnit] = {}
@@ -101,7 +107,7 @@ def _bind_refusals_to_probe_units(
             )
         by_id[unit_id] = unit
 
-    bound: list[ClassicRepairRefusal] = []
+    bound: list[RepairRefusal] = []
     for refusal in refusals:
         fresh = by_id.get(refusal.unit_id)
         if fresh is None:
@@ -109,7 +115,7 @@ def _bind_refusals_to_probe_units(
                 "classic donor repair cannot find freshly prepared translation unit "
                 f"{refusal.unit_id!r}"
             )
-        if refusal.synthetic:
+        if isinstance(refusal, ClassicRepairRefusal) and refusal.synthetic:
             # A census entry carries a placeholder unit: it binds to the fresh
             # authority of its translation unit by id alone, and has no saved
             # action or receipt to match.
@@ -154,11 +160,12 @@ def _bind_refusals_to_probe_units(
 def probe_classic_donor_repairs(
     args: argparse.Namespace,
     output: CLIOutput,
-    refusals: tuple[ClassicRepairRefusal, ...],
+    refusals: tuple[RepairRefusal, ...],
     *,
     candidate_budget: int = DEFAULT_RETUNE_PROBE_CANDIDATES,
     abandoned_states: Mapping[tuple[str, str], frozenset[str]] | None = None,
     compile_cache: ClassicDonorCompileCache | None = None,
+    excluded_groups: frozenset[tuple[str, str]] = frozenset(),
 ) -> ClassicDonorRetuneProbeResult:
     """Search bounded donor retunes without issuing evidence or publishing authority.
 
@@ -174,7 +181,7 @@ def probe_classic_donor_repairs(
 
     def run(
         probes: ClassicProbeExecution,
-        bound: tuple[ClassicRepairRefusal, ...],
+        bound: tuple[RepairRefusal, ...],
         clean: Mapping[str, bytes],
         effective: Mapping[str, bytes],
         operations: Mapping[str, Sequence[Mapping[str, object]]],
@@ -192,6 +199,7 @@ def probe_classic_donor_repairs(
             progress=progress,
             abandoned_states=abandoned_states,
             compile_cache=compile_cache,
+            excluded_groups=excluded_groups,
         )
 
     return _probe_with_runtime(
@@ -199,7 +207,7 @@ def probe_classic_donor_repairs(
         output,
         refusals,
         kind="repairprobe",
-        activity="trying nearby donor settings (the shown total is an upper bound)",
+        activity="trying nearby compiler choices (the shown total is an upper bound)",
         run=run,
     )
 
@@ -225,15 +233,17 @@ def probe_classic_carrier_discovery(
 
     def run(
         probes: ClassicProbeExecution,
-        bound: tuple[ClassicRepairRefusal, ...],
+        bound: tuple[RepairRefusal, ...],
         clean: Mapping[str, bytes],
         effective: Mapping[str, bytes],
         _operations: Mapping[str, Sequence[Mapping[str, object]]],
         progress: ClassicDonorProbeProgress,
     ) -> ClassicDiscoveryResult:
+        if any(not isinstance(item, ClassicRepairRefusal) for item in bound):
+            raise ClassicProjectError("carrier discovery cannot replace a legacy action")
         return probe_carrier_discovery(
             probes,
-            bound,
+            cast(tuple[ClassicRepairRefusal, ...], bound),
             clean_sources=clean,
             effective_sources=effective,
             per_unit=per_unit,
@@ -248,22 +258,105 @@ def probe_classic_carrier_discovery(
         output,
         refusals,
         kind="discoveryprobe",
-        activity="trying fresh carrier states (the shown total is an upper bound)",
+        activity="trying fresh compiler choices (the shown total is an upper bound)",
         run=run,
     )
+
+
+def probe_classic_project_overlay_repairs(
+    args: argparse.Namespace,
+    output: CLIOutput,
+    *,
+    candidate_budget: int,
+    settle_target_ids: frozenset[str] = frozenset(),
+    link_layout_hint: ClassicLinkLayoutHint | None = None,
+) -> ClassicProjectOverlayRepairResult:
+    """Check the dual source epoch and try bounded inert layout adjustments."""
+
+    root = project_root(args.project)
+    bundle = load_project_tree(root)
+    arena = RunArena(
+        state_root(root, bundle.spec),
+        kind="sourceprobe",
+        keep=KeepWorkspace.NEVER,
+    )
+    with arena:
+        with output.activity(
+            "preparing the source-layout check",
+            phase="repair-source-prepare",
+        ):
+            execution = resolve_classic_execution_inputs(
+                profile=bundle.spec.toolchain.profile,
+                explicit_toolchain_root=args.toolchain_root,
+                backend=selected_backend(args),
+                compiler_transport=args.compiler_transport,
+                resource_transport=args.resource_transport,
+            )
+            prepared = prepare_producer_graph_run(
+                args,
+                bundle,
+                project_root=root,
+                session_root=arena.path / "classic",
+                execution=execution,
+                progress=_ignore_preparation_progress,
+            )
+        clean_sources = {
+            entry.path: root.joinpath(*PurePosixPath(entry.path).parts).read_bytes()
+            for entry in (bundle.source_manifest.entries if bundle.source_manifest else ())
+        }
+        try:
+            with output.producer_activity(
+                "checking nearby source layouts (the shown total is an upper bound)"
+            ) as progress:
+
+                def report_candidate(completed: int, total: int, candidate_id: str) -> None:
+                    progress(
+                        completed,
+                        total,
+                        "repair-source-probe",
+                        candidate_id,
+                        ProgressKind.UNIT_FINISHED,
+                        None,
+                    )
+
+                result = probe_project_overlay_repair(
+                    prepared.probes,
+                    bundle,
+                    clean_sources=clean_sources,
+                    candidate_budget=candidate_budget,
+                    radius=(getattr(args, "retune_radius", None) or DEFAULT_REPAIR_RETUNE_RADIUS),
+                    candidate_limit=(
+                        getattr(args, "retune_candidates", None) or DEFAULT_RETUNE_CANDIDATES
+                    ),
+                    settle_target_ids=settle_target_ids,
+                    link_layout_hint=link_layout_hint,
+                    progress=report_candidate,
+                )
+        except BaseException as original:
+            if prepared.producer.is_open:
+                try:
+                    prepared.close()
+                except BaseException as cleanup_error:
+                    original.add_note(
+                        f"classic source-layout repair cleanup also failed: {cleanup_error}"
+                    )
+            raise
+        if prepared.producer.is_open:
+            prepared.close()
+        return result
 
 
 def _probe_with_runtime(
     args: argparse.Namespace,
     output: CLIOutput,
-    refusals: tuple[ClassicRepairRefusal, ...],
+    refusals: tuple[RepairRefusal, ...],
     *,
     kind: str,
     activity: str,
     run: Callable[
         [
             ClassicProbeExecution,
-            tuple[ClassicRepairRefusal, ...],
+            tuple[RepairRefusal, ...],
             Mapping[str, bytes],
             Mapping[str, bytes],
             Mapping[str, Sequence[Mapping[str, object]]],
@@ -284,7 +377,7 @@ def _probe_with_runtime(
     )
     with arena:
         with output.activity(
-            "preparing a safe donor search",
+            "preparing the repair search",
             phase="repair-probe-prepare",
         ):
             execution = resolve_classic_execution_inputs(
@@ -394,9 +487,25 @@ def apply_classic_donor_repairs(
     )
 
 
+def apply_classic_project_overlay_repair(
+    root: Path,
+    spec: ProjectSpec,
+    repair: ClassicProjectOverlayRepair,
+) -> tuple[str, ...]:
+    """Publish one compiler-proven source-layout edit through typed CAS."""
+
+    return apply_classic_authority_edits(
+        root,
+        spec,
+        project_overlays=(repair.edit,),
+    )
+
+
 __all__ = [
     "apply_classic_discovery_repairs",
     "apply_classic_donor_repairs",
+    "apply_classic_project_overlay_repair",
     "probe_classic_carrier_discovery",
     "probe_classic_donor_repairs",
+    "probe_classic_project_overlay_repairs",
 ]

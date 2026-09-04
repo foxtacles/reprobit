@@ -61,6 +61,7 @@ from reprobit.classic_incremental_planning import (
 )
 from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
+    classic_unit_oracle_targets,
 )
 from reprobit.classic_resources import scan_msvc_resource_dependencies
 from reprobit.classic_runtime_warm import ClassicWarmCompilerTransformResult
@@ -669,9 +670,11 @@ def _add_transform_node(
         )
         for donor in transform_unit.donors
     )
-    legacy_targets = tuple(
+    oracle_targets = tuple(
         sorted(
-            {action.oracle_target for action in transform_unit.legacy_actions},
+            classic_unit_oracle_targets(
+                transform_unit, repair=plan.measured_receipt_repair is not None
+            ),
             key=str.casefold,
         )
     )
@@ -681,13 +684,13 @@ def _add_transform_node(
             str(oracle_paths[target_id]),
             oracle_snapshots[target_id],
         )
-        for target_id in legacy_targets
+        for target_id in oracle_targets
     )
     transform_sampled_paths = tuple(
         sorted(
             (
                 path
-                for target_id in legacy_targets
+                for target_id in oracle_targets
                 for path in (census.known_path(oracle_paths[target_id]),)
                 if path is not None
             ),

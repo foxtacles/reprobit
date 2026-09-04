@@ -90,30 +90,49 @@ _FRIENDLY_PHASES = {
     "analyze": "Analyzing candidates",
     "compile": "Compiling source",
     "compose": "Applying reviewed interventions",
+    "counterfactual-audit": "Checking generated source",
     "discovery-analyze": "Analyzing candidates",
     "discovery-compile": "Trying declaration states",
     "discovery-enumerate": "Planning the search",
     "discovery-finalize": "Writing discovery results",
-    "grind-donors": "Trying donor candidates",
+    "grind-donors": "Trying compiler choices",
     "grind-finalize": "Finishing the search",
     "grind-publish": "Saving proven project files",
     "grind-qualify": "Checking candidate compatibility",
     "grind-seed": "Compiling the current translation unit",
-    "grind-skip": "Skipping incompatible candidates",
+    "grind-skip": "Skipping candidates",
     "grind-verify": "Verifying the best candidate from scratch",
-    "donor-compile": "Building donor candidates",
+    "donor-compile": "Building compiler choices",
     "evidence": "Checking trust evidence",
     "input-namespace": "Preparing compiler inputs",
     "link": "Linking targets",
     "link-controls": "Checking linker inputs",
     "object-transform": "Stabilizing object layout",
-    "repair-probe": "Trying nearby donor settings",
-    "repair-probe-prepare": "Preparing a safe donor search",
+    "repair-probe": "Trying compiler choices",
+    "repair-probe-prepare": "Preparing the repair search",
+    "repair-source-prepare": "Preparing the source layout check",
+    "repair-source-probe": "Trying source layouts",
     "resource": "Compiling resources",
     "source-epoch": "Preparing source inputs",
     "terminal": "Saving verified targets",
     "validate": "Checking project files",
     "validation": "Validating final output",
+}
+
+_FRIENDLY_NODE_PREFIXES = (
+    ("analysis-link.", "Creating comparison files"),
+    ("compiler.", "Compiling source"),
+    ("resource.", "Compiling resources"),
+    ("librarian.", "Building libraries"),
+    ("linker.", "Linking targets"),
+    ("transform.", "Applying saved adjustments"),
+    ("terminal.", "Finalizing target outputs"),
+)
+
+_FRIENDLY_INCREMENTAL_PHASES = {
+    "producer": "Running build steps",
+    "publication": "Saving reusable build results",
+    "transform": "Preparing build outputs",
 }
 
 
@@ -122,11 +141,16 @@ def _friendly_phase(phase: str) -> str:
 
 
 def _friendly_incremental_phase(phase: str, node_id: str) -> str:
-    """Give analysis nodes their user-facing work name without changing the DAG."""
+    """Give internal build nodes stable, plain-language work names."""
 
-    if node_id.startswith("analysis-link."):
-        return _friendly_phase("analysis-link")
-    return _friendly_phase(phase)
+    if phase == "repair-source-probe":
+        return f"Trying {_compact_failure_detail(node_id)}"
+    if phase == "counterfactual-audit":
+        return _friendly_phase(phase)
+    for prefix, description in _FRIENDLY_NODE_PREFIXES:
+        if node_id.startswith(prefix):
+            return description
+    return _FRIENDLY_INCREMENTAL_PHASES.get(phase, _friendly_phase(phase))
 
 
 _FRIENDLY_INVALIDATIONS = {
@@ -180,12 +204,14 @@ class CLIOutput:
     heartbeat_seconds: float = 5.0
     quiet: bool = False
     _progress: ProgressEmitter = field(init=False, repr=False)
+    _next_text_heartbeat: float = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         self._progress = ProgressEmitter(
             self._observe_progress,
             heartbeat_seconds=self.heartbeat_seconds,
         )
+        self._next_text_heartbeat = self.heartbeat_seconds * 3
 
     @property
     def _interactive(self) -> bool:
@@ -222,6 +248,15 @@ class CLIOutput:
             )
             self.stdout.flush()
             return
+        if (
+            progress_event.kind is ProgressKind.PHASE_STARTED
+            and progress_event.elapsed_seconds == 0
+        ):
+            self._next_text_heartbeat = self.heartbeat_seconds * 3
+        if progress_event.kind is ProgressKind.HEARTBEAT:
+            if progress_event.elapsed_seconds < self._next_text_heartbeat:
+                return
+            self._next_text_heartbeat = progress_event.elapsed_seconds + self.heartbeat_seconds * 3
         if self._renders_live or progress_event.kind in {
             ProgressKind.UNIT_FINISHED,
             ProgressKind.CACHE_HIT,
@@ -233,17 +268,24 @@ class CLIOutput:
         context: list[str] = []
         if progress_event.completed is not None and progress_event.total is not None:
             context.append(f"{progress_event.completed}/{progress_event.total}")
-        if progress_event.node_id is not None:
-            context.append(f"{progress_event.phase}: {progress_event.node_id}")
         if progress_event.kind is ProgressKind.PHASE_STARTED:
             rendered = f"{progress_event.message}..."
         elif progress_event.kind is ProgressKind.HEARTBEAT:
+            if progress_event.node_id is not None:
+                context.append(
+                    _friendly_incremental_phase(
+                        progress_event.phase,
+                        progress_event.node_id,
+                    )
+                )
             context.append(f"{progress_event.elapsed_seconds:.1f}s elapsed")
             rendered = f"{progress_event.message}... ({'; '.join(context)})"
         elif progress_event.kind is ProgressKind.PHASE_FINISHED:
             context.append(f"{progress_event.elapsed_seconds:.1f}s elapsed")
             rendered = f"{progress_event.message}: complete ({'; '.join(context)})"
         elif progress_event.kind is ProgressKind.PHASE_FAILED:
+            if progress_event.node_id is not None:
+                context.append(f"{progress_event.phase}: {progress_event.node_id}")
             if progress_event.reason is not None:
                 context.append(f"error: {_compact_failure_detail(progress_event.reason)}")
             detail = f" ({'; '.join(context)})" if context else ""
@@ -608,8 +650,9 @@ class CLIOutput:
                         if cache_hits or cache_misses
                         else ""
                     )
+                    friendly_phase = _friendly_incremental_phase(phase, node_id)
                     self.stderr.write(
-                        f"{description}: {completed}/{total} ({phase}: {node_id}{cache})\n"
+                        f"{description}: {completed}/{total} ({friendly_phase}{cache})\n"
                     )
                     self.stderr.flush()
 

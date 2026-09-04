@@ -30,6 +30,7 @@ from reprobit.schema import (
 from reprobit.strict_json import JsonValue, canonical_json
 
 if TYPE_CHECKING:
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
     from reprobit.classic.overlay_types import ClassicOverlayOutputReceipt
 
 
@@ -1182,6 +1183,7 @@ def prepare_donor_compile_request(
     receipts: Iterable[ClassicProofReceipt],
     clean_sources: Mapping[str, bytes] | None = None,
     canonical_overlay_operations: Sequence[Mapping[str, object]] | None = None,
+    overlay_render_session: ClassicOverlayRenderSession | None = None,
 ) -> DonorCompileRequest:
     """Render one closed donor request entirely from authenticated input bytes."""
 
@@ -1255,7 +1257,11 @@ def prepare_donor_compile_request(
             from reprobit.classic.overlay_document import render_classic_overlay_declarations
         except ImportError as exc:  # pragma: no cover - only during partial installations
             raise DonorSourceError("classic overlay renderer is unavailable") from exc
-        result = render_classic_overlay_declarations(declarations, normalized_inputs)
+        result = render_classic_overlay_declarations(
+            declarations,
+            normalized_inputs,
+            session=overlay_render_session,
+        )
         logical_outputs = dict(result.outputs)
         overlay_receipts = result.receipts
         _require(source_path in logical_outputs, "donor overlay does not render its source")

@@ -9,9 +9,11 @@ Pass `--quiet` (before or after the subcommand) to silence text-mode progress:
 phase starts, heartbeats, completion lines, unit counts, and the interactive
 progress display. Results, warnings, errors, and the context line written when
 a phase fails still print. `--quiet` does not change ndjson output, because
-machine readers rely on receiving every event. Output is plain by design: no
-colour, no shell completion, and no terminal control beyond the transient
-progress line, so a log reads the same everywhere it is captured.
+machine readers rely on receiving every event. Interactive terminals and saved
+logs use the same plain-language phase names. Exact internal step IDs remain
+available in failure details, rebuild explanations, and ndjson. Output is plain
+by design: no colour, no shell completion, and no terminal control beyond the
+transient progress line.
 
 This page has one section per command, in the order `rbit --help` lists them.
 The option tables are generated from the parser into
@@ -432,7 +434,7 @@ rbit clean . --reports --preview
 ```
 
 Use `--cache` only when you intend to clear the complete incremental cache and
-the donor probe replay store of `repair`. Use
+the repair search cache. Use
 `--older-than-hours 24` to keep recent workspaces and selected cache records.
 Active runs are never removed. The `--keep-workspace` option of `build`, `verify`,
 `repair`, and `import cmake` changes which run workspaces are retained in the
@@ -454,20 +456,26 @@ an error that lists the known IDs.
 
 ## rbit repair
 
-Use this after editing a source file that is already part of the project,
-including a shared header used by many source files. Reviewed records are tied
-to the source they describe, so the normal workflow after such an edit is one
-command:
+Use this after editing a file in a project that already matched exactly. This is
+the complete maintenance workflow, including for a shared header used by many
+source files:
 
 ```console
 rbit repair .
 ```
 
-Repair works in a private workspace. It updates the saved build guidance
-affected by your edit, records the current source, rebuilds every target from
-scratch, and checks that the result is still exact and trustworthy. If all
-checks pass, it publishes the changed project records, verified target
-binaries, any matching debug companions, and the JSON/HTML report together.
+Repair finds all affected work, including changes that cross source-file
+boundaries. It updates saved compiler choices and function records, and safely
+narrows or removes old fallback records. When generated declarations affect
+compiler layout, it checks both source views and tries nearby harmless layouts.
+A layout change can move other compiler output, so repair rechecks that work in
+later passes. It then rebuilds every target from scratch and checks the result.
+There is no manual JSON or TOML recipe to write between these steps.
+
+All work happens in a private workspace. Only an exact, trustworthy result is
+published, and the changed records, verified binaries, matching debug
+companions, and report are published together. If repair fails, the source edit
+remains, while the previously published records and results stay unchanged.
 The default report is `.reprobit-state/reports/report.html`; choose another
 project-relative location when useful:
 
@@ -475,147 +483,59 @@ project-relative location when useful:
 rbit repair . --report-dir build/reprobit-report
 ```
 
-No partial repair is published. If any update, build, or verification step
-fails, your source files remain edited, but saved project records, existing
-binaries, debug companions, and reports remain unchanged. The error points to
-the retained private workspace or candidate report when one is available. Once
-you are finished diagnosing it, reclaim that space with `rbit clean .`.
+Repair advances in trustworthy order. In each affected source build, it acts on
+the earliest refusal whose input is still complete, stages a safe change, and
+then analyzes the project again. Later work is rechecked from the newly valid
+state on the next pass instead of being guessed from an incomplete one. A broad
+header edit can therefore take several automatic passes, but still needs only
+the one command. Progress names the current pass and build phase, shows elapsed
+time, and carries the last completed adjustment into the next check.
 
-For example, suppose a project already matches and you add a harmless forward
-declaration to a shared header. That one edit may affect several source files;
-the workflow is still just `rbit repair .`. ReproBit follows the shared header
-to every affected build step, adjusts the saved guidance it can safely
-re-derive, and checks every final binary. You do not repair each source file
-separately.
+If the from-scratch check exposes a remaining link layout mismatch, repair
+searches nearby harmless source layouts for that target and checks again. This
+also stays private, and each retry counts against the same command-wide limits.
 
-Other realistic maintenance edits use the same command: changing harmless
-whitespace or comments in a header, adding or moving a declaration,
-making an assertion conditional for one build mode, or changing an inline
-header body used by several source files. ReproBit tries only a small,
-predictable set of safe adjustments and still requires the final binaries to
-match exactly. If an edit is not benign, repair stops without publishing a
-partial result.
-
-Each analysis pass records every refused adjustment in an affected source file,
-not only the first, so one pass exposes the whole fallout of a shared-header
-edit. Before any compiler runs, a refused function whose required body another
-donor of the same source file already emits -- or whose own donor still emits it,
-only under a cheaper record family -- is re-authored onto that donor from the
-fresh objects the pass compiled; its old record is retired and beneficiaries
-follow it. The nearby-donor search then retunes the declaration-only compiler-state
-carriers those adjustments depend on: declaration shapes, pad shapes, forward
-declaration runs, extern run pairs, forward runs with a shape, declaration run
-triples, and the declaration-run, padding-line and class-member counts inside
-donor source overlays (every one-knob move first, then two knobs of one rendering
-together, each rendered sequence's line canvas following its items). By default it
-tries settings up to a distance of 8 per donor and at most 256 settings per
-command. A header used by dozens of source files can need more; the search
-bounds can be raised explicitly, and every candidate still has to pass the
-ordinary composer and the final cold proof:
+The ordinary defaults keep searches bounded. If a report says a search budget
+was exhausted, these advanced options widen it:
 
 ```console
 rbit repair . --retune-radius 32 --retune-candidates 2048 \
-  --donor-candidates 20000 --adjustment-rounds 200
+  --donor-candidates 20000 --discovery-candidates 512 \
+  --adjustment-rounds 200
 ```
 
-A donor source overlay is retuned through the declaration-run, padding and
-class-member counts of its rendered sequences; whether or not it has such a
-knob, repair also tries inserting a fresh forward-declaration run of
-`distance` names at the file end or start of its owning source, rendered
-together with the overlay's own operations, so an overlay that only rewrites
-source or swaps includes still has a nearby compiler state to move to.
-
-`--retune-radius` is the farthest declaration-count distance tried per donor
-(at most 64), `--retune-candidates` caps the settings tried per donor, and
-`--donor-candidates` caps the settings compiled by the whole command;
-`--adjustment-rounds` raises the number of saved-guidance adjustment rounds
-before repair gives up. Wider bounds only cost compile time; they never widen
-what a repair may change.
-
-When no saved donor of an affected source file can be retuned any further,
-repair compiles fresh carrier states for that file (`--discovery-candidates`
-per file, default 64) cheapest first — every declaration shape, then forward
-declaration runs of growing length at each placement — and inspects every
-compiled object against every refused record of the file: an object carrying a
-record's required body re-authors the record onto that new donor under the
-cheapest closed family; an object carrying a rewriting record's pinned donor body
-moves the saved record onto the new donor unchanged. Discovered donors are
-ordinary declaration-only carrier records and pass the same fresh compile and
-cold proof as every other adjustment.
-
-Records whose receipts pin a decision rather than a measurement — a web
-recolouring, an instruction mosaic, a cross-file complete-target resize —
-are repaired like the measured families when only their compiler
-observations moved: the seed and witness census, seats, line tables,
-metadata digests and seed body are restated from the fresh objects, every
-decision, program field and donor body a range is drawn from stays as saved,
-and the family producer must compose the retail body again before the
-refreshed receipt is accepted. Whatever the family, a receipt that recorded a
-retail match is accepted by repair only when the composed body is that retail
-body.
-
-Before any donor is retuned, a refused function whose required body another
-donor of its file already emits is moved onto that donor: under the cheapest
-closed equal-body family the composer proves, or, when no such family can host
-the body (the file's own compile of the function changed length, say), as the
-saved record itself with its dependency changed and its measurements
-refreshed. Fresh carrier states found by discovery are adopted the same way.
-
-Compiler-numbered names are followed, never pinned: `$L`/`$T` labels, `$done$`
-serials and the `$S` serial of a file-static are counters that restart with
-every declaration change, so a saved declaration that names one is matched by
-kind and base name, and its relocation seats and debug-stream references are
-restated from the fresh compile. Families that install a body under the
-same-slot rules (relocation-divergent, same-slot resize, donor rewriting)
-prove that the seed's and the donor's `.debug$S` streams describe the same
-function; repair re-derives that record-by-record description (procedure
-extent, label serials, one local's type index or location) from the fresh
-pair and carries it in the receipt, where the strict validator re-proves it.
-A delta the recipe itself declares describes one particular donor pair, so it
-is dropped when the record moves to another donor and re-derived there.
-
-Repair never compiles the same candidate twice. Every probe compile is a pure
-function of its compiler seat (the rendered private inputs) and its compile
-epoch (the producer graph with its toolchain lock, the compiler environment,
-the sealed include authority and the sealed source tree), so its object is
-kept in the project state under `repair-probes/` and replayed by later rounds
-and later commands whenever the epoch still matches; a source or record edit
-that changes what the compiler reads changes the epoch and misses. The store
-is diagnostic only: the repair's final cold proof, like `verify`, recompiles
-everything. `rbit clean . --cache` removes it. Candidates are compiled with
-`--jobs` workers continuously, each result is judged as soon as it lands, and
-once one donor is restored by some move (say `functions +1` of a declaration
-shape) the same move is tried next on every other donor of that family, since
-one source edit disturbs every affected file in the same way.
+`--retune-radius` is the farthest declaration-count distance tried per saved
+compiler choice or source layout (default 8, maximum 64). `--retune-candidates`
+caps nearby choices per saved compiler choice or source layout (default 64),
+while `--donor-candidates` caps nearby repair choices tested by the whole command
+(default 256). `--discovery-candidates`
+caps fresh choices per affected source file after its saved donors are
+exhausted (default 64).
+`--adjustment-rounds` caps saved-guidance adjustment rounds (default 24).
+Larger values can take longer, but never relax what repair may change or the
+final proof. The complete limits are in the
+[generated option table](cli-reference.md#rbit-repair).
 
 For added or removed files, start with [`source preview`](#rbit-source-preview);
 it prints a safe next command when one is available. For a new project that
 builds but does not match yet, use [`discover grind`](#rbit-discover-grind)
 instead of repair.
 
-### Unrecorded fallout and the composed-body ledger
+### Functions newly affected by an edit
 
-A source edit can also move functions that carry no saved record at all. Every
-accepted `rbit verify` writes a ledger of the bodies the linker selected for
-each target (`.reprobit-state/ledger/composed-bodies.json`: per function, the
-providing object, its translation unit and the body digest). When that ledger
-exists, each clean repair pass also compiles every translation unit (cache
-hits when nothing changed), compares the fresh seed body of every function the
-linker took from that object with its verified body, and turns each moved,
-unrecorded function into a census entry. Carrier discovery then searches fresh
-declaration-only compiler states for that translation unit exactly as it does
-for a refused record, and a state that carries the verified body is recorded as
-a new donor plus function record; nothing is retired. Repair reports success
-only when the census is empty.
+When an accepted `rbit verify` or `rbit repair` completes, it remembers which
+function bodies were selected. Repair uses that record to notice when an
+edit also moves a function that never needed special handling before. It can add
+the source file to its saved repair guidance and create the needed records
+automatically; it succeeds only after every newly affected function is restored.
+If no replacement is found within the default budget, raise
+`--discovery-candidates` and `--donor-candidates` and rerun the same command.
+Do not hand-edit project records.
 
-A moved function in a translation unit the build plan does not list is admitted
-first: repair adds the unit to `reprobit/build-plan.json` with the identity a
-CMake import would give it, together with an empty intervention shard and proof
-shard, and the next pass records the function like any other. One finding stops
-the repair instead: a verified function the fresh object no longer defines at
-all, which is a semantic change no carrier state can restore. Without a ledger
--- a project that has never verified since the ledger was introduced -- repair
-behaves as before and the final cold verify remains the only gate.
+Repair stops when the edit removed the function entirely, because it cannot
+restore a function that is no longer present. A project without a
+previous accepted verification or repair has no baseline for this check, so the
+final from-scratch verification remains its gate.
 
 ## rbit build
 
@@ -829,8 +749,9 @@ Show retained runs, cache, reports, active leases, and disk usage:
 rbit state status .
 ```
 
-`state status` separates reusable build records from cache data left by older
-ReproBit code and prints the safe cleanup command when it finds any.
+`state status` reports reusable build and repair-search caches separately from
+cache data left by older ReproBit code, and prints the safe cleanup command when
+it finds any.
 
 ## rbit report
 
@@ -868,6 +789,11 @@ individual handlers:
 | 2 | Any error: usage errors, `--jobs` below one, a `CLIError`, an unreadable file, or any unexpected exception. The message starts with `error:`. | all |
 | 130 | Interrupted with Ctrl-C; active child processes were asked to drain. | all |
 
+A bounded grind can honestly find no useful new authority, so that outcome is
+`1`. Repair starts from an already-exact project and promises to restore it;
+if it cannot prove a safe complete repair, it refuses the operation as an error
+and returns `2` without publishing partial authority or outputs.
+
 ## Machine-readable output
 
 With `--format ndjson`, every line on standard output is one JSON object and
@@ -876,15 +802,15 @@ error become events too). Keys are sorted, non-ASCII is kept, and NaN is
 rejected. Every object carries:
 
 - `event` - the event name from the table below;
-- `message` - the same text a human would have seen (multi-line where the
-  text rendering is multi-line, for example `project_readiness`);
+- `message` - human-readable text for command results and diagnostics;
 - `schema_version` - `1`; consumers should reject an unknown version.
 
 Progress is streamed as `workflow_progress` (phase started, finished, failed,
 heartbeat) and `producer_progress` (unit finished, cache hit, cache miss)
 events with the fields of `reprobit.progress.ProgressEvent`: `sequence`,
 `kind`, `phase`, `message`, `elapsed_seconds` and, when present, `completed`,
-`total`, `node_id`, `reason`.
+`total`, `node_id`, `reason`. Progress messages retain machine-level detail;
+text mode replaces internal phase and node names with concise friendly labels.
 
 Command events (from `CLIOutput.emit` call sites; paths and pydantic models are
 serialized as strings and JSON objects):
@@ -892,10 +818,11 @@ serialized as strings and JSON objects):
 | Event | Command | Fields besides `event`, `message`, `schema_version` |
 |---|---|---|
 | `build_complete` | build | `cold`, nodes+hits+misses (warm) or steps (cold), `outputs` |
-| `cleanup` | clean | `active_cache_leases`, `cache_blobs`, `cache_records`, `cache_requested`, `obsolete_cache_requested`, `older_than_hours`, `reclaimed_bytes`, `removed`, `report_bytes`, `report_files`, `reports`, `reports_requested`, `skipped_active`, `skipped_recent`, `skipped_recent_cache_records` |
-| `cleanup_preview` | clean --preview | `active_cache_leases`, `cache_blobs`, `cache_records`, `cache_requested`, `candidates`, `next_argv`, `next_command`, `obsolete_cache_requested`, `older_than_hours`, `reclaimable_bytes`, `report_bytes`, `report_files`, `reports`, `reports_requested` |
+| `cleanup` | clean | `active_cache_leases`, `cache_blobs`, `cache_records`, `cache_requested`, `obsolete_cache_requested`, `older_than_hours`, `reclaimed_bytes`, `removed`, `repair_search_cache_bytes`, `repair_search_cache_files`, `report_bytes`, `report_files`, `reports`, `reports_requested`, `skipped_active`, `skipped_recent`, `skipped_recent_cache_records` |
+| `cleanup_preview` | clean --preview | `active_cache_leases`, `cache_blobs`, `cache_records`, `cache_requested`, `candidates`, `next_argv`, `next_command`, `obsolete_cache_requested`, `older_than_hours`, `reclaimable_bytes`, `repair_search_cache_bytes`, `repair_search_cache_files`, `report_bytes`, `report_files`, `reports`, `reports_requested` |
 | `cmake_imported` | import cmake | `build_plan`, `next_command`, `nodes`, `producer_graph`, `scaffold_transaction_id`, `translation_units` |
 | `cmake_module` | cmake-module | `path` |
+| `composed_body_ledger` | verify | `functions` (when saved), `outcome`, `path` |
 | `cost` | cost | `breakdown` |
 | `discovery_clean` | discover clean | `bytes`, `files`, `preview`, `removed`, `request`, `requests`, `shared`, `state` |
 | `discovery_complete` | discover run | `applied`, `built`, `candidate_kinds`, `cells`, `proposals`, `report_html`, `report_html_digest`, `report_json`, `report_json_digest`, `reused`, `transaction_id` |
@@ -916,7 +843,7 @@ serialized as strings and JSON objects):
 | `producer_graph_extracted` | graph extract, import cmake | `certification_runtime`, `extractor`, `graph_digest`, `nodes`, `output`, `roles`, `skipped_translation_units`, `transaction_id`, `translation_units` |
 | `project_readiness` | status | `checks`, `completed`, `next_command`, `next_step`, `ready`, `total` |
 | `repair_cleanup_warning` | repair | `project`, `workspace` |
-| `repair_complete` | repair | `changed_records`, `cleanup_warning`, `discovered_actions`, `donor_candidates`, `donor_retunes`, `exact`, `measured_checks`, `project`, `reauthored_actions`, `refreshed_checks`, `removed_donors`, `repair_passes`, `repaired_translation_units`, `report_html`, `report_json`, `retired_actions`, `source_inputs`, `transaction_id` |
+| `repair_complete` | repair | `adjustment_rounds`, `admitted_translation_units`, `changed_records`, `cleanup_warning`, `compiler_candidates`, `discovered_actions`, `donor_candidates` (compatibility alias), `donor_retunes`, `exact`, `measured_checks`, `project`, `reauthored_actions`, `refreshed_checks`, `removed_donors`, `repair_passes`, `repaired_translation_units`, `replayed_candidates`, `report_html`, `report_json`, `retired_actions`, `source_inputs`, `source_retunes`, `transaction_id` |
 | `repair_refused` | repair | failure diagnostic fields, `phase` |
 | `report_written` | report | `clean`, `html`, `input`, `total_cost` |
 | `setup` | setup | `backend`, `backend_failures`, `environment_ready`, `next_command`, `next_step`, `profile`, `project_ready`, `readiness`, `toolchain_lock`, `toolchain_lock_created`, `toolchain_root` |
@@ -924,7 +851,7 @@ serialized as strings and JSON objects):
 | `source_locked` | source lock | `entries`, `next_command`, `next_step`, `output`, `producer_graph_invalidated`, `source_manifest_digest`, `transaction_id` |
 | `source_preview` | source preview | `added`, `after_source_manifest_digest`, `authority_checked`, `authority_error`, `before_source_manifest_digest`, `changed`, `checked_overlay_outputs`, `classic_preflight_checked`, `cmake_import_command`, `entries`, `membership_transition_blocked`, `next_command`, `producer_graph_invalidation_required`, `removed`, `repair_required`, `stale_translation_units`, `unchanged`, `up_to_date` |
 | `source_regenerated` | source regenerate | `applied`, `changes`, `documents`, `next_command`, `transaction_id` |
-| `state_status` | state status | `cache_active_leases`, `cache_blobs`, `cache_bytes`, `cache_current_records`, `cache_files`, `cache_obsolete_records`, `cache_records`, `cache_stale_leases`, `report_bytes`, `report_files`, `root`, `run_bytes`, `run_files`, `runs`, `total_bytes`, `total_files` |
+| `state_status` | state status | `cache_active_leases`, `cache_blobs`, `cache_bytes`, `cache_current_records`, `cache_files`, `cache_obsolete_records`, `cache_records`, `cache_stale_leases`, `repair_ledger_bytes`, `repair_ledger_files`, `repair_search_cache_bytes`, `repair_search_cache_files`, `report_bytes`, `report_files`, `root`, `run_bytes`, `run_files`, `runs`, `total_bytes`, `total_files` |
 | `toolchain_locked` | toolchain lock | `input_trees`, `output`, `profile`, `runtime_files`, `tools`, `transaction_id` |
 | `toolchain_provisioned` | toolchain provision | `next_command`, `profile`, `root`, `saved` |
 | `validated` | validate | `interventions`, `project_id`, `proofs`, `targets` |

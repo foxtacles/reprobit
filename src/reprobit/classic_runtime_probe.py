@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Literal
 
+from reprobit.classic.semantic_contracts import (
+    CompilerEpochInvocation,
+    CompilerNamespaceEvidence,
+)
 from reprobit.classic_execution_records import ClassicActiveCompilerEpoch
 from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
@@ -22,6 +26,7 @@ from reprobit.classic_runtime_donor import (
 from reprobit.classic_runtime_files import (
     _require_declared_tree_writes,
     _require_unchanged_tree,
+    _secure_remove_regular,
     _tree_file_seal,
 )
 from reprobit.classic_runtime_graph import (
@@ -64,6 +69,25 @@ class ClassicCompilerProbeOutput:
     object_payload: bytes
     pdb_payload: bytes
     step: StepExecutionReceipt
+    compiler_invocation: CompilerEpochInvocation | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class ClassicCompilerSourceEpoch:
+    """One exact source view and the committed compiler nodes to run in it."""
+
+    epoch_id: str
+    node_ids: tuple[str, ...]
+    source_outputs: Mapping[str, bytes]
+
+
+@dataclass(frozen=True, slots=True)
+class ClassicCompilerSourceEpochOutput:
+    """Raw compiler products captured from one non-certifying source view."""
+
+    epoch_id: str
+    namespace: CompilerNamespaceEvidence
+    compiler_outputs: tuple[ClassicCompilerProbeOutput, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -289,6 +313,274 @@ class ClassicProbeExecution:
         finally:
             self.close()
 
+    def probe_compiler_source_epochs(
+        self,
+        epochs: Iterable[ClassicCompilerSourceEpoch],
+        *,
+        retain: Callable[[ClassicCompilerSourceEpochOutput], bool] | None = None,
+    ) -> tuple[ClassicCompilerSourceEpochOutput, ...]:
+        """Compile committed nodes against exact in-memory overlay source views.
+
+        Each view describes every ordinary project-overlay output. Views are
+        installed in order in the private source seat; compiler products are
+        captured and erased before the next view. The probe is deliberately
+        non-certifying and consumes the prepared run.
+        """
+
+        if not self.producer.is_open:
+            raise ClassicProjectError("classic compiler probe requires one unused prepared run")
+        generated_units = {item.casefold() for item in self.overlay.generated_translation_units}
+        source_pairs = {
+            item.path: item
+            for item in self.overlay.project_source_pairs
+            if item.path.casefold() not in generated_units
+        }
+        source_paths = {item.casefold(): item for item in source_pairs}
+        if len(source_paths) != len(source_pairs):
+            raise ClassicProjectError("classic compiler source probe paths overlap")
+        by_id = {node.id: node for node in self.graph.nodes}
+        current_payloads: dict[str, bytes | None] = {
+            path: pair.clean_payload for path, pair in source_pairs.items()
+        }
+        results: list[ClassicCompilerSourceEpochOutput] = []
+        seen_epoch_ids: set[str] = set()
+        ran_epoch = False
+        self.producer.begin_developer()
+        try:
+            build_before = _tree_file_seal(self.build_root)
+            with ExitStack() as stack, ProcessSupervisor() as supervisor:
+                authority = stack.enter_context(self.producer.authority_namespace_lease())
+                for ordinal, item in enumerate(epochs):
+                    ran_epoch = True
+                    if not item.epoch_id or item.epoch_id in seen_epoch_ids:
+                        raise ClassicProjectError(
+                            "classic compiler source probe requires unique non-empty epoch IDs"
+                        )
+                    seen_epoch_ids.add(item.epoch_id)
+                    requested = tuple(item.node_ids)
+                    if not requested or len(requested) != len(set(requested)):
+                        raise ClassicProjectError(
+                            f"classic compiler source probe epoch {item.epoch_id!r} requires "
+                            "unique nodes"
+                        )
+                    unknown = sorted(set(requested) - set(by_id), key=str.casefold)
+                    if unknown:
+                        raise ClassicProjectError(
+                            "classic compiler source probe names unknown nodes: " + repr(unknown)
+                        )
+                    selected = tuple(by_id[node_id] for node_id in requested)
+                    if any(
+                        node.role is not ProducerRole.COMPILER
+                        or node.id in self.overlay.generated_node_inputs
+                        for node in selected
+                    ):
+                        raise ClassicProjectError(
+                            "classic compiler source probe admits only ordinary committed "
+                            "compiler nodes"
+                        )
+                    selected_ids = set(requested)
+                    external_dependencies = {
+                        dependency
+                        for node in selected
+                        for dependency in node.depends_on
+                        if dependency not in selected_ids
+                    }
+                    if external_dependencies:
+                        raise ClassicProjectError(
+                            "classic compiler source probe omits required producer dependencies: "
+                            + ", ".join(sorted(external_dependencies, key=str.casefold))
+                        )
+                    supplied = {path.casefold(): path for path in item.source_outputs}
+                    if len(supplied) != len(item.source_outputs) or set(supplied) != set(
+                        source_paths
+                    ):
+                        raise ClassicProjectError(
+                            f"classic compiler source probe epoch {item.epoch_id!r} does not "
+                            "describe the ordinary project-overlay output universe"
+                        )
+                    if any(type(payload) is not bytes for payload in item.source_outputs.values()):
+                        raise ClassicProjectError(
+                            f"classic compiler source probe epoch {item.epoch_id!r} has invalid "
+                            "bytes"
+                        )
+                    source_before = _tree_file_seal(self.effective_root)
+                    changed_paths: list[Path] = []
+                    normalized_outputs = {
+                        source_paths[path.casefold()]: payload
+                        for path, payload in item.source_outputs.items()
+                    }
+                    for relative in sorted(source_pairs, key=str.casefold):
+                        destination, changed = self.overlay._install_project_overlay_source(
+                            relative=relative,
+                            expected_payload=current_payloads[relative],
+                            payload=normalized_outputs[relative],
+                            epoch=f"probe-{ordinal:04d}",
+                        )
+                        if changed:
+                            changed_paths.append(destination)
+                        current_payloads[relative] = normalized_outputs[relative]
+                    _require_declared_tree_writes(
+                        source_before,
+                        root=self.effective_root,
+                        allowed_outputs=changed_paths,
+                        phase="classic compiler source probe",
+                    )
+
+                    with self.producer.source_namespace_lease() as source:
+                        namespace_receipt = self.producer.capture_compiler_namespace(
+                            f"noncertifying-source-probe-{ordinal:04d}",
+                            source=source.snapshot,
+                            authority=authority.snapshot,
+                        )
+                        completed: set[str] = set()
+                        output_steps: dict[Path, str] = {}
+                        prefix = f"probe.epoch.{ordinal:04d}."
+                        trace_epoch = f"probe-source-{ordinal:04d}"
+                        self.producer.ensure_progress_capacity(len(selected))
+                        receipts = self.producer.run_graph_nodes(
+                            supervisor,
+                            selected,
+                            completed=completed,
+                            output_steps=output_steps,
+                            cancellation=CancellationToken(),
+                            step_id_prefix=prefix,
+                            progress_phase="compiler-probe",
+                            log_namespace="compiler-source-probe",
+                            include_authority=self.producer.include_authority(),
+                            include_trace_epoch=trace_epoch,
+                            compiler_namespace_id=namespace_receipt.evidence.namespace_id,
+                        )
+                        if completed != {node.id for node in selected}:
+                            raise ClassicProjectError(
+                                "classic compiler source probe execution was incomplete"
+                            )
+
+                    allowed_outputs = tuple(
+                        path for node in selected for path in self.producer.node_outputs(node)
+                    )
+                    _require_declared_tree_writes(
+                        build_before,
+                        root=self.build_root,
+                        allowed_outputs=allowed_outputs,
+                        phase="classic compiler source probe",
+                    )
+                    producer_steps = {
+                        receipt.step_id: receipt
+                        for receipt in receipts
+                        if receipt.step_id.startswith(prefix)
+                    }
+                    outputs: list[ClassicCompilerProbeOutput] = []
+                    for node in selected:
+                        source_ref, object_ref = classic_compiler_product_refs(node)
+                        pdb_refs = tuple(
+                            reference
+                            for reference in node.outputs
+                            if PurePosixPath(reference.split("/", 1)[-1]).suffix.casefold()
+                            == ".pdb"
+                        )
+                        if len(pdb_refs) != 1:
+                            raise ClassicProjectError(
+                                f"compiler source probe node {node.id!r} lacks one PDB output"
+                            )
+                        object_declared = self.producer.reference(object_ref)
+                        pdb_declared = self.producer.reference(pdb_refs[0])
+                        if object_declared is None or pdb_declared is None:
+                            raise ClassicProjectError(
+                                f"compiler source probe node {node.id!r} output is not "
+                                "materializable"
+                            )
+                        registered = self.producer.registered_outputs()
+                        object_path = registered.get(object_declared)
+                        pdb_path = registered.get(pdb_declared)
+                        if object_path is None or pdb_path is None:
+                            raise ClassicProjectError(
+                                f"compiler source probe node {node.id!r} lacks physical outputs"
+                            )
+                        self.producer.require_regular(
+                            object_path, label="compiler source probe OBJ"
+                        )
+                        self.producer.require_regular(pdb_path, label="compiler source probe PDB")
+                        object_payload = object_path.read_bytes()
+                        pdb_payload = pdb_path.read_bytes()
+                        step = producer_steps.get(f"{prefix}{node.id}")
+                        if step is None:
+                            raise ClassicProjectError(
+                                f"compiler source probe node {node.id!r} lacks an execution receipt"
+                            )
+                        outputs.append(
+                            ClassicCompilerProbeOutput(
+                                node.id,
+                                source_ref,
+                                object_ref,
+                                pdb_refs[0],
+                                object_path,
+                                pdb_path,
+                                Digest.from_bytes(object_payload),
+                                Digest.from_bytes(pdb_payload),
+                                object_payload,
+                                pdb_payload,
+                                step,
+                                self.producer.compiler_epoch_invocation(node, epoch=trace_epoch),
+                            )
+                        )
+
+                    for node in selected:
+                        for declared in self.producer.declared_outputs(node):
+                            physical = self.producer.clear_output(declared)
+                            if physical is None:
+                                raise ClassicProjectError(
+                                    f"compiler source probe node {node.id!r} lost an output"
+                                )
+                            _secure_remove_regular(physical)
+                    _require_unchanged_tree(
+                        build_before,
+                        root=self.build_root,
+                        label="classic compiler source probe erasure",
+                    )
+                    result = ClassicCompilerSourceEpochOutput(
+                        item.epoch_id,
+                        namespace_receipt.evidence,
+                        tuple(outputs),
+                    )
+                    try:
+                        selected_result = retain is None or retain(result)
+                        if selected_result:
+                            results.append(result)
+                    except BaseException as original:
+                        try:
+                            self.producer.release_noncertifying_compiler_epoch(
+                                namespace_receipt.evidence.namespace_id,
+                                node_ids=requested,
+                                epoch=trace_epoch,
+                            )
+                        except BaseException as cleanup_error:
+                            original.add_note(
+                                "classic compiler source probe receipt cleanup also failed: "
+                                f"{cleanup_error}"
+                            )
+                        raise
+                    self.producer.release_noncertifying_compiler_epoch(
+                        namespace_receipt.evidence.namespace_id,
+                        node_ids=requested,
+                        epoch=trace_epoch,
+                    )
+                    if retain is not None and selected_result:
+                        break
+                if not ran_epoch:
+                    raise ClassicProjectError(
+                        "classic compiler source probe requires at least one source epoch"
+                    )
+        except BaseException as original:
+            try:
+                self.close()
+            except BaseException as cleanup_error:
+                original.add_note(
+                    f"classic compiler source probe cleanup also failed: {cleanup_error}"
+                )
+            raise
+        self.close()
+        return tuple(results)
+
     def probe_donor_compilers(
         self,
         donor_ids: Sequence[str],
@@ -470,6 +762,8 @@ class ClassicProbeExecution:
 
 __all__ = [
     "ClassicCompilerProbeOutput",
+    "ClassicCompilerSourceEpoch",
+    "ClassicCompilerSourceEpochOutput",
     "ClassicDonorProbeInput",
     "ClassicDonorProbeOutput",
     "ClassicDonorProbeProgress",

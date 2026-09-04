@@ -261,7 +261,7 @@ class WarmRuntime:
                     expected = self.oracle_snapshots[target_id]
                     if digest != expected.digest.value or size != expected.size:
                         raise ClassicIncrementalError(
-                            f"warm legacy oracle changed after key planning: {target_id!r}"
+                            f"warm oracle changed after key planning: {target_id!r}"
                         )
                     capabilities[target_id] = bind_pe32_oracle(sealed)
                 self.prepared.donors.bind_legacy_oracles(capabilities)

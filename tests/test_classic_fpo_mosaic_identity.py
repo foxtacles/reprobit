@@ -95,6 +95,8 @@ def make_coff(
     directive=DIRECTIVE,
     fpo_locals=2,
     debug_f_relocation_type=7,
+    code_relocations=(),
+    line_rows=LINE_ROWS,
     extra_debug_s_relocation=False,
     omit_debug_f=False,
 ):
@@ -116,8 +118,8 @@ def make_coff(
         {
             "name": ".text",
             "raw": bytes(body),
-            "relocations": [],
-            "line_rows": LINE_ROWS,
+            "relocations": list(code_relocations),
+            "line_rows": line_rows,
             "characteristics": 0x60501020,
         },
         {

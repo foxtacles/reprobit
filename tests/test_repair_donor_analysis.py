@@ -10,6 +10,7 @@ from typing import Any, cast
 import pytest
 
 import reprobit.repair_donor_analysis as subject
+from reprobit.classic_project_overlay_repair import ClassicProjectOverlayRepairResult
 from reprobit.classic_repair_probe import (
     ClassicDonorRetuneProbeResult,
     ClassicDonorRetuneRepair,
@@ -205,6 +206,7 @@ def test_probe_uses_one_ordinary_runtime_and_exposes_progress(
         cast(Any, output),
         expected_refusals,
         candidate_budget=17,
+        excluded_groups=frozenset({("unit.fixture", "donor.exhausted")}),
     )
 
     assert actual is expected
@@ -237,12 +239,85 @@ def test_probe_uses_one_ordinary_runtime_and_exposes_progress(
     }
     assert probe_values["canonical_overlay_operations"] == {"x": ("op",)}
     assert probe_values["candidate_budget"] == 17
-    assert output.activities == [("preparing a safe donor search", "repair-probe-prepare")]
+    assert probe_values["excluded_groups"] == frozenset({("unit.fixture", "donor.exhausted")})
+    assert output.activities == [("preparing the repair search", "repair-probe-prepare")]
     assert output.producer_descriptions == [
-        "trying nearby donor settings (the shown total is an upper bound)"
+        "trying nearby compiler choices (the shown total is an upper bound)"
     ]
     assert output.progress == [(1, 9, "repair-probe", "donor-1", ProgressKind.UNIT_FINISHED, None)]
     assert prepared.close_calls == 0
+    assert arena.entered and arena.exited
+
+
+def test_project_overlay_probe_exposes_bounded_progress_and_closes_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    prepared, arena, observed, execution = _wire_preparation(monkeypatch, tmp_path)
+    output = _Output()
+    expected = ClassicProjectOverlayRepairResult(
+        True,
+        None,
+        1,
+        "src/unit.cpp",
+        "no nearby source layout worked",
+    )
+
+    def probe(probes: object, bundle: object, **values: object):
+        observed["source_probe"] = (probes, bundle, values)
+        progress = values["progress"]
+        assert callable(progress)
+        progress(1, 17, "src/unit.cpp: adjusted declaration count by +3")
+        return expected
+
+    monkeypatch.setattr(subject, "probe_project_overlay_repair", probe)
+
+    args = _args(cast(Path, observed["root"]))
+    actual = subject.probe_classic_project_overlay_repairs(
+        args,
+        cast(Any, output),
+        candidate_budget=17,
+    )
+
+    assert actual is expected
+    assert observed["arena"] == (
+        tmp_path / "state",
+        "sourceprobe",
+        subject.KeepWorkspace.NEVER,
+    )
+    assert observed["resolve"] == {
+        "profile": "msvc-4.2",
+        "explicit_toolchain_root": "/toolchain",
+        "backend": observed["backend"],
+        "compiler_transport": "/transport/cl",
+        "resource_transport": "/transport/rc",
+    }
+    assert observed["prepare_positional"] == (args, observed["bundle"])
+    assert observed["prepare"]["session_root"] == arena.path / "classic"
+    assert observed["prepare"]["execution"] is execution
+    probes, bundle, probe_values = observed["source_probe"]
+    assert probes is prepared.probes
+    assert bundle is observed["bundle"]
+    assert probe_values["clean_sources"] == {"src/unit.cpp": b"clean source"}
+    assert probe_values["candidate_budget"] == 17
+    assert probe_values["settle_target_ids"] == frozenset()
+    assert probe_values["link_layout_hint"] is None
+    assert callable(probe_values["progress"])
+    assert output.activities == [("preparing the source-layout check", "repair-source-prepare")]
+    assert output.producer_descriptions == [
+        "checking nearby source layouts (the shown total is an upper bound)"
+    ]
+    assert output.progress == [
+        (
+            1,
+            17,
+            "repair-source-probe",
+            "src/unit.cpp: adjusted declaration count by +3",
+            ProgressKind.UNIT_FINISHED,
+            None,
+        )
+    ]
+    assert prepared.close_calls == 1
     assert arena.entered and arena.exited
 
 

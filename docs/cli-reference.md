@@ -321,7 +321,7 @@ rbit clean [-h] [--preview] [--older-than-hours HOURS] [--cache | --obsolete-cac
 |---|---|---|
 | `--preview` |  | show how much space can be freed without removing anything |
 | `--older-than-hours` `HOURS` |  | keep workspace and cache entries newer than this age (default: 0) |
-| `--cache` |  | also remove cache records and blobs old enough for the selected age |
+| `--cache` |  | also remove incremental cache data selected by age and the complete repair search cache |
 | `--obsolete-cache` |  | also remove cache data this ReproBit version cannot reuse; keep the current cache |
 | `--reports` |  | also remove the canonical verification and grind reports |
 
@@ -343,7 +343,7 @@ rbit explain [-h] [--intervention ID] [project]
 
 ### `rbit repair`
 
-Use this after editing a source file that is already part of the project, including a shared header used by many source files. ReproBit repairs the saved build guidance in private, rebuilds, and publishes only after every target matches exactly. For added or removed files, start with source preview; it prints a safe next command when one is available.
+Use this after editing a file in a project that already matched exactly, including a shared header used by many source files. ReproBit repairs the saved build guidance in private, rebuilds, and publishes only after every target matches exactly. For added or removed files, start with source preview; it prints a safe next command when one is available.
 
 ```
 rbit repair [-h] [--jobs COUNT] [--keep-workspace {never,on-failure,always}] [--backend {auto,posix_wine_v1,windows_native_v1}] [--wine PATH_OR_NAME] [--wineserver PATH_OR_NAME] [--toolchain-root DIRECTORY] [--compiler-transport PATH] [--resource-transport PATH] [--initialization-timeout SECONDS] [--compile-timeout SECONDS] [--link-timeout SECONDS] [--cleanup-timeout SECONDS] [--policy {clean,allow-quarantine}] [--report-dir PROJECT_RELATIVE_DIRECTORY] [--retune-radius DISTANCE] [--retune-candidates COUNT] [--donor-candidates COUNT] [--discovery-candidates COUNT] [--adjustment-rounds COUNT] [project]
@@ -356,7 +356,7 @@ rbit repair [-h] [--jobs COUNT] [--keep-workspace {never,on-failure,always}] [--
 | Argument | Default | Description |
 |---|---|---|
 | `--jobs` `COUNT` |  | maximum parallel build workers (default: the CPUs this process may use, at most 8) |
-| `--keep-workspace` `{never,on-failure,always}` | `on-failure` | retain run-private diagnostics never, on failure, or always (default: on-failure) |
+| `--keep-workspace` `{never,on-failure,always}` | `on-failure` | keep the private workspace: never, only on failure, or always (default: on-failure) |
 | `--policy` `{clean,allow-quarantine}` |  | optionally narrow the project's committed authenticity policy |
 | `--report-dir` `PROJECT_RELATIVE_DIRECTORY` |  | write report.json and report.html beneath this project directory |
 
@@ -364,14 +364,14 @@ Shared: see [advanced execution options](#advanced-execution-options).
 
 **search bounds**
 
-Widen the bounded nearby-donor search for large shared-header edits; every candidate still passes the ordinary composer and the final cold proof.
+Widen the bounded search for larger repairs; a completed repair must still reproduce every expected output in a build from scratch.
 
 | Argument | Default | Description |
 |---|---|---|
-| `--retune-radius` `DISTANCE` |  | farthest declaration-count distance tried per donor (default: 8; max: 64) |
-| `--retune-candidates` `COUNT` |  | maximum nearby settings tried per donor (default: 64; max: 4096) |
-| `--donor-candidates` `COUNT` |  | maximum donor settings compiled by the whole command (default: 256; max: 65536) |
-| `--discovery-candidates` `COUNT` |  | fresh carrier states (declaration shapes, then forward declaration runs) compiled per affected source file once its saved donors cannot be retuned (default: 64; max: 2005) |
+| `--retune-radius` `DISTANCE` |  | largest declaration-count change tried per saved compiler choice or source layout (default: 8; max: 64) |
+| `--retune-candidates` `COUNT` |  | maximum nearby settings tried per saved compiler choice or source layout (default: 64; max: 4096) |
+| `--donor-candidates` `COUNT` |  | maximum nearby repair choices tested by the whole command (default: 256; max: 65536) |
+| `--discovery-candidates` `COUNT` |  | fresh declaration settings built per affected source file after its saved compiler choices are exhausted (default: 64; max: 2005) |
 | `--adjustment-rounds` `COUNT` |  | maximum saved-guidance adjustment rounds before repair stops (default: 24) |
 
 ### `rbit build`
@@ -390,7 +390,7 @@ rbit build [-h] [--jobs COUNT] [--cold] [--keep-workspace {never,on-failure,alwa
 |---|---|---|
 | `--jobs` `COUNT` |  | maximum parallel build workers (default: the CPUs this process may use, at most 8) |
 | `--cold` |  | build from scratch without using the incremental cache |
-| `--keep-workspace` `{never,on-failure,always}` | `on-failure` | retain run-private diagnostics never, on failure, or always (default: on-failure) |
+| `--keep-workspace` `{never,on-failure,always}` | `on-failure` | keep the private workspace: never, only on failure, or always (default: on-failure) |
 
 Shared: see [advanced execution options](#advanced-execution-options).
 
@@ -409,7 +409,7 @@ rbit verify [-h] [--jobs COUNT] [--keep-workspace {never,on-failure,always}] [--
 | Argument | Default | Description |
 |---|---|---|
 | `--jobs` `COUNT` |  | maximum parallel build workers (default: the CPUs this process may use, at most 8) |
-| `--keep-workspace` `{never,on-failure,always}` | `on-failure` | retain run-private diagnostics never, on failure, or always (default: on-failure) |
+| `--keep-workspace` `{never,on-failure,always}` | `on-failure` | keep the private workspace: never, only on failure, or always (default: on-failure) |
 | `--policy` `{clean,allow-quarantine}` |  | optionally narrow the project's committed authenticity policy |
 | `--report-dir` `PROJECT_RELATIVE_DIRECTORY` |  | write report.json and report.html beneath this project directory |
 | `--action-receipt` `PATH` |  | publish a nonce-bound completion receipt after both reports finalize |
@@ -481,7 +481,7 @@ rbit discover clean [-h] [--state-directory DIRECTORY] [--preview] [--all-reques
 
 ### `rbit discover grind`
 
-Search a bounded, project-wide set of low-cost adjustments. The default is a preview. Saved local progress does not prove the complete project; only a fresh byte-exact result does.
+Use this for a project's initial mismatch. Search a bounded, project-wide set of low-cost adjustments using project-owned reference .obj files. The default is a preview. Saved local progress does not prove the complete project; only a fresh byte-exact result does. For a later regression in an already-exact project, use rbit repair instead.
 
 ```
 rbit discover grind [-h] [--accept-exact | --accept-progress] [--reference-object TU=PROJECT_PATH] [--max-symbols COUNT] [--expert-plan PROJECT_RELATIVE_PATH] [--jobs COUNT] [--backend {auto,posix_wine_v1,windows_native_v1}] [--wine PATH_OR_NAME] [--wineserver PATH_OR_NAME] [--toolchain-root DIRECTORY] [--compiler-transport PATH] [--resource-transport PATH] [--initialization-timeout SECONDS] [--compile-timeout SECONDS] [--link-timeout SECONDS] [--cleanup-timeout SECONDS] [project]

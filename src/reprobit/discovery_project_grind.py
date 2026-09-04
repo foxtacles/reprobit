@@ -480,7 +480,7 @@ def run_project_auto_grind(
         progress(
             completed,
             total,
-            "grind-seed",
+            "discovery-enumerate",
             f"Found {len(campaign.items)} eligible project function(s)",
             ProgressKind.PHASE_STARTED,
             None,
@@ -490,7 +490,7 @@ def run_project_auto_grind(
         progress(
             completed,
             total,
-            "grind-seed",
+            "discovery-enumerate",
             "Project discovery scope sealed",
             ProgressKind.UNIT_FINISHED,
             None,

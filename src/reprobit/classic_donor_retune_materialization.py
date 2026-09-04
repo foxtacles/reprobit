@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from reprobit.classic.overlay_document import render_classic_overlay_proposal
 from reprobit.classic_donor_retune_candidates import (
@@ -33,6 +33,9 @@ from reprobit.schema import (
     ClassicRecipeRole,
 )
 from reprobit.strict_json import JsonValue
+
+if TYPE_CHECKING:
+    from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 
 # Declaration carriers whose only derived pin is the generated-header digest the
 # enumeration already recomputed; they render no source and carry no receipt pins.
@@ -322,6 +325,7 @@ def _materialize_overlay_candidate(
     *,
     clean_sources: Mapping[str, bytes] | None,
     canonical_overlay_operations: Sequence[Mapping[str, object]] | None,
+    overlay_render_session: ClassicOverlayRenderSession | None,
 ) -> MaterializedDonorRetuneCandidate:
     _require_overlay_candidate_shape(candidate)
 
@@ -402,7 +406,11 @@ def _materialize_overlay_candidate(
         )
 
     try:
-        rendered = render_classic_overlay_proposal(declarations, supplied)
+        rendered = render_classic_overlay_proposal(
+            declarations,
+            supplied,
+            session=overlay_render_session,
+        )
     except ValueError as exc:
         raise DonorRetuneError(f"cannot render overlay retune candidate: {exc}") from exc
 
@@ -475,6 +483,7 @@ def materialize_donor_retune_candidate(
     *,
     clean_sources: Mapping[str, bytes] | None = None,
     canonical_overlay_operations: Sequence[Mapping[str, object]] | None = None,
+    overlay_render_session: ClassicOverlayRenderSession | None = None,
 ) -> MaterializedDonorRetuneCandidate:
     """Close one retune proposal into publishable authority without compiling it.
 
@@ -505,6 +514,7 @@ def materialize_donor_retune_candidate(
             receipt,
             clean_sources=clean_sources,
             canonical_overlay_operations=canonical_overlay_operations,
+            overlay_render_session=overlay_render_session,
         )
     raise DonorRetuneError("retune candidate family is unsupported")
 

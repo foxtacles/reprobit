@@ -13,6 +13,7 @@ from reprobit.authority_snapshot import (
     json_authority_members,
     resolve_project_path,
 )
+from reprobit.composition_ledger import COMPOSED_BODY_LEDGER_RELATIVE, read_ledger
 from reprobit.model import Digest
 from reprobit.project_loader import load_project
 from reprobit.schema import BuildPlanDocument, ProjectSpec, SourceManifestDocument
@@ -22,6 +23,7 @@ from reprobit.source_lock import (
 )
 from reprobit.staged_project import ProjectFileSnapshot, StagedProject
 from reprobit.state import KeepWorkspace, report_publication_lease
+from reprobit.strict_json import canonical_json
 from reprobit.transactions import CASTransaction, TransactionResult
 
 
@@ -55,6 +57,7 @@ class RepairSnapshot:
     files: tuple[ProjectFileSnapshot, ...]
     authority_directories: tuple[JsonAuthorityDirectorySnapshot, ...]
     outputs: tuple[RepairOutputSnapshot, ...]
+    ledger: RepairOutputSnapshot
 
     @property
     def files_by_path(self) -> dict[str, ProjectFileSnapshot]:
@@ -69,6 +72,7 @@ class RepairCandidate:
     outputs: dict[str, bytes]
     report_json: bytes
     report_html: bytes
+    composed_body_ledger: bytes | None
 
 
 def _safe_path(root: Path, relative: str) -> Path:
@@ -212,7 +216,18 @@ def capture_repair_snapshot(project_root: Path) -> RepairSnapshot:
     outputs = tuple(
         _capture_optional_output(root, relative) for relative in _repair_output_paths(spec, plan)
     )
-    return RepairSnapshot(root, spec, manifest, tuple(files), tuple(directories), outputs)
+    ledger_relative = (
+        PurePosixPath(spec.state_dir).joinpath(*COMPOSED_BODY_LEDGER_RELATIVE).as_posix()
+    )
+    return RepairSnapshot(
+        root=root,
+        spec=spec,
+        source_manifest=manifest,
+        files=tuple(files),
+        authority_directories=tuple(directories),
+        outputs=outputs,
+        ledger=_capture_optional_output(root, ledger_relative),
+    )
 
 
 def stage_repair_project(snapshot: RepairSnapshot, *, keep: KeepWorkspace) -> StagedProject:
@@ -229,6 +244,7 @@ def stage_repair_project(snapshot: RepairSnapshot, *, keep: KeepWorkspace) -> St
 
 def _publishable_paths(snapshot: RepairSnapshot, staged_root: Path) -> tuple[str, ...]:
     values = {
+        "reprobit.toml",
         snapshot.spec.layout.source_manifest,
         snapshot.spec.layout.build_plan,
         snapshot.spec.layout.producer_graph,
@@ -311,11 +327,23 @@ def collect_repair_candidate(
         if not candidate.is_file():
             raise RepairError(f"exact verification did not produce {output.relative_path!r}")
         outputs[output.relative_path] = candidate.read_bytes()
+    ledger_path = _safe_path(staged_root, snapshot.ledger.relative_path)
+    if not os.path.lexists(ledger_path):
+        composed_body_ledger = None
+    else:
+        if ledger_path.is_symlink() or not ledger_path.is_file():
+            raise RepairError("verified repair data is not a regular file")
+        try:
+            ledger = read_ledger(ledger_path)
+        except (OSError, ValueError) as exc:
+            raise RepairError(f"verified repair data is invalid: {exc}") from exc
+        composed_body_ledger = canonical_json(ledger.model_dump(mode="json"))
     return RepairCandidate(
-        records,
-        outputs,
-        report_json.read_bytes(),
-        report_html.read_bytes(),
+        records=records,
+        outputs=outputs,
+        report_json=report_json.read_bytes(),
+        report_html=report_html.read_bytes(),
+        composed_body_ledger=composed_body_ledger,
     )
 
 
@@ -405,6 +433,23 @@ def publish_repair_candidate(
             relative,
             payload,
             expected_sha256=preimage.value if preimage is not None else None,
+        )
+    ledger_preimage = snapshot.ledger.digest
+    if candidate.composed_body_ledger is not None:
+        transaction.write(
+            snapshot.ledger.relative_path,
+            candidate.composed_body_ledger,
+            expected_sha256=ledger_preimage.value if ledger_preimage is not None else None,
+        )
+    elif ledger_preimage is not None:
+        transaction.delete(
+            snapshot.ledger.relative_path,
+            expected_sha256=ledger_preimage.value,
+        )
+    else:
+        transaction.assert_unchanged(
+            snapshot.ledger.relative_path,
+            expected_sha256=None,
         )
     with report_publication_lease(snapshot.root / snapshot.spec.state_dir):
         return transaction.commit()

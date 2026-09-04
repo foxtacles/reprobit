@@ -7,8 +7,8 @@ family.  Retuning cannot express either repair: it moves one donor's counts and
 keeps the record's dependency and family fixed.
 
 This module plans replacements from the fresh donor objects a repair analysis
-captured with each refusal.  The goal is the record's own immutable
-``expected_body_sha256``; a donor whose fresh body carries it may back a new
+captured with each refusal.  The goal is the record's own immutable retail-body
+digest; a donor whose fresh body carries it may back a new
 record of the cheapest closed equal-body family the ordinary composer proves,
 or, when no closed family hosts that body (the seed changed length, say), the
 saved record itself is moved onto that donor and its measurements refreshed.
@@ -25,6 +25,15 @@ from dataclasses import dataclass
 from hashlib import sha256
 
 from reprobit.classic_measured_pin_repair import MeasuredPinRepairError, repair_measured_pins
+from reprobit.classic_mosaic_repair import (
+    MosaicRepairError,
+    instruction_mosaic_semantics_required,
+    reauthor_instruction_mosaic,
+)
+from reprobit.classic_relational_repair import (
+    RelationalRepairError,
+    reauthor_relational_donor_rewriting,
+)
 from reprobit.classic_repair_authority import (
     ClassicDependencyEdit,
     ClassicInterventionEdit,
@@ -33,10 +42,12 @@ from reprobit.classic_repair_authority import (
 )
 from reprobit.classic_repair_session import (
     ClassicRepairRefusal,
+    ClassicRepairSessionError,
     dropped_move_parameters,
     repoint_refusal_materials,
     repointed_action,
 )
+from reprobit.classic_retail_repair import RetailRepairError, retail_body_goal_digest
 from reprobit.coff_format import CoffObject, coff_body
 from reprobit.discovery_authoring import (
     REAUTHORABLE_FAMILIES,
@@ -49,6 +60,7 @@ from reprobit.schema import (
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ClassicRecipeRole,
+    classic_function_donor_ids,
 )
 
 
@@ -85,9 +97,11 @@ class ClassicReauthorPlan:
     dependency_edits: tuple[ClassicDependencyEdit, ...] = ()
 
 
-def _goal_digest(receipt: ClassicProofReceipt) -> str | None:
-    value = receipt.expected_values.get("expected_body_sha256")
-    return value if isinstance(value, str) and len(value) == 64 else None
+def _goal_digest(action: ClassicRecipeIntervention, receipt: ClassicProofReceipt) -> str | None:
+    try:
+        return retail_body_goal_digest(action, receipt)
+    except RetailRepairError:
+        return None
 
 
 def _function_body_digest(payload: bytes, symbol: str) -> str | None:
@@ -159,10 +173,10 @@ def plan_function_reauthoring(
             raise ClassicReauthorError(f"refusal {action.id!r} was captured more than once")
         seen_actions.add(action.id)
         saved_actions[action.id] = action
-        goal = _goal_digest(refusal.receipt)
-        if goal is None:
+        goal = _goal_digest(action, refusal.receipt)
+        if goal is None and refusal.retail_body is None:
             skipped.append(
-                (refusal.unit_id, action.id, "receipt carries no expected_body_sha256 goal")
+                (refusal.unit_id, action.id, "receipt carries no immutable retail body goal")
             )
             continue
         if not action.dependencies:
@@ -183,9 +197,9 @@ def plan_function_reauthoring(
             consumers.setdefault(
                 item.intervention.id,
                 {
-                    function.id
-                    for function in unit.functions
-                    if item.intervention.id in function.dependencies
+                    consumer.id
+                    for consumer in (*unit.actions, *(donor.intervention for donor in unit.donors))
+                    if item.intervention.id in consumer.dependencies
                 },
             )
         for receipt in unit.receipts:
@@ -193,7 +207,63 @@ def plan_function_reauthoring(
 
         chosen: ClassicFunctionReauthoring | None = None
         reasons: list[str] = []
-        for donor_id in _donor_order(refusal):
+        if (
+            action.family is ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC
+            and refusal.retail_body is not None
+        ):
+            donor_interventions = {
+                item.intervention.id: item.intervention for item in refusal.unit.donors
+            }
+            try:
+                mosaic = reauthor_instruction_mosaic(
+                    action,
+                    refusal.receipt,
+                    refusal.materials,
+                    refusal.retail_body,
+                    donor_objects=refusal.unit_donor_objects,
+                    donor_interventions=donor_interventions,
+                    donor_sources={
+                        item.intervention.id: item.request.logical_outputs.get(
+                            refusal.unit.plan.source
+                        )
+                        for item in refusal.unit.donors
+                    },
+                    donor_shape_identifiers={
+                        item.intervention.id: item.request.carrier_identifiers
+                        for item in refusal.unit.donors
+                    },
+                )
+            except MosaicRepairError as exc:
+                reasons.append(f"bounded mosaic re-author: {exc}")
+            else:
+                primary_id = mosaic.intervention.dependencies[0]
+                chosen = ClassicFunctionReauthoring(
+                    refusal.unit_id,
+                    action.symbol,
+                    action.id,
+                    action.dependencies[0],
+                    primary_id,
+                    action.family.value,
+                    ClassicRecordAddition(
+                        mosaic.intervention,
+                        mosaic.receipt,
+                        replaces_intervention_id=action.id,
+                    ),
+                )
+        semantic_mosaic = instruction_mosaic_semantics_required(action)
+        if semantic_mosaic and chosen is None:
+            skipped.append(
+                (
+                    refusal.unit_id,
+                    action.id,
+                    "saved mosaic semantics could not be preserved"
+                    + (f" ({reasons[-1]})" if reasons else ""),
+                )
+            )
+            continue
+        donor_order = [] if chosen is not None else _donor_order(refusal)
+        prepared_donors = {item.intervention.id: item for item in refusal.unit.donors}
+        for donor_id in donor_order if goal is not None else ():
             donor_object = refusal.unit_donor_objects[donor_id]
             if _function_body_digest(donor_object, action.symbol) != goal:
                 continue
@@ -219,7 +289,11 @@ def plan_function_reauthoring(
                     action.dependencies[0],
                     donor_id,
                     family.value,
-                    ClassicRecordAddition(record.intervention, record.receipt),
+                    ClassicRecordAddition(
+                        record.intervention,
+                        record.receipt,
+                        replaces_intervention_id=action.id,
+                    ),
                 )
                 break
             if chosen is not None:
@@ -233,9 +307,14 @@ def plan_function_reauthoring(
                 repaired = repair_measured_pins(
                     moved,
                     refusal.receipt,
-                    repoint_refusal_materials(refusal, donor_id, donor_object),
+                    repoint_refusal_materials(
+                        refusal,
+                        moved,
+                        prepared_donors[donor_id],
+                        donor_object,
+                    ),
                 )
-            except MeasuredPinRepairError as exc:
+            except (ClassicRepairSessionError, MeasuredPinRepairError) as exc:
                 reasons.append(f"{donor_id}/{action.family.value} re-point: {exc}")
                 continue
             chosen = ClassicFunctionReauthoring(
@@ -254,24 +333,77 @@ def plan_function_reauthoring(
                 ),
             )
             break
+        if chosen is None and refusal.retail_body is not None:
+            for donor_id in donor_order:
+                donor_object = refusal.unit_donor_objects[donor_id]
+                prepared = prepared_donors[donor_id]
+                try:
+                    rewritten = reauthor_relational_donor_rewriting(
+                        action,
+                        refusal.receipt,
+                        refusal.materials,
+                        refusal.retail_body,
+                        donor_id=donor_id,
+                        donor_object=donor_object,
+                        donor_source=prepared.request.logical_outputs.get(refusal.unit.plan.source),
+                        shape_identifiers=prepared.request.carrier_identifiers,
+                    )
+                except RelationalRepairError as exc:
+                    reasons.append(f"{donor_id}/relational rewrite: {exc}")
+                    continue
+                chosen = ClassicFunctionReauthoring(
+                    refusal.unit_id,
+                    action.symbol,
+                    action.id,
+                    action.dependencies[0],
+                    donor_id,
+                    ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING.value,
+                    ClassicRecordAddition(
+                        rewritten.intervention,
+                        rewritten.receipt,
+                        replaces_intervention_id=action.id,
+                    ),
+                )
+                break
         if chosen is None:
             skipped.append(
                 (
                     refusal.unit_id,
                     action.id,
-                    "no captured donor object carries the goal body under a closed family"
-                    + (f" ({reasons[-1]})" if reasons else ""),
+                    "no captured donor object carries the goal body or can reproduce it by a "
+                    "proved relational rewrite" + (f" ({reasons[-1]})" if reasons else ""),
                 )
             )
             continue
         reauthorings.append(chosen)
         key = (action.scope.target, refusal.unit_id, action.symbol)
-        consumers[chosen.previous_donor_id].discard(action.id)
-        donor_state[chosen.previous_donor_id][1].discard(key)
-        consumers[chosen.donor_id].add(
-            chosen.addition.intervention.id if chosen.addition is not None else action.id
-        )
-        donor_state[chosen.donor_id][1].add(key)
+        if chosen.addition is not None:
+            after_action = chosen.addition.intervention
+            after_receipt = chosen.addition.receipt
+        else:
+            if chosen.dependency_edit is None:
+                raise ClassicReauthorError(
+                    f"re-pointed action {chosen.removed_action_id!r} names no donor"
+                )
+            after_action = chosen.dependency_edit.after
+            after_receipt = (
+                chosen.receipt_edit.after
+                if chosen.receipt_edit is not None and chosen.receipt_edit.after is not None
+                else refusal.receipt
+            )
+        before_donors = classic_function_donor_ids(action, refusal.receipt)
+        after_donors = classic_function_donor_ids(after_action, after_receipt)
+        unknown = (before_donors | after_donors) - donor_state.keys()
+        if unknown:
+            raise ClassicReauthorError(
+                f"function {action.id!r} names donors outside its prepared unit: {sorted(unknown)}"
+            )
+        for donor_id in before_donors:
+            consumers[donor_id].discard(action.id)
+            donor_state[donor_id][1].discard(key)
+        for donor_id in after_donors:
+            consumers[donor_id].add(after_action.id)
+            donor_state[donor_id][1].add(key)
 
     intervention_edits: list[ClassicInterventionEdit] = []
     receipt_edits: list[ClassicReceiptEdit] = []

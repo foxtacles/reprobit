@@ -33,6 +33,7 @@ from reprobit.classic_orchestration import (
     ClassicPreparedUnit,
     classic_compiler_translation_unit_authority,
     classic_rdata_repack_graph_authority,
+    classic_unit_oracle_targets,
     prepare_classic_units,
 )
 from reprobit.classic_project import ClassicProjectError
@@ -727,17 +728,22 @@ def prepare_classic_incremental_plan(
     }
     oracle_snapshots: dict[str, SecureFileSnapshot] = {}
     oracle_paths: dict[str, Path] = {}
-    legacy_target_ids = {action.oracle_target for unit in units for action in unit.legacy_actions}
+    oracle_target_ids = set().union(
+        *(
+            classic_unit_oracle_targets(unit, repair=measured_receipt_repair is not None)
+            for unit in units
+        )
+    )
     for target in bundle.spec.targets:
-        if target.id not in legacy_target_ids:
+        if target.id not in oracle_target_ids:
             continue
         path = project_root.joinpath(*PurePosixPath(target.oracle).parts)
         oracle_paths[target.id] = path
         oracle_snapshots[target.id] = census.snapshot(path)
-    if set(oracle_paths) != legacy_target_ids:
+    if set(oracle_paths) != oracle_target_ids:
         raise ClassicIncrementalError(
-            "warm legacy transform names unknown oracle targets: "
-            + f"{sorted(legacy_target_ids - set(oracle_paths))}"
+            "warm classic transform names unknown oracle targets: "
+            + f"{sorted(oracle_target_ids - set(oracle_paths))}"
         )
     graph_output_owner = {
         reference.casefold(): node.id for node in graph.nodes for reference in node.outputs

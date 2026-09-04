@@ -286,6 +286,29 @@ def _require_primary_structural_pair(
         raise DiscoveryError(f"{context} has incompatible relocations: {exc}") from exc
 
 
+def require_msvc_primary_structural_pair(
+    left: CoffObject,
+    left_record: MsvcFunctionRecord,
+    right: CoffObject,
+    right_record: MsvcFunctionRecord,
+    context: str,
+    *,
+    left_index: CoffMetadataIndex | None = None,
+    right_index: CoffMetadataIndex | None = None,
+) -> None:
+    """Require compatible isolated primary COMDATs and code relocations."""
+
+    _require_primary_structural_pair(
+        left,
+        left_record,
+        right,
+        right_record,
+        context,
+        left_index=left_index,
+        right_index=right_index,
+    )
+
+
 def require_msvc_structural_pair(
     left: CoffObject,
     left_record: MsvcFunctionRecord,
@@ -512,6 +535,7 @@ __all__ = [
     "observe_msvc_discovery_object",
     "parse_msvc_coff",
     "qualify_msvc_reference_object",
+    "require_msvc_primary_structural_pair",
     "require_msvc_structural_pair",
     "resolve_msvc_reference",
     "unique_isolated_msvc_function",

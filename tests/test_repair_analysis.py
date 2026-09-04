@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+import reprobit.repair_workflow as subject
 from reprobit.classic_project import ClassicProjectError
 from reprobit.cli_output import CLIOutput
 from reprobit.repair_workflow import RepairAnalysisError, analyze_classic_repair
@@ -54,3 +56,28 @@ def test_analysis_never_misclassifies_an_unrelated_runtime_failure(
 
     with pytest.raises(RepairAnalysisError, match="compiler environment failed"):
         analyze_classic_repair(_args(), _output())
+
+
+def test_analysis_discards_results_after_each_units_first_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    before_first = SimpleNamespace(unit_id="tu.first", action_index=1)
+    after_first = SimpleNamespace(unit_id="tu.first", action_index=3)
+    before_second = SimpleNamespace(unit_id="tu.second", action_index=2)
+    after_second = SimpleNamespace(unit_id="tu.second", action_index=6)
+    unaffected = SimpleNamespace(unit_id="tu.clean", action_index=9)
+    first_refusal = SimpleNamespace(unit_id="tu.first", action_index=2)
+    downstream_refusal = SimpleNamespace(unit_id="tu.first", action_index=4)
+    second_refusal = SimpleNamespace(unit_id="tu.second", action_index=5)
+    session = SimpleNamespace(
+        repairs=(before_first, after_first, before_second, after_second, unaffected),
+        refusals=(first_refusal, downstream_refusal, second_refusal),
+        seed_objects={},
+    )
+    monkeypatch.setattr(subject, "ClassicRepairSession", lambda: session)
+    monkeypatch.setattr(subject, "command_build", lambda *_args: 0)
+
+    result = subject.analyze_classic_repair(_args(), _output())
+
+    assert result.measured_repairs == (before_first, before_second, unaffected)
+    assert result.structural_refusals == (first_refusal, second_refusal)

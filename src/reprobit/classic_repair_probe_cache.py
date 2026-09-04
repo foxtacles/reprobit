@@ -18,22 +18,33 @@ from __future__ import annotations
 
 import json
 import zlib
+from collections import OrderedDict
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from hashlib import sha256
 from pathlib import Path
 
-from reprobit.atomic_io import write_bytes_atomic
 from reprobit.classic_execution_records import ClassicActiveCompilerEpoch
 from reprobit.classic_runtime_probe import ClassicDonorProbeInput, ClassicDonorProbeOutput
 from reprobit.execution import StepExecutionReceipt
 from reprobit.model import Digest
 from reprobit.producer_graph import ProducerGraphDocument, producer_graph_digest
+from reprobit.secure_paths import (
+    atomic_publish_relative,
+    read_relative_file,
+    remove_regular_relative,
+    split_absolute,
+    stat_relative_file,
+)
 from reprobit.strict_json import canonical_json
 
 PROBE_STORE_FORMAT = "reprobit-donor-probe-outcome-v1"
 PROBE_STORE_DIRECTORY = "repair-probes"
 PROBE_STORE_VERSION = "v1"
+_MAX_DISK_BACKED_MEMORY_BYTES = 256 * 1024 * 1024
+_MAX_PROBE_PAYLOAD_BYTES = _MAX_DISK_BACKED_MEMORY_BYTES
+_MAX_PROBE_HEADER_BYTES = 1024 * 1024
+_MAX_PROBE_ENTRY_BYTES = _MAX_PROBE_PAYLOAD_BYTES + _MAX_PROBE_HEADER_BYTES
 
 ProbeSeatKey = tuple[str, str, str]
 """``(build target, logical source, donor request identity)``, the first two casefolded."""
@@ -48,6 +59,14 @@ class ClassicDonorCompileRefusal:
 
 
 ClassicDonorCompileOutcome = ClassicDonorProbeOutput | ClassicDonorCompileRefusal
+
+
+def _output_payload_bytes(output: ClassicDonorProbeOutput) -> int:
+    return (
+        sum(len(item.payload) for item in output.rendered_inputs)
+        + len(output.object_payload)
+        + len(output.pdb_payload)
+    )
 
 
 def compile_epoch_digest(
@@ -90,9 +109,11 @@ def _entry_name(epoch: str, key: ProbeSeatKey) -> str:
     return sha256(canonical_json({"epoch": epoch, "key": list(key)})).hexdigest()
 
 
-def _encode_output(epoch: str, key: ProbeSeatKey, output: ClassicDonorProbeOutput) -> bytes:
+def _encode_output(epoch: str, key: ProbeSeatKey, output: ClassicDonorProbeOutput) -> bytes | None:
     payloads = [item.payload for item in output.rendered_inputs]
     payloads.extend((output.object_payload, output.pdb_payload))
+    if _output_payload_bytes(output) > _MAX_PROBE_PAYLOAD_BYTES:
+        return None
     header = {
         "build_target": output.build_target,
         "epoch": epoch,
@@ -123,7 +144,63 @@ def _encode_output(epoch: str, key: ProbeSeatKey, output: ClassicDonorProbeOutpu
         },
         "translation_unit_id": output.translation_unit_id,
     }
-    return canonical_json(header) + zlib.compress(b"".join(payloads), 6)
+    encoded_header = canonical_json(header)
+    if len(encoded_header) > _MAX_PROBE_HEADER_BYTES:
+        return None
+    encoded = encoded_header + zlib.compress(b"".join(payloads), 6)
+    return encoded if len(encoded) <= _MAX_PROBE_ENTRY_BYTES else None
+
+
+def _stored_length(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+        raise ValueError("stored probe length is invalid")
+    return value
+
+
+def _payload_lengths(
+    header: Mapping[str, object],
+) -> tuple[list[tuple[Mapping[str, object], int]], int, int] | None:
+    rendered_value = header.get("rendered_inputs")
+    if not isinstance(rendered_value, list):
+        return None
+    try:
+        total = 0
+        rendered: list[tuple[Mapping[str, object], int]] = []
+        for value in rendered_value:
+            if not isinstance(value, dict):
+                return None
+            length = _stored_length(value.get("length"))
+            size = _stored_length(value.get("size"))
+            if size != length or length > _MAX_PROBE_PAYLOAD_BYTES - total:
+                return None
+            total += length
+            rendered.append((value, length))
+        object_length = _stored_length(header.get("object_length"))
+        if object_length > _MAX_PROBE_PAYLOAD_BYTES - total:
+            return None
+        total += object_length
+        pdb_length = _stored_length(header.get("pdb_length"))
+        if pdb_length > _MAX_PROBE_PAYLOAD_BYTES - total:
+            return None
+        return rendered, object_length, pdb_length
+    except ValueError:
+        return None
+
+
+def _decompress_payload(data: bytes, expected_length: int) -> bytes | None:
+    try:
+        decompressor = zlib.decompressobj()
+        body = decompressor.decompress(data, expected_length or 1)
+    except zlib.error:
+        return None
+    if (
+        len(body) != expected_length
+        or not decompressor.eof
+        or decompressor.unconsumed_tail
+        or decompressor.unused_data
+    ):
+        return None
+    return body
 
 
 def _decode_output(
@@ -133,13 +210,14 @@ def _decode_output(
     key: ProbeSeatKey,
     donor_id: str,
 ) -> ClassicDonorProbeOutput | None:
-    newline = data.find(b"\n")
+    if len(data) > _MAX_PROBE_ENTRY_BYTES:
+        return None
+    newline = data.find(b"\n", 0, _MAX_PROBE_HEADER_BYTES + 1)
     if newline < 0:
         return None
     try:
         header = json.loads(data[:newline].decode("utf-8"))
-        body = zlib.decompress(data[newline + 1 :])
-    except (UnicodeDecodeError, ValueError, zlib.error):
+    except (UnicodeDecodeError, ValueError):
         return None
     if (
         not isinstance(header, dict)
@@ -148,11 +226,19 @@ def _decode_output(
         or header.get("key") != list(key)
     ):
         return None
+    lengths = _payload_lengths(header)
+    if lengths is None:
+        return None
+    rendered_headers, object_length, pdb_length = lengths
+    expected_length = sum(length for _item, length in rendered_headers)
+    expected_length += object_length + pdb_length
+    body = _decompress_payload(data[newline + 1 :], expected_length)
+    if body is None:
+        return None
     try:
         offset = 0
         rendered: list[ClassicDonorProbeInput] = []
-        for item in header["rendered_inputs"]:
-            length = int(item["length"])
+        for item, length in rendered_headers:
             payload = body[offset : offset + length]
             offset += length
             if len(payload) != length or Digest.from_bytes(payload).value != item["digest"]:
@@ -161,12 +247,10 @@ def _decode_output(
                 ClassicDonorProbeInput(
                     str(item["logical_path"]),
                     Digest(value=str(item["digest"])),
-                    int(item["size"]),
+                    length,
                     payload,
                 )
             )
-        object_length = int(header["object_length"])
-        pdb_length = int(header["pdb_length"])
         object_payload = body[offset : offset + object_length]
         offset += object_length
         pdb_payload = body[offset : offset + pdb_length]
@@ -206,18 +290,49 @@ def _decode_output(
         return None
 
 
+def _read_entry(path: Path) -> bytes | None:
+    try:
+        root, relative = split_absolute(path)
+        if stat_relative_file(root, relative).size > _MAX_PROBE_ENTRY_BYTES:
+            return None
+        data, snapshot = read_relative_file(root, relative)
+    except OSError:
+        return None
+    return data if snapshot.size <= _MAX_PROBE_ENTRY_BYTES else None
+
+
+def _publish_entry(path: Path, data: bytes) -> bool:
+    try:
+        root, relative = split_absolute(path)
+        atomic_publish_relative(root, relative, data)
+    except OSError:
+        return False
+    return True
+
+
+def _remove_entry(path: Path) -> None:
+    try:
+        root, relative = split_absolute(path)
+        remove_regular_relative(root, relative)
+    except OSError:
+        pass
+
+
 class ClassicDonorCompileStore:
     """Replay donor compile outcomes by seat within a named compile epoch.
 
-    Outcomes are kept in memory for the life of the store (one command).  When
-    a directory is given, successful compiles are also written there and read
-    back by later commands.  Refusals stay in memory only: a compiler error is
+    In-memory-only outcomes and refusals are kept for the life of the store
+    (one command).  When a directory is given, successful compiles are written
+    there and a bounded least-recently-used set stays in memory; evicted results
+    are read back if needed.  Refusals stay in memory only: a compiler error is
     deterministic for its seat, but a timeout or a killed process is not.
     """
 
     def __init__(self, directory: Path | None = None) -> None:
         self.directory = directory
         self._memory: dict[tuple[str, ProbeSeatKey], ClassicDonorCompileOutcome] = {}
+        self._disk_success_lru: OrderedDict[tuple[str, ProbeSeatKey], int] = OrderedDict()
+        self._disk_success_bytes = 0
         self.memory_hits = 0
         self.disk_hits = 0
         self.misses = 0
@@ -232,43 +347,68 @@ class ClassicDonorCompileStore:
         name = _entry_name(epoch, key)
         return self.directory / PROBE_STORE_VERSION / name[:2] / f"{name}.bin"
 
+    def _remember(
+        self,
+        epoch: str,
+        key: ProbeSeatKey,
+        outcome: ClassicDonorCompileOutcome,
+    ) -> None:
+        memory_key = (epoch, key)
+        previous_size = self._disk_success_lru.pop(memory_key, None)
+        if previous_size is not None:
+            self._disk_success_bytes -= previous_size
+        self._memory[memory_key] = outcome
+        if self.directory is None or not isinstance(outcome, ClassicDonorProbeOutput):
+            return
+        size = _output_payload_bytes(outcome)
+        self._disk_success_lru[memory_key] = size
+        self._disk_success_bytes += size
+        while self._disk_success_bytes > _MAX_DISK_BACKED_MEMORY_BYTES:
+            evicted, evicted_size = self._disk_success_lru.popitem(last=False)
+            del self._memory[evicted]
+            self._disk_success_bytes -= evicted_size
+
     def get(
         self, epoch: str, key: ProbeSeatKey, *, donor_id: str
     ) -> ClassicDonorCompileOutcome | None:
         """Return the outcome of ``key`` under ``epoch``, renamed to ``donor_id``."""
 
-        cached = self._memory.get((epoch, key))
+        memory_key = (epoch, key)
+        cached = self._memory.get(memory_key)
         if cached is not None:
+            if memory_key in self._disk_success_lru:
+                self._disk_success_lru.move_to_end(memory_key)
             self.memory_hits += 1
             return replayed(cached, donor_id)
         path = self._path(epoch, key)
-        if path is None or path.is_symlink() or not path.is_file():
+        if path is None:
             self.misses += 1
             return None
-        try:
-            data = path.read_bytes()
-        except OSError:
+        data = _read_entry(path)
+        if data is None:
+            _remove_entry(path)
             self.misses += 1
             return None
         decoded = _decode_output(data, epoch=epoch, key=key, donor_id=donor_id)
         if decoded is None:
-            path.unlink(missing_ok=True)
+            _remove_entry(path)
             self.misses += 1
             return None
-        self._memory[(epoch, key)] = decoded
+        self._remember(epoch, key, decoded)
         self.disk_hits += 1
         return decoded
 
     def put(self, epoch: str, key: ProbeSeatKey, outcome: ClassicDonorCompileOutcome) -> None:
         """Remember ``outcome`` for ``key`` under ``epoch``; persist successful compiles."""
 
-        self._memory[(epoch, key)] = outcome
         path = self._path(epoch, key)
         if path is None or not isinstance(outcome, ClassicDonorProbeOutput):
+            self._remember(epoch, key, outcome)
             return
-        path.parent.mkdir(parents=True, exist_ok=True)
-        write_bytes_atomic(path, _encode_output(epoch, key, outcome), fsync_directory=False)
-        self.stored += 1
+        encoded = _encode_output(epoch, key, outcome)
+        if encoded is not None and _publish_entry(path, encoded):
+            self.stored += 1
+        self._remember(epoch, key, outcome)
 
     def counters(self) -> Mapping[str, int]:
         return {

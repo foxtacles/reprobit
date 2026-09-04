@@ -210,7 +210,8 @@ def _add_execution_options(
             choices=tuple(item.value for item in KeepWorkspace),
             default=KeepWorkspace.ON_FAILURE.value,
             help=(
-                "retain run-private diagnostics never, on failure, or always (default: on-failure)"
+                "keep the private workspace: never, only on failure, or always "
+                "(default: on-failure)"
             ),
         )
     advanced = command.add_argument_group(
@@ -381,7 +382,8 @@ _EPILOG = """\
 exit status:
   0    the command completed and its result is ready, clean, or accepted
   1    an honest negative: status found missing setup, doctor or setup found a
-       failing check, verify was not accepted, or discover grind found nothing
+       failing check, verify was not accepted, or discover grind did not find
+       or save the requested result
   2    any error, including usage errors and unreadable project files
   130  interrupted with Ctrl-C; child processes were asked to drain
 
@@ -835,7 +837,10 @@ def _parser() -> argparse.ArgumentParser:
     cache_cleanup.add_argument(
         "--cache",
         action="store_true",
-        help="also remove cache records and blobs old enough for the selected age",
+        help=(
+            "also remove incremental cache data selected by age and the complete repair "
+            "search cache"
+        ),
     )
     cache_cleanup.add_argument(
         "--obsolete-cache",
@@ -863,7 +868,7 @@ def _parser() -> argparse.ArgumentParser:
         "repair",
         help="repair edits to already-locked source files and prove exact output",
         description=(
-            "Use this after editing a source file that is already part of the project, "
+            "Use this after editing a file in a project that already matched exactly, "
             "including a shared header used by many source files. ReproBit repairs the "
             "saved build guidance in private, rebuilds, and publishes only after every "
             "target matches exactly. For added or removed files, start with source "
@@ -884,8 +889,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     search = repair.add_argument_group(
         "search bounds",
-        "Widen the bounded nearby-donor search for large shared-header edits; every "
-        "candidate still passes the ordinary composer and the final cold proof.",
+        "Widen the bounded search for larger repairs; a completed repair must still "
+        "reproduce every expected output in a build from scratch.",
     )
     search.add_argument(
         "--retune-radius",
@@ -893,7 +898,7 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         metavar="DISTANCE",
         help=(
-            "farthest declaration-count distance tried per donor "
+            "largest declaration-count change tried per saved compiler choice or source layout "
             f"(default: {DEFAULT_REPAIR_RETUNE_RADIUS}; max: {MAX_RETUNE_RADIUS})"
         ),
     )
@@ -903,7 +908,7 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         metavar="COUNT",
         help=(
-            "maximum nearby settings tried per donor "
+            "maximum nearby settings tried per saved compiler choice or source layout "
             f"(default: {DEFAULT_RETUNE_CANDIDATES}; max: {MAX_RETUNE_CANDIDATES})"
         ),
     )
@@ -913,7 +918,7 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         metavar="COUNT",
         help=(
-            "maximum donor settings compiled by the whole command "
+            "maximum nearby repair choices tested by the whole command "
             f"(default: {DEFAULT_RETUNE_PROBE_CANDIDATES}; max: {MAX_RETUNE_PROBE_CANDIDATES})"
         ),
     )
@@ -923,8 +928,8 @@ def _parser() -> argparse.ArgumentParser:
         default=None,
         metavar="COUNT",
         help=(
-            "fresh carrier states (declaration shapes, then forward declaration runs) compiled "
-            "per affected source file once its saved donors cannot be retuned "
+            "fresh declaration settings built per affected source file after its saved "
+            "compiler choices are exhausted "
             f"(default: {DEFAULT_DISCOVERY_CANDIDATES}; max: "
             f"{MAX_DISCOVERY_CANDIDATES})"
         ),
@@ -1086,9 +1091,11 @@ def _parser() -> argparse.ArgumentParser:
         "grind",
         help="find low-cost project adjustments, preview them, and optionally save proven work",
         description=(
-            "Search a bounded, project-wide set of low-cost adjustments. The default is a "
-            "preview. Saved local progress does not prove the complete project; only a fresh "
-            "byte-exact result does."
+            "Use this for a project's initial mismatch. Search a bounded, project-wide set "
+            "of low-cost adjustments using project-owned reference .obj files. The default "
+            "is a preview. Saved local progress does not prove the complete project; only a "
+            "fresh byte-exact result does. For a later regression in an already-exact "
+            "project, use rbit repair instead."
         ),
     )
     discover_grind.add_argument(

@@ -14,6 +14,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 from reprobit.classic_donor_retune_candidates import (
     DEFAULT_REPAIR_RETUNE_RADIUS,
     DEFAULT_RETUNE_CANDIDATES,
@@ -51,7 +52,7 @@ from reprobit.classic_repair_probe_execution import (
     ClassicDonorCompileCache,
     probe_donor_compile_windows,
 )
-from reprobit.classic_repair_session import ClassicRepairRefusal
+from reprobit.classic_repair_session import ClassicRepairRefusal, RepairRefusal
 from reprobit.classic_runtime_probe import (
     ClassicDonorProbeOutput,
     ClassicDonorProbeProgress,
@@ -61,6 +62,8 @@ from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeIntervention,
     ClassicRecipeRole,
+    LegacyOracleInstallIntervention,
+    classic_function_donor_ids,
 )
 from reprobit.strict_json import canonical_json
 
@@ -185,17 +188,19 @@ class _RepairGroup:
     unit: ClassicPreparedUnit
     donor: ClassicPreparedDonor
     donor_receipt: ClassicProofReceipt
-    failures: tuple[ClassicRepairRefusal, ...]
+    failures: tuple[RepairRefusal, ...]
     setup_refusals: list[ClassicDonorRetuneAttemptRefusal]
     consumers: tuple[ClassicRepairRefusal, ...] = ()
     """The donor's currently composing consumers, validated with every candidate."""
+    donor_rank: int = 0
+    """Primary donors sort before canonical auxiliary alternatives."""
 
     @property
     def key(self) -> tuple[str, str]:
         return self.unit.plan.id, self.donor.intervention.id
 
     @property
-    def validated(self) -> tuple[ClassicRepairRefusal, ...]:
+    def validated(self) -> tuple[RepairRefusal, ...]:
         return (*self.failures, *self.consumers)
 
     @property
@@ -209,6 +214,7 @@ class _PreparedAttempt:
     materialized: MaterializedDonorRetuneCandidate
     donor: ClassicPreparedDonor
     probe_id: str
+    donor_rank: int = 0
 
 
 def _move_signature(family: str, changes: Iterable[DonorRetuneChange]) -> str:
@@ -265,24 +271,65 @@ def _one_donor(
     return donors[0], receipts[0]
 
 
-def _group_failures(refusals: Sequence[ClassicRepairRefusal]) -> tuple[_RepairGroup, ...]:
-    grouped: dict[tuple[str, str], list[ClassicRepairRefusal]] = {}
+def _retunable_donor_ids(refusal: RepairRefusal) -> tuple[str, ...]:
+    """Return the primary donor followed by canonical auxiliary alternatives."""
+
+    action = refusal.intervention
+    if not action.dependencies:
+        return ()
+    primary = action.dependencies[0]
+    if isinstance(action, LegacyOracleInstallIntervention):
+        return (primary,)
+    try:
+        donor_ids = classic_function_donor_ids(action, refusal.receipt)
+    except ValueError as exc:
+        raise ClassicDonorRetuneProbeError(
+            f"repair refusal {action.id!r} has an invalid donor graph: {exc}"
+        ) from exc
+    return (
+        primary,
+        *sorted(donor_ids - {primary}, key=lambda item: (item.casefold(), item)),
+    )
+
+
+def _group_failures(
+    refusals: Sequence[RepairRefusal],
+    *,
+    excluded_groups: frozenset[tuple[str, str]] = frozenset(),
+) -> tuple[_RepairGroup, ...]:
+    grouped: dict[tuple[str, str], list[RepairRefusal]] = {}
+    donor_ranks: dict[tuple[str, str], int] = {}
     for refusal in refusals:
         action = refusal.intervention
-        if action.role is not ClassicRecipeRole.FUNCTION or not action.dependencies:
+        if (
+            not isinstance(action, LegacyOracleInstallIntervention)
+            and action.role is not ClassicRecipeRole.FUNCTION
+        ) or not action.dependencies:
             raise ClassicDonorRetuneProbeError(
-                f"repair refusal {action.id!r} is not a classic function with a primary donor"
+                f"repair refusal {action.id!r} has no retunable primary donor"
             )
         unit = refusal.unit
         if unit.plan.id != refusal.unit_id or action not in unit.actions:
             raise ClassicDonorRetuneProbeError(
                 f"repair refusal {action.id!r} differs from its prepared TU authority"
             )
-        donor_id = action.dependencies[0]
-        grouped.setdefault((unit.plan.id, donor_id), []).append(refusal)
+        for donor_rank, donor_id in enumerate(_retunable_donor_ids(refusal)):
+            key = (unit.plan.id, donor_id)
+            if key in excluded_groups:
+                continue
+            grouped.setdefault(key, []).append(refusal)
+            donor_ranks[key] = min(donor_rank, donor_ranks.get(key, donor_rank))
 
     result: list[_RepairGroup] = []
-    for key in sorted(grouped, key=lambda item: (item[0].casefold(), item[1].casefold())):
+    for key in sorted(
+        grouped,
+        key=lambda item: (
+            item[0].casefold(),
+            donor_ranks[item],
+            item[1].casefold(),
+            item[1],
+        ),
+    ):
         failures = tuple(
             sorted(
                 grouped[key],
@@ -306,7 +353,17 @@ def _group_failures(refusals: Sequence[ClassicRepairRefusal]) -> tuple[_RepairGr
             raise ClassicDonorRetuneProbeError(
                 f"classic donor {key[1]!r} consumers cannot be described: {exc}"
             ) from exc
-        result.append(_RepairGroup(unit, donor, donor_receipt, failures, [], consumers))
+        result.append(
+            _RepairGroup(
+                unit,
+                donor,
+                donor_receipt,
+                failures,
+                [],
+                consumers,
+                donor_ranks[key],
+            )
+        )
     return tuple(result)
 
 
@@ -340,6 +397,26 @@ def _selected_seat_owner(
     return None
 
 
+def _group_action_keys(group: _RepairGroup) -> frozenset[tuple[str, str]]:
+    """Identify every action whose saved composition a proposal would change."""
+
+    return frozenset((group.unit.plan.id, item.intervention.id) for item in group.validated)
+
+
+def _selected_action_owner(
+    selected: Mapping[tuple[str, str], ClassicDonorRetuneRepair],
+    groups: Mapping[tuple[str, str], _RepairGroup],
+    group: _RepairGroup,
+) -> str | None:
+    """Return a selected donor whose proposal overlaps this group's actions."""
+
+    claimed = _group_action_keys(group)
+    for key in selected:
+        if claimed & _group_action_keys(groups[key]):
+            return groups[key].donor.intervention.id
+    return None
+
+
 def _candidate_windows(
     attempts: tuple[_PreparedAttempt, ...],
     selected: Mapping[tuple[str, str], ClassicDonorRetuneRepair],
@@ -347,6 +424,7 @@ def _candidate_windows(
     window_size: int,
     candidate_budget: int,
     signatures: Mapping[str, str] | None = None,
+    deferred: set[tuple[str, str]] | None = None,
 ) -> Iterable[tuple[str, ...]]:
     """Yield fair lazy windows, dropping groups as soon as they are selected.
 
@@ -358,12 +436,14 @@ def _candidate_windows(
     """
 
     emitted: set[str] = set()
+    deferred_groups = deferred if deferred is not None else set()
     remaining = candidate_budget
     ordered = sorted(
         attempts,
         key=lambda item: (
             item.materialized.distance,
             item.group_key[0].casefold(),
+            item.donor_rank,
             item.group_key[1].casefold(),
             item.probe_id,
         ),
@@ -379,7 +459,11 @@ def _candidate_windows(
         for item in ordered:
             if len(chosen) == limit:
                 break
-            if item.group_key in selected or item.probe_id in emitted:
+            if (
+                item.group_key in selected
+                or item.group_key in deferred_groups
+                or item.probe_id in emitted
+            ):
                 continue
             if signatures.get(item.probe_id) in wanted:
                 chosen.append(item.probe_id)
@@ -393,15 +477,28 @@ def _candidate_windows(
                 queue = by_group.setdefault(item.group_key, deque())
                 if item.probe_id not in queue:
                     queue.append(item.probe_id)
+        donor_ranks = {
+            item.group_key: item.donor_rank
+            for item in attempts
+            if item.materialized.distance == distance
+        }
         group_keys = tuple(
-            sorted(by_group, key=lambda item: (item[0].casefold(), item[1].casefold()))
+            sorted(
+                by_group,
+                key=lambda item: (
+                    item[0].casefold(),
+                    donor_ranks[item],
+                    item[1].casefold(),
+                    item[1],
+                ),
+            )
         )
         while remaining:
             window: list[str] = promoted(min(window_size, remaining))
             while len(window) < min(window_size, remaining):
                 added = False
                 for group_key in group_keys:
-                    if group_key in selected:
+                    if group_key in selected or group_key in deferred_groups:
                         continue
                     queue = by_group[group_key]
                     while queue and queue[0] in emitted:
@@ -424,7 +521,7 @@ def _candidate_windows(
 
 def _probe_bounded_donor_retunes(
     probes: ClassicProbeExecution,
-    refusals: Sequence[ClassicRepairRefusal],
+    refusals: Sequence[RepairRefusal],
     *,
     clean_sources: Mapping[str, bytes],
     effective_sources: Mapping[str, bytes],
@@ -436,6 +533,7 @@ def _probe_bounded_donor_retunes(
     progress: ClassicDonorProbeProgress | None = None,
     abandoned_states: Mapping[tuple[str, str], frozenset[str]] | None = None,
     compile_cache: ClassicDonorCompileCache | None = None,
+    excluded_groups: frozenset[tuple[str, str]] = frozenset(),
 ) -> ClassicDonorRetuneProbeResult:
     """Compile deterministic distance tiers and select ordinarily valid retunes.
 
@@ -444,13 +542,16 @@ def _probe_bounded_donor_retunes(
     would return to one is refused, so two consumers cannot trade a donor back
     and forth between rounds.
 
-    Failed actions are grouped by translation unit and primary donor.  A
-    candidate is selected only if the ordinary measured-pin repair/composer
-    accepts every *captured* failed action in its group; callers must still
-    continue the TU to expose later actions.  Candidate enumeration remains
-    bounded by ``radius`` and ``limit`` per donor.  Nearby distance tiers run
-    first in small windows, and outer tiers are requested only after cheaper
-    candidates fail.  The supplied non-certifying probe runtime is consumed.
+    Failed actions are grouped by translation unit and each donor they use,
+    with the primary donor tried before canonical auxiliary alternatives.
+    ``excluded_groups`` can defer already-exhausted ``(unit_id, donor_id)``
+    pairs without hiding the same failure from another donor.  A candidate is
+    selected only if the ordinary measured-pin repair/composer accepts every
+    *captured* failed action in its group; callers must still continue the TU
+    to expose later actions.  Candidate enumeration remains bounded by
+    ``radius`` and ``limit`` per donor.  Nearby distance tiers run first in
+    small windows, and outer tiers are requested only after cheaper candidates
+    fail.  The supplied non-certifying probe runtime is consumed.
     """
 
     if type(window_size) is not int or not 1 <= window_size <= MAX_RETUNE_PROBE_WINDOW:
@@ -464,7 +565,7 @@ def _probe_bounded_donor_retunes(
         raise ClassicDonorRetuneProbeError(
             f"candidate_budget must be an integer from 1 to {MAX_RETUNE_PROBE_CANDIDATES}"
         )
-    groups = _group_failures(refusals)
+    groups = _group_failures(refusals, excluded_groups=excluded_groups)
     if not groups:
         return ClassicDonorRetuneProbeResult((), (), 0)
     canonical = canonical_overlay_operations or {}
@@ -472,100 +573,108 @@ def _probe_bounded_donor_retunes(
     attempts: list[_PreparedAttempt] = []
     compiler_seats: dict[tuple[str, str, str], _PreparedAttempt] = {}
     signatures: dict[str, str] = {}
-    for group in groups:
-        try:
-            candidates = enumerate_donor_retune_candidates(
-                group.donor.intervention,
-                radius=radius,
-                limit=limit,
-                carrier_sources=clean_sources,
-            )
-        except DonorRetuneError as exc:
-            group.setup_refusals.append(
-                ClassicDonorRetuneAttemptRefusal(0, (), "preparation", str(exc))
-            )
-            continue
-        forbidden = (abandoned_states or {}).get(group.key, frozenset())
-        for candidate in candidates:
-            if forbidden and _parameter_payload(candidate.intervention) in forbidden:
-                group.setup_refusals.append(
-                    ClassicDonorRetuneAttemptRefusal(
-                        candidate.distance,
-                        candidate.changes,
-                        "preparation",
-                        "candidate returns to a donor state this command already saved and "
-                        "abandoned",
-                    )
-                )
-                continue
+    with ClassicOverlayRenderSession() as overlay_render_session:
+        for group in groups:
             try:
-                materialized, donor = prepare_retune_candidate(
-                    group.unit,
-                    group.donor,
-                    group.donor_receipt,
-                    candidate,
-                    clean_sources=clean_sources,
-                    effective_sources=effective_sources,
-                    canonical_overlay_operations=canonical,
+                candidates = enumerate_donor_retune_candidates(
+                    group.donor.intervention,
+                    radius=radius,
+                    limit=limit,
+                    carrier_sources=clean_sources,
                 )
-            except (
-                ClassicDonorRetuneProbeError,
-                DonorRetuneError,
-                DonorSourceError,
-                ValueError,
-            ) as exc:
+            except DonorRetuneError as exc:
                 group.setup_refusals.append(
-                    ClassicDonorRetuneAttemptRefusal(
-                        candidate.distance,
-                        candidate.changes,
-                        "preparation",
-                        f"candidate preparation failed: {exc}",
-                    )
+                    ClassicDonorRetuneAttemptRefusal(0, (), "preparation", str(exc))
                 )
                 continue
-            occupant = _occupying_donor(group, donor.request.compiler_seat)
-            if occupant is not None:
-                group.setup_refusals.append(
-                    ClassicDonorRetuneAttemptRefusal(
-                        candidate.distance,
-                        candidate.changes,
-                        "preparation",
-                        "candidate renders the same declarations as donor "
-                        f"{occupant!r} of this translation unit and would share its "
-                        "compiler arena",
-                    )
-                )
-                continue
-            compiler_seat = (
-                group.unit.plan.build_target.casefold(),
-                group.unit.plan.source.casefold(),
-                donor.request.compiler_seat.casefold(),
-            )
-            previous = compiler_seats.get(compiler_seat)
-            if previous is not None:
-                if (
-                    previous.materialized.distance != materialized.distance
-                    or not same_donor_compile_input(previous.donor, donor)
-                ):
+            forbidden = (abandoned_states or {}).get(group.key, frozenset())
+            for candidate in candidates:
+                if forbidden and _parameter_payload(candidate.intervention) in forbidden:
                     group.setup_refusals.append(
                         ClassicDonorRetuneAttemptRefusal(
                             candidate.distance,
                             candidate.changes,
                             "preparation",
-                            "candidate compiler arena collides with a different bounded input",
+                            "candidate returns to a donor state this command already saved and "
+                            "abandoned",
                         )
                     )
                     continue
-                probe_id = previous.probe_id
-            else:
-                probe_id = f"repair_probe_{len(compiler_seats):04d}"
-            attempt = _PreparedAttempt(group.key, materialized, donor, probe_id)
-            compiler_seats.setdefault(compiler_seat, attempt)
-            attempts.append(attempt)
-            signatures.setdefault(
-                probe_id,
-                _move_signature(group.donor.intervention.family.value, materialized.changes),
-            )
+                try:
+                    materialized, donor = prepare_retune_candidate(
+                        group.unit,
+                        group.donor,
+                        group.donor_receipt,
+                        candidate,
+                        clean_sources=clean_sources,
+                        effective_sources=effective_sources,
+                        canonical_overlay_operations=canonical,
+                        overlay_render_session=overlay_render_session,
+                    )
+                except (
+                    ClassicDonorRetuneProbeError,
+                    DonorRetuneError,
+                    DonorSourceError,
+                    ValueError,
+                ) as exc:
+                    group.setup_refusals.append(
+                        ClassicDonorRetuneAttemptRefusal(
+                            candidate.distance,
+                            candidate.changes,
+                            "preparation",
+                            f"candidate preparation failed: {exc}",
+                        )
+                    )
+                    continue
+                occupant = _occupying_donor(group, donor.request.compiler_seat)
+                if occupant is not None:
+                    group.setup_refusals.append(
+                        ClassicDonorRetuneAttemptRefusal(
+                            candidate.distance,
+                            candidate.changes,
+                            "preparation",
+                            "candidate renders the same declarations as donor "
+                            f"{occupant!r} of this translation unit and would share its "
+                            "compiler arena",
+                        )
+                    )
+                    continue
+                compiler_seat = (
+                    group.unit.plan.build_target.casefold(),
+                    group.unit.plan.source.casefold(),
+                    donor.request.compiler_seat.casefold(),
+                )
+                previous = compiler_seats.get(compiler_seat)
+                if previous is not None:
+                    if (
+                        previous.materialized.distance != materialized.distance
+                        or not same_donor_compile_input(previous.donor, donor)
+                    ):
+                        group.setup_refusals.append(
+                            ClassicDonorRetuneAttemptRefusal(
+                                candidate.distance,
+                                candidate.changes,
+                                "preparation",
+                                "candidate compiler arena collides with a different bounded input",
+                            )
+                        )
+                        continue
+                    probe_id = previous.probe_id
+                else:
+                    probe_id = f"repair_probe_{len(compiler_seats):04d}"
+                attempt = _PreparedAttempt(
+                    group.key,
+                    materialized,
+                    donor,
+                    probe_id,
+                    group.donor_rank,
+                )
+                compiler_seats.setdefault(compiler_seat, attempt)
+                attempts.append(attempt)
+                signatures.setdefault(
+                    probe_id,
+                    _move_signature(group.donor.intervention.family.value, materialized.changes),
+                )
 
     if not attempts:
         unavailable = tuple(
@@ -593,6 +702,7 @@ def _probe_bounded_donor_retunes(
     rejected = {group.key: list(group.setup_refusals) for group in groups}
     compiled = {group.key: 0 for group in groups}
     selected: dict[tuple[str, str], ClassicDonorRetuneRepair] = {}
+    deferred: set[tuple[str, str]] = set()
     compilable_groups = {item.group_key for item in attempt_tuple}
 
     def evaluate(outcomes: tuple[ClassicDonorCompileOutcome, ...]) -> bool:
@@ -618,6 +728,19 @@ def _probe_bounded_donor_retunes(
                             attempt.materialized.changes,
                             "compilation",
                             f"candidate compiler rejected input: {outcome.reason}",
+                        )
+                    )
+                    continue
+                overlap = _selected_action_owner(selected, by_key, group)
+                if overlap is not None:
+                    deferred.add(group.key)
+                    rejected[group.key].append(
+                        ClassicDonorRetuneAttemptRefusal(
+                            attempt.materialized.distance,
+                            attempt.materialized.changes,
+                            "ordinary_validation",
+                            "candidate was deferred because the selected repair for donor "
+                            f"{overlap!r} changes the same function record",
                         )
                     )
                     continue
@@ -684,14 +807,17 @@ def _probe_bounded_donor_retunes(
                     ),
                     additions,
                 )
-        return compilable_groups <= set(selected)
+                for other_key in compilable_groups - set(selected):
+                    if _selected_action_owner(selected, by_key, by_key[other_key]) is not None:
+                        deferred.add(other_key)
+        return compilable_groups <= (set(selected) | deferred)
 
     canonical_attempts = tuple(values[0] for values in attempts_by_id.values())
     units = tuple(
         clone_retune_probe_unit(by_key[item.group_key].unit, item.donor, item.probe_id)
         for item in canonical_attempts
     )
-    outcomes = probe_donor_compile_windows(
+    compiled_probe_ids = probe_donor_compile_windows(
         probes,
         units,
         _candidate_windows(
@@ -700,13 +826,14 @@ def _probe_bounded_donor_retunes(
             window_size=window_size,
             candidate_budget=candidate_budget,
             signatures=signatures,
+            deferred=deferred,
         ),
         evaluate=evaluate,
         progress=progress,
         planned_candidates=min(len(canonical_attempts), candidate_budget),
         cache=compile_cache,
     )
-    compiled_probe_ids = {outcome.donor_id for outcome in outcomes}
+    compiled_probe_id_set = set(compiled_probe_ids)
 
     repairs: list[ClassicDonorRetuneRepair] = []
     refusals_out: list[ClassicDonorRetuneRefusal] = []
@@ -715,15 +842,20 @@ def _probe_bounded_donor_retunes(
         if repair is not None:
             repairs.append(repair)
             continue
+        choice_count = compiled[group.key]
+        choices = f"{choice_count} compiler choice" + ("" if choice_count == 1 else "s")
         untried = {
             attempt.probe_id for attempt in attempt_tuple if attempt.group_key == group.key
-        } - compiled_probe_ids
-        reason = (
-            "remaining command-wide donor-candidate budget was exhausted after "
-            f"{compiled[group.key]} candidate(s) for this donor"
-            if len(outcomes) >= candidate_budget and untried
-            else f"none of {compiled[group.key]} compiled candidates restored composition"
-        )
+        } - compiled_probe_id_set
+        if group.key in deferred:
+            reason = "donor repair was deferred because another selected repair overlaps it"
+        elif len(compiled_probe_ids) >= candidate_budget and untried:
+            reason = (
+                "remaining command-wide donor-candidate budget was exhausted after "
+                f"testing {choices} for this donor"
+            )
+        else:
+            reason = f"none of {choices} restored the expected output"
         refusals_out.append(
             ClassicDonorRetuneRefusal(
                 group.unit.plan.id,
@@ -732,19 +864,19 @@ def _probe_bounded_donor_retunes(
                 compiled[group.key],
                 reason,
                 tuple(rejected[group.key]),
-                exhausted=not untried,
+                exhausted=group.key not in deferred and not untried,
             )
         )
     return ClassicDonorRetuneProbeResult(
         tuple(repairs),
         tuple(refusals_out),
-        len(outcomes),
+        len(compiled_probe_ids),
     )
 
 
 def probe_bounded_donor_retunes(
     probes: ClassicProbeExecution,
-    refusals: Sequence[ClassicRepairRefusal],
+    refusals: Sequence[RepairRefusal],
     *,
     clean_sources: Mapping[str, bytes],
     effective_sources: Mapping[str, bytes],
@@ -756,6 +888,7 @@ def probe_bounded_donor_retunes(
     progress: ClassicDonorProbeProgress | None = None,
     abandoned_states: Mapping[tuple[str, str], frozenset[str]] | None = None,
     compile_cache: ClassicDonorCompileCache | None = None,
+    excluded_groups: frozenset[tuple[str, str]] = frozenset(),
 ) -> ClassicDonorRetuneProbeResult:
     """Consume one prepared runtime while attempting bounded donor retunes."""
 
@@ -773,6 +906,7 @@ def probe_bounded_donor_retunes(
             progress=progress,
             abandoned_states=abandoned_states,
             compile_cache=compile_cache,
+            excluded_groups=excluded_groups,
         )
     except BaseException as original:
         try:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -7,6 +8,7 @@ import pytest
 
 import reprobit.classic_repair_probe as subject
 import reprobit.classic_repair_probe_candidates as candidate_support
+from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
 from reprobit.classic_donors import generate_declaration_shape, prepare_donor_compile_request
 from reprobit.classic_measured_pin_repair import MeasuredPinRepairError
 from reprobit.classic_orchestration import ClassicPreparedDonor, ClassicPreparedUnit
@@ -176,7 +178,7 @@ def _fake_compile_windows(
     progress: subject.ClassicDonorProbeProgress | None = None,
     planned_candidates: int,
     cache: Any = None,
-) -> tuple[ClassicDonorProbeOutput, ...]:
+) -> tuple[str, ...]:
     by_id = {unit.donors[0].intervention.id: unit for unit in units}
     outputs: list[ClassicDonorProbeOutput] = []
     for window in windows:
@@ -193,7 +195,7 @@ def _fake_compile_windows(
                 progress(completed, planned_candidates, donor_id)
         if evaluate(window_outputs):
             break
-    return tuple(outputs)
+    return tuple(output.donor_id for output in outputs)
 
 
 class _ProbeHandle:
@@ -326,6 +328,16 @@ def test_retune_uses_small_windows_and_stops_after_first_ordinary_candidate(
     _unit, failures = _fixture()
     _COMPILE_WINDOWS.clear()
     monkeypatch.setattr(subject, "probe_donor_compile_windows", _fake_compile_windows)
+    original_prepare = subject.prepare_retune_candidate
+    render_sessions: list[ClassicOverlayRenderSession] = []
+
+    def record_render_session(*args: Any, **kwargs: Any) -> Any:
+        session = kwargs["overlay_render_session"]
+        assert isinstance(session, ClassicOverlayRenderSession)
+        render_sessions.append(session)
+        return original_prepare(*args, **kwargs)
+
+    monkeypatch.setattr(subject, "prepare_retune_candidate", record_render_session)
     validations = 0
 
     def repair(
@@ -366,6 +378,10 @@ def test_retune_uses_small_windows_and_stops_after_first_ordinary_candidate(
     assert selected.intervention_edits[0].before.id == "donor.fixture"
     assert selected.intervention_edits[0].after is not None
     assert selected.intervention_edits[0].after != selected.intervention_edits[0].before
+    assert len(render_sessions) >= 2
+    assert all(session is render_sessions[0] for session in render_sessions)
+    with pytest.raises(ValueError, match="render session is closed"):
+        render_sessions[0].significant_tokens(SOURCE)
 
 
 def test_retune_stops_at_the_remaining_command_wide_candidate_budget(
@@ -536,7 +552,7 @@ def test_one_candidate_compile_refusal_does_not_abort_later_windows(
         progress: subject.ClassicDonorProbeProgress | None = None,
         planned_candidates: int,
         cache: Any = None,
-    ) -> tuple[subject.ClassicDonorCompileOutcome, ...]:
+    ) -> tuple[str, ...]:
         del planned_candidates, progress
         by_id = {unit.donors[0].intervention.id: unit for unit in units}
         outcomes: list[subject.ClassicDonorCompileOutcome] = []
@@ -553,7 +569,7 @@ def test_one_candidate_compile_refusal_does_not_abort_later_windows(
             outcomes.append(outcome)
             if evaluate((outcome,)):
                 break
-        return tuple(outcomes)
+        return tuple(outcome.donor_id for outcome in outcomes)
 
     monkeypatch.setattr(subject, "probe_donor_compile_windows", compile_with_first_refusal)
     monkeypatch.setattr(
@@ -652,6 +668,218 @@ def _two_donor_fixture(
         for index, action in enumerate(actions)
     )
     return unit, failures
+
+
+def _auxiliary_donor_fixture() -> tuple[ClassicPreparedUnit, ClassicRepairRefusal]:
+    primary = _shaped_donor("donor.primary", 2, 3)
+    auxiliary = _shaped_donor("donor.auxiliary", 8, 64)
+    donors = (primary, auxiliary)
+    donor_receipts = tuple(_receipt(donor, f"proof.{donor.id}") for donor in donors)
+    prepared = tuple(
+        ClassicPreparedDonor(
+            donor,
+            prepare_donor_compile_request(
+                donor,
+                source_path="src/unit.cpp",
+                clean_source=SOURCE,
+                effective_source=SOURCE,
+                receipts=(receipt,),
+            ),
+        )
+        for donor, receipt in zip(donors, donor_receipts, strict=True)
+    )
+    action = _action("function.auxiliary", "?Auxiliary@@YAXXZ").model_copy(
+        update={"dependencies": (primary.id,)}
+    )
+    receipt = _receipt(action, "proof.function.auxiliary").model_copy(
+        update={"expected_values": {"target_donor": auxiliary.id}}
+    )
+    unit = ClassicPreparedUnit(
+        ClassicTranslationUnitPlan(
+            id="unit.fixture",
+            target_id="program",
+            build_target="program",
+            source="src/unit.cpp",
+            source_digest=Digest.from_bytes(SOURCE),
+        ),
+        prepared,
+        (action,),
+        (),
+        (action,),
+        (*donor_receipts, receipt),
+    )
+    refusal = ClassicRepairRefusal(
+        unit_id=unit.plan.id,
+        action_index=0,
+        intervention=action,
+        receipt=receipt,
+        materials=ClassicDispatchMaterials(
+            seed_object=b"seed",
+            donor_object=b"saved primary",
+            target_donor_object=b"saved auxiliary",
+        ),
+        unit=unit,
+        reason="saved donor combination no longer composes",
+        unit_donor_objects={
+            primary.id: b"saved primary",
+            auxiliary.id: b"saved auxiliary",
+        },
+    )
+    return unit, refusal
+
+
+def test_failure_groups_primary_before_receipt_selected_auxiliary() -> None:
+    _unit, refusal = _auxiliary_donor_fixture()
+
+    groups = subject._group_failures((refusal,))
+
+    assert [group.donor.intervention.id for group in groups] == [
+        "donor.primary",
+        "donor.auxiliary",
+    ]
+
+
+def test_auxiliary_donor_can_repair_when_primary_candidates_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _unit, refusal = _auxiliary_donor_fixture()
+    _COMPILE_WINDOWS.clear()
+    monkeypatch.setattr(subject, "probe_donor_compile_windows", _fake_compile_windows)
+
+    def repair(
+        _action: ClassicRecipeIntervention,
+        receipt: ClassicProofReceipt,
+        materials: ClassicDispatchMaterials,
+    ) -> Any:
+        if materials.target_donor_object == b"saved auxiliary":
+            raise MeasuredPinRepairError("primary candidate still differs")
+        return SimpleNamespace(receipt=receipt)
+
+    monkeypatch.setattr(candidate_support, "repair_measured_pins", repair)
+
+    result = subject.probe_bounded_donor_retunes(
+        _probe_handle(),
+        (refusal,),
+        clean_sources={"src/unit.cpp": SOURCE},
+        effective_sources={"src/unit.cpp": SOURCE},
+        radius=1,
+        limit=1,
+        window_size=1,
+    )
+
+    assert [repair.donor_id for repair in result.repairs] == ["donor.auxiliary"]
+    assert [refusal.donor_id for refusal in result.refusals] == ["donor.primary"]
+    assert result.compiled_candidates == 2
+
+
+def test_overlapping_primary_and_auxiliary_repairs_select_only_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _unit, refusal = _auxiliary_donor_fixture()
+    _COMPILE_WINDOWS.clear()
+    monkeypatch.setattr(subject, "probe_donor_compile_windows", _fake_compile_windows)
+    monkeypatch.setattr(
+        candidate_support,
+        "repair_measured_pins",
+        lambda _action, receipt, _materials: SimpleNamespace(receipt=receipt),
+    )
+
+    result = subject.probe_bounded_donor_retunes(
+        _probe_handle(),
+        (refusal,),
+        clean_sources={"src/unit.cpp": SOURCE},
+        effective_sources={"src/unit.cpp": SOURCE},
+        radius=1,
+        limit=1,
+        window_size=1,
+    )
+
+    assert [repair.donor_id for repair in result.repairs] == ["donor.primary"]
+    assert [refusal.donor_id for refusal in result.refusals] == ["donor.auxiliary"]
+    assert not result.refusals[0].exhausted
+    assert "overlaps" in result.refusals[0].reason
+    assert result.compiled_candidates == 1
+
+
+def test_excluded_primary_group_still_searches_receipt_selected_auxiliary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _unit, refusal = _auxiliary_donor_fixture()
+    _COMPILE_WINDOWS.clear()
+    monkeypatch.setattr(subject, "probe_donor_compile_windows", _fake_compile_windows)
+    monkeypatch.setattr(
+        candidate_support,
+        "repair_measured_pins",
+        lambda _action, receipt, _materials: SimpleNamespace(receipt=receipt),
+    )
+
+    result = subject.probe_bounded_donor_retunes(
+        _probe_handle(),
+        (refusal,),
+        clean_sources={"src/unit.cpp": SOURCE},
+        effective_sources={"src/unit.cpp": SOURCE},
+        radius=1,
+        limit=1,
+        window_size=1,
+        excluded_groups=frozenset({("unit.fixture", "donor.primary")}),
+    )
+
+    assert [repair.donor_id for repair in result.repairs] == ["donor.auxiliary"]
+    assert result.refusals == ()
+    assert result.compiled_candidates == 1
+
+
+def test_repairs_sharing_an_earlier_consumer_are_split_across_rounds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unit, failures = _two_donor_fixture((2, 3), (8, 64))
+    first_id = unit.donors[0].intervention.id
+    second_id = unit.donors[1].intervention.id
+    shared = _action("function.shared", "?Shared@@YAXXZ").model_copy(
+        update={"dependencies": (first_id,)}
+    )
+    shared_receipt = _receipt(shared, "proof.function.shared").model_copy(
+        update={"expected_values": {"target_donor": second_id}}
+    )
+    unit = replace(
+        unit,
+        functions=(shared, *unit.functions),
+        actions=(shared, *unit.actions),
+        receipts=(*unit.receipts, shared_receipt),
+    )
+    captured = {first_id: b"saved first", second_id: b"saved second"}
+    failures = tuple(
+        replace(
+            failure,
+            action_index=index + 1,
+            unit=unit,
+            unit_donor_objects=captured,
+            action_preimages={shared.id: b"shared preimage"},
+        )
+        for index, failure in enumerate(failures)
+    )
+    _COMPILE_WINDOWS.clear()
+    monkeypatch.setattr(subject, "probe_donor_compile_windows", _fake_compile_windows)
+    monkeypatch.setattr(
+        candidate_support,
+        "repair_measured_pins",
+        lambda _action, receipt, _materials: SimpleNamespace(receipt=receipt),
+    )
+
+    result = subject.probe_bounded_donor_retunes(
+        _probe_handle(),
+        failures,
+        clean_sources={"src/unit.cpp": SOURCE},
+        effective_sources={"src/unit.cpp": SOURCE},
+        radius=1,
+        limit=1,
+        window_size=1,
+    )
+
+    assert [repair.donor_id for repair in result.repairs] == [first_id]
+    assert [refusal.donor_id for refusal in result.refusals] == [second_id]
+    assert not result.refusals[0].exhausted
+    assert "overlaps" in result.refusals[0].reason
 
 
 def test_candidate_occupying_another_donors_arena_is_never_compiled(
@@ -771,17 +999,18 @@ def test_candidate_must_keep_the_donors_other_consumers_composing(
     unit, failures = _fixture(2)
     _COMPILE_WINDOWS.clear()
     monkeypatch.setattr(subject, "probe_donor_compile_windows", _fake_compile_windows)
-    # Only function.0 failed; function.1 still composes on the saved donor, and the
-    # refusal carries the unit's fresh donor objects so both must be validated.
+    # Only function.1 failed; the earlier function.0 still composes on the saved
+    # donor, and its exact preimage lets both be validated.
     failure = ClassicRepairRefusal(
-        unit_id=failures[0].unit_id,
-        action_index=0,
-        intervention=failures[0].intervention,
-        receipt=failures[0].receipt,
-        materials=failures[0].materials,
+        unit_id=failures[1].unit_id,
+        action_index=1,
+        intervention=failures[1].intervention,
+        receipt=failures[1].receipt,
+        materials=failures[1].materials,
         unit=unit,
-        reason=failures[0].reason,
+        reason=failures[1].reason,
         unit_donor_objects={"donor.fixture": b"saved donor"},
+        action_preimages={unit.functions[0].id: b"seed"},
     )
     validated: list[tuple[str, bytes | None]] = []
 
@@ -791,7 +1020,7 @@ def test_candidate_must_keep_the_donors_other_consumers_composing(
         materials: ClassicDispatchMaterials,
     ) -> Any:
         validated.append((action.id, materials.donor_object))
-        if action.id == "function.1" and materials.donor_object == b"candidate-1":
+        if action.id == "function.0" and materials.donor_object == b"candidate-1":
             raise MeasuredPinRepairError("the other consumer would stop composing")
         return SimpleNamespace(receipt=receipt)
 
@@ -807,10 +1036,160 @@ def test_candidate_must_keep_the_donors_other_consumers_composing(
         window_size=1,
     )
 
-    assert validated[:2] == [("function.0", b"candidate-1"), ("function.1", b"candidate-1")]
+    assert validated[:2] == [("function.1", b"candidate-1"), ("function.0", b"candidate-1")]
     assert result.repairs[0].attempts == 2
-    assert result.repairs[0].action_ids == ("function.0",)
-    assert validated[-2:] == [("function.0", b"candidate-2"), ("function.1", b"candidate-2")]
+    assert result.repairs[0].action_ids == ("function.1",)
+    assert validated[-2:] == [("function.1", b"candidate-2"), ("function.0", b"candidate-2")]
+
+
+def test_candidate_replays_an_auxiliary_consumer_without_replacing_its_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    unit, failures = _fixture()
+    primary = _shaped_donor("donor.primary", 8, 64)
+    primary_receipt = _receipt(primary, "proof.donor.primary")
+    primary_prepared = ClassicPreparedDonor(
+        primary,
+        prepare_donor_compile_request(
+            primary,
+            source_path="src/unit.cpp",
+            clean_source=SOURCE,
+            effective_source=SOURCE,
+            receipts=(primary_receipt,),
+        ),
+    )
+    auxiliary_consumer = _action("function.auxiliary", "?Auxiliary@@YAXXZ").model_copy(
+        update={
+            "dependencies": (primary.id,),
+            "parameters": (ClassicField(name="target_donor", value="donor.fixture"),),
+        }
+    )
+    auxiliary_receipt = _receipt(auxiliary_consumer, "proof.function.auxiliary")
+    unit = replace(
+        unit,
+        donors=(*unit.donors, primary_prepared),
+        functions=(*unit.functions, auxiliary_consumer),
+        actions=(auxiliary_consumer, *unit.actions),
+        receipts=(*unit.receipts, primary_receipt, auxiliary_receipt),
+    )
+    failure = replace(
+        failures[0],
+        action_index=1,
+        unit=unit,
+        unit_donor_objects={
+            "donor.fixture": b"saved auxiliary",
+            primary.id: b"saved primary",
+        },
+        action_preimages={auxiliary_consumer.id: b"seed"},
+    )
+    _COMPILE_WINDOWS.clear()
+    monkeypatch.setattr(subject, "probe_donor_compile_windows", _fake_compile_windows)
+    observed: list[tuple[bytes | None, bytes | None, frozenset[str]]] = []
+
+    def repair(
+        action: ClassicRecipeIntervention,
+        receipt: ClassicProofReceipt,
+        materials: ClassicDispatchMaterials,
+    ) -> Any:
+        if action.id == auxiliary_consumer.id:
+            observed.append(
+                (
+                    materials.donor_object,
+                    materials.target_donor_object,
+                    materials.shape_identifiers,
+                )
+            )
+            if materials.target_donor_object == b"candidate-1":
+                raise MeasuredPinRepairError("the auxiliary consumer rejects this candidate")
+        return SimpleNamespace(receipt=receipt)
+
+    monkeypatch.setattr(candidate_support, "repair_measured_pins", repair)
+
+    result = subject.probe_bounded_donor_retunes(
+        _probe_handle(),
+        (failure,),
+        clean_sources={"src/unit.cpp": SOURCE},
+        effective_sources={"src/unit.cpp": SOURCE},
+        radius=1,
+        limit=4,
+        window_size=1,
+    )
+
+    assert observed == [
+        (b"saved primary", b"candidate-1", primary_prepared.request.carrier_identifiers),
+        (b"saved primary", b"candidate-2", primary_prepared.request.carrier_identifiers),
+    ]
+    assert result.repairs[0].attempts == 2
+
+
+def test_donor_retune_refuses_an_uncaptured_legacy_consumer() -> None:
+    unit, failures = _fixture()
+    legacy = SimpleNamespace(id="legacy.install", dependencies=("donor.fixture",))
+    guarded = replace(  # type: ignore[arg-type]
+        unit,
+        legacy_actions=(legacy,),
+        actions=(legacy, *unit.actions),
+    )
+    failure = replace(failures[0], action_index=1, unit=guarded)
+
+    with pytest.raises(ValueError, match=r"uncaptured legacy consumers.*legacy\.install"):
+        candidate_support.other_consumers(guarded, "donor.fixture", (failure,))
+
+
+def test_donor_retune_defers_an_uncaptured_legacy_consumer_after_failure() -> None:
+    unit, failures = _fixture()
+    legacy = SimpleNamespace(id="legacy.install", dependencies=("donor.fixture",))
+    guarded = replace(  # type: ignore[arg-type]
+        unit,
+        legacy_actions=(legacy,),
+        actions=(*unit.actions, legacy),
+    )
+
+    assert candidate_support.other_consumers(guarded, "donor.fixture", failures) == ()
+
+
+def test_other_consumer_receives_its_captured_goal_without_an_oracle() -> None:
+    unit, failures = _fixture(action_count=2)
+    template = replace(
+        failures[1],
+        unit_donor_objects={"donor.fixture": b"saved donor"},
+        unit_retail_bodies={unit.functions[0].id: b"retail goal"},
+        action_preimages={unit.functions[0].id: b"consumer preimage"},
+    )
+
+    (consumer,) = candidate_support.other_consumers(unit, "donor.fixture", (template,))
+
+    assert consumer.intervention is unit.functions[0]
+    assert consumer.materials.seed_object == b"consumer preimage"
+    assert consumer.retail_body == b"retail goal"
+    assert consumer.unit_retail_bodies == template.unit_retail_bodies
+
+
+def test_later_shared_consumer_is_deferred_after_a_failed_action() -> None:
+    unit, failures = _fixture(action_count=2)
+    template = replace(
+        failures[0],
+        unit_donor_objects={"donor.fixture": b"saved donor"},
+        action_preimages={unit.functions[1].id: b"counterfactual checkpoint"},
+    )
+
+    assert candidate_support.other_consumers(unit, "donor.fixture", (template,)) == ()
+
+
+def test_earlier_shared_consumer_uses_its_own_captured_preimage() -> None:
+    unit, failures = _fixture(action_count=2)
+    template = replace(
+        failures[1],
+        materials=replace(failures[1].materials, seed_object=b"later failure checkpoint"),
+        unit_donor_objects={"donor.fixture": b"saved donor"},
+        action_preimages={unit.functions[0].id: b"fresh unit seed"},
+    )
+
+    (consumer,) = candidate_support.other_consumers(unit, "donor.fixture", (template,))
+
+    assert consumer.intervention is unit.functions[0]
+    assert consumer.action_index == 0
+    assert consumer.materials.seed_object == b"fresh unit seed"
 
 
 def test_move_signature_names_family_and_knob_deltas_without_item_indices() -> None:

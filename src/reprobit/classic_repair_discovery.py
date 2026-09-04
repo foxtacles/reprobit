@@ -6,7 +6,7 @@ emit the body a record needs.  This probe compiles new declaration shapes for
 such a unit -- states none of its donors renders yet -- and inspects every
 compiled object against every refused function of the unit:
 
-* a body equal to the record's immutable ``expected_body_sha256`` goal lets the
+* a body equal to the record's immutable retail-body goal lets the
   function be re-authored onto the new donor with the cheapest closed
   equal-body family the composer proves;
 * a body equal to a rewriting record's pinned ``expected_donor_body_sha256``
@@ -32,7 +32,16 @@ from reprobit.classic_donors import (
     validate_donor_recipe,
 )
 from reprobit.classic_measured_pin_repair import MeasuredPinRepairError, repair_measured_pins
+from reprobit.classic_mosaic_repair import (
+    MosaicRepairError,
+    instruction_mosaic_semantics_required,
+    reauthor_instruction_mosaic,
+)
 from reprobit.classic_orchestration import ClassicPreparedDonor, ClassicPreparedUnit
+from reprobit.classic_relational_repair import (
+    RelationalRepairError,
+    reauthor_relational_donor_rewriting,
+)
 from reprobit.classic_repair_authority import (
     ClassicDependencyEdit,
     ClassicInterventionEdit,
@@ -50,10 +59,12 @@ from reprobit.classic_repair_probe_execution import (
 )
 from reprobit.classic_repair_session import (
     ClassicRepairRefusal,
+    ClassicRepairSessionError,
     dropped_move_parameters,
     repoint_refusal_materials,
     repointed_action,
 )
+from reprobit.classic_retail_repair import RetailRepairError, retail_body_goal_digest
 from reprobit.classic_runtime_probe import (
     ClassicDonorProbeOutput,
     ClassicDonorProbeProgress,
@@ -73,6 +84,7 @@ from reprobit.schema import (
     ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ClassicRecipeRole,
+    classic_function_donor_ids,
 )
 from reprobit.strict_json import canonical_json
 
@@ -241,6 +253,15 @@ def _digest_pin(receipt: ClassicProofReceipt, key: str) -> str | None:
     return value if isinstance(value, str) and len(value) == 64 else None
 
 
+def _body_goal_digest(
+    action: ClassicRecipeIntervention, receipt: ClassicProofReceipt
+) -> str | None:
+    try:
+        return retail_body_goal_digest(action, receipt)
+    except RetailRepairError:
+        return None
+
+
 def _group_units(
     refusals: Sequence[ClassicRepairRefusal],
 ) -> dict[str, _UnitWork]:
@@ -354,15 +375,80 @@ def _prepare_attempts(
 def _try_resolve(
     entry: _UnitWork,
     refusal: ClassicRepairRefusal,
-    donor: ClassicRecipeIntervention,
+    donor: ClassicPreparedDonor | ClassicRecipeIntervention,
     payload: bytes,
 ) -> tuple[ClassicDiscoveryResolution, object] | None:
     action = refusal.intervention
+    if isinstance(donor, ClassicPreparedDonor):
+        prepared = donor
+        intervention = donor.intervention
+    else:
+        prepared = None
+        intervention = donor
     symbol = action.symbol or ""
     body = _body_digest(payload, symbol)
     if body is None:
         return None
-    goal = _digest_pin(refusal.receipt, "expected_body_sha256")
+    goal = _body_goal_digest(action, refusal.receipt)
+    semantic_mosaic = instruction_mosaic_semantics_required(action)
+    if (
+        action.family is ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC
+        and refusal.retail_body is not None
+    ):
+        donor_objects = dict(refusal.unit_donor_objects)
+        donor_objects[intervention.id] = payload
+        donor_interventions = {
+            item.intervention.id: item.intervention for item in refusal.unit.donors
+        }
+        donor_interventions[intervention.id] = intervention
+        donor_sources = {
+            item.intervention.id: item.request.logical_outputs.get(entry.unit.plan.source)
+            for item in refusal.unit.donors
+        }
+        donor_shapes = {
+            item.intervention.id: item.request.carrier_identifiers for item in refusal.unit.donors
+        }
+        if prepared is not None:
+            donor_sources[intervention.id] = prepared.request.logical_outputs.get(
+                entry.unit.plan.source
+            )
+            donor_shapes[intervention.id] = prepared.request.carrier_identifiers
+        try:
+            mosaic = reauthor_instruction_mosaic(
+                action,
+                refusal.receipt,
+                refusal.materials,
+                refusal.retail_body,
+                donor_objects=donor_objects,
+                donor_interventions=donor_interventions,
+                donor_sources=donor_sources,
+                donor_shape_identifiers=donor_shapes,
+            )
+        except MosaicRepairError as exc:
+            entry.reasons[action.id] = f"bounded mosaic re-author: {exc}"
+        else:
+            if intervention.id in mosaic.donor_ids:
+                return (
+                    ClassicDiscoveryResolution(
+                        action.id,
+                        symbol,
+                        intervention.id,
+                        "reauthor",
+                        action.family.value,
+                    ),
+                    ClassicRecordAddition(
+                        mosaic.intervention,
+                        mosaic.receipt,
+                        replaces_intervention_id=action.id,
+                    ),
+                )
+            entry.reasons[action.id] = "bounded mosaic did not use the discovered carrier"
+    if semantic_mosaic:
+        reason = entry.reasons.get(action.id)
+        entry.reasons[action.id] = "saved mosaic semantics could not be preserved" + (
+            f" ({reason})" if reason else ""
+        )
+        return None
     # A rewriting witness pins its donor body; a cross-file resize pins the body of
     # the same-file target donor its primary dependency names.
     donor_goal = _digest_pin(refusal.receipt, "expected_donor_body_sha256") or _digest_pin(
@@ -377,7 +463,7 @@ def _try_resolve(
                     build_target=action.build_target,
                     symbol=symbol,
                     family=family,
-                    donor_id=donor.id,
+                    donor_id=intervention.id,
                     seed_object=refusal.materials.seed_object,
                     donor_object=payload,
                 )
@@ -385,8 +471,14 @@ def _try_resolve(
                 entry.reasons[action.id] = f"{family.value}: {exc}"
                 continue
             return (
-                ClassicDiscoveryResolution(action.id, symbol, donor.id, "reauthor", family.value),
-                ClassicRecordAddition(record.intervention, record.receipt),
+                ClassicDiscoveryResolution(
+                    action.id, symbol, intervention.id, "reauthor", family.value
+                ),
+                ClassicRecordAddition(
+                    record.intervention,
+                    record.receipt,
+                    replaces_intervention_id=None if refusal.synthetic else action.id,
+                ),
             )
     # A census entry has no saved record to move: only re-authoring settles it.
     if refusal.synthetic:
@@ -397,20 +489,54 @@ def _try_resolve(
     if (goal is not None and body == goal) or (
         donor_goal is not None and donor_goal != goal and body == donor_goal
     ):
-        moved = repointed_action(action, donor.id)
+        if prepared is None:
+            entry.reasons[action.id] = "re-pointing requires the prepared donor input"
+            return None
+        moved = repointed_action(action, intervention.id)
         try:
             repaired = repair_measured_pins(
                 moved,
                 refusal.receipt,
-                repoint_refusal_materials(refusal, donor.id, payload),
+                repoint_refusal_materials(refusal, moved, prepared, payload),
             )
-        except MeasuredPinRepairError as exc:
-            entry.reasons[action.id] = f"re-point onto {donor.id}: {exc}"
+        except (ClassicRepairSessionError, MeasuredPinRepairError) as exc:
+            entry.reasons[action.id] = f"re-point onto {intervention.id}: {exc}"
             return None
         return (
-            ClassicDiscoveryResolution(action.id, symbol, donor.id, "repoint", action.family.value),
+            ClassicDiscoveryResolution(
+                action.id, symbol, intervention.id, "repoint", action.family.value
+            ),
             (repaired.receipt, moved),
         )
+    if prepared is not None and refusal.retail_body is not None:
+        try:
+            rewritten = reauthor_relational_donor_rewriting(
+                action,
+                refusal.receipt,
+                refusal.materials,
+                refusal.retail_body,
+                donor_id=intervention.id,
+                donor_object=payload,
+                donor_source=prepared.request.logical_outputs.get(entry.unit.plan.source),
+                shape_identifiers=prepared.request.carrier_identifiers,
+            )
+        except RelationalRepairError as exc:
+            entry.reasons[action.id] = f"relational rewrite on {intervention.id}: {exc}"
+        else:
+            return (
+                ClassicDiscoveryResolution(
+                    action.id,
+                    symbol,
+                    intervention.id,
+                    "reauthor",
+                    ClassicRecipeFamily.RETAIL_EXACT_DONOR_REWRITING.value,
+                ),
+                ClassicRecordAddition(
+                    rewritten.intervention,
+                    rewritten.receipt,
+                    replaces_intervention_id=action.id,
+                ),
+            )
     return None
 
 
@@ -427,7 +553,11 @@ def _unit_repair(entry: _UnitWork) -> ClassicDiscoveryRepair | None:
         for donor_id, saved in saved_donors.items()
     }
     consumers = {
-        donor_id: {f.id for f in unit.functions if donor_id in f.dependencies}
+        donor_id: {
+            consumer.id
+            for consumer in (*unit.actions, *(item.intervention for item in unit.donors))
+            if donor_id in consumer.dependencies
+        }
         for donor_id in saved_donors
     }
     additions: list[ClassicRecordAddition] = []
@@ -443,7 +573,7 @@ def _unit_repair(entry: _UnitWork) -> ClassicDiscoveryRepair | None:
         resolution, product = settled
         resolutions.append(resolution)
         symbol = action.symbol or ""
-        donor_beneficiaries[resolution.donor_id].add(symbol)
+        before_donors: frozenset[str]
         if refusal.synthetic:
             # Unrecorded fallout: the census entry never existed in the saved
             # guidance, so its resolution only adds records and retires nothing.
@@ -452,9 +582,10 @@ def _unit_repair(entry: _UnitWork) -> ClassicDiscoveryRepair | None:
                     f"census entry {action.id!r} can only be settled by re-authoring"
                 )
             additions.append(product)
-            continue
-        previous = action.dependencies[0]
-        if resolution.how == "reauthor":
+            before_donors = frozenset()
+            after_action = product.intervention
+            after_receipt = product.receipt
+        elif resolution.how == "reauthor":
             assert isinstance(product, ClassicRecordAddition)
             additions.append(product)
             intervention_edits.append(ClassicInterventionEdit(action, None))
@@ -462,18 +593,38 @@ def _unit_repair(entry: _UnitWork) -> ClassicDiscoveryRepair | None:
             if old_receipt is None:
                 raise ClassicDiscoveryProbeError(f"refused action {action.id!r} has no receipt")
             receipt_edits.append(ClassicReceiptEdit(old_receipt, None))
-            consumers[previous].discard(action.id)
+            before_donors = classic_function_donor_ids(action, refusal.receipt)
+            after_action = product.intervention
+            after_receipt = product.receipt
         else:
             assert isinstance(product, tuple)
-            repaired_receipt, _moved = product
+            repaired_receipt, moved = product
             assert isinstance(repaired_receipt, ClassicProofReceipt)
             dependency_edits.append(
                 ClassicDependencyEdit(action, resolution.donor_id, dropped_move_parameters(action))
             )
             if repaired_receipt != refusal.receipt:
                 receipt_edits.append(ClassicReceiptEdit(refusal.receipt, repaired_receipt))
-            consumers[previous].discard(action.id)
-        saved_beneficiaries[previous].discard(symbol)
+            before_donors = classic_function_donor_ids(action, refusal.receipt)
+            after_action = moved
+            after_receipt = repaired_receipt
+        after_donors = classic_function_donor_ids(after_action, after_receipt)
+        unknown = (before_donors | after_donors) - (
+            saved_beneficiaries.keys() | donor_beneficiaries.keys()
+        )
+        if unknown:
+            raise ClassicDiscoveryProbeError(
+                f"function {action.id!r} names donors outside its prepared unit: {sorted(unknown)}"
+            )
+        for donor_id in before_donors:
+            consumers[donor_id].discard(action.id)
+            saved_beneficiaries[donor_id].discard(symbol)
+        for donor_id in after_donors:
+            if donor_id in saved_beneficiaries:
+                consumers[donor_id].add(after_action.id)
+                saved_beneficiaries[donor_id].add(symbol)
+            else:
+                donor_beneficiaries[donor_id].add(symbol)
     for donor_id, donor in entry.kept_donors.items():
         scopes = tuple(
             Scope(target=target_id, translation_unit=unit.plan.id, function=symbol)
@@ -544,7 +695,7 @@ def probe_carrier_discovery(
             work,
             clean_sources=clean_sources,
             effective_sources=effective_sources,
-            per_unit=per_unit,
+            per_unit=min(per_unit, candidate_budget),
             tried_states=tried_states,
         )
         attempts = {
@@ -581,7 +732,7 @@ def probe_carrier_discovery(
 
         def evaluate(outcomes: tuple[ClassicDonorCompileOutcome, ...]) -> bool:
             for outcome in outcomes:
-                unit_id, donor, _prepared = attempts[outcome.donor_id]
+                unit_id, donor, prepared = attempts[outcome.donor_id]
                 entry = work[unit_id]
                 if isinstance(outcome, ClassicDonorCompileRefusal):
                     entry.reasons.setdefault("compilation", outcome.reason)
@@ -591,7 +742,7 @@ def probe_carrier_discovery(
                 for refusal in entry.refusals:
                     if refusal.intervention.id in entry.resolved:
                         continue
-                    settled = _try_resolve(entry, refusal, donor, outcome.object_payload)
+                    settled = _try_resolve(entry, refusal, prepared, outcome.object_payload)
                     if settled is not None:
                         entry.resolved[refusal.intervention.id] = settled
                         entry.kept_donors.setdefault(donor.id, donor)
@@ -601,12 +752,13 @@ def probe_carrier_discovery(
                 for refusal in entry.refusals
             )
 
+        ordered_ids = {probe_id for probe_id, _unit_id in order}
         units = tuple(
             clone_retune_probe_unit(work[unit_id].unit, prepared, probe_id)
             for probe_id, (unit_id, _donor, prepared) in attempts.items()
-            if probe_id in {item[0] for item in order}
+            if probe_id in ordered_ids
         )
-        outcomes = probe_donor_compile_windows(
+        compiled_ids = probe_donor_compile_windows(
             probes,
             units,
             windows(),
@@ -624,10 +776,10 @@ def probe_carrier_discovery(
         raise
     if probes.producer.is_open:
         probes.close()
-    compiled_ids = {outcome.donor_id for outcome in outcomes}
+    compiled_id_set = set(compiled_ids)
     tried: dict[str, set[str]] = {}
     for probe_id, (unit_id, _donor, _prepared) in attempts.items():
-        if probe_id in compiled_ids:
+        if probe_id in compiled_id_set:
             tried.setdefault(unit_id, set()).add(work[unit_id].identities[probe_id])
     repairs: list[ClassicDiscoveryRepair] = []
     unresolved: list[tuple[str, str, str]] = []
@@ -649,7 +801,7 @@ def probe_carrier_discovery(
     return ClassicDiscoveryResult(
         tuple(repairs),
         tuple(unresolved),
-        len(outcomes),
+        len(compiled_ids),
         {unit_id: frozenset(values) for unit_id, values in tried.items()},
     )
 

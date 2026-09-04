@@ -16,12 +16,28 @@ from types import MappingProxyType
 from typing import Protocol
 
 from reprobit.classic_incremental_context import SeedObject
+from reprobit.classic_legacy_repair import (
+    LegacyInstallRepair,
+    LegacyNoWindowError,
+    LegacyNoWindowResolution,
+    LegacyRepairError,
+    plan_legacy_no_window_resolution,
+    reauthor_legacy_simulated_elision,
+)
+from reprobit.classic_link_layout_repair import (
+    ClassicLinkLayoutHint,
+    derive_classic_link_layout_hint,
+)
 from reprobit.classic_project import ClassicDispatchMaterials
 from reprobit.classic_redundant_action_repair import (
     RedundantActionRepairError,
     plan_redundant_action_retirements,
 )
-from reprobit.classic_repair_authority import apply_classic_authority_edits
+from reprobit.classic_repair_authority import (
+    ClassicReceiptEdit,
+    LegacyInterventionEdit,
+    apply_classic_authority_edits,
+)
 from reprobit.classic_repair_probe import (
     DEFAULT_RETUNE_PROBE_CANDIDATES,
     ClassicDonorRetuneRefusal,
@@ -36,14 +52,19 @@ from reprobit.classic_repair_reauthor import (
 )
 from reprobit.classic_repair_session import (
     ClassicReceiptRepair,
-    ClassicRepairRefusal,
     ClassicRepairSession,
+    LegacyRepairRefusal,
+    RepairRefusal,
     apply_classic_receipt_repairs,
 )
-from reprobit.cli_build import COMPOSED_BODY_LEDGER_RELATIVE, command_build
-from reprobit.cli_output import CLIOutput
+from reprobit.cli_build import command_build
+from reprobit.cli_output import CLIOutput, count_phrase
 from reprobit.cli_project import command_source_lock
-from reprobit.composition_ledger import ComposedBodyLedger, read_ledger
+from reprobit.composition_ledger import (
+    COMPOSED_BODY_LEDGER_RELATIVE,
+    ComposedBodyLedger,
+    read_ledger,
+)
 from reprobit.project_loader import load_project_tree
 from reprobit.repair import (
     RepairCandidate,
@@ -59,21 +80,29 @@ from reprobit.repair_census import RepairCensusEntry, plan_repair_census
 from reprobit.repair_donor_analysis import (
     apply_classic_discovery_repairs,
     apply_classic_donor_repairs,
+    apply_classic_project_overlay_repair,
     probe_classic_carrier_discovery,
     probe_classic_donor_repairs,
+    probe_classic_project_overlay_repairs,
 )
 from reprobit.repair_unit_admission import (
     TranslationUnitAdmissionError,
     apply_translation_unit_admissions,
     plan_translation_unit_admissions,
 )
+from reprobit.report_io import read_report_json
 from reprobit.schema import (
     ClassicProofReceipt,
+    ClassicRecipeFamily,
     ClassicRecipeIntervention,
     ClassicRecipeRole,
+    LegacyOracleInstallIntervention,
     ProjectBundle,
     ProjectSpec,
+    classic_debug_companion_paths,
+    classic_function_donor_ids,
 )
+from reprobit.source_lock import receipt_source_input
 from reprobit.source_regeneration import (
     RegenerationPlan,
     SourceRegenerationError,
@@ -102,6 +131,27 @@ class RepairWorkflowError(RuntimeError):
         self.diagnostic = diagnostic
 
 
+def _consume_candidate_budget(
+    compiled: int,
+    used: int,
+    *,
+    limit: int,
+    search: str,
+) -> int:
+    """Add one search result without trusting it past the remaining command budget."""
+
+    remaining = limit - compiled
+    if not 0 <= used <= remaining:
+        raise RepairWorkflowError(f"{search} exceeded its remaining command-wide candidate budget")
+    return compiled + used
+
+
+def _repair_limit(args: argparse.Namespace, name: str, default: int) -> int:
+    """Resolve one optional CLI repair bound while preserving its default."""
+
+    return getattr(args, name, None) or default
+
+
 @dataclass(frozen=True, slots=True)
 class RepairWorkflowResult:
     """Human-sized accounting for a completed staged repair."""
@@ -120,6 +170,10 @@ class RepairWorkflowResult:
     """Candidates settled from earlier compiles of the same seat instead of compiling."""
     admitted_units: int = 0
     """Translation units the ledger census added to the build plan for unrecorded fallout."""
+    source_retunes: int = 0
+    """Project source layouts adjusted after their dual compiler-epoch check."""
+    adjustment_rounds: int = 0
+    """Saved-guidance adjustment rounds consumed by this workflow run."""
 
 
 class RepairAnalysisError(RuntimeError):
@@ -132,7 +186,7 @@ class RepairAnalysisResult:
 
     completed: bool
     measured_repairs: tuple[ClassicReceiptRepair, ...]
-    structural_refusals: tuple[ClassicRepairRefusal, ...]
+    structural_refusals: tuple[RepairRefusal, ...]
     seed_objects: Mapping[str, SeedObject] = field(default_factory=lambda: MappingProxyType({}))
 
 
@@ -167,10 +221,25 @@ def analyze_classic_repair(
         raise RepairAnalysisError(f"repair analysis failed: {exc}") from exc
     if status != 0:
         raise RepairAnalysisError(f"repair analysis returned failure status {status}")
+    refusals = session.refusals
+    cutoffs: dict[str, int] = {}
+    for refusal in refusals:
+        cutoffs[refusal.unit_id] = min(
+            refusal.action_index,
+            cutoffs.get(refusal.unit_id, refusal.action_index),
+        )
+    repairs = tuple(
+        repair
+        for repair in session.repairs
+        if repair.action_index <= cutoffs.get(repair.unit_id, repair.action_index)
+    )
+    refusals = tuple(
+        refusal for refusal in refusals if refusal.action_index <= cutoffs[refusal.unit_id]
+    )
     return RepairAnalysisResult(
-        not session.refusals,
-        session.repairs,
-        session.refusals,
+        not refusals,
+        repairs,
+        refusals,
         session.seed_objects,
     )
 
@@ -190,7 +259,7 @@ def _composed_body_ledger(cache_root: Path) -> ComposedBodyLedger | None:
     try:
         return read_ledger(path)
     except (OSError, ValueError) as exc:
-        raise RepairWorkflowError(f"composed-body ledger {path} is unreadable: {exc}") from exc
+        raise RepairWorkflowError(f"saved repair data at {path} is unreadable: {exc}") from exc
 
 
 def _classic_receipts(bundle: ProjectBundle) -> tuple[ClassicProofReceipt, ...]:
@@ -221,16 +290,16 @@ def _probe_refusal_error(
     unresolved: tuple[tuple[str, str, str], ...] = (),
 ) -> RepairWorkflowError:
     attempts = refusal.compiled_candidates
-    setting = "setting" if attempts == 1 else "settings"
+    choice = "choice" if attempts == 1 else "choices"
     lines = [
-        f"No safe automatic repair restored `{refusal.unit_id}` after testing "
-        f"{attempts} nearby compiler {setting}."
+        "Automatic repair could not prove a safe result for affected build "
+        f"`{refusal.unit_id}` after testing {attempts} nearby compiler {choice}."
     ]
     discovery_note = next(
         (reason for unit_id, _action, reason in unresolved if unit_id == refusal.unit_id), None
     )
     if discovery_note:
-        lines.append(f"Fresh declaration shapes did not help either: {_one_line(discovery_note)}")
+        lines.append(f"Fresh compiler choices did not help: {_one_line(discovery_note)}")
     best = refusal.best_attempt
     best_document: dict[str, object] | None = None
     if best is not None:
@@ -240,8 +309,8 @@ def _probe_refusal_error(
                 f"`{change.path[-1]}` {change.before} -> {change.after}"
                 for change in visible_changes
             )
-            lines.append(f"Closest technical candidate: {rendered}.")
-        lines.append(f"Technical reason it was refused: {_one_line(best.reason)}")
+            lines.append(f"Closest compiler choice tried: {rendered}.")
+        lines.append(f"Why it was rejected: {_one_line(best.reason)}")
         best_document = {
             "distance": best.distance,
             "stage": best.stage,
@@ -257,7 +326,7 @@ def _probe_refusal_error(
             ],
         }
     else:
-        lines.append(f"Technical reason it was refused: {_one_line(refusal.reason)}")
+        lines.append(f"Why it was rejected: {_one_line(refusal.reason)}")
     return RepairWorkflowError(
         " ".join(lines),
         diagnostic={
@@ -271,9 +340,61 @@ def _probe_refusal_error(
     )
 
 
-def _donor_group_key(refusal: ClassicRepairRefusal) -> tuple[str, str]:
-    dependencies = refusal.intervention.dependencies
-    return (refusal.unit_id, dependencies[0] if dependencies else "")
+def _donor_group_keys(refusal: RepairRefusal) -> tuple[tuple[str, str], ...]:
+    """Return every retunable donor key, with the primary donor first."""
+
+    action = refusal.intervention
+    dependencies = action.dependencies
+    if not dependencies:
+        return ()
+    primary = dependencies[0]
+    if isinstance(action, LegacyOracleInstallIntervention):
+        donor_ids = frozenset({primary})
+    elif isinstance(action, ClassicRecipeIntervention):
+        donor_ids = classic_function_donor_ids(action, refusal.receipt)
+    else:
+        # Small workflow doubles and future non-classic refusal types can only
+        # express the dependency graph they carry directly.
+        donor_ids = frozenset(dependencies)
+    ordered = (primary, *sorted(donor_ids - {primary}, key=lambda item: (item.casefold(), item)))
+    return tuple((refusal.unit_id, donor_id) for donor_id in ordered)
+
+
+def _publish_legacy_fallbacks(
+    root: Path,
+    spec: ProjectSpec,
+    fallbacks: Sequence[tuple[LegacyRepairRefusal, LegacyInstallRepair]],
+) -> tuple[str, ...]:
+    """Atomically save current-donor legacy repairs after retunes find no improvement."""
+
+    return apply_classic_authority_edits(
+        root,
+        spec,
+        legacy_interventions=tuple(
+            LegacyInterventionEdit(refusal.intervention, repair.intervention)
+            for refusal, repair in fallbacks
+        ),
+        receipts=tuple(
+            ClassicReceiptEdit(refusal.receipt, repair.receipt) for refusal, repair in fallbacks
+        ),
+    )
+
+
+def _publish_legacy_no_window_resolution(
+    root: Path,
+    spec: ProjectSpec,
+    resolution: LegacyNoWindowResolution,
+) -> tuple[str, ...]:
+    """Atomically remove a quarantine and optionally replace its record in place."""
+
+    return apply_classic_authority_edits(
+        root,
+        spec,
+        interventions=resolution.donor_edits,
+        legacy_interventions=(resolution.legacy_edit,),
+        receipts=resolution.receipt_edits,
+        additions=(() if resolution.addition is None else (resolution.addition,)),
+    )
 
 
 def repair_classic_records(
@@ -283,6 +404,8 @@ def repair_classic_records(
     staged_root: Path,
     spec: ProjectSpec,
     cache_root: Path,
+    settle_target_ids: frozenset[str] = frozenset(),
+    link_layout_hint: ClassicLinkLayoutHint | None = None,
 ) -> RepairWorkflowResult:
     """Repair measured, redundant, then nearby-donor fallout until composition is clean.
 
@@ -291,8 +414,8 @@ def repair_classic_records(
     repairs; the search stays bounded by whatever the command line declares.
     """
 
-    adjustment_limit = getattr(args, "adjustment_rounds", None) or MAX_REPAIR_ADJUSTMENT_ROUNDS
-    candidate_limit = getattr(args, "donor_candidates", None) or MAX_REPAIR_DONOR_CANDIDATES
+    adjustment_limit = _repair_limit(args, "adjustment_rounds", MAX_REPAIR_ADJUSTMENT_ROUNDS)
+    candidate_limit = _repair_limit(args, "donor_candidates", MAX_REPAIR_DONOR_CANDIDATES)
     changed_records: set[str] = set()
     affected_units: set[str] = set()
     measured_checks = 0
@@ -302,11 +425,13 @@ def repair_classic_records(
     reauthored_actions = 0
     discovered_actions = 0
     admitted_units = 0
+    source_retunes = 0
     compiled_candidates = 0
     seen_authority: set[str] = set()
     adjustment_rounds = 0
     initial_function_actions: int | None = None
     pass_number = 0
+    last_outcome: str | None = None
     # Donor groups whose complete bounded candidate set already failed once in this
     # command.  Their saved state has not changed, so they are deferred until every
     # other group is settled and then given one final attempt, instead of burning
@@ -334,7 +459,8 @@ def repair_classic_records(
         bundle = load_project_tree(staged_root)
         if initial_function_actions is None:
             initial_function_actions = sum(
-                getattr(item, "role", None) is ClassicRecipeRole.FUNCTION
+                isinstance(item, LegacyOracleInstallIntervention)
+                or getattr(item, "role", None) is ClassicRecipeRole.FUNCTION
                 for item in bundle.interventions
             )
         maximum_analyses = initial_function_actions + adjustment_limit + 1
@@ -346,11 +472,23 @@ def repair_classic_records(
                 "automatic repair reached a previously checked saved-guidance state"
             )
         seen_authority.add(fingerprint)
+        if settle_target_ids:
+            progress_description = (
+                f"repair pass {pass_number}: checking a remaining link layout mismatch"
+            )
+        else:
+            progress_description = f"repair pass {pass_number}: checking affected source files"
+        if last_outcome is not None and settle_target_ids:
+            progress_description = (
+                f"repair pass {pass_number}: checking the link layout again ({last_outcome})"
+            )
+        elif last_outcome is not None:
+            progress_description = f"repair pass {pass_number}: checking again ({last_outcome})"
         analysis = analyze_classic_repair(
             args,
             output,
             cache_root=cache_root,
-            progress_description=f"checking affected source files (pass {pass_number})",
+            progress_description=progress_description,
             seed_census=ledger is not None,
         )
         affected_units.update(item.unit_id for item in analysis.measured_repairs)
@@ -374,6 +512,10 @@ def repair_classic_records(
             changed_records.update(changed)
             measured_checks += len(analysis.measured_repairs)
             adjustment_rounds += 1
+            last_outcome = "refreshed " + count_phrase(
+                len(analysis.measured_repairs),
+                "saved check",
+            )
             continue
 
         if analysis.completed:
@@ -383,7 +525,7 @@ def repair_classic_records(
                 )
                 if census.missing:
                     raise RepairWorkflowError(
-                        "verified functions no longer defined by their fresh object: "
+                        "the edit removed functions used by the last accepted build: "
                         + _listed_census(census.missing)
                     )
                 if census.unplanned:
@@ -399,18 +541,20 @@ def repair_classic_records(
                         changed = apply_translation_unit_admissions(staged_root, spec, admitted)
                     except TranslationUnitAdmissionError as exc:
                         raise RepairWorkflowError(
-                            "automatic repair could not admit the translation units with "
-                            f"unrecorded fallout ({_listed_census(census.unplanned)}): "
-                            + _one_line(exc)
+                            "automatic repair could not add saved guidance for newly affected "
+                            f"source files ({_listed_census(census.unplanned)}): " + _one_line(exc)
                         ) from exc
                     if not changed:
                         raise RepairWorkflowError(
-                            "translation-unit admission reported success without changing "
-                            "saved guidance"
+                            "source-file admission reported success without changing saved guidance"
                         )
                     changed_records.update(changed)
                     admitted_units += len(admitted)
                     adjustment_rounds += 1
+                    last_outcome = "added " + count_phrase(
+                        len(admitted),
+                        "affected source build",
+                    )
                     continue
                 if census.refusals:
                     if adjustment_rounds >= adjustment_limit:
@@ -421,8 +565,8 @@ def repair_classic_records(
                     remaining_candidates = candidate_limit - compiled_candidates
                     if remaining_candidates <= 0:
                         raise RepairWorkflowError(
-                            "automatic repair exhausted its command-wide budget of "
-                            f"{candidate_limit} donor candidates"
+                            "automatic repair exhausted the command-wide --donor-candidates "
+                            f"limit after testing {candidate_limit} repair choices"
                         )
                     affected_units.update(item.unit_id for item in census.refusals)
                     discovery = probe_classic_carrier_discovery(
@@ -435,7 +579,12 @@ def repair_classic_records(
                         },
                         compile_cache=compile_cache,
                     )
-                    compiled_candidates += discovery.compiled_candidates
+                    compiled_candidates = _consume_candidate_budget(
+                        compiled_candidates,
+                        discovery.compiled_candidates,
+                        limit=candidate_limit,
+                        search="newly affected function discovery",
+                    )
                     for unit_id, digests in getattr(discovery, "tried_states", {}).items():
                         discovered_shapes.setdefault(unit_id, set()).update(digests)
                     if not discovery.repairs:
@@ -444,35 +593,193 @@ def repair_classic_records(
                             for unit_id, action_id, reason in discovery.unresolved[:8]
                         )
                         raise RepairWorkflowError(
-                            "automatic repair could not record unrecorded fallout: "
+                            "automatic repair could not restore newly affected functions: "
                             + (unresolved or "no carrier state settled it")
                         )
                     changed = apply_classic_discovery_repairs(staged_root, spec, discovery.repairs)
                     if not changed:
                         raise RepairWorkflowError(
-                            "unrecorded-fallout census reported success without changing "
-                            "saved guidance"
+                            "new-function check reported success without changing saved guidance"
                         )
                     changed_records.update(changed)
-                    discovered_actions += sum(len(item.resolutions) for item in discovery.repairs)
+                    resolved = sum(len(item.resolutions) for item in discovery.repairs)
+                    discovered_actions += resolved
                     adjustment_rounds += 1
+                    last_outcome = "added " + count_phrase(
+                        resolved,
+                        "function repair",
+                    )
                     continue
+            if any(
+                isinstance(item, ClassicRecipeIntervention)
+                and item.role is ClassicRecipeRole.PROJECT
+                and item.family is ClassicRecipeFamily.SOURCE_OVERLAY_GRAPH
+                for item in bundle.interventions
+            ):
+                remaining_candidates = max(0, candidate_limit - compiled_candidates)
+                source_result = probe_classic_project_overlay_repairs(
+                    args,
+                    output,
+                    candidate_budget=remaining_candidates,
+                    settle_target_ids=settle_target_ids,
+                    link_layout_hint=link_layout_hint,
+                )
+                compiled_candidates = _consume_candidate_budget(
+                    compiled_candidates,
+                    source_result.compiled_candidates,
+                    limit=candidate_limit,
+                    search="source-layout repair",
+                )
+                if source_result.repair is not None:
+                    if adjustment_rounds >= adjustment_limit:
+                        raise RepairWorkflowError(
+                            "automatic repair reached its limit of "
+                            f"{adjustment_limit} saved-guidance adjustment rounds"
+                        )
+                    changed = apply_classic_project_overlay_repair(
+                        staged_root,
+                        spec,
+                        source_result.repair,
+                    )
+                    if not changed:
+                        raise RepairWorkflowError(
+                            "source-layout repair reported success without changing saved guidance"
+                        )
+                    changed_records.update(changed)
+                    try:
+                        regeneration = plan_source_regeneration(staged_root)
+                        apply_source_regeneration(staged_root, regeneration)
+                    except SourceRegenerationError as exc:
+                        raise RepairWorkflowError(
+                            "source-layout repair could not refresh its saved output checks: "
+                            + _one_line(exc)
+                        ) from exc
+                    changed_records.update(regeneration.changed_documents)
+                    source_retunes += 1
+                    adjustment_rounds += 1
+                    last_outcome = "adjusted one source layout"
+                    continue
+                if source_result.checked and source_result.reason is not None:
+                    if source_result.exhausted:
+                        raise RepairWorkflowError(
+                            "automatic repair exhausted the command-wide --donor-candidates "
+                            f"limit after testing {candidate_limit} repair choices"
+                        )
+                    raise RepairWorkflowError(
+                        "automatic repair could not find a safe source layout for "
+                        f"{source_result.source_path or 'an affected source'}: "
+                        + _one_line(source_result.reason)
+                    )
             return RepairWorkflowResult(
-                tuple(sorted(changed_records, key=lambda item: (item.casefold(), item))),
-                tuple(sorted(affected_units, key=str.casefold)),
-                measured_checks,
-                retired_actions,
-                removed_donors,
-                donor_retunes,
-                compiled_candidates,
-                pass_number,
-                reauthored_actions,
-                discovered_actions,
-                compile_cache.memory_hits + compile_cache.disk_hits,
-                admitted_units,
+                changed_records=tuple(
+                    sorted(changed_records, key=lambda item: (item.casefold(), item))
+                ),
+                affected_units=tuple(sorted(affected_units, key=str.casefold)),
+                measured_checks=measured_checks,
+                retired_actions=retired_actions,
+                removed_donors=removed_donors,
+                donor_retunes=donor_retunes,
+                compiled_candidates=compiled_candidates,
+                passes=pass_number,
+                reauthored_actions=reauthored_actions,
+                discovered_actions=discovered_actions,
+                replayed_candidates=compile_cache.memory_hits + compile_cache.disk_hits,
+                admitted_units=admitted_units,
+                source_retunes=source_retunes,
+                adjustment_rounds=adjustment_rounds,
             )
 
         receipts = _classic_receipts(bundle)
+        unavailable_legacy = [
+            refusal
+            for refusal in analysis.structural_refusals
+            if isinstance(refusal.intervention, LegacyOracleInstallIntervention)
+            and (refusal.legacy_oracle is None or refusal.materials.donor_object is None)
+        ]
+        if unavailable_legacy:
+            detail = next(
+                (
+                    refusal.reason
+                    if refusal.legacy_oracle is None
+                    else "fresh donor material is unavailable"
+                )
+                for refusal in unavailable_legacy
+            )
+            raise RepairWorkflowError(
+                "automatic repair cannot inspect the saved legacy oracle before donor search: "
+                + _one_line(detail)
+            )
+
+        structural_refusals: list[RepairRefusal] = []
+        legacy_fallbacks: list[tuple[LegacyRepairRefusal, LegacyInstallRepair]] = []
+        legacy_failures: list[str] = []
+        no_window_resolution: LegacyNoWindowResolution | None = None
+        for refusal in analysis.structural_refusals:
+            if not isinstance(refusal.intervention, LegacyOracleInstallIntervention):
+                structural_refusals.append(refusal)
+                continue
+            assert refusal.legacy_oracle is not None
+            assert refusal.materials.donor_object is not None
+            try:
+                repaired = reauthor_legacy_simulated_elision(
+                    refusal.intervention,
+                    refusal.receipt,
+                    refusal.materials.seed_object,
+                    refusal.materials.donor_object,
+                    refusal.legacy_oracle.retail_body,
+                    refusal.legacy_oracle.auxiliary_bodies,
+                )
+            except LegacyNoWindowError:
+                try:
+                    no_window_resolution = plan_legacy_no_window_resolution(
+                        bundle.interventions,
+                        receipts,
+                        intervention=refusal.intervention,
+                        receipt=refusal.receipt,
+                        seed_object=refusal.materials.seed_object,
+                        donor_object=refusal.materials.donor_object,
+                        retail_body=refusal.legacy_oracle.retail_body,
+                        build_target=refusal.unit.plan.build_target,
+                    )
+                except LegacyRepairError as exc:
+                    legacy_failures.append(str(exc))
+                    structural_refusals.append(refusal)
+                else:
+                    break
+            except (LegacyRepairError, RuntimeError, ValueError) as exc:
+                legacy_failures.append(str(exc))
+                structural_refusals.append(refusal)
+                continue
+            with_baseline = replace(refusal, baseline_repair=repaired)
+            structural_refusals.append(with_baseline)
+            legacy_fallbacks.append((with_baseline, repaired))
+        if no_window_resolution is not None:
+            if adjustment_rounds >= adjustment_limit:
+                raise RepairWorkflowError(
+                    "automatic repair reached its limit of "
+                    f"{adjustment_limit} saved-guidance adjustment rounds"
+                )
+            changed = _publish_legacy_no_window_resolution(
+                staged_root,
+                bundle.spec,
+                no_window_resolution,
+            )
+            if not changed:
+                raise RepairWorkflowError(
+                    "legacy dequarantine reported success without changing saved guidance"
+                )
+            changed_records.update(changed)
+            removed_donors += len(no_window_resolution.removed_donors)
+            if no_window_resolution.replaced:
+                reauthored_actions += 1
+                last_outcome = "replaced 1 obsolete quarantine record"
+            else:
+                retired_actions += 1
+                last_outcome = "removed 1 obsolete quarantine record"
+            adjustment_rounds += 1
+            continue
+        current_refusals = tuple(structural_refusals)
+
         retirement_failures: list[str] = []
         retirement_candidates: list[
             tuple[
@@ -481,7 +788,9 @@ def repair_classic_records(
                 ClassicDispatchMaterials,
             ]
         ] = []
-        for refusal in analysis.structural_refusals:
+        for refusal in current_refusals:
+            if isinstance(refusal.intervention, LegacyOracleInstallIntervention):
+                continue
             candidate = (refusal.intervention, refusal.receipt, refusal.materials)
             try:
                 plan_redundant_action_retirements(
@@ -519,13 +828,23 @@ def repair_classic_records(
             changed_records.update(changed)
             retired_actions += len(retirement_candidates)
             removed_donors += len(plan.removed_donors)
+            last_outcome = "removed " + count_phrase(
+                len(retirement_candidates),
+                "obsolete function record",
+            )
             continue
 
         # Before compiling anything: a refused function whose goal body another
         # donor of its unit (or its own donor, under a cheaper family) already
         # emits is re-authored onto that donor from the captured fresh objects.
         try:
-            reauthor_plan = plan_function_reauthoring(analysis.structural_refusals)
+            reauthor_plan = plan_function_reauthoring(
+                tuple(
+                    item
+                    for item in current_refusals
+                    if not isinstance(item.intervention, LegacyOracleInstallIntervention)
+                )
+            )
         except ClassicReauthorError as exc:
             raise RepairWorkflowError(
                 "automatic repair could not plan function re-authoring: " + _one_line(exc)
@@ -551,12 +870,19 @@ def repair_classic_records(
             changed_records.update(changed)
             reauthored_actions += len(reauthor_plan.reauthorings)
             adjustment_rounds += 1
+            last_outcome = "updated " + count_phrase(
+                len(reauthor_plan.reauthorings),
+                "function record",
+            )
             continue
 
         donor_refusals = tuple(
             refusal
-            for refusal in analysis.structural_refusals
-            if refusal.intervention.role is ClassicRecipeRole.FUNCTION
+            for refusal in current_refusals
+            if (
+                isinstance(refusal.intervention, LegacyOracleInstallIntervention)
+                or refusal.intervention.role is ClassicRecipeRole.FUNCTION
+            )
             and refusal.intervention.dependencies
         )
         if donor_refusals:
@@ -567,35 +893,53 @@ def repair_classic_records(
                 )
             remaining_candidates = candidate_limit - compiled_candidates
             if remaining_candidates <= 0:
+                if legacy_fallbacks:
+                    changed = _publish_legacy_fallbacks(staged_root, bundle.spec, legacy_fallbacks)
+                    if not changed:
+                        raise RepairWorkflowError(
+                            "legacy re-authoring reported success without changing saved guidance"
+                        )
+                    changed_records.update(changed)
+                    reauthored_actions += len(legacy_fallbacks)
+                    adjustment_rounds += 1
+                    last_outcome = "narrowed " + count_phrase(
+                        len(legacy_fallbacks),
+                        "quarantine record",
+                    )
+                    continue
                 raise RepairWorkflowError(
-                    "automatic repair exhausted its command-wide budget of "
-                    f"{candidate_limit} donor candidates"
+                    "automatic repair exhausted the command-wide --donor-candidates "
+                    f"limit after testing {candidate_limit} repair choices"
                 )
-            fresh_refusals = tuple(
-                refusal
-                for refusal in donor_refusals
-                if _donor_group_key(refusal) not in exhausted_groups
+            active_group_keys = frozenset(
+                key for refusal in donor_refusals for key in _donor_group_keys(refusal)
+            )
+            deferred_group_keys = frozenset(exhausted_groups & active_group_keys)
+            excluded_group_keys = (
+                deferred_group_keys if active_group_keys - deferred_group_keys else frozenset()
             )
             frozen_abandoned = {key: frozenset(value) for key, value in abandoned_states.items()}
             probe = probe_classic_donor_repairs(
                 args,
                 output,
-                fresh_refusals or donor_refusals,
+                donor_refusals,
                 candidate_budget=remaining_candidates,
                 abandoned_states=frozen_abandoned,
                 compile_cache=compile_cache,
+                excluded_groups=excluded_group_keys,
             )
-            if not 0 <= probe.compiled_candidates <= remaining_candidates:
-                raise RepairWorkflowError(
-                    "donor repair exceeded its remaining command-wide candidate budget"
-                )
-            compiled_candidates += probe.compiled_candidates
+            compiled_candidates = _consume_candidate_budget(
+                compiled_candidates,
+                probe.compiled_candidates,
+                limit=candidate_limit,
+                search="donor repair",
+            )
             exhausted_groups.update(
                 (refusal.unit_id, refusal.donor_id)
                 for refusal in probe.refusals
                 if getattr(refusal, "exhausted", False)
             )
-            if not probe.repairs and fresh_refusals and len(fresh_refusals) < len(donor_refusals):
+            if not probe.repairs and excluded_group_keys:
                 # Nothing fresh could be settled: give the deferred groups their final attempt.
                 remaining_candidates = candidate_limit - compiled_candidates
                 if remaining_candidates > 0:
@@ -607,11 +951,17 @@ def repair_classic_records(
                         abandoned_states=frozen_abandoned,
                         compile_cache=compile_cache,
                     )
-                    if not 0 <= probe.compiled_candidates <= remaining_candidates:
-                        raise RepairWorkflowError(
-                            "donor repair exceeded its remaining command-wide candidate budget"
-                        )
-                    compiled_candidates += probe.compiled_candidates
+                    compiled_candidates = _consume_candidate_budget(
+                        compiled_candidates,
+                        probe.compiled_candidates,
+                        limit=candidate_limit,
+                        search="donor repair",
+                    )
+                    exhausted_groups.update(
+                        (refusal.unit_id, refusal.donor_id)
+                        for refusal in probe.refusals
+                        if getattr(refusal, "exhausted", False)
+                    )
             if probe.repairs:
                 changed = apply_classic_donor_repairs(staged_root, spec, probe.repairs)
                 if not changed:
@@ -626,39 +976,81 @@ def repair_classic_records(
                         )
                 donor_retunes += len(probe.repairs)
                 adjustment_rounds += 1
+                last_outcome = "adjusted " + count_phrase(
+                    len(probe.repairs),
+                    "compiler choice",
+                )
                 continue
             # No saved donor can be retuned: compile fresh carrier states for the
             # affected units and accept any that carries a refused record's body.
             remaining_candidates = candidate_limit - compiled_candidates
-            discovery = probe_classic_carrier_discovery(
-                args,
-                output,
-                donor_refusals,
-                candidate_budget=remaining_candidates,
-                tried_states={key: frozenset(value) for key, value in discovered_shapes.items()},
-                compile_cache=compile_cache,
+            discovery_refusals = tuple(
+                item
+                for item in donor_refusals
+                if not isinstance(item.intervention, LegacyOracleInstallIntervention)
             )
-            compiled_candidates += discovery.compiled_candidates
-            for unit_id, digests in getattr(discovery, "tried_states", {}).items():
-                discovered_shapes.setdefault(unit_id, set()).update(digests)
-            if discovery.repairs:
-                changed = apply_classic_discovery_repairs(staged_root, spec, discovery.repairs)
+            unresolved_discovery: tuple[tuple[str, str, str], ...] = ()
+            if discovery_refusals:
+                discovery = probe_classic_carrier_discovery(
+                    args,
+                    output,
+                    discovery_refusals,
+                    candidate_budget=remaining_candidates,
+                    tried_states={
+                        key: frozenset(value) for key, value in discovered_shapes.items()
+                    },
+                    compile_cache=compile_cache,
+                )
+                compiled_candidates = _consume_candidate_budget(
+                    compiled_candidates,
+                    discovery.compiled_candidates,
+                    limit=candidate_limit,
+                    search="carrier discovery",
+                )
+                unresolved_discovery = discovery.unresolved
+                for unit_id, digests in getattr(discovery, "tried_states", {}).items():
+                    discovered_shapes.setdefault(unit_id, set()).update(digests)
+                if discovery.repairs:
+                    changed = apply_classic_discovery_repairs(staged_root, spec, discovery.repairs)
+                    if not changed:
+                        raise RepairWorkflowError(
+                            "carrier discovery reported success without changing saved guidance"
+                        )
+                    changed_records.update(changed)
+                    resolved = sum(len(item.resolutions) for item in discovery.repairs)
+                    discovered_actions += resolved
+                    adjustment_rounds += 1
+                    last_outcome = "added " + count_phrase(
+                        resolved,
+                        "function repair",
+                    )
+                    continue
+            if legacy_fallbacks:
+                changed = _publish_legacy_fallbacks(staged_root, bundle.spec, legacy_fallbacks)
                 if not changed:
                     raise RepairWorkflowError(
-                        "carrier discovery reported success without changing saved guidance"
+                        "legacy re-authoring reported success without changing saved guidance"
                     )
                 changed_records.update(changed)
-                discovered_actions += sum(len(item.resolutions) for item in discovery.repairs)
+                reauthored_actions += len(legacy_fallbacks)
                 adjustment_rounds += 1
+                last_outcome = "narrowed " + count_phrase(
+                    len(legacy_fallbacks),
+                    "quarantine record",
+                )
                 continue
             if probe.best_refusal is not None:
-                raise _probe_refusal_error(probe.best_refusal, discovery.unresolved)
+                raise _probe_refusal_error(
+                    probe.best_refusal,
+                    unresolved_discovery,
+                )
             probe_reasons: list[str] = []
         else:
             probe_reasons = []
 
         reasons = [
-            *(item.reason for item in analysis.structural_refusals),
+            *(item.reason for item in current_refusals),
+            *legacy_failures,
             *retirement_failures,
             *probe_reasons,
         ]
@@ -675,6 +1067,8 @@ class RepairRecords(Protocol):
         staged_root: Path,
         spec: ProjectSpec,
         cache_root: Path,
+        settle_target_ids: frozenset[str] = frozenset(),
+        link_layout_hint: ClassicLinkLayoutHint | None = None,
     ) -> RepairWorkflowResult: ...
 
 
@@ -715,6 +1109,115 @@ def _candidate_args(
     return argparse.Namespace(**values)
 
 
+def _merge_workflow_results(
+    first: RepairWorkflowResult,
+    second: RepairWorkflowResult,
+) -> RepairWorkflowResult:
+    """Combine accounting from consecutive private repair passes."""
+
+    return RepairWorkflowResult(
+        changed_records=tuple(
+            sorted(
+                {*first.changed_records, *second.changed_records},
+                key=lambda item: (item.casefold(), item),
+            )
+        ),
+        affected_units=tuple(
+            sorted({*first.affected_units, *second.affected_units}, key=str.casefold)
+        ),
+        measured_checks=first.measured_checks + second.measured_checks,
+        retired_actions=first.retired_actions + second.retired_actions,
+        removed_donors=first.removed_donors + second.removed_donors,
+        donor_retunes=first.donor_retunes + second.donor_retunes,
+        compiled_candidates=first.compiled_candidates + second.compiled_candidates,
+        passes=first.passes + second.passes,
+        reauthored_actions=first.reauthored_actions + second.reauthored_actions,
+        discovered_actions=first.discovered_actions + second.discovered_actions,
+        replayed_candidates=first.replayed_candidates + second.replayed_candidates,
+        admitted_units=first.admitted_units + second.admitted_units,
+        source_retunes=first.source_retunes + second.source_retunes,
+        adjustment_rounds=first.adjustment_rounds + second.adjustment_rounds,
+    )
+
+
+def _cold_mismatch_targets(
+    staged_root: Path,
+    report_directory: str,
+) -> frozenset[str]:
+    """Return target IDs eligible for one evidence-driven layout retry."""
+
+    try:
+        report = read_report_json(staged_root / report_directory / "report.json")
+    except ValueError as exc:
+        raise RepairError(f"private verification produced an invalid report: {exc}") from exc
+    if not (
+        report.verdict.cold and report.verdict.logic_certified and not report.verdict.byte_exact
+    ):
+        return frozenset()
+    return frozenset(target.id for target in report.targets if not target.byte_exact)
+
+
+def _cold_link_layout_hint(
+    staged_root: Path,
+    target_ids: frozenset[str],
+    candidate_outputs: Mapping[str, bytes],
+) -> ClassicLinkLayoutHint | None:
+    """Derive one transient compiler-layout objective from a failed cold proof."""
+
+    try:
+        bundle = load_project_tree(staged_root)
+        graph = bundle.producer_graph
+        if graph is None:
+            return None
+        targets = {target.id: target for target in bundle.spec.targets}
+        companions = {item.target_id: item for item in classic_debug_companion_paths(bundle)}
+        for target_id in sorted(target_ids, key=str.casefold):
+            target = targets.get(target_id)
+            companion = companions.get(target_id)
+            if target is None or companion is None:
+                continue
+            candidate_image = candidate_outputs.get(target.artifact)
+            debug_image = candidate_outputs.get(companion.image)
+            pdb = candidate_outputs.get(companion.pdb)
+            if candidate_image is None or debug_image is None or pdb is None:
+                continue
+            _size, _digest, oracle_image = receipt_source_input(
+                staged_root,
+                target.oracle,
+                capture=True,
+            )
+            if oracle_image is None:
+                raise AssertionError("captured source receipt has no payload")
+            hint = derive_classic_link_layout_hint(
+                bundle,
+                graph,
+                target_id=target_id,
+                candidate_image=candidate_image,
+                oracle_image=oracle_image,
+                debug_image=debug_image,
+                pdb=pdb,
+            )
+            if hint is not None:
+                return hint
+    except (OSError, ValueError):
+        return None
+    return None
+
+
+def _link_settlement_args(
+    args: argparse.Namespace,
+    *,
+    candidate_budget: int,
+    adjustment_rounds: int,
+) -> argparse.Namespace:
+    values = vars(args).copy()
+    values.update(
+        donor_candidates=candidate_budget,
+        adjustment_rounds=adjustment_rounds,
+    )
+    return argparse.Namespace(**values)
+
+
 def execute_repair_attempt(
     args: argparse.Namespace,
     output: CLIOutput,
@@ -739,7 +1242,10 @@ def execute_repair_attempt(
         with staged as staged_root:
             phase = "refreshing saved source records"
             try:
-                regeneration = plan_source_regeneration(staged_root)
+                regeneration = plan_source_regeneration(
+                    staged_root,
+                    clean_preimage_root=snapshot.root,
+                )
                 apply_source_regeneration(staged_root, regeneration)
             except SourceRegenerationError as exc:
                 raise RepairError(f"mechanical source repair refused: {exc}") from exc
@@ -755,33 +1261,136 @@ def execute_repair_attempt(
 
             phase = "repairing saved build guidance"
             candidate_args = _candidate_args(args, staged_root, candidate_report_directory)
+            candidate_limit = _repair_limit(
+                candidate_args,
+                "donor_candidates",
+                MAX_REPAIR_DONOR_CANDIDATES,
+            )
+            adjustment_limit = _repair_limit(
+                candidate_args,
+                "adjustment_rounds",
+                MAX_REPAIR_ADJUSTMENT_ROUNDS,
+            )
             workflow = repair_records(
                 candidate_args,
                 output,
                 staged_root=staged_root,
                 spec=snapshot.spec,
                 cache_root=cache_root,
+                settle_target_ids=frozenset(),
+                link_layout_hint=None,
             )
-            authorized_records = {
-                snapshot.spec.layout.source_manifest,
-                snapshot.spec.layout.build_plan,
-                snapshot.spec.layout.producer_graph,
-                *regeneration.changed_documents,
-                *workflow.changed_records,
-            }
-            record_postimages = capture_repair_record_postimages(
-                snapshot,
-                staged_root,
-                authorized_records,
+            _consume_candidate_budget(
+                0,
+                workflow.compiled_candidates,
+                limit=candidate_limit,
+                search="automatic repair",
             )
-
-            phase = "proving every target from scratch"
-            status = verify_command(candidate_args, output)
-            if status != 0:
-                raise RepairError(
-                    "candidate output did not satisfy exact verification and the committed "
-                    "authenticity policy"
+            if not 0 <= workflow.adjustment_rounds <= adjustment_limit:
+                raise RepairWorkflowError(
+                    "automatic repair exceeded its command-wide adjustment-round budget"
                 )
+
+            while True:
+                authorized_records = {
+                    snapshot.spec.layout.source_manifest,
+                    snapshot.spec.layout.build_plan,
+                    snapshot.spec.layout.producer_graph,
+                    *regeneration.changed_documents,
+                    *workflow.changed_records,
+                }
+                record_postimages = capture_repair_record_postimages(
+                    snapshot,
+                    staged_root,
+                    authorized_records,
+                )
+
+                phase = "proving every target from scratch"
+                status = verify_command(candidate_args, output)
+                if status == 0:
+                    break
+                if status != 1:
+                    raise RepairError(
+                        "candidate output did not satisfy exact verification and the committed "
+                        "authenticity policy"
+                    )
+
+                phase = "checking the private from-scratch result"
+                # A failed verifier may write outputs and reports, but it may not
+                # alter any sealed input or authorized record.  Reuse the final
+                # collection boundary to prove that before another repair pass.
+                try:
+                    failed_candidate = collect_repair_candidate(
+                        snapshot,
+                        staged_root,
+                        report_directory=candidate_report_directory,
+                        record_postimages=record_postimages,
+                    )
+                    target_ids = _cold_mismatch_targets(
+                        staged_root,
+                        candidate_report_directory,
+                    )
+                    link_layout_hint = _cold_link_layout_hint(
+                        staged_root,
+                        target_ids,
+                        failed_candidate.outputs,
+                    )
+                except RepairError as exc:
+                    raise RepairError(
+                        "candidate output did not satisfy exact verification and the committed "
+                        f"authenticity policy; {_one_line(exc)}"
+                    ) from exc
+                if not target_ids:
+                    raise RepairError(
+                        "candidate output did not satisfy exact verification and the committed "
+                        "authenticity policy"
+                    )
+
+                remaining_candidates = candidate_limit - workflow.compiled_candidates
+                if remaining_candidates <= 0:
+                    raise RepairWorkflowError(
+                        "from-scratch verification found link layout fallout after repair "
+                        "exhausted the command-wide --donor-candidates limit"
+                    )
+                remaining_rounds = adjustment_limit - workflow.adjustment_rounds
+                if remaining_rounds <= 0:
+                    raise RepairWorkflowError(
+                        "from-scratch verification found link layout fallout after repair "
+                        "reached its saved-guidance adjustment-round limit"
+                    )
+
+                phase = "settling link layout for the affected targets"
+                candidate_args = _link_settlement_args(
+                    candidate_args,
+                    candidate_budget=remaining_candidates,
+                    adjustment_rounds=remaining_rounds,
+                )
+                followup = repair_records(
+                    candidate_args,
+                    output,
+                    staged_root=staged_root,
+                    spec=snapshot.spec,
+                    cache_root=cache_root,
+                    settle_target_ids=target_ids,
+                    link_layout_hint=link_layout_hint,
+                )
+                _consume_candidate_budget(
+                    workflow.compiled_candidates,
+                    followup.compiled_candidates,
+                    limit=candidate_limit,
+                    search="link layout repair",
+                )
+                if not 0 <= followup.adjustment_rounds <= remaining_rounds:
+                    raise RepairWorkflowError(
+                        "link layout repair exceeded its remaining command-wide "
+                        "adjustment-round budget"
+                    )
+                if followup.source_retunes < 1 or not followup.changed_records:
+                    raise RepairWorkflowError(
+                        "from-scratch verification found link layout fallout, but no safe "
+                        "automatic source adjustment settled it"
+                    )
+                workflow = _merge_workflow_results(workflow, followup)
 
             phase = "collecting the verified repair result"
             candidate = collect_repair_candidate(

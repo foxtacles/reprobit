@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from hashlib import sha256
 from types import SimpleNamespace
 
@@ -13,7 +14,11 @@ from reprobit.classic_repair_reauthor import (
     describe_reauthorings,
     plan_function_reauthoring,
 )
-from reprobit.classic_repair_session import ClassicRepairRefusal
+from reprobit.classic_repair_session import (
+    ClassicRepairRefusal,
+    repoint_refusal_materials,
+    repointed_action,
+)
 from reprobit.coff_format import CoffObject, coff_body
 from reprobit.model import Digest, Scope
 from reprobit.schema import (
@@ -70,6 +75,19 @@ def _receipt(intervention: ClassicRecipeIntervention, **values: object) -> Class
     )
 
 
+def _prepared(donor: ClassicRecipeIntervention) -> ClassicPreparedDonor:
+    return ClassicPreparedDonor(
+        donor,
+        prepare_donor_compile_request(
+            donor,
+            source_path="src/unit.cpp",
+            clean_source=SOURCE,
+            effective_source=SOURCE,
+            receipts=(_receipt(donor),),
+        ),
+    )
+
+
 def _fixture(
     *, goal_donor: str
 ) -> tuple[
@@ -81,19 +99,7 @@ def _fixture(
     retail = coff_fixture.make_coff(body=bytes(retail_body))
     first = _donor("donor.first", 3, SYMBOL)
     second = _donor("donor.second", 5)
-    donors = tuple(
-        ClassicPreparedDonor(
-            donor,
-            prepare_donor_compile_request(
-                donor,
-                source_path="src/unit.cpp",
-                clean_source=SOURCE,
-                effective_source=SOURCE,
-                receipts=(_receipt(donor),),
-            ),
-        )
-        for donor in (first, second)
-    )
+    donors = tuple(_prepared(donor) for donor in (first, second))
     action = ClassicRecipeIntervention(
         id="function.saved",
         scope=Scope(target="program", translation_unit="unit.fixture", function=SYMBOL),
@@ -152,6 +158,7 @@ def test_reauthors_onto_the_unit_donor_that_carries_the_goal_body() -> None:
     assert entry.family == "equal_body_strict"
     assert entry.removed_action_id == "function.saved"
     addition = plan.additions[0]
+    assert addition.replaces_intervention_id == "function.saved"
     assert addition.intervention.dependencies == ("donor.second",)
     assert addition.intervention.family is ClassicRecipeFamily.EQUAL_BODY_STRICT
     assert (
@@ -173,6 +180,92 @@ def test_reauthors_onto_the_unit_donor_that_carries_the_goal_body() -> None:
     assert "was donor.first" in describe_reauthorings(plan.reauthorings)
 
 
+def test_reauthors_an_exact_cross_tu_normalized_goal_from_a_saved_donor() -> None:
+    refusal, _seed, _retail, _first, _second = _fixture(goal_donor="donor.second")
+    action = refusal.intervention.model_copy(
+        update={"family": ClassicRecipeFamily.RETAIL_EXACT_CROSS_TU_COMPLETE_TARGET_RESIZE}
+    )
+    goal = refusal.receipt.expected_values["expected_body_sha256"]
+    receipt = refusal.receipt.model_copy(
+        update={
+            "family": action.family,
+            "expected_values": {"expected_normalized_body_sha256": goal},
+        }
+    )
+    unit = replace(
+        refusal.unit,
+        functions=(action,),
+        actions=(action,),
+        receipts=tuple(
+            receipt if item.intervention_id == action.id else item for item in refusal.unit.receipts
+        ),
+    )
+
+    plan = plan_function_reauthoring(
+        (replace(refusal, intervention=action, receipt=receipt, unit=unit),)
+    )
+
+    assert plan.skipped == ()
+    assert plan.reauthorings[0].donor_id == "donor.second"
+    assert plan.reauthorings[0].family == ClassicRecipeFamily.EQUAL_BODY_STRICT.value
+
+
+def test_reauthoring_retires_orphaned_auxiliary_donors() -> None:
+    refusal, seed, _retail, _first, _second = _fixture(goal_donor="donor.second")
+    parameter_donor = _donor("donor.parameter", 7, SYMBOL)
+    receipt_donor = _donor("donor.receipt", 8, SYMBOL)
+    action = refusal.intervention.model_copy(
+        update={
+            "parameters": (ClassicField(name="target_donor", value=parameter_donor.id),),
+        }
+    )
+    receipt = refusal.receipt.model_copy(
+        update={
+            "expected_values": {
+                **refusal.receipt.expected_values,
+                "complete_donor": receipt_donor.id,
+            }
+        }
+    )
+    unit = replace(
+        refusal.unit,
+        donors=(*refusal.unit.donors, _prepared(parameter_donor), _prepared(receipt_donor)),
+        functions=(action,),
+        actions=(action,),
+        receipts=(
+            *(
+                item
+                for item in refusal.unit.receipts
+                if item.intervention_id != refusal.intervention.id
+            ),
+            _receipt(parameter_donor),
+            _receipt(receipt_donor),
+            receipt,
+        ),
+    )
+    refusal = replace(
+        refusal,
+        intervention=action,
+        receipt=receipt,
+        unit=unit,
+        unit_donor_objects={
+            **refusal.unit_donor_objects,
+            parameter_donor.id: seed,
+            receipt_donor.id: seed,
+        },
+    )
+
+    plan = plan_function_reauthoring((refusal,))
+
+    edits = {edit.before.id: edit.after for edit in plan.intervention_edits}
+    assert edits[parameter_donor.id] is None
+    assert edits[receipt_donor.id] is None
+    assert {edit.before.id for edit in plan.receipt_edits} >= {
+        f"proof.{parameter_donor.id}",
+        f"proof.{receipt_donor.id}",
+    }
+
+
 def test_reauthors_under_a_cheaper_family_on_the_same_donor() -> None:
     refusal, _seed, _retail, _first, _second = _fixture(goal_donor="donor.first")
 
@@ -187,6 +280,43 @@ def test_reauthors_under_a_cheaper_family_on_the_same_donor() -> None:
     assert {edit.before.id for edit in plan.receipt_edits} == {"proof.function.saved"}
 
 
+def test_source_aware_mosaic_never_falls_through_to_equal_body_reauthoring() -> None:
+    refusal, _seed, _retail, _first, _second = _fixture(goal_donor="donor.second")
+    action = refusal.intervention.model_copy(
+        update={
+            "family": ClassicRecipeFamily.RETAIL_EXACT_INSTRUCTION_MOSAIC,
+            "parameters": (
+                ClassicField(name="instruction_ranges", value=[]),
+                ClassicField(name="target_source_refactor", value={"kind": "fixture"}),
+            ),
+        }
+    )
+    receipt = refusal.receipt.model_copy(update={"family": action.family})
+    unit = replace(
+        refusal.unit,
+        functions=(action,),
+        actions=(action,),
+        receipts=tuple(
+            receipt if item.intervention_id == action.id else item for item in refusal.unit.receipts
+        ),
+    )
+
+    plan = plan_function_reauthoring(
+        (
+            replace(
+                refusal,
+                intervention=action,
+                receipt=receipt,
+                unit=unit,
+                retail_body=None,
+            ),
+        )
+    )
+
+    assert plan.reauthorings == () and plan.additions == ()
+    assert "saved mosaic semantics could not be preserved" in plan.skipped[0][2]
+
+
 def test_refusals_without_a_goal_body_or_a_matching_donor_are_reported_not_guessed() -> None:
     refusal, seed, _retail, _first, _second = _fixture(goal_donor="donor.second")
     no_goal = ClassicRepairRefusal(
@@ -197,7 +327,7 @@ def test_refusals_without_a_goal_body_or_a_matching_donor_are_reported_not_guess
     )
     plan = plan_function_reauthoring((no_goal,))
     assert plan.reauthorings == ()
-    assert plan.skipped[0][2] == "receipt carries no expected_body_sha256 goal"
+    assert plan.skipped[0][2] == "receipt carries no immutable retail body goal"
 
     nobody = ClassicRepairRefusal(
         **{
@@ -263,6 +393,13 @@ def test_a_goal_body_no_closed_family_can_host_moves_the_saved_record_over(
 
     def repoint(moved: object, receipt: object, materials: object) -> object:
         seen.append((moved.dependencies[0], sha256(materials.donor_object).hexdigest()[:8]))  # type: ignore[attr-defined]
+        prepared = next(
+            item
+            for item in refusal.unit.donors
+            if item.intervention.id == moved.dependencies[0]  # type: ignore[attr-defined]
+        )
+        assert materials.donor_source == prepared.request.logical_outputs[refusal.unit.plan.source]  # type: ignore[attr-defined]
+        assert materials.shape_identifiers == prepared.request.carrier_identifiers  # type: ignore[attr-defined]
         refreshed = receipt.model_copy(  # type: ignore[attr-defined]
             update={"expected_values": {**receipt.expected_values, "expected_seed_length": 99}}  # type: ignore[attr-defined]
         )
@@ -304,8 +441,6 @@ def test_a_goal_body_no_closed_family_can_host_moves_the_saved_record_over(
 
 
 def test_repointed_action_drops_the_previous_pairs_debug_delta_only() -> None:
-    from reprobit.classic_repair_session import repointed_action
-
     refusal, _seed, _retail, _first, _second = _fixture(goal_donor="donor.second")
     declared = refusal.intervention.model_copy(
         update={
@@ -326,3 +461,77 @@ def test_repointed_action_drops_the_previous_pairs_debug_delta_only() -> None:
     assert moved.id == declared.id and moved.family is declared.family
     untouched = repointed_action(refusal.intervention, "donor.second")
     assert untouched.parameters == refusal.intervention.parameters
+
+
+def test_repoint_materials_keep_explicit_roles_on_their_named_donors() -> None:
+    refusal, seed, retail, _first, _second = _fixture(goal_donor="donor.second")
+    old_source = b"old donor source\n"
+    new_source = b"new donor source\n"
+    old, new = refusal.unit.donors
+    old = replace(
+        old,
+        request=replace(
+            old.request,
+            logical_outputs={refusal.unit.plan.source: old_source},
+            carrier_identifiers=frozenset({"OldCarrier"}),
+        ),
+    )
+    new = replace(
+        new,
+        request=replace(
+            new.request,
+            logical_outputs={refusal.unit.plan.source: new_source},
+            carrier_identifiers=frozenset({"NewCarrier"}),
+        ),
+    )
+    action = refusal.intervention.model_copy(
+        update={"parameters": (ClassicField(name="target_donor", value=old.intervention.id),)}
+    )
+    receipt = refusal.receipt.model_copy(
+        update={
+            "expected_values": {
+                **refusal.receipt.expected_values,
+                "complete_donor": old.intervention.id,
+                "instruction_donor": old.intervention.id,
+            }
+        }
+    )
+    unit = replace(
+        refusal.unit,
+        donors=(old, new),
+        functions=(action,),
+        actions=(action,),
+        receipts=tuple(
+            receipt if item.intervention_id == action.id else item for item in refusal.unit.receipts
+        ),
+    )
+    refusal = replace(refusal, intervention=action, receipt=receipt, unit=unit)
+    moved = repointed_action(action, new.intervention.id)
+
+    materials = repoint_refusal_materials(refusal, moved, new, retail)
+
+    assert materials.donor_object == retail
+    assert materials.target_donor_object == seed
+    assert materials.complete_donor_object == seed
+    assert materials.instruction_donor_object == seed
+    assert materials.donor_source == new_source
+    assert materials.target_donor_source == old_source
+    assert materials.instruction_donor_source == old_source
+    assert materials.shape_identifiers == frozenset({"NewCarrier"})
+    assert materials.candidate_constraints is not None
+    assert materials.candidate_constraints["target_donor"] == old.intervention.id
+
+
+def test_repoint_materials_move_an_implicit_target_with_the_primary() -> None:
+    refusal, _seed, retail, _first, _second = _fixture(goal_donor="donor.second")
+    selected = refusal.unit.donors[1]
+    selected_source = selected.request.logical_outputs[refusal.unit.plan.source]
+    moved = repointed_action(refusal.intervention, selected.intervention.id)
+
+    materials = repoint_refusal_materials(refusal, moved, selected, retail)
+
+    assert materials.target_donor_object == retail
+    assert materials.target_donor_source == selected_source
+    assert materials.complete_donor_object is None
+    assert materials.instruction_donor_object is None
+    assert materials.additional_donor_objects == {}

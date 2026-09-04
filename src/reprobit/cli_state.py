@@ -49,9 +49,15 @@ def command_state_status(args: argparse.Namespace, output: CLIOutput) -> int:
         f"state: {human_bytes(status.total_bytes)} in {count_phrase(status.total_files, 'file')}",
         f"  runs: {len(status.runs)} ({active} active, {retained} retained), "
         f"{human_bytes(status.run_bytes)}",
-        f"  cache: {count_phrase(status.cache_records, 'record')}, "
+        f"  incremental cache: {count_phrase(status.cache_records, 'record')}, "
         f"{count_phrase(status.cache_blobs, 'blob')}, "
         f"{human_bytes(status.cache_bytes)}",
+        "  repair search cache: "
+        f"{count_phrase(status.repair_probe_cache_files, 'file')}, "
+        f"{human_bytes(status.repair_probe_cache_bytes)}",
+        "  saved repair data: "
+        f"{count_phrase(status.repair_ledger_files, 'file')}, "
+        f"{human_bytes(status.repair_ledger_bytes)}",
         f"  cache leases: {status.cache_active_leases} active, {status.cache_stale_leases} stale",
         f"  reports: {status.report_files} managed "
         f"{'file' if status.report_files == 1 else 'files'}, "
@@ -86,6 +92,10 @@ def command_state_status(args: argparse.Namespace, output: CLIOutput) -> int:
         cache_stale_leases=status.cache_stale_leases,
         cache_current_records=status.cache_current_records,
         cache_obsolete_records=status.cache_obsolete_records,
+        repair_search_cache_bytes=status.repair_probe_cache_bytes,
+        repair_search_cache_files=status.repair_probe_cache_files,
+        repair_ledger_bytes=status.repair_ledger_bytes,
+        repair_ledger_files=status.repair_ledger_files,
         report_bytes=status.report_bytes,
         report_files=status.report_files,
         runs=[
@@ -152,6 +162,7 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             result.removed
             or result.cache_removed_records
             or result.cache_removed_blobs
+            or result.repair_probe_cache_files
             or result.reports_removed
         )
         next_command = human_command(next_argv) if has_selection else None
@@ -160,7 +171,7 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
         elif result.cache_active_leases:
             build_verb = "is" if result.cache_active_leases == 1 else "are"
             cache_summary = (
-                "Cache cleanup is currently skipped because "
+                "Incremental cache cleanup is currently skipped because "
                 f"{count_phrase(result.cache_active_leases, 'active build')} "
                 f"{build_verb} using it."
             )
@@ -186,6 +197,13 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
                 f"{count_phrase(result.cache_skipped_recent_records, 'recent cache record')} "
                 "will be kept."
             )
+        repair_cache_summary = (
+            "The selection includes "
+            f"{count_phrase(result.repair_probe_cache_files, 'repair search cache file')} "
+            f"({human_bytes(result.repair_probe_cache_bytes)})."
+            if args.cache
+            else "The repair search cache will be kept."
+        )
         report_summary = (
             f"The selection includes {result.report_files} managed report "
             f"{'file' if result.report_files == 1 else 'files'}."
@@ -202,6 +220,7 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             f"Clean preview: {human_bytes(result.reclaimed_bytes)} can be freed. "
             f"Selected {count_phrase(len(result.removed), 'inactive workspace')}. "
             f"{cache_summary} "
+            f"{repair_cache_summary} "
             f"{report_summary} "
             f"{next_step}",
             candidates=result.removed,
@@ -209,6 +228,8 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             obsolete_cache_requested=args.obsolete_cache,
             cache_records=result.cache_removed_records,
             cache_blobs=result.cache_removed_blobs,
+            repair_search_cache_files=result.repair_probe_cache_files,
+            repair_search_cache_bytes=result.repair_probe_cache_bytes,
             active_cache_leases=result.cache_active_leases,
             reports_requested=args.reports,
             report_files=result.report_files,
@@ -225,7 +246,7 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
     elif result.cache_active_leases:
         build_verb = "is" if result.cache_active_leases == 1 else "are"
         cache_summary = (
-            "Cache cleanup was skipped because "
+            "Incremental cache cleanup was skipped because "
             f"{count_phrase(result.cache_active_leases, 'active build')} "
             f"{build_verb} using it."
         )
@@ -248,6 +269,12 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
             f"{count_phrase(result.cache_removed_blobs, 'unreferenced blob')}; kept "
             f"{count_phrase(result.cache_skipped_recent_records, 'recent cache record')}."
         )
+    repair_cache_summary = (
+        f"Removed {count_phrase(result.repair_probe_cache_files, 'repair search cache file')} "
+        f"({human_bytes(result.repair_probe_cache_bytes)})."
+        if args.cache
+        else "The repair search cache was kept."
+    )
     report_summary = (
         f"Removed {result.report_files} managed report "
         f"{'file' if result.report_files == 1 else 'files'}."
@@ -259,6 +286,7 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
         f"Freed {human_bytes(result.reclaimed_bytes)}. "
         f"Removed {count_phrase(len(result.removed), 'inactive workspace')}. "
         f"{cache_summary} "
+        f"{repair_cache_summary} "
         f"{report_summary} "
         f"Kept {count_phrase(len(result.skipped_active), 'active workspace')} and "
         f"{count_phrase(len(result.skipped_recent), 'recent workspace')}.",
@@ -270,6 +298,8 @@ def command_clean(args: argparse.Namespace, output: CLIOutput) -> int:
         obsolete_cache_requested=args.obsolete_cache,
         cache_records=result.cache_removed_records,
         cache_blobs=result.cache_removed_blobs,
+        repair_search_cache_files=result.repair_probe_cache_files,
+        repair_search_cache_bytes=result.repair_probe_cache_bytes,
         active_cache_leases=result.cache_active_leases,
         skipped_recent_cache_records=result.cache_skipped_recent_records,
         reports_requested=args.reports,

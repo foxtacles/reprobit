@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Mapping, Sequence
+from typing import cast
 
 import reprobit.msvc_discovery_coff as msvc_coff
 import reprobit.msvc_discovery_mosaic as mosaic
@@ -151,6 +152,13 @@ def mosaic_proposal(
 ) -> DiscoveryProposal:
     """Describe a bounded instruction-range mosaic."""
 
+    if any(item.product is None for item in ranges):
+        raise DiscoveryError("discovery mosaic range has no compiler product")
+    discovery_ranges = cast(
+        tuple[tuple[mosaic.MosaicRangeCandidate, DiscoveryProduct], ...],
+        tuple((item, item.product) for item in ranges),
+    )
+
     scope = Scope(
         target=plan.target,
         translation_unit=plan.translation_unit,
@@ -158,7 +166,7 @@ def mosaic_proposal(
     )
     range_models = tuple(
         MosaicRangeProposal(
-            donor_cell_id=item.product.observation.cell_id,
+            donor_cell_id=product.observation.cell_id,
             offset=item.start,
             length=item.end - item.start,
             seed=Digest.from_bytes(seed_body[item.start : item.end]),
@@ -166,9 +174,9 @@ def mosaic_proposal(
             seed_instruction_lengths=item.seed_lengths,
             donor_instruction_lengths=item.donor_lengths,
         )
-        for item in ranges
+        for item, product in discovery_ranges
     )
-    donor_products = {item.product.observation.cell_id: item.product for item in ranges}
+    donor_products = {product.observation.cell_id: product for _item, product in discovery_ranges}
     state_ids = tuple(sorted(declaration_state_id(item.state) for item in donor_products.values()))
     source_artifacts = tuple(
         sorted(

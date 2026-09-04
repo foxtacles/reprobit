@@ -216,7 +216,7 @@ def _stream_compiles(
     cache: ClassicDonorCompileStore | None,
     epoch: str,
     jobs: int,
-) -> tuple[ClassicDonorCompileOutcome, ...]:
+) -> tuple[str, ...]:
     """Keep ``jobs`` compiles in flight and evaluate each outcome as it lands.
 
     Candidates are pulled lazily from ``windows`` only when a worker is free, so
@@ -226,7 +226,7 @@ def _stream_compiles(
     """
 
     candidates = (donor_id for window in windows for donor_id in window)
-    outcomes: list[ClassicDonorCompileOutcome] = []
+    donor_ids: list[str] = []
     running: dict[Future[ClassicDonorProbeOutput], tuple[str, ProbeSeatKey]] = {}
     submitted = 0
     settled = False
@@ -234,9 +234,9 @@ def _stream_compiles(
 
     def record(outcome: ClassicDonorCompileOutcome) -> None:
         nonlocal settled
-        outcomes.append(outcome)
+        donor_ids.append(outcome.donor_id)
         if progress is not None:
-            progress(len(outcomes), planned_candidates, outcome.donor_id)
+            progress(len(donor_ids), planned_candidates, outcome.donor_id)
         if evaluate((outcome,)):
             settled = True
 
@@ -282,7 +282,7 @@ def _stream_compiles(
                 if cache is not None:
                     cache.put(epoch, key, outcome)
                 record(outcome)
-    return tuple(outcomes)
+    return tuple(donor_ids)
 
 
 def probe_donor_compile_windows(
@@ -294,18 +294,17 @@ def probe_donor_compile_windows(
     progress: ClassicDonorProbeProgress | None = None,
     planned_candidates: int,
     cache: ClassicDonorCompileStore | None = None,
-) -> tuple[ClassicDonorCompileOutcome, ...]:
+) -> tuple[str, ...]:
     """Compile lazy candidate windows inside one consumed non-certifying runtime.
 
     ``cache`` replays outcomes of seats compiled earlier under the same compile
     epoch instead of compiling them again; see :mod:`classic_repair_probe_cache`.
 
-    Expected compiler failures are returned per candidate.  ``evaluate`` runs
-    on the coordinating thread for every completed candidate and may stop the
-    search before further candidates are requested from the lazy iterable.
-    Progress is cumulative; its total is an upper bound because a successful
-    cheap tier stops early.  Outcomes are returned in completion order.  No
-    runtime evidence, cache entry, or report is issued.
+    ``evaluate`` receives each full outcome on the coordinating thread and may
+    stop the search before more candidates are requested.  Only completed
+    candidate IDs are retained and returned, in completion order.  Progress is
+    cumulative; its total is an upper bound because a successful cheap tier
+    stops early.  No runtime evidence, cache entry, or report is issued.
     """
 
     if type(planned_candidates) is not int or planned_candidates < 1:
@@ -314,7 +313,7 @@ def probe_donor_compile_windows(
     if not probes.producer.is_open:
         raise ClassicProjectError("classic donor repair probe requires one unused prepared run")
     probes.producer.begin_developer()
-    outcomes: tuple[ClassicDonorCompileOutcome, ...] = ()
+    donor_ids: tuple[str, ...] = ()
     try:
         source_seal = _tree_file_seal(probes.effective_root)
         if probes.overlay.overlay_witnesses:
@@ -351,7 +350,7 @@ def probe_donor_compile_windows(
                 else ""
             )
             cancellation = CancellationToken()
-            outcomes = _stream_compiles(
+            donor_ids = _stream_compiles(
                 probes,
                 prepared,
                 supervisor,
@@ -377,7 +376,7 @@ def probe_donor_compile_windows(
             original.add_note(f"classic donor repair probe cleanup also failed: {cleanup_error}")
         raise
     probes.close()
-    return outcomes
+    return donor_ids
 
 
 __all__ = [

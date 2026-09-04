@@ -202,7 +202,7 @@ validated gs: 1 target, 0 interventions
 ```console
 $ rbit build .
 checking the project files...
-rebuilding changed steps and reusing unchanged work: complete (8/8; execute: target-set; 7.8s elapsed)
+rebuilding changed steps and reusing unchanged work: complete (8/8; 7.8s elapsed)
 Incremental build: 0 reused, 6 rebuilt (0.0% reused); compiler environment started 1 time; 7.77s; target outputs: 0 unchanged, 1 updated
 Why steps were rebuilt:
   compiler.grind_progress.0000: not cached on this machine yet (first build of this step)
@@ -271,7 +271,7 @@ removes files that are no longer part of it.
 
 ## After the project is exact: edits and repair
 
-After editing a file that is already part of the project—even a shared header
+After editing a file in a project that already matched exactly—even a shared header
 used by many source files—let ReproBit repair and verify the project in one
 step:
 
@@ -280,15 +280,23 @@ rbit repair .
 ```
 
 `repair` works on a private copy first. It updates the saved build guidance
-affected by your edit, rebuilds every target from scratch, and checks that the
-result is still exact and trustworthy. Only then does it publish the updated
-project records, verified binaries, matching debug companions, and JSON/HTML
+affected by your edit, follows shared headers to every affected source file,
+updates saved compiler choices and function records, and safely narrows or
+removes old fallback records. It then rebuilds every target from scratch and
+checks that the result is still exact and trustworthy. No hand-written JSON or
+TOML repair recipe is needed.
+
+Repair may take several passes. It fixes the earliest trustworthy problem,
+then rechecks later work from that valid state instead of relying on fallout
+observed after a failed step. Only after the whole project passes does it
+publish the updated records, verified binaries, matching debug companions, and
 report together. If repair cannot prove the result, your source edit is kept
-while the saved records and previously published results stay unchanged. This is
-the maintenance path once a project has reached an exact match; a project that
-builds but does not match yet starts with `discover grind` instead. See
-[`rbit repair`](cli.md#rbit-repair) for report paths, cleanup, and the advanced
-preview tool.
+while previously published records and results stay unchanged.
+
+This is the maintenance path once a project has reached an exact match; a
+project that builds but does not match yet starts with `discover grind`
+instead. See [`rbit repair`](cli.md#rbit-repair) for report paths and advanced
+search budgets.
 
 To add a new file to the reviewed source list—or remove a locked one—start with
 `rbit source preview .`; repair never silently admits newly tracked files.

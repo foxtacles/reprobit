@@ -188,16 +188,21 @@ rbit repair .
 ```
 
 ReproBit updates the saved build guidance affected by your edit, records the
-current source, rebuilds from scratch, and checks every target. It publishes
-updated records, binaries, any matching debug companions, and reports only
-after the result is still exact and trustworthy. On failure, your source edits
-remain, while the saved records and previously published results remain
-unchanged. Follow the printed candidate report or workspace path, then run
-`rbit clean .` when you no longer need that diagnostic state.
+current source, rebuilds from scratch, and checks every target. It follows
+shared headers, updates saved compiler choices and function records, and safely
+narrows or removes old fallback records without a hand-written JSON or TOML
+recipe. Work stays private until the complete result is exact and trustworthy;
+publishing is one atomic step. On failure, your source edits remain, while saved
+records and previously published results remain unchanged.
+Follow the printed report or workspace path, then run `rbit clean .` when you
+no longer need it.
 
 The same `repair` command covers an edit to a shared header, even when many
 source files include it. ReproBit finds the affected work; do not run a command
-for each source file.
+for each source file. Repair may need several passes: it fixes the earliest
+trustworthy refusal, then checks later work again from the repaired state. It
+does not mistake downstream fallout from an incomplete build for a valid
+repair target.
 
 For an added or removed file, run `rbit source preview .` (with the
 same repeatable `--path` values used for an explicit lock). The preview is
@@ -210,30 +215,23 @@ intervention. A successful source lock prints the next required step.
 The NDJSON event keeps the detailed
 source-list, build-graph, and saved-record findings for automation.
 
-For advanced diagnosis, `rbit source regenerate .` previews only the
-mechanical record changes that repair can derive. Human output is a concise
-per-document summary; global `--format ndjson` includes every field-level
-before/after value. Add `--apply` only when you intentionally want that
-intermediate update without a build. It is not certification; after applying,
-the command points back to `rbit repair .` for the build and exact check. See
+For advanced diagnosis, `rbit source regenerate .` previews the source-record
+updates that repair can derive, without writing them. It is not a substitute
+for repair or verification. See
 [`rbit source regenerate`](cli.md#rbit-source-regenerate).
 
-## Repair reports unrecorded fallout it could not record
+## Repair could not restore a newly affected function
 
-`rbit repair .` compared the fresh objects with the composed-body ledger of the
-last accepted verify and found a function without any saved record whose
-linker-selected body moved. Such a function is normally recorded automatically:
-its translation unit is admitted to `reprobit/build-plan.json` when the plan
-did not list it, and carrier discovery searches fresh declaration-only compiler
-states for the verified body. Two errors remain. "could not admit the
-translation units" names a source the locked manifest does not contain or an
-identity that collides with the plan; lock the source first
-(`rbit source preview .`). "could not record unrecorded fallout" means no
-carrier state within the discovery budget carried the verified body; raise
-`--discovery-candidates` and `--donor-candidates`, or derive the record by
-hand. A "verified functions no longer defined by their fresh object" error
-names a function the edit removed outright; that is a semantic change the
-repair cannot restore.
+`rbit repair .` found that the source edit also changed a function that had not
+needed its own saved record before. Repair normally adds the source file to its
+saved guidance and restores the function automatically. If it says it could not
+add saved guidance for a source file, start with `rbit source preview .`; the
+file may be missing from the locked source list. If it says it could not restore
+newly affected functions, raise `--discovery-candidates` and
+`--donor-candidates`, then rerun `rbit repair .`. Do not edit project records by
+hand. If the message says the edit removed a function used by the last accepted
+exact check, the source change is semantic and repair cannot recreate that
+function.
 
 ## Bytes match but the command exits nonzero
 

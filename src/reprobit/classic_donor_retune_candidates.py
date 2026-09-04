@@ -779,14 +779,17 @@ def _apply_overlay_moves(
     parameters: dict[str, JsonValue],
     moves: Sequence[tuple[_OverlayKnobSeat, int]],
     layouts: _SequenceLayouts,
+    *,
+    preserve_canvas_slack: bool = False,
 ) -> tuple[dict[str, JsonValue], tuple[DonorRetuneChange, ...]] | None:
     """Move the given knobs and keep each sequence's line layout consistent.
 
     A knob that grows or shrinks a declaration run by ``delta`` lines pushes
     every later item of the same sequence by ``delta`` and lets a canvas that
-    exactly fitted its items keep fitting them; a canvas with slack grows only
-    when the items would otherwise leave it.  Returns ``None`` when the moved
-    layout is impossible (a line or canvas would drop below one).
+    exactly fitted its items keep fitting them; by default, a canvas with slack
+    grows only when the items would otherwise leave it.  Project-source moves
+    can instead preserve their existing trailing slack.  Returns ``None`` when
+    the moved layout is impossible (a line or canvas would drop below one).
     """
 
     changed = deepcopy(parameters)
@@ -865,7 +868,12 @@ def _apply_overlay_moves(
         moved_extent = _rendered_extent({**generator, "lines": max(canvas, 1) + 8192})
         if moved_extent is None:
             return None
-        new_canvas = moved_extent if canvas == extent else max(canvas, moved_extent)
+        if preserve_canvas_slack:
+            if canvas < extent:
+                return None
+            new_canvas = moved_extent + canvas - extent
+        else:
+            new_canvas = moved_extent if canvas == extent else max(canvas, moved_extent)
         if new_canvas < 1:
             return None
         if new_canvas != canvas:

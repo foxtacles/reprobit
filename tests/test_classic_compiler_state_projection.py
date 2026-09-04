@@ -121,9 +121,28 @@ _VECTOR_CLEAN = bytes.fromhex(
     "568b51048b41088bf13bc28bca740783c1043bc175f952e800000000"
     "c7460400000000c746080000000083c404c7460c000000005ec3"
 )
+_VECTOR_COLD_CLEAN = bytes.fromhex(
+    "568b51048bf18bc28b4e083bc1740783c0043bc175f952e800000000"
+    "c7460400000000c746080000000083c404c7460c000000005ec3"
+)
 _VECTOR_EFFECTIVE = bytes.fromhex(
     "568b41088bf18b49043bc18bd1740783c2043bc275f951e800000000"
     "c7460400000000c746080000000083c404c7460c000000005ec3"
+)
+_VECTOR_EFFECTIVE_WITH_EQUALITY_REVERSAL = bytes.fromhex(
+    "568b41088bf18b49043bc18bd1740783c2043bd075f951e800000000"
+    "c7460400000000c746080000000083c404c7460c000000005ec3"
+)
+_VECTOR_DESTRUCTOR = (
+    "??1?$vector@PAULegoAnimActorStruct@@V?$allocator@PAULegoAnimActorStruct@@@@@@QAE@XZ"
+)
+_VECTOR_FPO = bytes.fromhex("00000000360000000000000000000101")
+_VECTOR_DEBUG = bytes.fromhex(
+    "a30005020000000000000000000000003600000001000000340000000000000000002018007f"
+    "766563746f723c4c65676f416e696d4163746f72537472756374202a2c616c6c6f6361746f72"
+    "3c4c65676f416e696d4163746f72537472756374202a3e3e3a3a7e766563746f723c4c65676f"
+    "416e696d4163746f72537472756374202a2c616c6c6f6361746f723c4c65676f416e696d4163"
+    "746f72537472756374202a3e3e0b0002000f181700047468697302000600"
 )
 
 _TESTTIMER_PRINT_CLEAN = bytes.fromhex(
@@ -233,6 +252,28 @@ def test_vector_pair_proves_real_schedule_and_atomic_web_path() -> None:
     assert web["mapping"] == {"ecx": "edx", "edx": "ecx"}
     assert web["call_observation_count"] == 1
     assert isinstance(web["call_observation_digest"], str)
+
+
+def test_existing_schedule_web_path_ignores_optional_algebraic_search_overflow() -> None:
+    pair = _vector_pair()
+    third_equality_site = bytes.fromhex("3bc17400")
+    pair = replace(
+        pair,
+        clean_body=pair.clean_body[:-2] + third_equality_site + pair.clean_body[-2:],
+        effective_body=pair.effective_body[:-2] + third_equality_site + pair.effective_body[-2:],
+    )
+
+    projection = state_projection.derive_msvc420_compiler_state_projection(
+        [pair],
+        compiler_identity=_compiler_identity(),
+        compiler_evidence=_compiler_evidence("/O2"),
+    )
+
+    assert projection is not None
+    assert [step["kind"] for step in projection.proof["sections"][0]["steps"]] == [
+        "dependence-dag-schedule-v1",
+        "simultaneous-register-web-cycle-v1",
+    ]
 
 
 def test_real_testtimer_print_pair_proves_fpo_ebx_ebp_web_cycle() -> None:
@@ -1078,8 +1119,20 @@ def _fpo_paired_object(
     )
 
 
-def _fpo_vector_coff_pair(*, uses_ebp: int) -> tuple[_CoffObject, _CoffObject]:
-    fpo = _fpo_evidence(len(_VECTOR_CLEAN), uses_ebp=uses_ebp).clean_body
+def _fpo_vector_coff_pair(
+    *,
+    uses_ebp: int,
+    clean_body: bytes = _VECTOR_CLEAN,
+    effective_body: bytes = _VECTOR_EFFECTIVE,
+    owner: str = "_owner",
+    fpo_body: bytes | None = None,
+    debug_body: bytes = b"symbols",
+) -> tuple[_CoffObject, _CoffObject]:
+    fpo = (
+        fpo_body
+        if fpo_body is not None
+        else _fpo_evidence(len(clean_body), uses_ebp=uses_ebp).clean_body
+    )
 
     def build(label: str, body: bytes) -> _CoffObject:
         call = _relocation(
@@ -1108,7 +1161,7 @@ def _fpo_vector_coff_pair(*, uses_ebp: int) -> tuple[_CoffObject, _CoffObject]:
                 _section(
                     3,
                     ".debug$S",
-                    b"symbols",
+                    debug_body,
                     associated=1,
                     characteristics=0x42101048,
                 ),
@@ -1116,7 +1169,7 @@ def _fpo_vector_coff_pair(*, uses_ebp: int) -> tuple[_CoffObject, _CoffObject]:
             (
                 _symbol(
                     0,
-                    "_owner",
+                    owner,
                     value=0,
                     section=1,
                     symbol_type=0x20,
@@ -1133,7 +1186,7 @@ def _fpo_vector_coff_pair(*, uses_ebp: int) -> tuple[_CoffObject, _CoffObject]:
             ),
         )
 
-    return build("clean", _VECTOR_CLEAN), build("effective", _VECTOR_EFFECTIVE)
+    return build("clean", clean_body), build("effective", effective_body)
 
 
 def test_pair_builder_binds_topology_entries_and_exact_eh_control() -> None:
@@ -1407,6 +1460,134 @@ def test_full_coff_non_ebp_projection_accepts_exact_fpo_without_bp_use() -> None
     ]
     assert section["steps"][1]["mapping"] == {"ecx": "edx", "edx": "ecx"}
     assert "frame_pointer_free_evidence" not in section
+
+
+def test_preserved_cold_projection_proves_schedule_web_and_equality_reversal() -> None:
+    clean, effective = _fpo_vector_coff_pair(
+        uses_ebp=0,
+        clean_body=_VECTOR_COLD_CLEAN,
+        effective_body=_VECTOR_EFFECTIVE_WITH_EQUALITY_REVERSAL,
+        owner=_VECTOR_DESTRUCTOR,
+        fpo_body=_VECTOR_FPO,
+        debug_body=_VECTOR_DEBUG,
+    )
+    pair = _compiler_state_code_pairs(
+        clean,
+        effective,
+        excluded_effective_sections=frozenset(),
+    )[0]
+    assert pair.owner == _VECTOR_DESTRUCTOR
+    assert Digest.from_bytes(pair.clean_body).value == (
+        "78356b722faef611c67316829dac65ec109aa8ac6f1b209fdc1f1796aa3e0691"
+    )
+    assert Digest.from_bytes(pair.effective_body).value == (
+        "69c0d19127c6af476665e38de531eb101ddec18db377149648088e74fd4cb76b"
+    )
+    assert pair.fpo_evidence is not None
+    assert pair.fpo_evidence.clean_body == _VECTOR_FPO
+    assert pair.fpo_evidence.effective_body == _VECTOR_FPO
+    assert pair.debug_evidence is not None
+    assert pair.debug_evidence.clean_body == _VECTOR_DEBUG
+    assert pair.debug_evidence.effective_body == _VECTOR_DEBUG
+    pair = replace(
+        pair,
+        clean_section_number=699,
+        effective_section_number=703,
+        topology_digest="1a3548840824d176334abdad9f74bd9becb5ec0cb1a9de199de9e0fac64e7aca",
+        fpo_evidence=replace(
+            pair.fpo_evidence,
+            receipt_digest="a5262fefa62ebb456e8d9f16f31874242c1a17203ad94731b50cc0ac5067c00d",
+        ),
+        debug_evidence=replace(
+            pair.debug_evidence,
+            receipt_digest="1f66ba2b79c6f2540a28db47edf52c8ec87889517cfdf8a509fc41811c9b1bc6",
+        ),
+    )
+    identity = _compiler_identity()
+    projection = state_projection.derive_msvc420_compiler_state_projection(
+        [pair],
+        compiler_identity=identity,
+        compiler_evidence=_compiler_evidence("/O2"),
+    )
+
+    assert projection is not None
+    proof = projection.proof
+    assert proof["compiler_identity"] == identity.proof_receipt()
+    section = proof["sections"][0]
+    assert section["clean_section_number"] == 699
+    assert section["effective_section_number"] == 703
+    assert section["topology_digest"] == pair.topology_digest
+    assert [step["kind"] for step in section["steps"]] == [
+        "derived-equality-compare-reversal-v1",
+        "msvc-4.20-atomic-schedule-register-web-v1",
+    ]
+    assert section["steps"][0]["declaration"] == [
+        {
+            "compare_offset": 11,
+            "branch_offset": 13,
+            "seed_condition": "e",
+            "image_condition": "e",
+            "reencode": True,
+        }
+    ]
+    fused = section["steps"][1]
+    assert fused["window"] == {
+        "start": 1,
+        "end": 13,
+        "target_order": [3, 1, 0, 4, 2],
+    }
+    assert fused["exit_register_cycle"] == {
+        "eax": "edx",
+        "ecx": "eax",
+        "edx": "ecx",
+    }
+    assert "frame_pointer_free_evidence" not in section
+
+
+def test_full_coff_algebraic_bridge_rejects_non_equality_branch() -> None:
+    target = bytearray(_VECTOR_EFFECTIVE_WITH_EQUALITY_REVERSAL)
+    target[20] = 0x7C
+    clean, effective = _fpo_vector_coff_pair(
+        uses_ebp=0,
+        clean_body=_VECTOR_COLD_CLEAN,
+        effective_body=bytes(target),
+        owner=_VECTOR_DESTRUCTOR,
+        fpo_body=_VECTOR_FPO,
+        debug_body=_VECTOR_DEBUG,
+    )
+
+    with pytest.raises(ClassicSemanticError):
+        _coff_compiler_congruence_trace(
+            clean,
+            effective,
+            excluded_effective_sections=frozenset(),
+            compiler_state_identity=_compiler_identity(),
+            compiler_state_evidence=_compiler_evidence("/O2"),
+            compiler_state_projection_required=True,
+        )
+
+
+def test_cold_atomic_schedule_web_rejects_a_recoloured_prefix() -> None:
+    target = bytearray(_VECTOR_EFFECTIVE_WITH_EQUALITY_REVERSAL)
+    target[0] = 0x57  # push edi would change the symbolic window entry
+    clean, effective = _fpo_vector_coff_pair(
+        uses_ebp=0,
+        clean_body=_VECTOR_COLD_CLEAN,
+        effective_body=bytes(target),
+        owner=_VECTOR_DESTRUCTOR,
+        fpo_body=_VECTOR_FPO,
+        debug_body=_VECTOR_DEBUG,
+    )
+
+    with pytest.raises(ClassicSemanticError):
+        _coff_compiler_congruence_trace(
+            clean,
+            effective,
+            excluded_effective_sections=frozenset(),
+            compiler_state_identity=_compiler_identity(),
+            compiler_state_evidence=_compiler_evidence("/O2"),
+            compiler_state_projection_required=True,
+        )
 
 
 @pytest.mark.parametrize(

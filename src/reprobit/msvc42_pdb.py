@@ -13,6 +13,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from enum import StrEnum
 from hashlib import sha256
+from itertools import pairwise
 
 from reprobit.binary import require
 from reprobit.small_msf import SmallMsf, parse_small_msf_stream_table
@@ -23,6 +24,9 @@ _TPI_HEADER_SIZE = 16
 _DBI_HEADER_SIZE = 24
 _MODI50_FIXED_SIZE = 48
 _SC40_SIZE = 20
+_PSI_HEADER_SIZE = 28
+_PSI_SECTION_OFFSET_SIZE = 8
+_S_PUB32_16T = 0x0203
 _S_GPROC32_16T = 0x0205
 _MODULE_STREAM_SIGNATURE = 1
 _NIL_STREAM = 0xFFFF
@@ -81,6 +85,46 @@ class Msvc42PdbIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class Msvc42PdbModule:
+    """One zero-based DBI module and its original linker names."""
+
+    index: int
+    stream_number: int | None
+    module_name: str
+    object_name: str
+
+
+@dataclass(frozen=True, slots=True)
+class Msvc42PdbSectionContribution:
+    """One SC40 range, in debug-companion section coordinates."""
+
+    section: int
+    offset: int
+    size: int
+    characteristics: int
+    module_index: int
+
+
+@dataclass(frozen=True, slots=True)
+class Msvc42PdbPublicSymbol:
+    """One S_PUB32_16t record named by the PSI address map."""
+
+    section: int
+    offset: int
+    name: str
+
+
+@dataclass(frozen=True, slots=True)
+class Msvc42PdbLinkMap:
+    """Read-only ownership and public-address facts from an MSVC 4.2 PDB."""
+
+    identity: Msvc42PdbIdentity
+    modules: tuple[Msvc42PdbModule, ...]
+    contributions: tuple[Msvc42PdbSectionContribution, ...]
+    publics: tuple[Msvc42PdbPublicSymbol, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class PdbCanonicalizationAudit:
     """Content identity and exact byte-level explanation of one transform."""
 
@@ -121,6 +165,10 @@ class _ModuleStream:
 class _DbiStreams:
     modules: tuple[_ModuleStream, ...]
     auxiliaries: tuple[int, ...]
+    link_modules: tuple[Msvc42PdbModule, ...]
+    contributions: tuple[Msvc42PdbSectionContribution, ...]
+    public_symbols: int | None
+    symbol_records: int | None
 
 
 def _coalesce(ranges: list[tuple[int, int]]) -> tuple[PdbCanonicalizationRange, ...]:
@@ -352,6 +400,12 @@ def _find_nul(data: bytes, start: int, end: int, context: str) -> int:
     return offset
 
 
+def _pdb_name(data: bytes, start: int, end: int) -> str:
+    # VC 4.2 stores current-code-page bytes.  Latin-1 is intentionally used as
+    # a lossless byte-to-text mapping instead of guessing a host code page.
+    return data[start:end].decode("latin-1")
+
+
 def _dbi_stream(msf: SmallMsf, edits: _Edits) -> _DbiStreams:
     stream = msf.read_stream(3, "DBI")
     require(len(stream) >= _DBI_HEADER_SIZE, "DBI stream is truncated")
@@ -387,6 +441,7 @@ def _dbi_stream(msf: SmallMsf, edits: _Edits) -> _DbiStreams:
 
     module_end = _DBI_HEADER_SIZE + module_bytes
     modules: list[_ModuleStream] = []
+    link_modules: list[Msvc42PdbModule] = []
     live_streams: set[int] = set()
     cursor = _DBI_HEADER_SIZE
     while cursor < module_end:
@@ -421,6 +476,14 @@ def _dbi_stream(msf: SmallMsf, edits: _Edits) -> _DbiStreams:
         require(second_nul > first_nul + 1, "DBI object name is empty")
         record_end = (second_nul + 4) & ~3
         require(record_end <= module_end, "DBI MODI50 alignment exceeds its substream")
+        link_modules.append(
+            Msvc42PdbModule(
+                index=len(link_modules),
+                stream_number=None if stream_number == _NIL_STREAM else stream_number,
+                module_name=_pdb_name(stream, cursor + _MODI50_FIXED_SIZE, first_nul),
+                object_name=_pdb_name(stream, first_nul + 1, second_nul),
+            )
+        )
 
         edits.zero(
             PdbCanonicalizationCategory.DBI_TRANSIENT_POINTERS,
@@ -456,7 +519,20 @@ def _dbi_stream(msf: SmallMsf, edits: _Edits) -> _DbiStreams:
     require(cursor == module_end, "DBI MODI50 records do not exhaust their substream")
 
     sc_end = module_end + sc_bytes
+    contributions: list[Msvc42PdbSectionContribution] = []
     for offset in range(module_end, sc_end, _SC40_SIZE):
+        section, _leading_padding, section_offset, size, characteristics, module_index, _pad = (
+            struct.unpack_from("<HHIIIHH", stream, offset)
+        )
+        contributions.append(
+            Msvc42PdbSectionContribution(
+                section=section,
+                offset=section_offset,
+                size=size,
+                characteristics=characteristics,
+                module_index=module_index,
+            )
+        )
         edits.zero(
             PdbCanonicalizationCategory.DBI_SC40_PADDING,
             msf.stream_ranges(3, offset + 2, 2, "DBI SC40 leading padding"),
@@ -465,12 +541,24 @@ def _dbi_stream(msf: SmallMsf, edits: _Edits) -> _DbiStreams:
             PdbCanonicalizationCategory.DBI_SC40_PADDING,
             msf.stream_ranges(3, offset + 18, 2, "DBI SC40 trailing padding"),
         )
-    return _DbiStreams(tuple(modules), tuple(auxiliary_streams))
+    return _DbiStreams(
+        modules=tuple(modules),
+        auxiliaries=tuple(auxiliary_streams),
+        link_modules=tuple(link_modules),
+        contributions=tuple(contributions),
+        public_symbols=None if public_symbols == _NIL_STREAM else public_symbols,
+        symbol_records=None if symbol_records == _NIL_STREAM else symbol_records,
+    )
 
 
 def _validate_stream_roles(tpi_hash: int, dbi: _DbiStreams) -> None:
     roles = (tpi_hash, *dbi.auxiliaries, *(module.number for module in dbi.modules))
     require(len(set(roles)) == len(roles), "MSVC 4.2 PDB stream roles alias one another")
+
+
+def _validate_dbi_stream_roles(dbi: _DbiStreams) -> None:
+    roles = (*dbi.auxiliaries, *(module.number for module in dbi.modules))
+    require(len(set(roles)) == len(roles), "MSVC 4.2 DBI stream roles alias one another")
 
 
 def _module_streams(msf: SmallMsf, edits: _Edits, modules: tuple[_ModuleStream, ...]) -> None:
@@ -539,6 +627,124 @@ def _module_streams(msf: SmallMsf, edits: _Edits, modules: tuple[_ModuleStream, 
                         tail_size == expected_alignment,
                         "S_GPROC32_16t alignment is malformed",
                     )
+
+
+def _validated_link_contributions(
+    dbi: _DbiStreams,
+) -> tuple[Msvc42PdbSectionContribution, ...]:
+    for contribution in dbi.contributions:
+        require(contribution.section != 0, "DBI SC40 contribution has no section")
+        require(contribution.size != 0, "DBI SC40 contribution is empty")
+        require(
+            contribution.offset + contribution.size <= 0x100000000,
+            "DBI SC40 contribution exceeds its 32-bit section",
+        )
+        require(
+            contribution.module_index < len(dbi.link_modules),
+            "DBI SC40 contribution has an out-of-range module index",
+        )
+    return dbi.contributions
+
+
+def _s_pub32_16t(symbols: bytes, record_offset: int) -> Msvc42PdbPublicSymbol:
+    require(record_offset % 4 == 0, "PSI address-map entry is not aligned")
+    require(record_offset <= len(symbols) - 4, "PSI address-map entry exceeds symbol records")
+    record_length, record_type = struct.unpack_from("<HH", symbols, record_offset)
+    require(record_length >= 2, "PSI CodeView symbol record is too short")
+    record_end = record_offset + 2 + record_length
+    require(record_end <= len(symbols), "PSI CodeView symbol exceeds symbol records")
+    require(record_end % 4 == 0, "PSI CodeView symbol record is not aligned")
+    require(record_type == _S_PUB32_16T, "PSI address map names a non-S_PUB32_16t record")
+    require(record_end >= record_offset + 13, "S_PUB32_16t fixed fields are truncated")
+    offset, section, _type_index = struct.unpack_from("<IHH", symbols, record_offset + 4)
+    name_size = symbols[record_offset + 12]
+    require(name_size != 0, "S_PUB32_16t name is empty")
+    name_start = record_offset + 13
+    name_end = name_start + name_size
+    require(name_end <= record_end, "S_PUB32_16t name exceeds its record")
+    require(
+        record_end - name_end == (-name_end) % 4,
+        "S_PUB32_16t has an unexplained tail",
+    )
+    require(not any(symbols[name_end:record_end]), "S_PUB32_16t alignment is not canonical")
+    return Msvc42PdbPublicSymbol(
+        section=section,
+        offset=offset,
+        name=_pdb_name(symbols, name_start, name_end),
+    )
+
+
+def _psi_publics(msf: SmallMsf, dbi: _DbiStreams) -> tuple[Msvc42PdbPublicSymbol, ...]:
+    if dbi.public_symbols is None:
+        return ()
+    require(dbi.symbol_records is not None, "DBI PSI has no symbol-record stream")
+    symbol_records = dbi.symbol_records
+    assert symbol_records is not None
+    psi = msf.read_stream(dbi.public_symbols, "DBI public-symbol PSI")
+    require(len(psi) >= _PSI_HEADER_SIZE, "PSI stream is truncated")
+    (
+        symbol_hash_bytes,
+        address_map_bytes,
+        thunk_count,
+        thunk_size,
+        thunk_section,
+        thunk_offset,
+        section_count,
+    ) = struct.unpack_from("<IIIIH2xII", psi, 0)
+    require(psi[18:20] == b"\0\0", "PSI header ABI padding is not canonical")
+    require(address_map_bytes % 4 == 0, "PSI address map is not aligned")
+    require(
+        thunk_count != 0 or (thunk_size == 0 and thunk_section == 0 and thunk_offset == 0),
+        "PSI empty thunk map has nonzero metadata",
+    )
+    require(
+        thunk_count == 0 or (thunk_size != 0 and thunk_section != 0),
+        "PSI thunk map metadata is incomplete",
+    )
+    address_map_start = _PSI_HEADER_SIZE + symbol_hash_bytes
+    address_map_end = address_map_start + address_map_bytes
+    expected_size = address_map_end + thunk_count * 4 + section_count * _PSI_SECTION_OFFSET_SIZE
+    require(expected_size == len(psi), "PSI substream sizes do not exhaust the stream")
+
+    symbols = msf.read_stream(symbol_records, "DBI symbol records")
+    record_offsets = tuple(
+        struct.unpack_from("<I", psi, offset)[0]
+        for offset in range(address_map_start, address_map_end, 4)
+    )
+    require(
+        len(set(record_offsets)) == len(record_offsets),
+        "PSI address map repeats a symbol-record offset",
+    )
+    publics = tuple(_s_pub32_16t(symbols, offset) for offset in record_offsets)
+    require(
+        all(
+            (left.section, left.offset) <= (right.section, right.offset)
+            for left, right in pairwise(publics)
+        ),
+        "PSI address map is not ordered by address",
+    )
+    return publics
+
+
+def read_msvc42_pdb_link_map(data: bytes) -> Msvc42PdbLinkMap:
+    """Read modules, SC40 ownership ranges, and PSI-indexed public symbols.
+
+    Section numbers and offsets describe the linked debug companion.  This API
+    intentionally does not infer a coordinate transform to a different PE.
+    """
+
+    require(type(data) is bytes, "MSVC 4.2 PDB input must be bytes")
+    msf = SmallMsf(data)
+    require(len(msf.streams) >= 4, "MSVC 4.2 PDB is missing reserved streams")
+    identity = _pdb_identity(msf)
+    dbi = _dbi_stream(msf, _Edits(data))
+    _validate_dbi_stream_roles(dbi)
+    return Msvc42PdbLinkMap(
+        identity=identity,
+        modules=dbi.link_modules,
+        contributions=_validated_link_contributions(dbi),
+        publics=_psi_publics(msf, dbi),
+    )
 
 
 def read_msvc42_pdb_identity(data: bytes) -> Msvc42PdbIdentity:
@@ -620,10 +826,15 @@ __all__ = [
     "MSVC42_PDB_CANONICALIZATION_POLICY",
     "CanonicalizedMsvc42Pdb",
     "Msvc42PdbIdentity",
+    "Msvc42PdbLinkMap",
+    "Msvc42PdbModule",
+    "Msvc42PdbPublicSymbol",
+    "Msvc42PdbSectionContribution",
     "PdbCanonicalizationAudit",
     "PdbCanonicalizationCategory",
     "PdbCanonicalizationRange",
     "PdbCanonicalizationStat",
     "canonicalize_msvc42_pdb",
     "read_msvc42_pdb_identity",
+    "read_msvc42_pdb_link_map",
 ]

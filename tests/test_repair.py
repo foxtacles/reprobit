@@ -11,7 +11,13 @@ from test_cli import _complete_translation_unit_project
 from reprobit.cli import main
 from reprobit.cli_output import CLIOutput
 from reprobit.cli_paths import CLIError
-from reprobit.project_loader import load_project_tree
+from reprobit.composition_ledger import (
+    COMPOSED_BODY_LEDGER_RELATIVE,
+    ComposedBodyLedger,
+    read_ledger,
+    write_ledger,
+)
+from reprobit.project_loader import load_project, load_project_tree
 from reprobit.repair import RepairError, capture_repair_snapshot, collect_repair_candidate
 from reprobit.repair_workflow import RepairWorkflowError, RepairWorkflowResult
 from reprobit.schema import classic_debug_companion_paths
@@ -42,6 +48,13 @@ def _write_candidate_reports(args: argparse.Namespace) -> None:
     report_directory.mkdir(parents=True, exist_ok=True)
     (report_directory / "report.json").write_bytes(b"{}\n")
     (report_directory / "report.html").write_bytes(b"<!doctype html>\n")
+
+
+def _write_composed_body_ledger(project: Path, graph_digest: str) -> Path:
+    spec = load_project(project)
+    path = (project / spec.state_dir).joinpath(*COMPOSED_BODY_LEDGER_RELATIVE)
+    write_ledger(path, ComposedBodyLedger(graph_digest=graph_digest))
+    return path
 
 
 @pytest.fixture(autouse=True)
@@ -191,7 +204,38 @@ def test_repair_noop_reports_that_exact_verification_passed(
 
     assert main(["repair", str(project)]) == 0
 
-    assert "Nothing needed repair; every target still matches exactly" in capsys.readouterr().out
+    assert (
+        "Nothing needed repair after 1 pass; every target still matches exactly"
+        in capsys.readouterr().out
+    )
+
+
+def test_repair_quiet_reaches_private_workflow_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+
+    def repair(_args: object, output: CLIOutput, **_kwargs: object) -> RepairWorkflowResult:
+        with output.producer_activity("repair pass 1: checking affected source files") as progress:
+            progress(1, 1, "compile", "compiler.unit")
+        return RepairWorkflowResult((), (), 0, 0, 0, 0, 0, 1)
+
+    def verify(args: argparse.Namespace, _output: CLIOutput) -> int:
+        _write_candidate_reports(args)
+        return 0
+
+    monkeypatch.setattr("reprobit.cli_repair.repair_classic_records", repair)
+    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    capsys.readouterr()
+
+    assert main(["--quiet", "repair", str(project)]) == 0
+
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert "Nothing needed repair after 1 pass" in captured.out
 
 
 def test_repair_completion_omits_zero_counters_and_uses_plain_pluralization(
@@ -226,13 +270,55 @@ def test_repair_completion_omits_zero_counters_and_uses_plain_pluralization(
     assert main(["repair", str(project)]) == 0
 
     message = capsys.readouterr().out
+    assert "Repair complete after 2 passes" in message
     assert "Repaired 1 affected source file and refreshed its saved guidance." in message
-    assert "Tested 1 nearby compiler setting." in message
+    assert "Tested 1 nearby repair choice." in message
     assert "saved expectation" not in message
     assert "obsolete adjustment" not in message
     assert "donor" not in message
     assert "TU" not in message
     assert "(s)" not in message
+
+
+def test_repair_machine_summary_names_all_compiler_candidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
+    monkeypatch.setattr(
+        "reprobit.cli_repair.repair_classic_records",
+        lambda *_args, **_kwargs: RepairWorkflowResult(
+            (),
+            ("tu.unit",),
+            0,
+            0,
+            0,
+            0,
+            3,
+            2,
+            admitted_units=2,
+            source_retunes=1,
+        ),
+    )
+
+    def verify(args: argparse.Namespace, _output: CLIOutput) -> int:
+        _write_candidate_reports(args)
+        return 0
+
+    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    capsys.readouterr()
+
+    assert main(["--format", "ndjson", "repair", str(project)]) == 0
+
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    completion = next(event for event in events if event["event"] == "repair_complete")
+    assert completion["compiler_candidates"] == 3
+    assert completion["donor_candidates"] == 3
+    assert completion["admitted_translation_units"] == 2
+    assert completion["source_retunes"] == 1
 
 
 def test_repair_refusal_emits_stable_candidate_diagnostics_for_machines(
@@ -283,9 +369,10 @@ def test_repair_refusal_keeps_human_guidance_plain_and_actionable(
 
     def refuse(*_args: object, **_kwargs: object) -> RepairWorkflowResult:
         raise RepairWorkflowError(
-            "No safe automatic repair restored `tu.unit` after testing 4 nearby compiler "
-            "settings. Closest technical candidate: `classes` 6 -> 8. Technical reason "
-            "it was refused: retail relocation target changed."
+            "Automatic repair could not prove a safe result for affected build `tu.unit` after "
+            "testing 4 nearby compiler choices. "
+            "Closest compiler choice tried: `classes` 6 -> 8. "
+            "Why it was rejected: retail relocation target changed."
         )
 
     monkeypatch.setattr("reprobit.cli_repair.repair_classic_records", refuse)
@@ -296,8 +383,8 @@ def test_repair_refusal_keeps_human_guidance_plain_and_actionable(
     message = capsys.readouterr().err
     assert "Repair stopped while repairing saved build guidance" in message
     assert "Your source edits are untouched" in message
-    assert "No safe automatic repair restored `tu.unit`" in message
-    assert "Closest technical candidate: `classes` 6 -> 8" in message
+    assert "Automatic repair could not prove a safe result for affected build `tu.unit`" in message
+    assert "Closest compiler choice tried: `classes` 6 -> 8" in message
     assert "Diagnostics:" in message
     assert "Cleanup when finished:" in message
 
@@ -363,6 +450,8 @@ def test_repair_restores_authority_when_verification_returns_failure(
     edited = b"int main() { return 1; }\n"
     (project / "src/unit.cpp").write_bytes(edited)
     before = _authority_bytes(project)
+    public_ledger = _write_composed_body_ledger(project, "1" * 64)
+    ledger_before = public_ledger.read_bytes()
 
     monkeypatch.setattr("reprobit.cli_repair.command_verify", lambda *_args: 1)
     capsys.readouterr()
@@ -372,6 +461,55 @@ def test_repair_restores_authority_when_verification_returns_failure(
     assert "did not satisfy exact verification" in capsys.readouterr().err
     assert _authority_bytes(project) == before
     assert (project / "src/unit.cpp").read_bytes() == edited
+    assert public_ledger.read_bytes() == ledger_before
+
+
+def test_source_layout_fallback_stays_private_when_final_verification_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    relative = Path("reprobit/interventions/unit.json")
+    public_authority = project / relative
+    before = _authority_bytes(project)
+
+    def accept_private_layout(
+        _args: object,
+        _output: CLIOutput,
+        *,
+        staged_root: Path,
+        **_kwargs: object,
+    ) -> RepairWorkflowResult:
+        staged_authority = staged_root / relative
+        staged_authority.write_bytes(staged_authority.read_bytes() + b"\n")
+        assert staged_authority.read_bytes() != public_authority.read_bytes()
+        return RepairWorkflowResult(
+            (relative.as_posix(),),
+            (),
+            0,
+            0,
+            0,
+            0,
+            1,
+            2,
+            source_retunes=1,
+        )
+
+    def reject(args: argparse.Namespace, _output: CLIOutput) -> int:
+        staged_authority = Path(args.project) / relative
+        assert staged_authority.read_bytes() != public_authority.read_bytes()
+        return 1
+
+    monkeypatch.setattr("reprobit.cli_repair.repair_classic_records", accept_private_layout)
+    monkeypatch.setattr("reprobit.cli_repair.command_verify", reject)
+    capsys.readouterr()
+
+    assert main(["repair", str(project)]) == 2
+
+    assert "did not satisfy exact verification" in capsys.readouterr().err
+    assert _authority_bytes(project) == before
 
 
 def test_repair_never_overwrites_concurrent_authority_edits(
@@ -453,6 +591,109 @@ def test_repair_never_overwrites_concurrent_report(
     message = capsys.readouterr().err
     assert "preimage conflict" in message
     assert live_report.read_bytes() == b"concurrent report\n"
+
+
+def test_repair_publishes_the_verified_composed_body_ledger(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
+    public_ledger = _write_composed_body_ledger(project, "1" * 64)
+
+    def verify(args: argparse.Namespace, _output: CLIOutput) -> int:
+        staged = Path(args.project)
+        _write_candidate_reports(args)
+        _write_composed_body_ledger(staged, "2" * 64)
+        return 0
+
+    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    capsys.readouterr()
+
+    assert main(["repair", str(project)]) == 0
+
+    assert read_ledger(public_ledger).graph_digest == "2" * 64
+
+
+def test_repair_removes_an_old_ledger_when_the_verified_run_has_none(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    public_ledger = _write_composed_body_ledger(project, "1" * 64)
+
+    def verify(args: argparse.Namespace, _output: CLIOutput) -> int:
+        _write_candidate_reports(args)
+        return 0
+
+    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    capsys.readouterr()
+
+    assert main(["repair", str(project)]) == 0
+
+    assert not public_ledger.exists()
+
+
+def test_repair_refuses_a_concurrent_public_ledger_change_without_partial_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    (project / "src/unit.cpp").write_bytes(b"int main() { return 1; }\n")
+    spec = load_project(project)
+    public_ledger = (project / spec.state_dir).joinpath(*COMPOSED_BODY_LEDGER_RELATIVE)
+    artifact = project / "out/program.bin"
+    artifact.parent.mkdir(parents=True, exist_ok=True)
+    artifact.write_bytes(b"old output\n")
+
+    def verify(args: argparse.Namespace, _output: CLIOutput) -> int:
+        _write_candidate_reports(args)
+        _write_composed_body_ledger(project, "3" * 64)
+        return 0
+
+    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    capsys.readouterr()
+
+    assert main(["repair", str(project)]) == 2
+
+    assert "preimage conflict" in capsys.readouterr().err
+    assert read_ledger(public_ledger).graph_digest == "3" * 64
+    assert artifact.read_bytes() == b"old output\n"
+
+
+def test_repair_refuses_malformed_verified_repair_data(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    project = tmp_path / "project"
+    _complete_translation_unit_project(project)
+    public_ledger = _write_composed_body_ledger(project, "1" * 64)
+    before = public_ledger.read_bytes()
+
+    def verify(args: argparse.Namespace, _output: CLIOutput) -> int:
+        staged = Path(args.project)
+        _write_candidate_reports(args)
+        ledger = (staged / load_project_tree(staged).spec.state_dir).joinpath(
+            *COMPOSED_BODY_LEDGER_RELATIVE
+        )
+        ledger.parent.mkdir(parents=True, exist_ok=True)
+        ledger.write_bytes(b"{}\n")
+        return 0
+
+    monkeypatch.setattr("reprobit.cli_repair.command_verify", verify)
+    capsys.readouterr()
+
+    assert main(["repair", str(project)]) == 2
+
+    assert "verified repair data is invalid" in capsys.readouterr().err
+    assert public_ledger.read_bytes() == before
 
 
 def test_repair_refuses_report_directory_inside_saved_authority(

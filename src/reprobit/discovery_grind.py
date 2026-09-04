@@ -546,7 +546,7 @@ def run_project_grind(
                 completed,
                 total,
                 "grind-verify",
-                f"Cold-verifying {state_id}",
+                f"Verifying {state_id} from scratch",
                 kind=ProgressKind.PHASE_STARTED,
             )
             evidence = callbacks.cold_verify(staged_root)

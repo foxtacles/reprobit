@@ -51,26 +51,26 @@ _OUTCOME_COPY: Mapping[OutcomeBranch, tuple[str, str]] = MappingProxyType(
     {
         "published-exact": (
             "Exact adjustment saved",
-            "The chosen compiler settings passed a fresh verification build, matched every "
+            "The selected compiler choices passed a fresh verification build, matched every "
             "target byte for byte, and passed the required logic checks. ReproBit then saved "
             "the adjustment and its supporting verification records together.",
         ),
         "published": (
             "Locally proven adjustment saved",
-            "The chosen compiler settings reproduced this function from the project-owned "
+            "The selected compiler choices reproduced this function from the project-owned "
             "reference object and passed the required logic checks in a fresh build. The "
             "complete project does not match yet, so this is saved progress—not project "
             "certification.",
         ),
         "exact": (
             "Exact adjustment ready for review",
-            "The chosen compiler settings passed a fresh verification build, matched every "
+            "The selected compiler choices passed a fresh verification build, matched every "
             "target byte for byte, and passed the required logic checks. This preview wrote "
             "only review reports; the project files stayed unchanged.",
         ),
         "qualified": (
             "Locally proven adjustment ready for review",
-            "The chosen compiler settings reproduced this function from the project-owned "
+            "The selected compiler choices reproduced this function from the project-owned "
             "reference object and passed the required logic checks in a fresh build. The "
             "complete project does not match yet, and this preview left project files "
             "unchanged. This local result is not project certification.",
@@ -298,7 +298,7 @@ def _decision(
     return f"""
 <article class="card decision-card {tone}">
   <p class="eyebrow"><code>{escape(state_id)}</code></p>
-  <h3>Selected compiler settings</h3>
+  <h3>Selected compiler choices</h3>
   {publish_status}
   <p>{parameters}</p>
   <p>Symbol <code>{escape(solution.symbol)}</code> · added cost

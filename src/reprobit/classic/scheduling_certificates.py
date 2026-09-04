@@ -39,6 +39,42 @@ from .scheduling_webs import _ia32_web_membership
 INSTRUCTION_SCHEDULE_KIND = "topological_window_reordering_v1"
 
 
+def measure_instruction_schedule_debug_envelope(
+    coff: CoffObject,
+    section: dict[str, Any],
+    context: str,
+) -> dict[str, Any]:
+    """Measure the procedure range and closure references used by rewriting proofs."""
+
+    child = _comdat_child(coff, section, ".debug$S")
+    stream = coff_body(coff, child)
+    records = parse_codeview_symbol_stream(stream, f"{context} debug$S")
+    procedures = [record for record in records if record["type"] in CODEVIEW_PROCEDURE_RECORD_TYPES]
+    require(
+        len(procedures) == 1,
+        f"{context}: the .debug$S stream does not carry exactly one procedure record",
+    )
+    record = procedures[0]
+    procedure_range = list(
+        coff_unpack("<III", stream, record["offset"] + 16, f"{context} procedure record")
+    )
+    values = {
+        symbol["name"]: symbol["value"]
+        for symbol in coff.symbols.values()
+        if symbol["section"] == section["number"]
+    }
+    referenced = []
+    for child_name in _comdat_child_closure(coff, section)[1]:
+        sibling = _comdat_child(coff, section, child_name)
+        for row in detailed_relocations(coff, sibling):
+            if row["target"] in values:
+                referenced.append([child_name, row["target"], values[row["target"]]])
+    return {
+        "procedure_range": procedure_range,
+        "code_symbol_references": referenced,
+    }
+
+
 def require_instruction_schedule_debug_fidelity(
     coff: CoffObject,
     section: dict[str, Any],
@@ -113,18 +149,8 @@ def require_instruction_schedule_debug_fidelity(
             f"{context}: the line rows inside window {start:#x} differ from their declaration",
         )
         interior.extend(attribution)
-    child = _comdat_child(coff, section, ".debug$S")
-    stream = coff_body(coff, child)
-    records = parse_codeview_symbol_stream(stream, f"{context} debug$S")
-    procedures = [record for record in records if record["type"] in CODEVIEW_PROCEDURE_RECORD_TYPES]
-    require(
-        len(procedures) == 1,
-        f"{context}: the .debug$S stream does not carry exactly one procedure record",
-    )
-    record = procedures[0]
-    code_length, debug_start, debug_end = coff_unpack(
-        "<III", stream, record["offset"] + 16, f"{context} procedure record"
-    )
+    envelope = measure_instruction_schedule_debug_envelope(coff, section, context)
+    code_length, debug_start, debug_end = envelope["procedure_range"]
     require(
         [code_length, debug_start, debug_end] == spec["expected_procedure_range"],
         f"{context}: the procedure record's code range differs from its declaration",
@@ -146,26 +172,15 @@ def require_instruction_schedule_debug_fidelity(
             ),
             f"{context}: the procedure record's {name} falls inside a reordered window",
         )
-    values = {}
-    for symbol in coff.symbols.values():
-        if symbol["section"] == section["number"]:
-            values[symbol["name"]] = symbol["value"]
-    referenced = []
-    for child_name in _comdat_child_closure(coff, section)[1]:
-        sibling = _comdat_child(coff, section, child_name)
-        for row in detailed_relocations(coff, sibling):
-            if row["target"] in values:
-                value = values[row["target"]]
-                require(
-                    not any(
-                        (
-                            start < value < end
-                            for start, end in [(item["start"], item["end"]) for item in windows]
-                        )
-                    ),
-                    f"{context}: {child_name} names the code symbol {row['target']} at {value:#x}, inside a reordered window",
-                )
-                referenced.append([child_name, row["target"], value])
+    referenced = envelope["code_symbol_references"]
+    for child_name, target, value in referenced:
+        require(
+            not any(
+                start < value < end
+                for start, end in [(item["start"], item["end"]) for item in windows]
+            ),
+            f"{context}: {child_name} names the code symbol {target} at {value:#x}, inside a reordered window",
+        )
     require(
         sorted(referenced) == sorted(spec["expected_code_symbol_references"]),
         f"{context}: the closure's code-symbol references differ from their declaration",

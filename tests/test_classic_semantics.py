@@ -36,6 +36,7 @@ from reprobit.classic.compiler_epoch import (
     _helper_delta_sections,
     _macro_capture_collisions,
     _portable_tree_statement,
+    _project_compiler_artifact_pair,
     _seed_order_dependencies,
     _validate_compiler_invocation,
     _validate_compiler_namespaces,
@@ -2075,6 +2076,99 @@ def test_coff_envelope_alpha_normalizes_compiler_local_symbol_order() -> None:
     )
 
     assert theorem["theorem"] == "closed-source-compiler-congruence-coff-envelope-v1"
+
+
+def _artifact_pair_fixture(
+    tmp_path: Path,
+    baseline: bytes,
+    candidate: bytes,
+):
+    bundle, graph, *_rest = _base_authority(tmp_path, generated_carrier=False)
+    node = next(item for item in graph.nodes if item.role is ProducerRole.COMPILER)
+    source = b"int target() { return 1; }\n"
+    invocation, _namespace = _compiler_invocation(
+        bundle,
+        graph,
+        node,
+        (
+            CompilerSourceRead(
+                "source/src/unit.cpp",
+                Digest.from_bytes(source),
+                len(source),
+                None,
+                source,
+            ),
+        ),
+        namespace_id="artifact-pair",
+    )
+    return _project_compiler_artifact_pair(
+        bundle=bundle,
+        compiler_invocation=invocation,
+        counterfactual=_parse_coff(baseline, "baseline.obj"),
+        effective=_parse_coff(candidate, "candidate.obj"),
+        projection_required=True,
+    )
+
+
+def _mutate_first_section_byte(payload: bytes) -> bytes:
+    result = bytearray(payload)
+    body_offset = struct.unpack_from("<I", payload, 40)[0]
+    result[body_offset] ^= 1
+    return bytes(result)
+
+
+def test_project_compiler_artifact_pair_uses_the_closed_coff_envelope(
+    tmp_path: Path,
+) -> None:
+    baseline = _append_coff_symbols(
+        _coff_object("_entry"),
+        _symbol("x$S1", value=0, section=1, symbol_type=0, storage=3),
+    )
+    candidate = _append_coff_symbols(
+        _coff_object("_entry"),
+        _symbol("x$S2", value=0, section=1, symbol_type=0, storage=3),
+    )
+
+    proof = _artifact_pair_fixture(tmp_path, baseline, candidate)
+
+    assert proof.projection.equivalent is False
+    assert proof.coff_trace["changed_code_section_count"] == 0
+    assert proof.decision.proven is True
+
+
+@pytest.mark.parametrize(
+    ("baseline", "candidate"),
+    (
+        (
+            _coff_object("_entry", reference="_left"),
+            _coff_object("_entry", reference="_right"),
+        ),
+        (
+            _coff_const_pool(external_owner=True),
+            _mutate_first_section_byte(_coff_const_pool(external_owner=True)),
+        ),
+        (
+            _coff_const_pool(relocation=True, external_owner=True),
+            _patch_coff_symbol(
+                _coff_const_pool(relocation=True, external_owner=True),
+                "_pool",
+                value=1,
+            ),
+        ),
+        (
+            _coff_object("_entry", body_payload=b"\x90\xc3"),
+            _coff_object("_entry", body_payload=b"\x91\xc3"),
+        ),
+    ),
+    ids=("external-target", "data-body", "relocation-target-value", "code-byte"),
+)
+def test_project_compiler_artifact_pair_rejects_unproved_runtime_changes(
+    tmp_path: Path,
+    baseline: bytes,
+    candidate: bytes,
+) -> None:
+    with pytest.raises(ClassicSemanticError):
+        _artifact_pair_fixture(tmp_path, baseline, candidate)
 
 
 def test_typed_crt_pull_admits_only_its_derived_dead_helper_dependency() -> None:

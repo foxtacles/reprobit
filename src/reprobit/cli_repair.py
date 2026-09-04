@@ -52,6 +52,7 @@ def _candidate_output(output: CLIOutput) -> CLIOutput:
         stdout=output.stdout if output.output_format == "ndjson" else StringIO(),
         stderr=output.stderr,
         heartbeat_seconds=output.heartbeat_seconds,
+        quiet=output.quiet,
     )
 
 
@@ -168,12 +169,13 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
                 repair_result.measured_checks,
                 repair_result.retired_actions,
                 repair_result.donor_retunes,
+                repair_result.source_retunes,
                 repair_result.reauthored_actions,
                 repair_result.discovered_actions,
             )
         )
         completion_lines = [
-            "Repair complete: "
+            f"Repair complete after {count_phrase(repair_result.passes, 'pass', 'passes')}: "
             f"{count_phrase(changed_records, 'saved project file')} updated; "
             "every target matches exactly."
         ]
@@ -193,20 +195,25 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
                 completion_lines.append("Refreshed saved source guidance.")
         if repair_result.reauthored_actions:
             completion_lines.append(
-                "Re-authored "
+                "Updated "
                 + count_phrase(repair_result.reauthored_actions, "function record")
-                + " from donors the affected source files already had."
+                + " using compiler choices already available for the affected source files."
             )
         if repair_result.discovered_actions:
             completion_lines.append(
-                "Settled "
+                "Updated "
                 + count_phrase(repair_result.discovered_actions, "function record")
-                + " on freshly discovered declaration shapes."
+                + " using newly found compiler choices."
+            )
+        if repair_result.source_retunes:
+            completion_lines.append(
+                "Adjusted "
+                + count_phrase(repair_result.source_retunes, "source layout")
+                + " and rechecked every target from scratch."
             )
         if repair_result.compiled_candidates:
             tested = (
-                "Tested "
-                f"{count_phrase(repair_result.compiled_candidates, 'nearby compiler setting')}"
+                f"Tested {count_phrase(repair_result.compiled_candidates, 'nearby repair choice')}"
             )
             replayed = repair_result.replayed_candidates
             if replayed:
@@ -216,7 +223,9 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
         completion_message = "\n".join(completion_lines)
     else:
         completion_message = (
-            f"Nothing needed repair; every target still matches exactly\nReport: {report_html}"
+            "Nothing needed repair after "
+            f"{count_phrase(repair_result.passes, 'pass', 'passes')}; "
+            f"every target still matches exactly\nReport: {report_html}"
         )
     output.emit(
         "repair_complete",
@@ -228,11 +237,16 @@ def command_repair(args: argparse.Namespace, output: CLIOutput) -> int:
         retired_actions=repair_result.retired_actions,
         removed_donors=repair_result.removed_donors,
         donor_retunes=repair_result.donor_retunes,
+        source_retunes=repair_result.source_retunes,
+        admitted_translation_units=repair_result.admitted_units,
         reauthored_actions=repair_result.reauthored_actions,
         discovered_actions=repair_result.discovered_actions,
+        compiler_candidates=repair_result.compiled_candidates,
+        # Kept for machine-output compatibility with earlier ReproBit releases.
         donor_candidates=repair_result.compiled_candidates,
         replayed_candidates=repair_result.replayed_candidates,
         repair_passes=repair_result.passes,
+        adjustment_rounds=repair_result.adjustment_rounds,
         changed_records=sorted(candidate.records),
         source_inputs=len(admitted_paths),
         exact=True,

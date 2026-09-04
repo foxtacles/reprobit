@@ -1832,6 +1832,7 @@ def test_compiler_namespace_census_covers_every_source_and_toolchain_file(
     executor.toolchain_root = toolchain_root
     executor._namespace_payload_intern = {}
     executor._compiler_namespaces = {}
+    executor._captured_compiler_namespace_ids = set()
     executor.bundle = cast(
         ProjectBundle,
         SimpleNamespace(
@@ -1873,7 +1874,7 @@ def test_compiler_namespace_census_covers_every_source_and_toolchain_file(
     assert len(namespace.evidence.members) == 3
 
 
-def test_compiler_namespace_payload_census_is_shared_across_nodes(
+def test_compiler_namespace_payload_is_shared_and_probe_receipts_stay_bounded(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1892,6 +1893,7 @@ def test_compiler_namespace_payload_census_is_shared_across_nodes(
     executor.toolchain_root = toolchain_root
     executor._namespace_payload_intern = {}
     executor._compiler_namespaces = {}
+    executor._captured_compiler_namespace_ids = set()
     executor._producer_reads = []
     executor._compiler_reads = {}
     executor._evidence_lock = Lock()
@@ -1978,6 +1980,68 @@ def test_compiler_namespace_payload_census_is_shared_across_nodes(
     assert len(namespace.reads) == 2
     assert all(not receipt.reads for receipt in executor._producer_reads)
     assert {item.namespace_digest for item in invocations} == {namespace.evidence.namespace_digest}
+
+    executor._mode = "developer"
+    executor.release_noncertifying_compiler_epoch(
+        namespace.evidence.namespace_id,
+        node_ids=tuple(node.id for node in nodes),
+        epoch="effective",
+    )
+    assert executor._compiler_namespaces == {}
+    assert executor._compiler_reads == {}
+    assert executor._producer_reads == []
+    assert len(namespace.evidence.members) == 2
+    assert {item.namespace_count for item in invocations} == {2}
+
+    retained: list[tuple[CompilerNamespaceEvidence, CompilerEpochInvocation]] = []
+    for index in range(24):
+        epoch = f"probe-{index:04d}"
+        current = executor.capture_compiler_namespace(
+            epoch,
+            source=source.snapshot,
+            authority=authority.snapshot,
+        )
+        with executor._evidence_lock:
+            executor._record_producer_read(
+                classic_execution_records.ClassicProducerReadReceipt(
+                    nodes[0].id,
+                    epoch,
+                    ProducerRole.COMPILER,
+                    epoch,
+                    (),
+                    "complete-readable-namespace-v1",
+                    current.evidence.namespace_id,
+                    current.evidence.namespace_digest,
+                    len(current.evidence.members),
+                )
+            )
+        invocation = executor.compiler_epoch_invocation(nodes[0], epoch=epoch)
+        retained.append((current.evidence, invocation))
+        assert len(executor._compiler_namespaces) == 1
+        assert len(executor._compiler_reads) == 1
+        assert len(executor._producer_reads) == 1
+        executor.release_noncertifying_compiler_epoch(
+            current.evidence.namespace_id,
+            node_ids=(nodes[0].id,),
+            epoch=epoch,
+        )
+        assert executor._compiler_namespaces == {}
+        assert executor._compiler_reads == {}
+        assert executor._producer_reads == []
+
+    assert all(
+        invocation.namespace_id == evidence.namespace_id
+        and invocation.namespace_digest == evidence.namespace_digest
+        and invocation.namespace_count == len(evidence.members)
+        for evidence, invocation in retained
+    )
+    assert len(executor._namespace_payload_intern) == 2
+    with pytest.raises(ClassicProjectError, match="already captured"):
+        executor.capture_compiler_namespace(
+            "probe-0000",
+            source=source.snapshot,
+            authority=authority.snapshot,
+        )
 
 
 def test_compiler_epoch_invocation_finds_exactly_one_receipt_per_node_and_epoch() -> None:
@@ -3640,6 +3704,29 @@ def test_progress_reporter_serializes_parallel_events() -> None:
     assert {item[3] for item in events} == {f"compiler.unit.{index:04d}" for index in range(32)}
 
 
+def test_producer_progress_capacity_grows_only_for_new_work() -> None:
+    events: list[tuple[int, int]] = []
+    reporter = classic_runtime_producer.ClassicProgressReporter(
+        1,
+        lambda completed, total, _phase, _node_id, _kind, _reason: events.append(
+            (completed, total)
+        ),
+    )
+    producer = object.__new__(classic_runtime_producer.ClassicProducerExecution)
+    producer._progress = reporter
+
+    reporter.emit("compile", "compiler.unit")
+    producer.ensure_progress_capacity(2)
+    producer.ensure_progress_capacity(1)
+    reporter.emit("compiler-probe", "probe.0")
+    reporter.emit("compiler-probe", "probe.1")
+
+    assert reporter.total == 3
+    assert events == [(1, 1), (2, 3), (3, 3)]
+    with pytest.raises(ClassicProjectError, match="remaining work cannot be negative"):
+        producer.ensure_progress_capacity(-1)
+
+
 def test_progress_reporter_names_activity_without_advancing_work() -> None:
     events: list[tuple[int, int, str, str, str, str | None]] = []
     reporter = classic_runtime_producer.ClassicProgressReporter(
@@ -5266,6 +5353,319 @@ def test_exact_compiler_probe_returns_raw_outputs_and_closes_runtime(
     assert producer._runtime_open is False
 
 
+def _source_epoch_probe_executor(
+    tmp_path: Path,
+) -> tuple[
+    classic_runtime_probe.ClassicProbeExecution,
+    ProducerNode,
+    SimpleNamespace,
+]:
+    source_root = tmp_path / "source-epochs"
+    build_root = tmp_path / "source-epoch-build"
+    source_root.mkdir()
+    build_root.mkdir()
+    clean = b"int value = 0;\n"
+    (source_root / "unit.cpp").write_bytes(clean)
+    node = ProducerNode(
+        id="compiler.program.0000",
+        role=ProducerRole.COMPILER,
+        owner="program",
+        arguments=("/c", "${SOURCE}/unit.cpp"),
+        inputs=("source/unit.cpp",),
+        outputs=("build/unit.obj", "build/unit.pdb"),
+    )
+    graph = ProducerGraphDocument(
+        schema_version=3,
+        toolchain_lock_digest=Digest.from_bytes(b"toolchain"),
+        path_profile_id="fixture",
+        extractor="cmake-makefiles-v1",
+        nodes=(node,),
+    )
+
+    class Overlay:
+        generated_translation_units = frozenset()
+        generated_node_inputs = MappingProxyType({})
+        project_source_pairs = (ProjectOverlaySourcePair("unit.cpp", clean, clean),)
+
+        def _install_project_overlay_source(
+            self,
+            *,
+            relative: str,
+            expected_payload: bytes | None,
+            payload: bytes,
+            epoch: str,
+        ) -> tuple[Path, bool]:
+            del epoch
+            path = source_root / relative
+            actual = path.read_bytes() if path.exists() else None
+            assert actual == expected_payload
+            changed = actual != payload
+            if changed:
+                path.write_bytes(payload)
+            return path, changed
+
+    class Producer:
+        is_open = True
+
+        def __init__(self) -> None:
+            self.outputs: dict[Path, Path] = {}
+            self.closed = False
+            self._compiler_namespaces: dict[str, CompilerNamespaceEvidence] = {}
+            self._compiler_reads: dict[tuple[str, str], tuple[str, str, str]] = {}
+            self._producer_reads: list[tuple[str, str, str]] = []
+            self.namespace_high_water = 0
+            self.read_high_water = 0
+            self.events: list[tuple[str, str]] = []
+            self.progress_capacity: list[int] = []
+            self.run_count = 0
+
+        def begin_developer(self) -> None:
+            pass
+
+        def ensure_progress_capacity(self, remaining: int) -> None:
+            self.progress_capacity.append(remaining)
+
+        def close(self) -> None:
+            self.closed = True
+            self.is_open = False
+
+        def authority_namespace_lease(self) -> object:
+            return nullcontext(SimpleNamespace(snapshot=SimpleNamespace(files=())))
+
+        def source_namespace_lease(self) -> object:
+            return nullcontext(SimpleNamespace(snapshot=SimpleNamespace(files=())))
+
+        def capture_compiler_namespace(self, *args: object, **kwargs: object) -> object:
+            del kwargs
+            namespace_id = cast(str, args[0])
+            evidence = CompilerNamespaceEvidence(
+                namespace_id,
+                Digest.from_bytes((source_root / "unit.cpp").read_bytes()),
+                (),
+            )
+            assert namespace_id not in self._compiler_namespaces
+            self._compiler_namespaces[namespace_id] = evidence
+            self.namespace_high_water = max(
+                self.namespace_high_water, len(self._compiler_namespaces)
+            )
+            self.events.append(("capture", namespace_id))
+            return SimpleNamespace(evidence=evidence)
+
+        def include_authority(self) -> object:
+            return object()
+
+        def reference(self, value: str) -> Path | None:
+            prefix, relative = value.split("/", 1)
+            return (source_root if prefix == "source" else build_root) / relative
+
+        def declared_outputs(self, selected: ProducerNode) -> tuple[Path, ...]:
+            return cast(
+                tuple[Path, ...], tuple(self.reference(value) for value in selected.outputs)
+            )
+
+        def node_outputs(self, selected: ProducerNode) -> tuple[Path, ...]:
+            return tuple(self.outputs.get(path, path) for path in self.declared_outputs(selected))
+
+        def registered_outputs(self) -> Mapping[Path, Path]:
+            return MappingProxyType(dict(self.outputs))
+
+        def clear_output(self, declared: Path) -> Path | None:
+            return self.outputs.pop(declared, None)
+
+        def require_regular(self, path: Path, *, label: str) -> None:
+            del label
+            assert path.is_file()
+
+        def compiler_epoch_invocation(
+            self, selected: ProducerNode, *, epoch: str
+        ) -> CompilerEpochInvocation:
+            namespace_id = self._compiler_reads[(selected.id, epoch)][2]
+            namespace = self._compiler_namespaces[namespace_id]
+            self.events.append(("freeze", namespace_id))
+            return CompilerEpochInvocation(
+                "compiler",
+                Digest.from_bytes(b"compiler"),
+                selected.arguments,
+                r"R:\build",
+                Digest.from_bytes(b"environment"),
+                Digest.from_bytes(b"paths"),
+                Digest.from_bytes(epoch.encode()),
+                namespace_id,
+                namespace.namespace_digest,
+                0,
+            )
+
+        def release_noncertifying_compiler_epoch(
+            self,
+            namespace_id: str,
+            *,
+            node_ids: tuple[str, ...],
+            epoch: str,
+        ) -> None:
+            receipts = [self._compiler_reads.pop((node_id, epoch)) for node_id in node_ids]
+            for receipt in receipts:
+                self._producer_reads.remove(receipt)
+            del self._compiler_namespaces[namespace_id]
+            self.events.append(("release", namespace_id))
+
+        def run_graph_nodes(
+            self,
+            supervisor: ProcessSupervisor,
+            selected: tuple[ProducerNode, ...],
+            **kwargs: object,
+        ) -> list[StepExecutionReceipt]:
+            del supervisor
+            assert selected == (node,)
+            assert len(self.progress_capacity) == self.run_count + 1
+            self.run_count += 1
+            payload = (source_root / "unit.cpp").read_bytes()
+            declared = self.declared_outputs(node)
+            declared[0].write_bytes(b"object:" + payload)
+            declared[1].write_bytes(b"pdb:" + payload)
+            self.outputs.update({path: path for path in declared})
+            cast(set[str], kwargs["completed"]).add(node.id)
+            prefix = cast(str, kwargs["step_id_prefix"])
+            epoch = cast(str, kwargs["include_trace_epoch"])
+            namespace_id = cast(str, kwargs["compiler_namespace_id"])
+            receipt = (node.id, epoch, namespace_id)
+            self._compiler_reads[(node.id, epoch)] = receipt
+            self._producer_reads.append(receipt)
+            self.read_high_water = max(self.read_high_water, len(self._compiler_reads))
+            return [classic_runtime_receipts._internal_step(f"{prefix}{node.id}", {}, 0.0)]
+
+    producer = Producer()
+    executor = object.__new__(classic_runtime_probe.ClassicProbeExecution)
+    executor.warm = SimpleNamespace(close=lambda: producer.close())
+    executor.graph = graph
+    executor.overlay = Overlay()
+    executor.effective_root = source_root
+    executor.build_root = build_root
+    executor.producer = producer
+    return executor, node, cast(SimpleNamespace, producer)
+
+
+def test_source_epoch_probe_is_lazy_erases_losers_and_stops_on_retained_result(
+    tmp_path: Path,
+) -> None:
+    executor, node, producer = _source_epoch_probe_executor(tmp_path)
+    yielded: list[str] = []
+
+    def epochs() -> object:
+        for index in range(3):
+            epoch_id = f"epoch-{index}"
+            yielded.append(epoch_id)
+            yield classic_runtime_probe.ClassicCompilerSourceEpoch(
+                epoch_id,
+                (node.id,),
+                {"unit.cpp": f"int value = {index};\n".encode()},
+            )
+
+    def retain(result: classic_runtime_probe.ClassicCompilerSourceEpochOutput) -> bool:
+        producer.events.append(("callback", result.epoch_id))
+        return result.epoch_id == "epoch-1"
+
+    retained = executor.probe_compiler_source_epochs(
+        cast(object, epochs()),  # type: ignore[arg-type]
+        retain=retain,
+    )
+
+    assert yielded == ["epoch-0", "epoch-1"]
+    assert tuple(item.epoch_id for item in retained) == ("epoch-1",)
+    assert retained[0].compiler_outputs[0].object_payload == b"object:int value = 1;\n"
+    assert tuple((tmp_path / "source-epoch-build").iterdir()) == ()
+    assert producer.closed is True
+    assert producer._compiler_namespaces == {}
+    assert producer._compiler_reads == {}
+    assert producer._producer_reads == []
+    assert producer.namespace_high_water == 1
+    assert producer.read_high_water == 1
+    assert producer.progress_capacity == [1, 1]
+    assert producer.events == [
+        ("capture", "noncertifying-source-probe-0000"),
+        ("freeze", "noncertifying-source-probe-0000"),
+        ("callback", "epoch-0"),
+        ("release", "noncertifying-source-probe-0000"),
+        ("capture", "noncertifying-source-probe-0001"),
+        ("freeze", "noncertifying-source-probe-0001"),
+        ("callback", "epoch-1"),
+        ("release", "noncertifying-source-probe-0001"),
+    ]
+
+
+def test_source_epoch_probe_receipt_maps_stay_bounded_across_many_epochs(
+    tmp_path: Path,
+) -> None:
+    executor, node, producer = _source_epoch_probe_executor(tmp_path)
+    epochs = tuple(
+        classic_runtime_probe.ClassicCompilerSourceEpoch(
+            f"epoch-{index}",
+            (node.id,),
+            {"unit.cpp": f"int value = {index};\n".encode()},
+        )
+        for index in range(24)
+    )
+
+    retained = executor.probe_compiler_source_epochs(epochs, retain=lambda _result: False)
+
+    assert retained == ()
+    assert producer._compiler_namespaces == {}
+    assert producer._compiler_reads == {}
+    assert producer._producer_reads == []
+    assert producer.namespace_high_water == 1
+    assert producer.read_high_water == 1
+    assert producer.progress_capacity == [1] * 24
+    assert producer.closed is True
+
+
+def test_source_epoch_probe_releases_receipts_when_callback_fails(tmp_path: Path) -> None:
+    executor, node, producer = _source_epoch_probe_executor(tmp_path)
+
+    def fail(result: classic_runtime_probe.ClassicCompilerSourceEpochOutput) -> bool:
+        producer.events.append(("callback", result.epoch_id))
+        raise RuntimeError("callback failed")
+
+    with pytest.raises(RuntimeError, match="callback failed"):
+        executor.probe_compiler_source_epochs(
+            (
+                classic_runtime_probe.ClassicCompilerSourceEpoch(
+                    "epoch-0",
+                    (node.id,),
+                    {"unit.cpp": b"int value = 1;\n"},
+                ),
+            ),
+            retain=fail,
+        )
+
+    assert producer._compiler_namespaces == {}
+    assert producer._compiler_reads == {}
+    assert producer._producer_reads == []
+    assert producer.events[-2:] == [
+        ("callback", "epoch-0"),
+        ("release", "noncertifying-source-probe-0000"),
+    ]
+    assert producer.closed is True
+
+
+def test_source_epoch_probe_closes_runtime_when_a_lazy_epoch_is_invalid(
+    tmp_path: Path,
+) -> None:
+    executor, node, producer = _source_epoch_probe_executor(tmp_path)
+
+    with pytest.raises(ClassicProjectError, match="output universe"):
+        executor.probe_compiler_source_epochs(
+            (
+                classic_runtime_probe.ClassicCompilerSourceEpoch(
+                    "invalid",
+                    (node.id,),
+                    {},
+                ),
+            )
+        )
+
+    assert producer.closed is True
+    assert tuple((tmp_path / "source-epoch-build").iterdir()) == ()
+
+
 class _DonorProbePool:
     created_count = 0
 
@@ -5571,9 +5971,10 @@ def test_repair_donor_probe_isolates_candidate_failure_and_stops_before_later_wi
     )
 
     assert invoked == ["donor.failure", "donor.match"]
-    assert isinstance(outcomes[0], classic_repair_probe_execution.ClassicDonorCompileRefusal)
-    assert isinstance(outcomes[1], classic_runtime_probe.ClassicDonorProbeOutput)
+    assert outcomes == ("donor.failure", "donor.match")
     assert len(evaluated) == 2
+    assert isinstance(evaluated[0][0], classic_repair_probe_execution.ClassicDonorCompileRefusal)
+    assert isinstance(evaluated[1][0], classic_runtime_probe.ClassicDonorProbeOutput)
     assert progress == [
         (1, 3, "donor.failure"),
         (2, 3, "donor.match"),

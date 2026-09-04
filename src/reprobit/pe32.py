@@ -25,6 +25,8 @@ MAXIMUM_SECTION_COUNT = 96
 SECTION_HEADER_SIZE = 40
 MINIMUM_OPTIONAL_HEADER_SIZE = 32
 DATA_DIRECTORY_OFFSET = 96
+IMAGE_REL_BASED_ABSOLUTE = 0
+IMAGE_REL_BASED_HIGHLOW = 3
 
 _SECTION_HEADER = struct.Struct("<8sIIIIIIHHI")
 
@@ -212,14 +214,60 @@ def parse_pe32_headers(
     )
 
 
+def pe32_highlow_relocation_offsets(data: bytes) -> frozenset[int]:
+    """Return every complete i386 HIGHLOW relocation operand in a PE32 image."""
+
+    headers = parse_pe32_headers(data, minimum_optional_size=144)
+    reloc_rva, reloc_size = headers.data_directory(5, "base-relocation directory")
+    if reloc_rva == 0 and reloc_size == 0:
+        return frozenset()
+    require(
+        reloc_rva != 0 and reloc_size >= 8,
+        "base-relocation directory is malformed",
+    )
+    start = headers.rva_to_offset(
+        reloc_rva,
+        reloc_size,
+        context="base-relocation directory",
+    )
+    end = start + reloc_size
+    cursor = start
+    sites: set[int] = set()
+    while cursor < end:
+        require(cursor <= end - 8, "base-relocation block header is truncated")
+        page_rva, block_size = struct.unpack_from("<II", data, cursor)
+        require(page_rva % 0x1000 == 0, "base-relocation page is not aligned")
+        require(block_size >= 8 and block_size % 4 == 0, "invalid base-relocation block")
+        require(block_size <= end - cursor, "base-relocation block extends past directory")
+        for entry_offset in range(cursor + 8, cursor + block_size, 2):
+            value = struct.unpack_from("<H", data, entry_offset)[0]
+            kind, page_offset = value >> 12, value & 0x0FFF
+            if kind in {IMAGE_REL_BASED_ABSOLUTE, IMAGE_REL_BASED_HIGHLOW}:
+                if kind == IMAGE_REL_BASED_ABSOLUTE:
+                    continue
+                site = headers.rva_to_offset(
+                    page_rva + page_offset,
+                    4,
+                    context="HIGHLOW base-relocation operand",
+                )
+                require(site not in sites, "duplicate HIGHLOW base-relocation site")
+                sites.add(site)
+        cursor += block_size
+    require(cursor == end, "base-relocation directory was not consumed")
+    return frozenset(sites)
+
+
 __all__ = [
     "DATA_DIRECTORY_OFFSET",
     "IMAGE_FILE_MACHINE_I386",
     "IMAGE_NT_OPTIONAL_HDR32_MAGIC",
+    "IMAGE_REL_BASED_ABSOLUTE",
+    "IMAGE_REL_BASED_HIGHLOW",
     "MAXIMUM_SECTION_COUNT",
     "MINIMUM_OPTIONAL_HEADER_SIZE",
     "SECTION_HEADER_SIZE",
     "Pe32Headers",
     "Pe32Section",
     "parse_pe32_headers",
+    "pe32_highlow_relocation_offsets",
 ]

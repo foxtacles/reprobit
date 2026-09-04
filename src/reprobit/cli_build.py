@@ -14,7 +14,11 @@ from reprobit.cli_environment import selected_backend
 from reprobit.cli_output import CLIOutput, count_phrase
 from reprobit.cli_paths import CLIError, project_root, resolve_program, safe_project_path
 from reprobit.cli_state import state_root
-from reprobit.composition_ledger import ComposedBodyLedger
+from reprobit.composition_ledger import (
+    COMPOSED_BODY_LEDGER_RELATIVE,
+    ComposedBodyLedger,
+    write_ledger,
+)
 from reprobit.model import AuthenticityPolicy
 from reprobit.progress import ProgressKind
 from reprobit.project_loader import load_project_tree
@@ -24,7 +28,7 @@ from reprobit.schema import (
     ProjectBundle,
     ProjectSpec,
 )
-from reprobit.state import KeepWorkspace, RunArena
+from reprobit.state import KeepWorkspace, RunArena, report_publication_lease
 
 if TYPE_CHECKING:
     from reprobit.classic.overlay_tokens import ClassicOverlayRenderSession
@@ -142,6 +146,18 @@ def _quarantine_oracle_targets(bundle: ProjectBundle) -> frozenset[str]:
     )
 
 
+def _repair_oracle_targets(
+    prepared: ClassicProducerGraphPreparedRun,
+) -> frozenset[str]:
+    """Return the extra sealed readers required only during repair analysis."""
+
+    from reprobit.classic_orchestration import classic_unit_oracle_targets
+
+    return frozenset().union(
+        *(classic_unit_oracle_targets(unit, repair=True) for unit in prepared.donors.units)
+    )
+
+
 def _project_relative(root: Path, path: Path) -> str:
     try:
         return path.relative_to(root).as_posix()
@@ -229,7 +245,12 @@ def _command_build(
                             from reprobit.oracle_pe32 import bind_pe32_oracle
                             from reprobit.verify import seal_file_oracle
 
-                            quarantine_targets = _quarantine_oracle_targets(bundle)
+                            repair = getattr(args, "_classic_measured_receipt_repair", None)
+                            oracle_targets = (
+                                _repair_oracle_targets(prepared)
+                                if repair is not None
+                                else _quarantine_oracle_targets(bundle)
+                            )
                             prepared.donors.bind_legacy_oracles(
                                 {
                                     target.id: bind_pe32_oracle(
@@ -238,7 +259,7 @@ def _command_build(
                                         )
                                     )
                                     for target in bundle.spec.targets
-                                    if target.id in quarantine_targets
+                                    if target.id in oracle_targets
                                 }
                             )
                             receipt = prepared.executor.execute(
@@ -382,9 +403,6 @@ def _command_build(
     return 0
 
 
-COMPOSED_BODY_LEDGER_RELATIVE = ("ledger", "composed-bodies.json")
-
-
 def _composed_body_ledger(run: object) -> tuple[ComposedBodyLedger | None, str | None]:
     """Read the verified function bodies back from the run; never fail the verify over it."""
 
@@ -402,31 +420,51 @@ def _publish_composed_body_ledger(
     ledger: ComposedBodyLedger | None,
     error: str | None,
 ) -> None:
-    """Record the accepted build's linker-selected function bodies for later repairs."""
-
-    from reprobit.composition_ledger import write_ledger
+    """Record an accepted verification's selected function bodies for later repairs."""
 
     path = state.joinpath(*COMPOSED_BODY_LEDGER_RELATIVE)
-    if ledger is None:
+    failure = error or (
+        "current verification did not provide function bodies" if ledger is None else None
+    )
+    removed_stale = False
+    removal_error: OSError | None = None
+    with report_publication_lease(state):
+        if (
+            ledger is not None
+            and os.path.lexists(path.parent)
+            and (path.parent.is_symlink() or not path.parent.is_dir())
+        ):
+            failure = f"saved repair data directory is not a regular directory: {path.parent}"
+        elif ledger is not None:
+            try:
+                write_ledger(path, ledger)
+            except OSError as exc:
+                failure = str(exc)
+            else:
+                failure = None
+        if failure is not None and os.path.lexists(path):
+            try:
+                if path.parent.is_symlink() or path.is_symlink() or not path.is_file():
+                    raise OSError(f"saved repair data is not a regular file: {path}")
+                path.unlink()
+                removed_stale = True
+            except OSError as exc:
+                removal_error = exc
+    if failure is not None:
+        message = f"verified function bodies were not recorded: {failure}"
+        if removed_stale:
+            message += "; removed the older saved repair data"
+        elif removal_error is not None:
+            message += f"; older saved repair data could not be removed: {removal_error}"
         output.emit(
             "composed_body_ledger",
-            f"verified function bodies were not recorded: {error}",
+            message,
             path=path,
             outcome="skipped",
             diagnostic=True,
         )
         return
-    try:
-        write_ledger(path, ledger)
-    except OSError as exc:
-        output.emit(
-            "composed_body_ledger",
-            f"verified function bodies were not recorded: {exc}",
-            path=path,
-            outcome="skipped",
-            diagnostic=True,
-        )
-        return
+    assert ledger is not None
     functions = sum(len(target.functions) for target in ledger.targets.values())
     output.emit(
         "composed_body_ledger",
@@ -538,12 +576,12 @@ def _command_verify(
                     )
                     from reprobit.oracle_pe32 import bind_pe32_oracle
 
-                    quarantine_targets = _quarantine_oracle_targets(bundle)
+                    oracle_targets = _quarantine_oracle_targets(bundle)
                     prepared.donors.bind_legacy_oracles(
                         {
                             oracle.target_id: bind_pe32_oracle(oracle.capability)
                             for oracle in oracles
-                            if oracle.target_id in quarantine_targets
+                            if oracle.target_id in oracle_targets
                         }
                     )
                     request = EngineRequest(

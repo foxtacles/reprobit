@@ -13,8 +13,10 @@ locking and a from-scratch byte verification before it can be certified.
 from __future__ import annotations
 
 import os
+import subprocess
 from collections.abc import Mapping
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 from typing import Any
@@ -61,8 +63,9 @@ class RegenerationPlan:
 class ProjectSourceReader:
     """Read project-relative source files once, remembering the exact bytes."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, *, clean_preimage_root: Path | None = None) -> None:
         self._root = root
+        self._clean_preimage_root = clean_preimage_root or root
         self._cache: dict[str, bytes] = {}
         self._digests: dict[str, str] = {}
 
@@ -78,6 +81,30 @@ class ProjectSourceReader:
         self._cache[relative] = data
         self._digests[relative] = digest.value
         return data
+
+    def read_clean_preimage(self, relative: str, *, expected_sha256: str) -> bytes | None:
+        """Return the matching clean blob saved at Git HEAD, when available."""
+
+        try:
+            completed = subprocess.run(
+                (
+                    "git",
+                    "-C",
+                    os.fspath(self._clean_preimage_root),
+                    "cat-file",
+                    "blob",
+                    f"HEAD:./{relative}",
+                ),
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+            )
+        except OSError:
+            return None
+        if completed.returncode or sha256(completed.stdout).hexdigest() != expected_sha256:
+            return None
+        return completed.stdout
 
     @property
     def digests(self) -> dict[str, str]:
@@ -141,7 +168,11 @@ def _validate_json_document(
         ) from exc
 
 
-def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
+def plan_source_regeneration(
+    project_root: Path | str,
+    *,
+    clean_preimage_root: Path | str | None = None,
+) -> RegenerationPlan:
     """Propose pin regenerations for every stale mechanical derivation."""
 
     root = Path(project_root).resolve(strict=True)
@@ -200,7 +231,10 @@ def plan_source_regeneration(project_root: Path | str) -> RegenerationPlan:
     else:
         control_preimages[plan_relative] = None
 
-    reader = ProjectSourceReader(root)
+    preimage_root = (
+        Path(clean_preimage_root).resolve(strict=True) if clean_preimage_root is not None else root
+    )
+    reader = ProjectSourceReader(root, clean_preimage_root=preimage_root)
     derived = derive_classic_source_regeneration(
         documents=documents,
         plan_relative=plan_relative,

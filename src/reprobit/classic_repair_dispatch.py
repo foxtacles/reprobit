@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from reprobit.binary import ByteIdentityError
 from reprobit.classic.semantic_errors import ClassicSemanticError
@@ -19,7 +19,11 @@ from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeIntervention,
     ClassicTranslationUnitPlan,
+    LegacyOracleInstallIntervention,
 )
+
+if TYPE_CHECKING:
+    from reprobit.oracle_pe32 import PE32VirtualAddressReader
 
 ADMITTED_ADDED_PIN_KEYS = frozenset({"debug_representation_delta"})
 """Pins a measured repair may state on a receipt that never carried them.
@@ -49,14 +53,42 @@ class ClassicMeasuredReceiptRepairRequest:
     action_index: int
     unit_donor_objects: Mapping[str, bytes] = field(default_factory=dict)
     """Every fresh donor object of the unit, so a repair may re-seat the action."""
+    oracle: PE32VirtualAddressReader | None = None
+    """Repair-only sealed target reader; callbacks must retain only finite bytes."""
+
+
+@dataclass(frozen=True, slots=True)
+class LegacyOracleInstallRepairRequest:
+    """One failed legacy action at its exact staged composition seat."""
+
+    intervention: LegacyOracleInstallIntervention
+    receipt: ClassicProofReceipt
+    materials: ClassicDispatchMaterials
+    failure: Exception
+    unit: _ClassicRepairUnit
+    action_index: int
+    oracle: PE32VirtualAddressReader
+    unit_donor_objects: Mapping[str, bytes] = field(default_factory=dict)
 
 
 class ClassicMeasuredReceiptRepair(Protocol):
     """Repair-only measured-pin callback; certification never supplies one."""
 
+    def record_action_preimage(
+        self,
+        unit_id: str,
+        action_index: int,
+        intervention_id: str,
+        preimage: bytes,
+    ) -> None: ...
+
+    def release_completed_unit_preimages(self, unit_id: str) -> None: ...
+
     def __call__(
         self, request: ClassicMeasuredReceiptRepairRequest
     ) -> ClassicProofReceipt | None: ...
+
+    def record_legacy_failure(self, request: LegacyOracleInstallRepairRequest) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +116,7 @@ def dispatch_classic_action(
     action_index: int,
     measured_receipt_repair: ClassicMeasuredReceiptRepair | None,
     unit_donor_objects: Mapping[str, bytes] | None = None,
+    repair_oracle: PE32VirtualAddressReader | None = None,
 ) -> ClassicActionDispatchResult:
     """Dispatch normally, then retry one narrowly repaired receipt when authorized."""
 
@@ -100,6 +133,7 @@ def dispatch_classic_action(
                     unit,
                     action_index,
                     dict(unit_donor_objects or {}),
+                    repair_oracle,
                 )
             )
             if measured_receipt_repair is not None
@@ -146,5 +180,6 @@ __all__ = [
     "ClassicActionDispatchResult",
     "ClassicMeasuredReceiptRepair",
     "ClassicMeasuredReceiptRepairRequest",
+    "LegacyOracleInstallRepairRequest",
     "dispatch_classic_action",
 ]

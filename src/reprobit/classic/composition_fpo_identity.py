@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import struct
 from collections.abc import Callable
 from typing import Any, cast
@@ -152,14 +153,11 @@ def require_self_permutation_receipts(
                 f"{context}: {child_name} body differs between compiler states",
             )
     source_identity = function["same_function_source_identity"]
-    carrier = validate_donor_source_compiler_state_carrier(
-        source_identity.get("carrier"), f"{context} carrier descriptor"
+    identifiers = list(
+        donor_source_compiler_state_carrier_identifiers(
+            source_identity.get("carrier"), f"{context} carrier descriptor"
+        )
     )
-    identifiers = [
-        f"{carrier[f'{role}_prefix']}{index:0{carrier['width']}d}"
-        for role in DONOR_SOURCE_CARRIER_SEATS[carrier["kind"]][1]
-        for index in range(carrier[f"{role}_count"])
-    ]
     normalized_identifiers = source_identity.get("carrier_identifiers")
     require(
         normalized_identifiers is None or normalized_identifiers == identifiers,
@@ -212,6 +210,122 @@ def require_source_fpo_mosaic_identity(
         context,
         source_refactor=True,
     )
+
+
+def measure_fpo_mosaic_identity(
+    seed: CoffObject,
+    seed_primary: dict[str, Any],
+    donor: CoffObject,
+    donor_primary: dict[str, Any],
+    *,
+    receipt_prefix: str,
+    source_refactor: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Measure the identity and flattened pins consumed by the FPO validator.
+
+    Repair uses this to replay an existing FPO mosaic class against fresh
+    compiler objects.  The caller keeps the saved identity class while
+    refreshing its object geometry and receipt hashes.
+    """
+
+    identity: dict[str, Any] = {
+        "kind": (
+            "seed_authoritative_source_refactor_fpo_codeview_v1"
+            if source_refactor
+            else "seed_authoritative_fpo_codeview_v1"
+        )
+    }
+    pins: dict[str, Any] = {}
+    seed_definitions = section_definitions(seed)
+    for key, name in (("debug_f", ".debug$F"), ("debug_s", ".debug$S")):
+        left = _comdat_child(seed, seed_primary, name)
+        right = _comdat_child(donor, donor_primary, name)
+        definition = seed_definitions[left["number"]]
+        geometry = {
+            "associated": definition["associated"],
+            "characteristics": left["characteristics"],
+            "line_count": left["line_count"],
+            "relocation_count": left["relocation_count"],
+            "section_number": left["number"],
+            "selection": definition["selection"],
+        }
+        if not source_refactor:
+            geometry["raw_size"] = left["raw_size"]
+        identity[key] = geometry
+        for role, coff, section in (("seed", seed, left), ("donor", donor, right)):
+            path = f"{receipt_prefix}.{key}"
+            pins[f"{path}.expected_{role}_body_sha256"] = sha256_bytes(coff_body(coff, section))
+            pins[f"{path}.expected_{role}_relocation_sha256"] = sha256_bytes(
+                _coff_table_bytes(coff, section, "relocations")
+            )
+            if source_refactor:
+                pins[f"{path}.expected_{role}_raw_size"] = section["raw_size"]
+        if key == "debug_f":
+            pins[f"{receipt_prefix}.debug_f.expected_record"] = parse_fpo_data(
+                coff_body(seed, left), expected_proc_size=seed_primary["raw_size"]
+            )
+            continue
+        seed_body = coff_body(seed, left)
+        donor_body = coff_body(donor, right)
+        require(
+            len(seed_body) >= 28 and len(donor_body) >= 28,
+            "FPO CodeView procedure streams are too short",
+        )
+        cb_proc, dbg_start, dbg_end = struct.unpack_from("<III", seed_body, 16)
+        pins.update(
+            {
+                f"{receipt_prefix}.debug_s.expected_cb_proc": cb_proc,
+                f"{receipt_prefix}.debug_s.expected_dbg_start": dbg_start,
+                f"{receipt_prefix}.debug_s.expected_dbg_end": dbg_end,
+                f"{receipt_prefix}.debug_s.expected_common_prefix_sha256": sha256_bytes(
+                    seed_body[:28]
+                ),
+                f"{receipt_prefix}.debug_s.expected_record_kind": seed_body[2:4].hex(),
+            }
+        )
+        if source_refactor:
+            pins[f"{receipt_prefix}.debug_s.expected_seed_tail_sha256"] = sha256_bytes(
+                seed_body[28:]
+            )
+            pins[f"{receipt_prefix}.debug_s.expected_donor_tail_sha256"] = sha256_bytes(
+                donor_body[28:]
+            )
+            pins[f"{receipt_prefix}.debug_s.expected_extra_relocations"] = [
+                {
+                    field: row[field]
+                    for field in (
+                        "addend",
+                        "offset",
+                        "target",
+                        "target_section",
+                        "target_storage",
+                        "target_type",
+                        "target_value",
+                        "type",
+                        "width",
+                    )
+                }
+                for row in detailed_relocations(seed, left)[2:]
+            ]
+    pins.update(
+        {
+            f"{receipt_prefix}.expected_comdat_count": sum(
+                comdat_primary_identity_multiset(seed).values()
+            ),
+            f"{receipt_prefix}.expected_function_count": sum(function_multiset(seed).values()),
+            f"{receipt_prefix}.expected_primary_characteristics": seed_primary["characteristics"],
+            f"{receipt_prefix}.expected_primary_selection": seed_definitions[
+                seed_primary["number"]
+            ]["selection"],
+            f"{receipt_prefix}.expected_seed_line_sha256": sha256_bytes(
+                _coff_table_bytes(seed, seed_primary, "lines")
+            ),
+            f"{receipt_prefix}.expected_donor_line_sha256": sha256_bytes(
+                _coff_table_bytes(donor, donor_primary, "lines")
+            ),
+        }
+    )
+    return identity, pins
 
 
 def _require_fpo_mosaic_identity(
@@ -447,6 +561,33 @@ def _donor_source_force_included_shape(kind: str, params: dict[str, Any]) -> byt
     _, generator_name, names = DONOR_SOURCE_FORCE_INCLUDE_CARRIERS[kind]
     generator: Callable[..., str] = getattr(entropy_generator, generator_name)
     return generator(*(params[name] for name in names)).encode("ascii")
+
+
+def donor_source_compiler_state_carrier_identifiers(value: object, context: str) -> tuple[str, ...]:
+    """Return the deterministic declaration identifiers for one validated carrier."""
+
+    carrier = validate_donor_source_compiler_state_carrier(value, context)
+    kind = cast(str, carrier["kind"])
+    if kind in DONOR_SOURCE_FORCE_INCLUDE_CARRIERS:
+        generated = _donor_source_force_included_shape(kind, carrier)
+        return tuple(
+            dict.fromkeys(
+                match.group(1).decode("ascii")
+                for match in re.finditer(
+                    rb"(?:\bclass\s+|\bextern\s+int\s+|\bvoid\s+)"
+                    rb"([A-Za-z_][A-Za-z0-9_]*)",
+                    generated,
+                )
+            )
+        )
+    placement, roles = DONOR_SOURCE_CARRIER_SEATS[kind]
+    assert carrier["placement"] == placement
+    width = cast(int, carrier["width"])
+    return tuple(
+        f"{carrier[f'{role}_prefix']}{index:0{width}d}"
+        for role in roles
+        for index in range(cast(int, carrier[f"{role}_count"]))
+    )
 
 
 def validate_donor_source_compiler_state_carrier(value: object, context: str) -> dict[str, Any]:

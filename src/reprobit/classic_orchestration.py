@@ -2,10 +2,11 @@
 
 This module owns the seam between typed schema-v3 shards and the low-level
 COFF/PE producers.  It deliberately does not know how a consumer names its
-CMake targets and never receives an image oracle.  A build adapter supplies
-fresh compiler products; the functions here validate the complete declaration
-graph, render private donor inputs, compose translation units, and apply the
-candidate-only terminal pipeline.
+CMake targets.  Ordinary candidate producers never receive image-oracle
+capabilities; quarantine actions and repair callbacks receive only their exact
+sealed target readers.  A build adapter supplies fresh compiler products; the
+functions here validate the complete declaration graph, render private donor
+inputs, compose translation units, and apply the candidate-only terminal pipeline.
 """
 
 from __future__ import annotations
@@ -47,6 +48,7 @@ from reprobit.classic_project import (
     ClassicProjectError,
     InterventionWitness,
 )
+from reprobit.classic_retail_repair import authenticated_retail_body_available
 from reprobit.model import Digest, SemanticProof
 from reprobit.producer_graph import ProducerGraphDocument, ProducerNode, ProducerRole
 from reprobit.schema import (
@@ -80,6 +82,26 @@ class ClassicPreparedUnit:
     actions: tuple[ClassicRecipeIntervention | LegacyOracleInstallIntervention, ...]
     receipts: tuple[ClassicProofReceipt, ...]
     compiler_identity: Msvc420CompilerIdentity | None = None
+
+
+def classic_unit_oracle_targets(unit: ClassicPreparedUnit, *, repair: bool) -> frozenset[str]:
+    """Return the sealed target readers needed for one prepared unit.
+
+    Ordinary execution exposes readers only to legacy actions.  Repair also
+    binds a target when an existing function has one authenticated finite
+    retail MATCH span, allowing the repair callback to capture those bytes
+    without widening ordinary composition.
+    """
+
+    targets = {action.oracle_target for action in unit.legacy_actions}
+    if not repair:
+        return frozenset(targets)
+    receipts = {item.intervention_id: item for item in unit.receipts}
+    for action in unit.functions:
+        receipt = receipts.get(action.id)
+        if receipt is not None and authenticated_retail_body_available(action, receipt):
+            targets.add(action.scope.target)
+    return frozenset(targets)
 
 
 @dataclass(frozen=True, slots=True)
@@ -757,7 +779,7 @@ def compose_classic_unit(
     legacy_oracles: Mapping[str, PE32VirtualAddressReader] | None = None,
     measured_receipt_repair: repair_dispatch.ClassicMeasuredReceiptRepair | None = None,
 ) -> ClassicUnitComposition:
-    """Compose one independently compiled TU without access to image-oracle bytes."""
+    """Compose one TU; only a repair callback may capture a finite target span."""
 
     if not isinstance(seed_object, bytes) or not isinstance(seed_source, bytes):
         raise ClassicProjectError("classic unit inputs must be immutable bytes")
@@ -796,7 +818,10 @@ def compose_classic_unit(
     dispatcher = ClassicFamilyDispatcher()
     provisional_repair = False
     incomplete = False
+    preimage_recorder = getattr(measured_receipt_repair, "record_action_preimage", None)
     for action_index, action in enumerate(unit.actions):
+        if preimage_recorder is not None:
+            preimage_recorder(unit.plan.id, action_index, action.id, output)
         if isinstance(action, LegacyOracleInstallIntervention):
             if legacy_oracles is None or action.oracle_target not in legacy_oracles:
                 raise ClassicProjectError(
@@ -808,14 +833,45 @@ def compose_classic_unit(
             if len(action.dependencies) != 1:
                 raise ClassicProjectError(f"legacy action {action.id!r} requires one fresh donor")
             from reprobit.classic_quarantine import compose_legacy_simulated_elision
+            from reprobit.oracle_pe32 import LegacyInstallError
 
-            result = compose_legacy_simulated_elision(
-                action,
-                matches[0],
-                output,
-                donor_objects[action.dependencies[0]],
-                legacy_oracles[action.oracle_target],
-            )
+            dependency_id = action.dependencies[0]
+            try:
+                result = compose_legacy_simulated_elision(
+                    action,
+                    matches[0],
+                    output,
+                    donor_objects[dependency_id],
+                    legacy_oracles[action.oracle_target],
+                )
+            except LegacyInstallError as exc:
+                if measured_receipt_repair is None:
+                    raise
+                request = prepared_donors[dependency_id].request
+                measured_receipt_repair.record_legacy_failure(
+                    repair_dispatch.LegacyOracleInstallRepairRequest(
+                        action,
+                        matches[0],
+                        ClassicDispatchMaterials(
+                            seed_object=output,
+                            donor_object=donor_objects[dependency_id],
+                            seed_source=seed_source,
+                            donor_source=donor_sources.get(dependency_id),
+                            target_donor_object=donor_objects[dependency_id],
+                            target_donor_source=donor_sources.get(dependency_id),
+                            shape_identifiers=request.carrier_identifiers,
+                            candidate_constraints=matches[0].expected_values,
+                            compiler_identity=unit.compiler_identity,
+                        ),
+                        exc,
+                        unit,
+                        action_index,
+                        legacy_oracles[action.oracle_target],
+                        donor_objects,
+                    )
+                )
+                incomplete = True
+                continue
             output = result.output
             for donor_id in action.dependencies:
                 quarantined_uses[donor_id][action.id] = result.evidence_digest
@@ -907,6 +963,11 @@ def compose_classic_unit(
             action_index,
             measured_receipt_repair,
             donor_objects if measured_receipt_repair is not None else None,
+            (
+                legacy_oracles.get(function.scope.target)
+                if measured_receipt_repair is not None and legacy_oracles is not None
+                else None
+            ),
         )
         if dispatch.candidate is None:
             # Repair analysis captured this refusal.  Leave the function as the
@@ -982,7 +1043,7 @@ def compose_classic_unit(
                 f"classic donor semantic validator rejected {donor_id!r}: {exc}"
             ) from exc
         donor_semantic_proofs[donor_id] = validation.proof
-    return ClassicUnitComposition(
+    composition = ClassicUnitComposition(
         output,
         tuple(witnesses),
         group_evidence,
@@ -992,6 +1053,9 @@ def compose_classic_unit(
         MappingProxyType({donor_id: tuple(uses) for donor_id, uses in sorted(donor_uses.items())}),
         provisional_repair,
     )
+    if measured_receipt_repair is not None:
+        measured_receipt_repair.release_completed_unit_preimages(unit.plan.id)
+    return composition
 
 
 def apply_classic_terminal_pipeline(
@@ -1080,6 +1144,7 @@ __all__ = [
     "classic_rdata_repack_authority",
     "classic_rdata_repack_graph_authority",
     "classic_terminal_pipeline_authority",
+    "classic_unit_oracle_targets",
     "compiler_source",
     "compiler_terminal_consumer_targets",
     "compose_classic_unit",

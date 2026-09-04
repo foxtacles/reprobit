@@ -6,6 +6,7 @@ import pytest
 
 from reprobit.classic_repair_session import (
     ClassicReceiptRepair,
+    ClassicRepairSession,
     ClassicRepairSessionError,
     apply_classic_receipt_repairs,
 )
@@ -58,6 +59,17 @@ def _spec() -> ProjectSpec:
 
 def _repair(before: ClassicProofReceipt, after: ClassicProofReceipt) -> ClassicReceiptRepair:
     return ClassicReceiptRepair("tu_main", 0, before, after, ("expected_body_length",))
+
+
+def test_completed_unit_preimages_do_not_accumulate() -> None:
+    session = ClassicRepairSession()
+
+    for index in range(32):
+        unit_id = f"unit.{index}"
+        session.record_action_preimage(unit_id, 0, f"function.{index}", b"object preimage")
+        session.release_completed_unit_preimages(unit_id)
+
+        assert session._unit_action_preimages == {}
 
 
 def test_apply_classic_receipt_repairs_updates_only_the_matching_proof_document(
