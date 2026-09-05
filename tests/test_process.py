@@ -279,6 +279,96 @@ def test_supervisor_terminates_a_timed_out_tree(tmp_path: Path) -> None:
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+def test_supervisor_waits_for_short_lived_descendant_and_its_late_output(
+    tmp_path: Path,
+) -> None:
+    completion = tmp_path / "descendant-complete"
+    descendant = (
+        "import time; from pathlib import Path; time.sleep(0.15); "
+        "print('late descendant output', flush=True); "
+        f"Path({str(completion)!r}).write_bytes(b'complete')"
+    )
+    program = (
+        "import subprocess,sys; "
+        f"subprocess.Popen([sys.executable, '-c', {descendant!r}]); "
+        "print('leader output', flush=True)"
+    )
+    with ProcessSupervisor(poll_interval=0.01, termination_grace=1.0) as supervisor:
+        result = supervisor.run(command(tmp_path, program))
+        assert completion.read_bytes() == b"complete"
+        assert result.output == b"leader output\nlate descendant output\n"
+        assert supervisor.active_pids == ()
+    assert result.succeeded
+    assert (tmp_path / "command.log").read_bytes() == result.output
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+@pytest.mark.parametrize(
+    ("violation", "expected_error"),
+    [
+        ("timeout", ProcessTimedOut),
+        ("cancellation", ProcessCancelled),
+        ("output", ProcessOutputLimitExceeded),
+        ("interrupt", KeyboardInterrupt),
+    ],
+)
+def test_descendant_grace_preserves_command_limits(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    violation: str,
+    expected_error: type[BaseException],
+) -> None:
+    gate = tmp_path / "leader-exited"
+    pid_file = tmp_path / "grandchild.pid"
+    descendant = (
+        "import time; from pathlib import Path\n"
+        f"while not Path({str(gate)!r}).exists(): time.sleep(0.01)\n"
+        + ("print('x' * 4096, flush=True)\n" if violation == "output" else "")
+        + "time.sleep(60)\n"
+    )
+    program = (
+        "import subprocess,sys; from pathlib import Path; "
+        f"child=subprocess.Popen([sys.executable, '-c', {descendant!r}]); "
+        f"Path({str(pid_file)!r}).write_text(str(child.pid))"
+    )
+    token = CancellationToken()
+    original_group_exists = process_module._OwnedChild._posix_group_exists
+
+    def observe_leader_exit(child: process_module._OwnedChild) -> bool:
+        exists = original_group_exists(child)
+        if exists and child.process.poll() is not None and not gate.exists():
+            gate.write_bytes(b"exited")
+            if violation == "cancellation":
+                token.cancel("cancel during descendant grace")
+            if violation == "interrupt":
+                raise KeyboardInterrupt("interrupt during descendant grace")
+        return exists
+
+    monkeypatch.setattr(process_module._OwnedChild, "_posix_group_exists", observe_leader_exit)
+    spec = CommandSpec.create(
+        (sys.executable, "-c", program),
+        cwd=tmp_path,
+        environment={},
+        timeout_seconds=1.0 if violation == "timeout" else 5.0,
+        output_limit=512,
+        log_path=tmp_path / "command.log",
+    )
+    with ProcessSupervisor(poll_interval=0.01, termination_grace=2.0) as supervisor:
+        with pytest.raises(expected_error):
+            supervisor.run(spec, cancellation=token)
+        assert supervisor.active_pids == ()
+
+    assert gate.read_bytes() == b"exited"
+    with pytest.raises(ProcessLookupError):
+        os.kill(int(pid_file.read_text()), 0)
+    if violation == "interrupt":
+        assert not (tmp_path / "command.log").exists()
+    else:
+        output = (tmp_path / "command.log").read_bytes()
+        assert output == (b"x" * 512 if violation == "output" else b"")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
 def test_successful_parent_cannot_leave_a_process_group_descendant(
     tmp_path: Path,
 ) -> None:

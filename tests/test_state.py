@@ -153,6 +153,71 @@ def test_run_arena_retention_modes_are_explicit(tmp_path: Path) -> None:
     assert not removed.exists()
 
 
+def test_run_arena_releases_lease_under_maintenance_gate_before_removal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    arena = RunArena(state, kind="build", run_id="lease-release")
+    arena.__enter__()
+    lease = arena._lease
+    assert lease is not None and lease.locked
+    real_close = lease.close
+    real_move = state_module._move_to_quarantine
+    released = False
+
+    def close_under_gate() -> None:
+        nonlocal released
+        contender = AdvisoryFileLock(state / ".maintenance.lock", create=False)
+        try:
+            assert not contender.acquire(nonblocking=True)
+        finally:
+            contender.close()
+        real_close()
+        released = True
+
+    def move_after_release(path: Path, quarantine: Path) -> None:
+        assert released and lease.stream.closed
+        real_move(path, quarantine)
+
+    monkeypatch.setattr(lease, "close", close_under_gate)
+    monkeypatch.setattr(state_module, "_move_to_quarantine", move_after_release)
+    arena.finish(succeeded=True)
+
+    assert released
+    assert not arena.path.exists()
+
+
+def test_run_arena_rechecks_identity_after_releasing_its_lease(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    state = tmp_path / "state"
+    state.mkdir()
+    arena = RunArena(state, kind="build", run_id="lease-release-race")
+    arena.__enter__()
+    lease = arena._lease
+    assert lease is not None
+    real_close = lease.close
+    original = arena.path.parent / "original-run"
+
+    def swap_after_release() -> None:
+        real_close()
+        arena.path.rename(original)
+        arena.path.mkdir()
+        (arena.path / "valuable.txt").write_bytes(b"keep me")
+
+    monkeypatch.setattr(lease, "close", swap_after_release)
+
+    with pytest.raises(StateError, match="run arena changed before cleanup"):
+        arena.finish(succeeded=True)
+
+    assert lease.stream.closed
+    assert (arena.path / "valuable.txt").read_bytes() == b"keep me"
+    assert (original / ".outcome.json").is_file()
+
+
 def test_run_arena_cleanup_preserves_a_directory_swapped_before_quarantine(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

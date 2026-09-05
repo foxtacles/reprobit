@@ -855,6 +855,7 @@ class ProcessSupervisor:
         child = self._spawn(spec, windows_lineage_planner)
         started = time.monotonic()
         deadline = started + spec.timeout_seconds
+        leader_exited_at: float | None = None
         try:
             while True:
                 if cancellation.cancelled:
@@ -871,7 +872,17 @@ class ProcessSupervisor:
                     self._write_log(spec.log_path, output)
                     raise ProcessTimedOut(spec, output)
                 if child.process.poll() is not None:
-                    break
+                    if os.name != "posix" or not child._posix_group_exists():
+                        break
+                    # Keep every deadline/output/cancellation check active
+                    # while short-lived helpers finish after their leader.
+                    now = time.monotonic()
+                    if leader_exited_at is None:
+                        leader_exited_at = now
+                    drain_remaining = self.termination_grace - (now - leader_exited_at)
+                    if drain_remaining <= 0:
+                        break
+                    remaining = min(remaining, drain_remaining)
                 time.sleep(min(self.poll_interval, remaining))
             leaked = child.drain_after_leader_exit(self.termination_grace)
             output = child.read_output(spec.output_limit)
@@ -884,7 +895,7 @@ class ProcessSupervisor:
                 raise ProcessTreeLeak(spec, output)
             return child.process.returncode, output, time.monotonic() - started
         except BaseException:
-            if child.process.poll() is None:
+            if child.process.poll() is None or (os.name == "posix" and child._posix_group_exists()):
                 child.terminate_and_drain(self.termination_grace, spec.output_limit)
             raise
         finally:

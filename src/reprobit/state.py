@@ -573,6 +573,12 @@ class RunArena:
             with _maintenance_gate(self.state_root):
                 self._require_arena_identity(action="cleanup")
                 if not should_keep:
+                    # Windows cannot rename a directory containing a held
+                    # lease. Keep the maintenance gate across release and
+                    # removal, which rechecks the arena's exact identity.
+                    if lease is not None:
+                        lease.close()
+                        lease = None
                     self._remove()
         finally:
             if lease is not None:

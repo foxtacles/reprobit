@@ -1521,8 +1521,25 @@ def promote_relative_new(
                 destination_name,
                 replace=False,
             )
+            moved_native = held.api.identity(source_handle)
+            moved_strong = held.api.strong_identity(source_handle)
+            # NTFS tunneling may restore a recently vacated destination's
+            # creation time during this rename.  Change time also advances.
+            # Admit those transitions only on our continuously held source;
+            # all object, payload, write-time, link, and attribute evidence
+            # must survive, and the destination must match it exactly below.
+            if (
+                moved_native != before_native
+                or moved_strong[:2] != before_strong[:2]
+                or moved_strong[3] != before_strong[3]
+                or moved_strong[5:] != before_strong[5:]
+            ):
+                raise SecurePathError(f"native promotion source changed: {source_relative!r}")
             final = held.api.open_relative(
-                destination_handles[-1], destination_name, directory=False
+                destination_handles[-1],
+                destination_name,
+                directory=False,
+                read_data=False,
             )
             if final is None:
                 raise SecurePathError(
@@ -1531,9 +1548,7 @@ def promote_relative_new(
             try:
                 after_native = held.api.identity(final)
                 after_strong = held.api.strong_identity(final)
-                if after_native != before_native or not _same_windows_identity_except_change_time(
-                    before_strong, after_strong
-                ):
+                if after_native != moved_native or after_strong != moved_strong:
                     raise SecurePathError(
                         f"native promotion target changed: {destination_relative!r}"
                     )
@@ -1542,6 +1557,13 @@ def promote_relative_new(
             held.recheck(source_edges)
             held.recheck(destination_edges)
             held.api.flush_directory(destination_handles[-1])
+            if (
+                held.api.identity(source_handle) != moved_native
+                or held.api.strong_identity(source_handle) != moved_strong
+            ):
+                raise SecurePathError(
+                    f"native promotion target changed while finalizing: {destination_relative!r}"
+                )
             return SecureFileSnapshot(
                 held.path.joinpath(*destination_path.parts),
                 expected.digest,

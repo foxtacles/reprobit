@@ -1233,17 +1233,32 @@ def test_recovery_refuses_a_state_root_swapped_before_scan(
     moved = tmp_path / "original-transaction-state"
     real_scandir = os.scandir
     swapped = False
+    swap_blocked = False
 
     def swap_then_scan(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]) -> Any:
-        nonlocal swapped
+        nonlocal swapped, swap_blocked
         if not swapped and Path(path) == state:
             swapped = True
-            os.replace(state, moved)
-            state.mkdir()
-            (state / "keep.txt").write_bytes(b"replacement")
+            if os.name == "nt":
+                # The live project lock prevents deleting its parent seat.
+                with pytest.raises(PermissionError):
+                    os.replace(state, moved)
+                swap_blocked = True
+            else:
+                os.replace(state, moved)
+                state.mkdir()
+                (state / "keep.txt").write_bytes(b"replacement")
         return real_scandir(path)
 
     monkeypatch.setattr(os, "scandir", swap_then_scan)
+
+    if os.name == "nt":
+        assert CASTransaction.recover(tmp_path) == (TRANSACTION_ID,)
+        assert swap_blocked
+        assert not moved.exists()
+        assert not directory.exists()
+        assert tuple(path.name for path in state.iterdir()) == ("project.lock",)
+        return
 
     with pytest.raises(TransactionError, match="transaction state changed"):
         CASTransaction.recover(tmp_path)
