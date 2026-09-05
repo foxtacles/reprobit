@@ -13,6 +13,12 @@ compiled object against every refused function of the unit:
   lets the saved record move onto the new donor unchanged, its donor-side
   measurements refreshed by the ordinary measured-pin repair.
 
+A census entry (unrecorded fallout of a source edit) names no donor at all, so
+for it the unit's saved carriers are compiled first -- or replayed from the
+command's probe store -- and one that already emits the verified body hosts the
+new record as an additional beneficiary; fresh states are tried only after
+every eligible saved carrier.
+
 Nothing here reads a reference image; the accepted objects become ordinary
 donor records whose fresh compile and cold proof still decide everything.
 """
@@ -152,6 +158,8 @@ class _UnitWork:
     reasons: dict[str, str]
     receipts: dict[str, ClassicProofReceipt] = field(default_factory=dict)
     identities: dict[str, str] = field(default_factory=dict)
+    saved_attempts: set[str] = field(default_factory=set)
+    """Probe ids that compile one of the unit's saved carriers rather than a fresh state."""
 
 
 def _shape_states() -> list[tuple[int, int]]:
@@ -225,21 +233,28 @@ def _forward_run_donor(
     return intervention, receipt
 
 
+def _saved_state_identity(intervention: ClassicRecipeIntervention) -> str | None:
+    """The carrier-state identity a saved donor renders, when it renders one."""
+
+    values = {parameter.name: parameter.value for parameter in intervention.parameters}
+    digest = values.get("generated_header_sha256")
+    if not isinstance(digest, str):
+        return None
+    if intervention.family is ClassicRecipeFamily.DECLARATION_SHAPE:
+        return f"shape::{digest}"
+    if intervention.family is ClassicRecipeFamily.FORWARD_DECLARATION_RUN:
+        return f"forward_run:{values.get('placement')}:{digest}"
+    return f"{intervention.family.value}::{digest}"
+
+
 def _existing_state_identities(unit: ClassicPreparedUnit) -> set[str]:
     """Identities of the carrier states the unit's saved donors already render."""
 
     identities: set[str] = set()
     for item in unit.donors:
-        values = {parameter.name: parameter.value for parameter in item.intervention.parameters}
-        digest = values.get("generated_header_sha256")
-        if not isinstance(digest, str):
-            continue
-        if item.intervention.family is ClassicRecipeFamily.DECLARATION_SHAPE:
-            identities.add(f"shape::{digest}")
-        elif item.intervention.family is ClassicRecipeFamily.FORWARD_DECLARATION_RUN:
-            identities.add(f"forward_run:{values.get('placement')}:{digest}")
-        else:
-            identities.add(f"{item.intervention.family.value}::{digest}")
+        identity = _saved_state_identity(item.intervention)
+        if identity is not None:
+            identities.add(identity)
     return identities
 
 
@@ -284,6 +299,26 @@ def _group_units(
     return work
 
 
+def _hostable_saved_carrier(donor: ClassicPreparedDonor) -> bool:
+    """Whether a saved donor may gain an ordinary equal-body consumer.
+
+    Source-mutating overlay donors have exactly one consumer by construction,
+    a donor with a role policy confines its consumers to that role, and a
+    cross-file carrier compiles another translation unit's source.
+    """
+
+    intervention = donor.intervention
+    if intervention.family is ClassicRecipeFamily.DONOR_SOURCE_OVERLAY:
+        return False
+    names = {parameter.name for parameter in intervention.parameters}
+    return "role_policy" not in names and "donor_source" not in names
+
+
+def _saved_carrier_identity(donor: ClassicPreparedDonor) -> str:
+    identity = _saved_state_identity(donor.intervention)
+    return identity if identity is not None else f"saved::{donor.intervention.id}"
+
+
 def _prepare_attempts(
     work: Mapping[str, _UnitWork],
     *,
@@ -315,8 +350,22 @@ def _prepare_attempts(
         # one candidate, so the later state is skipped rather than compiled twice.
         seats = {item.request.compiler_seat.casefold() for item in unit.donors}
         ids: list[str] = []
+        if any(refusal.synthetic for refusal in entry.refusals):
+            # A census entry names no donor yet.  The carriers the unit already
+            # compiles are the cheapest hosts for its verified body: they add no
+            # record and no compile to the saved guidance, so they are compiled
+            # (or replayed from the command's store) ahead of any fresh state.
+            for item in unit.donors:
+                if not _hostable_saved_carrier(item):
+                    continue
+                probe_id = f"discovery_probe_{ordinal:04d}"
+                ordinal += 1
+                entry.attempts.append((probe_id, item.intervention, item))
+                entry.identities[probe_id] = _saved_carrier_identity(item)
+                entry.saved_attempts.add(probe_id)
+                ids.append(probe_id)
         for kind, state in _carrier_states():
-            if len(ids) >= per_unit:
+            if len(ids) - len(entry.saved_attempts) >= per_unit:
                 break
             try:
                 if kind == "shape":
@@ -543,6 +592,30 @@ def _try_resolve(
     return None
 
 
+def _settle_attempt(
+    entry: _UnitWork,
+    probe_id: str,
+    donor: ClassicRecipeIntervention,
+    prepared: ClassicPreparedDonor,
+    payload: bytes,
+) -> None:
+    """Try one compiled carrier against every open refusal of its unit.
+
+    A fresh state that settles a refusal is kept as a new donor; a saved carrier
+    is not -- the settled record simply names it, and the unit repair widens the
+    saved donor's beneficiaries.
+    """
+
+    for refusal in entry.refusals:
+        if refusal.intervention.id in entry.resolved:
+            continue
+        settled = _try_resolve(entry, refusal, prepared, payload)
+        if settled is not None:
+            entry.resolved[refusal.intervention.id] = settled
+            if probe_id not in entry.saved_attempts:
+                entry.kept_donors.setdefault(donor.id, donor)
+
+
 def _unit_repair(entry: _UnitWork) -> ClassicDiscoveryRepair | None:
     if not entry.resolved:
         return None
@@ -723,6 +796,15 @@ def probe_carrier_discovery(
             return ClassicDiscoveryResult((), unprepared, 0)
         budget = min(candidate_budget, len(order))
         order = order[:budget]
+        # Candidates are preferred in preparation order: a unit's saved carriers,
+        # then fresh states cheapest first.  Outcomes land in completion order --
+        # a replayed candidate lands at once -- so each unit's outcomes are held
+        # and settled strictly in that preference order.
+        sequence: dict[str, list[str]] = {}
+        for probe_id, unit_id in order:
+            sequence.setdefault(unit_id, []).append(probe_id)
+        arrived: dict[str, ClassicDonorCompileOutcome] = {}
+        cursor: dict[str, int] = dict.fromkeys(sequence, 0)
 
         def windows() -> Iterable[tuple[str, ...]]:
             pending = [probe_id for probe_id, _unit_id in order]
@@ -741,20 +823,28 @@ def probe_carrier_discovery(
 
         def evaluate(outcomes: tuple[ClassicDonorCompileOutcome, ...]) -> bool:
             for outcome in outcomes:
-                unit_id, donor, prepared = attempts[outcome.donor_id]
+                if outcome.donor_id not in attempts:
+                    raise ClassicDiscoveryProbeError(
+                        f"discovery probe returned an unknown candidate {outcome.donor_id!r}"
+                    )
+                arrived[outcome.donor_id] = outcome
+            for unit_id, ids in sequence.items():
                 entry = work[unit_id]
-                if isinstance(outcome, ClassicDonorCompileRefusal):
-                    entry.reasons.setdefault("compilation", outcome.reason)
-                    continue
-                if not isinstance(outcome, ClassicDonorProbeOutput):
-                    raise ClassicDiscoveryProbeError("discovery probe returned an invalid outcome")
-                for refusal in entry.refusals:
-                    if refusal.intervention.id in entry.resolved:
+                while cursor[unit_id] < len(ids):
+                    probe_id = ids[cursor[unit_id]]
+                    landed = arrived.get(probe_id)
+                    if landed is None:
+                        break
+                    cursor[unit_id] += 1
+                    _unit_id, donor, prepared = attempts[probe_id]
+                    if isinstance(landed, ClassicDonorCompileRefusal):
+                        entry.reasons.setdefault("compilation", landed.reason)
                         continue
-                    settled = _try_resolve(entry, refusal, prepared, outcome.object_payload)
-                    if settled is not None:
-                        entry.resolved[refusal.intervention.id] = settled
-                        entry.kept_donors.setdefault(donor.id, donor)
+                    if not isinstance(landed, ClassicDonorProbeOutput):
+                        raise ClassicDiscoveryProbeError(
+                            "discovery probe returned an invalid outcome"
+                        )
+                    _settle_attempt(entry, probe_id, donor, prepared, landed.object_payload)
             return all(
                 refusal.intervention.id in entry.resolved
                 for entry in work.values()
@@ -792,7 +882,7 @@ def probe_carrier_discovery(
     compiled_id_set = set(compiled_ids)
     tried: dict[str, set[str]] = {}
     for probe_id, (unit_id, _donor, _prepared) in attempts.items():
-        if probe_id in compiled_id_set:
+        if probe_id in compiled_id_set and probe_id not in work[unit_id].saved_attempts:
             tried.setdefault(unit_id, set()).add(work[unit_id].identities[probe_id])
     repairs: list[ClassicDiscoveryRepair] = []
     unresolved: list[tuple[str, str, str]] = []
