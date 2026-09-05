@@ -185,11 +185,16 @@ def _cmake_import_workspace(arena: RunArena, *, short: bool) -> Iterator[Path]:
         yield arena.path / "cmake"
         return
 
-    workspace = arena.create_cmake_workspace()
-    if not workspace.is_absolute() or not _plain_directory(workspace):
-        raise CLIError(f"temporary CMake workspace is not a real directory: {workspace}")
+    owned_root = arena.create_cmake_workspace()
+    if not owned_root.is_absolute() or not _plain_directory(owned_root):
+        raise CLIError(f"temporary CMake workspace is not a real directory: {owned_root}")
+    # The parent owns the cleanup marker; CMake requires an empty workspace.
+    workspace = owned_root / "cmake"
+    created = False
     succeeded = False
     try:
+        workspace.mkdir(mode=0o700)
+        created = True
         yield workspace
         succeeded = True
     finally:
@@ -198,17 +203,17 @@ def _cmake_import_workspace(arena: RunArena, *, short: bool) -> Iterator[Path]:
         retain = arena.keep is KeepWorkspace.ALWAYS or (
             arena.keep is KeepWorkspace.ON_FAILURE and not succeeded
         )
-        if retain:
+        if retain and created:
             try:
-                if not _plain_directory(workspace):
+                if not _plain_directory(owned_root) or not _plain_directory(workspace):
                     raise CLIError("temporary CMake workspace changed type before retention")
                 shutil.copytree(workspace, arena.path / "cmake", symlinks=True)
             except BaseException as error:
                 cleanup_errors.append(error)
         try:
-            if not _plain_directory(workspace):
+            if not _plain_directory(owned_root):
                 raise CLIError("temporary CMake workspace changed type before cleanup")
-            arena.remove_cmake_workspace(workspace)
+            arena.remove_cmake_workspace(owned_root)
         except BaseException as error:
             cleanup_errors.append(error)
         if cleanup_errors:

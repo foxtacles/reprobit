@@ -13,6 +13,7 @@ from typing import cast
 import pytest
 
 import reprobit.cmake_configure as cmake_configure
+from reprobit.cli_cmake_import import _cmake_import_workspace
 from reprobit.cmake_configure import effective_source_digest
 from reprobit.model import Digest
 from reprobit.schema import (
@@ -27,6 +28,7 @@ from reprobit.schema import (
     ToolchainLock,
     ToolchainRef,
 )
+from reprobit.state import KeepWorkspace, RunArena
 from reprobit.strict_json import canonical_json
 
 
@@ -82,6 +84,44 @@ def _executable(path: Path, payload: str = "#!/bin/sh\nexit 0\n") -> Path:
     path.write_text(payload, encoding="utf-8")
     path.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
     return path
+
+
+def test_short_import_workspace_keeps_ownership_outside_configure_root(tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    project.mkdir()
+    toolchain = tmp_path / "toolchain"
+    toolchain.mkdir()
+    bundle = _bundle(project)
+    arena = RunArena(tmp_path / "state", kind="import", keep=KeepWorkspace.ALWAYS)
+
+    with arena, _cmake_import_workspace(arena, short=True) as workspace:
+        owned_root = workspace.parent
+        marker = owned_root / ".reprobit-cmake-workspace.json"
+        assert marker.is_file()
+        assert list(workspace.iterdir()) == []
+        for candidate, message in (
+            (owned_root, "CMake import workspace is not empty"),
+            (workspace, "CMake executable is absent or redirected"),
+        ):
+            # Exercise the real configure preflight through its executable
+            # check without requiring any host-specific CMake/compiler tools.
+            with pytest.raises(cmake_configure.CMakeConfigureError, match=message):
+                cmake_configure.configure_cmake_project(
+                    bundle,
+                    project_root=project,
+                    workspace_root=candidate,
+                    toolchain_root=toolchain,
+                    cmake=tmp_path / "missing-cmake",
+                    compiler_transport=toolchain / "cl",
+                    resource_transport=toolchain / "rc",
+                )
+        assert marker.is_file()
+        (workspace / "build").mkdir()
+        (workspace / "build/configure.log").write_bytes(b"diagnostic\n")
+
+    assert not owned_root.exists()
+    assert (arena.path / "cmake/build/configure.log").read_bytes() == b"diagnostic\n"
+    assert not (arena.path / "cmake/.reprobit-cmake-workspace.json").exists()
 
 
 @pytest.mark.parametrize(
