@@ -210,6 +210,8 @@ def test_streaming_keeps_workers_busy_and_stops_pulling_after_settlement(
     active = 0
     peak = 0
     lock = threading.Lock()
+    slow_started = threading.Event()
+    settled = threading.Event()
 
     def fake_compile(*args: Any) -> Any:
         nonlocal active, peak
@@ -218,7 +220,11 @@ def test_streaming_keeps_workers_busy_and_stops_pulling_after_settlement(
             started.append(donor_id)
             active += 1
             peak = max(peak, active)
-        time.sleep(0.3 if donor_id == "slow" else 0.02)
+        if donor_id == "slow":
+            slow_started.set()
+            assert settled.wait(timeout=5), "streaming stopped behind the slow candidate"
+        else:
+            assert slow_started.wait(timeout=5), "slow candidate never started"
         with lock:
             active -= 1
         return _output(donor_id)
@@ -239,7 +245,11 @@ def test_streaming_keeps_workers_busy_and_stops_pulling_after_settlement(
     def evaluate(outcomes: tuple[Any, ...]) -> bool:
         assert len(outcomes) == 1
         settled_on.append(outcomes[0].donor_id)
-        return outcomes[0].donor_id == "e"
+        if outcomes[0].donor_id == "e":
+            assert not settled.is_set()
+            settled.set()
+            return True
+        return False
 
     outcomes = subject._stream_compiles(
         SimpleNamespace(),
@@ -257,6 +267,7 @@ def test_streaming_keeps_workers_busy_and_stops_pulling_after_settlement(
     )
 
     assert peak == 2
+    assert settled_on[:4] == ["b", "c", "d", "e"]
     assert "never" not in started and "never" not in outcomes
     # Everything that had started was still recorded, including the slow one.
     assert set(outcomes) == set(started)
