@@ -1,9 +1,8 @@
 """Refuse a release tag that does not name the packaged version.
 
-``python scripts/check_release_tag.py v1.2.3`` exits 0 only when the tag is
-``v`` followed by exactly the version that ``pyproject.toml`` declares and the
-installed ``reprobit`` reports, so a release can never carry a different
-version from its tag.
+``python scripts/check_release_tag.py 1.2.3`` exits 0 only when the tag names
+exactly the version that ``pyproject.toml`` declares and ``reprobit`` reports.
+The historical ``v`` prefix is also accepted.
 """
 
 from __future__ import annotations
@@ -28,9 +27,10 @@ def main(argv: list[str]) -> None:
         raise SystemExit(
             f"pyproject.toml declares {declared} but reprobit reports {reprobit.__version__}"
         )
-    if tag != f"v{declared}":
+    if tag not in {declared, f"v{declared}"}:
         raise SystemExit(
-            f"tag {tag} does not name the packaged version {declared} (expected v{declared})"
+            f"tag {tag} does not name the packaged version {declared} "
+            f"(expected {declared} or v{declared})"
         )
     print(f"tag {tag} names the packaged version {declared}")
 

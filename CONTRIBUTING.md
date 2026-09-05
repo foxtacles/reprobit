@@ -152,9 +152,11 @@ timing threshold. This benchmark writes normal build state and outputs.
 There are no scheduled releases; a release is a tag.
 
 1. On `master`, set `version` in `pyproject.toml` and
-   `reprobit.__version__` to the release number (they must agree;
-   `tests/test_package.py` checks that) and land that commit through CI.
-2. Tag it `vX.Y.Z` and push the tag. The CI workflow runs every job on the
+   `reprobit.__version__` and the CLI's source-checkout fallback to the release
+   number (they must agree; `tests/test_package.py` checks that) and land that
+   commit through CI.
+2. Tag it `X.Y.Z` and push the tag (`vX.Y.Z` is also accepted). Keep release tags
+   fixed at their verified commits. The CI workflow runs every job on the
    tag and, when all of them pass, the `release` job checks that the tag
    names the packaged version (`scripts/check_release_tag.py`), builds the
    sdist and wheel, re-runs the wheel check, and creates a GitHub release

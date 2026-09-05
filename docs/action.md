@@ -23,8 +23,8 @@ The workflow that calls ReproBit must:
 
 The committed project chooses the compiler profile and verification policy. The
 Action does not download, cache, upload, or redistribute proprietary compilers
-or reference binaries. Until ReproBit has a stable release tag, use the same
-ReproBit commit for the CLI and Action. Use maintained major-version tags for
+or reference binaries. Use the same ReproBit release tag or commit for the CLI
+and Action. Use maintained major-version tags for
 third-party Actions.
 
 ## Example
@@ -32,8 +32,7 @@ third-party Actions.
 This complete example uses the native Windows runner and shows only the inputs
 needed for the normal path. It assumes the protected reference binaries are
 already present; add the project's secret/download step before ReproBit when
-they are not committed. Replace the repeated `012345...` placeholder with the
-same ReproBit commit SHA in both places:
+they are not committed. This example pins both installations to ReproBit `0.1.0`:
 
 ```yaml
 name: Verify with ReproBit
@@ -56,14 +55,14 @@ jobs:
       - name: Install the pinned ReproBit CLI for provisioning
         run: >-
           python -m pip install
-          "git+https://github.com/isledecomp/reprobit.git@0123456789abcdef0123456789abcdef01234567"
+          "git+https://github.com/isledecomp/reprobit.git@0.1.0"
       - name: Provision and authenticate MSVC 4.2
         run: >-
           rbit toolchain provision
           --destination "${{ runner.temp }}/msvc42"
           --no-save
       - id: reprobit
-        uses: isledecomp/reprobit@0123456789abcdef0123456789abcdef01234567
+        uses: isledecomp/reprobit@0.1.0
         with:
           project-directory: .
           toolchain-root: ${{ runner.temp }}/msvc42

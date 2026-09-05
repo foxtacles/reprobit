@@ -38,8 +38,11 @@ jobs:
         run: >-
           python -m pytest -q -x
           tests/test_windows_metadata_contract.py
+          tests/test_windows_promotion.py
           tests/test_exact_tree_windows_move.py
           tests/test_secure_paths_windows.py
+          tests/test_state.py
+          tests/test_transactions.py
       - run: python -m pytest
 
   lowest-bounds:
@@ -208,8 +211,11 @@ jobs:
         run: >-
           python -m pytest -q -x
           tests/test_windows_metadata_contract.py
+          tests/test_windows_promotion.py
           tests/test_exact_tree_windows_move.py
           tests/test_secure_paths_windows.py
+          tests/test_state.py
+          tests/test_transactions.py
       - name: Run the full suite with the authenticated compiler
         run: >-
           python -m pytest -q
@@ -245,7 +251,7 @@ jobs:
     # A tag push runs every job above; the release is cut only when all of
     # them pass. Nothing is published to PyPI: the repository holds no PyPI
     # credentials, so the release carries the sdist and wheel as assets.
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/')
     needs: [test, lowest-bounds, quality, wine-msvc42, native-msvc42]
     runs-on: ubuntu-latest
     timeout-minutes: 15
