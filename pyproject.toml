@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "reprobit"
-version = "0.1.0"
+version = "0.1.1"
 description = "Proof-carrying reproduction of byte-identical compiler output"
 readme = "README.md"
 requires-python = ">=3.11"

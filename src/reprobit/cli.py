@@ -36,7 +36,7 @@ from reprobit.toolchains import MSVC_42, TOOLCHAIN_PROFILES
 try:
     _VERSION = version("reprobit")
 except PackageNotFoundError:
-    _VERSION = "0.1.0"
+    _VERSION = "0.1.1"
 
 
 def command_verify(args: argparse.Namespace, output: CLIOutput) -> int:

@@ -32,7 +32,7 @@ third-party Actions.
 This complete example uses the native Windows runner and shows only the inputs
 needed for the normal path. It assumes the protected reference binaries are
 already present; add the project's secret/download step before ReproBit when
-they are not committed. This example pins both installations to ReproBit `0.1.0`:
+they are not committed. This example pins both installations to ReproBit `0.1.1`:
 
 ```yaml
 name: Verify with ReproBit
@@ -55,14 +55,14 @@ jobs:
       - name: Install the pinned ReproBit CLI for provisioning
         run: >-
           python -m pip install
-          "git+https://github.com/isledecomp/reprobit.git@0.1.0"
+          "git+https://github.com/isledecomp/reprobit.git@0.1.1"
       - name: Provision and authenticate MSVC 4.2
         run: >-
           rbit toolchain provision
           --destination "${{ runner.temp }}/msvc42"
           --no-save
       - id: reprobit
-        uses: isledecomp/reprobit@0.1.0
+        uses: isledecomp/reprobit@0.1.1
         with:
           project-directory: .
           toolchain-root: ${{ runner.temp }}/msvc42
