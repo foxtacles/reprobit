@@ -180,6 +180,7 @@ def _fake_windows(objects: dict[int, bytes], compiled: list[str]) -> Any:
         windows: Any,
         *,
         evaluate: Any,
+        ordered_outcomes: bool,
         progress: Any = None,
         planned_candidates: int,
         cache: Any = None,
@@ -738,3 +739,47 @@ def test_discovery_repoints_a_goal_body_no_closed_family_can_host(
     (dependency,) = repair.dependency_edits
     assert dependency.donor_id == resolution.donor_id
     assert repair.additions[0].intervention.id == resolution.donor_id
+
+
+def test_discovery_releases_processed_candidate_objects(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import gc
+    import weakref
+    from dataclasses import fields
+
+    class TrackedOutput(ClassicDonorProbeOutput):
+        pass
+
+    refusal, seed, _goal = _fixture(
+        ClassicRecipeFamily.EQUAL_BODY_STRICT, expected_body_sha256=GOAL_DIGEST
+    )
+    references: list[weakref.ReferenceType[TrackedOutput]] = []
+
+    def fake_windows(_probes, units, windows, *, evaluate, **_kwargs):  # type: ignore[no-untyped-def]
+        by_id = {unit.donors[0].intervention.id: unit for unit in units}
+        completed = []
+        for window in windows:
+            for donor_id in window:
+                original = _probe_output(donor_id, by_id[donor_id], seed)
+                output = TrackedOutput(
+                    **{field.name: getattr(original, field.name) for field in fields(original)}
+                )
+                references.append(weakref.ref(output))
+                assert not evaluate((output,))
+                completed.append(donor_id)
+                del output
+                gc.collect()
+                assert all(reference() is None for reference in references)
+        return tuple(completed)
+
+    monkeypatch.setattr(subject, "probe_donor_compile_windows", fake_windows)
+    result = subject.probe_carrier_discovery(
+        _Handle(),
+        (refusal,),
+        clean_sources={"src/unit.cpp": SOURCE},
+        effective_sources={"src/unit.cpp": SOURCE},
+        per_unit=8,
+        window_size=1,
+    )
+    assert result.compiled_candidates == 8

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,11 +30,67 @@ class ClassicExecutionInputs:
 def selected_backend(args: argparse.Namespace) -> ExecutionBackend:
     """Resolve shared CLI backend options without duplicating host policy."""
 
+    wine = args.wine if args.wine is not None else "wine"
+    wineserver = args.wineserver if args.wineserver is not None else "wineserver"
     if args.backend == "auto":
-        return backend_for_host()
+        backend = backend_for_host()
+        if not isinstance(backend, PosixWineBackend) or (
+            wine == "wine" and wineserver == "wineserver"
+        ):
+            return backend
+        return PosixWineBackend(wine=wine, wineserver=wineserver)
     if args.backend == POSIX_WINE_BACKEND:
-        return PosixWineBackend(wine=args.wine, wineserver=args.wineserver)
+        return PosixWineBackend(wine=wine, wineserver=wineserver)
     return NativeWindowsBackend()
+
+
+_EXECUTION_OPTIONS = (
+    "--backend",
+    "--wine",
+    "--wineserver",
+    "--toolchain-root",
+    "--compiler-transport",
+    "--resource-transport",
+    "--jobs",
+    "--initialization-timeout",
+    "--compile-timeout",
+    "--link-timeout",
+    "--cleanup-timeout",
+)
+
+
+def execution_option_argv(
+    args: argparse.Namespace, supplied_argv: Sequence[str]
+) -> tuple[str, ...]:
+    """Keep explicit execution choices in follow-ups without printing defaults.
+
+    Call after argparse validates the invocation and before automatic worker
+    selection. Parsed values preserve last-option-wins behavior, while matching
+    accepted option prefixes also supports argparse's unambiguous abbreviations.
+    """
+
+    available = tuple(
+        option for option in _EXECUTION_OPTIONS if hasattr(args, option[2:].replace("-", "_"))
+    )
+    selected: set[str] = set()
+    for value in supplied_argv:
+        if value == "--":
+            break
+        option = value.partition("=")[0]
+        if not option.startswith("--"):
+            continue
+        if option in available:
+            selected.add(option)
+            continue
+        matches = tuple(candidate for candidate in available if candidate.startswith(option))
+        if len(matches) == 1:
+            selected.add(matches[0])
+    return tuple(
+        value
+        for option in available
+        if option in selected
+        for value in (option, str(getattr(args, option[2:].replace("-", "_"))))
+    )
 
 
 def resolve_classic_execution_inputs(
@@ -59,6 +116,7 @@ def resolve_classic_execution_inputs(
 
 __all__ = [
     "ClassicExecutionInputs",
+    "execution_option_argv",
     "resolve_classic_execution_inputs",
     "selected_backend",
 ]

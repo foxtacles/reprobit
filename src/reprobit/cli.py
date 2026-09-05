@@ -270,13 +270,7 @@ def _add_execution_options(
     cold_option: bool,
     keep_workspace_option: bool = True,
 ) -> None:
-    command.add_argument(
-        "--jobs",
-        type=int,
-        default=None,
-        metavar="COUNT",
-        help=f"maximum parallel build workers (default: {_JOBS_DEFAULT_HELP})",
-    )
+    _add_jobs_option(command)
     if cold_option:
         command.add_argument(
             "--cold",
@@ -299,6 +293,16 @@ def _add_execution_options(
     )
     _add_host_options(advanced, transports=True)
     _add_timeout_options(advanced)
+
+
+def _add_jobs_option(group: argparse._ActionsContainer) -> None:
+    group.add_argument(
+        "--jobs",
+        type=int,
+        default=None,
+        metavar="COUNT",
+        help=f"maximum parallel build workers (default: {_JOBS_DEFAULT_HELP})",
+    )
 
 
 _TOOLCHAIN_ROOT_HELP = "compiler installation override (normally remembered by rbit setup)"
@@ -807,9 +811,13 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="replace saved default-library edges with an empty list during --refresh",
     )
-    # A refresh performs one private cold verification. ``main`` fills this
-    # internal execution default without adding an initial-import-only flag.
-    cmake_import.set_defaults(handler=_lazy_cmake_import, jobs=None)
+    refresh_execution = cmake_import.add_argument_group(
+        "refresh execution options",
+        "With --refresh, control the required build from scratch; --timeout controls CMake.",
+    )
+    _add_jobs_option(refresh_execution)
+    _add_timeout_options(refresh_execution)
+    cmake_import.set_defaults(handler=_lazy_cmake_import)
 
     graph = _subcommand(
         subcommands, "graph", help="record the compiler and linker steps used by direct builds"
@@ -1379,6 +1387,10 @@ def main(argv: list[str] | None = None) -> int:
         args = parser.parse_args(arguments)
     output = CLIOutput(args.format, sys.stdout, sys.stderr, quiet=args.quiet)
     handler: Handler = args.handler
+    if hasattr(args, "jobs"):
+        from reprobit.cli_environment import execution_option_argv
+
+        args.execution_argv = execution_option_argv(args, arguments)
     if hasattr(args, "jobs") and args.jobs is None:
         args.jobs = default_jobs()
     if getattr(args, "jobs", 1) < 1:

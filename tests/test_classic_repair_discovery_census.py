@@ -270,6 +270,7 @@ def test_a_replayed_later_candidate_cannot_overtake_a_saved_carrier(
         windows: object,
         *,
         evaluate: object,
+        ordered_outcomes: bool,
         progress: object = None,
         planned_candidates: int,
         cache: object = None,
@@ -389,3 +390,86 @@ def test_a_saved_carrier_with_a_captured_object_is_not_compiled_again() -> None:
 
     enqueued = [donor.id for probe, donor, _p in entry.attempts if probe in entry.saved_attempts]
     assert enqueued == ["donor.uncaptured"]
+
+
+def test_captured_resolved_unit_does_not_spend_the_last_candidate_slot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from test_classic_repair_discovery import _Handle, _probe_output
+
+    import reprobit.classic_repair_discovery as subject
+
+    def named_refusal(name: str, captured: bool) -> ClassicRepairRefusal:
+        original = _census_refusal()
+        plan = PLAN.model_copy(update={"id": name, "source": name + ".cpp"})
+        donor = _saved_shape_donor("donor." + name, 1, 2).model_copy(
+            update={
+                "scope": Scope(target=plan.target_id, translation_unit=name),
+                "beneficiaries": (
+                    Scope(target=plan.target_id, translation_unit=name, function="?other@@YAXXZ"),
+                ),
+            }
+        )
+        receipt = ClassicProofReceipt(
+            id="proof." + donor.id,
+            intervention_id=donor.id,
+            family=donor.family,
+            expected_values={},
+        )
+        prepared = ClassicPreparedDonor(
+            donor,
+            prepare_donor_compile_request(
+                donor,
+                source_path=plan.source,
+                clean_source=SOURCE_TEXT,
+                effective_source=SOURCE_TEXT,
+                receipts=(receipt,),
+            ),
+        )
+        unit = ClassicPreparedUnit(plan, (prepared,), (), (), (), (receipt,))
+        action = original.intervention.model_copy(
+            update={
+                "id": "census." + name,
+                "scope": Scope(target=plan.target_id, translation_unit=name, function=SYMBOL),
+            }
+        )
+        return replace(
+            original,
+            unit_id=name,
+            unit=unit,
+            intervention=action,
+            receipt=original.receipt.model_copy(
+                update={
+                    "id": "proof." + action.id,
+                    "intervention_id": action.id,
+                }
+            ),
+            unit_donor_objects={donor.id: VERIFIED} if captured else {},
+        )
+
+    refusals = (named_refusal("a.settled", True), named_refusal("b.open", False))
+    compiled: list[str] = []
+
+    def fake_windows(_probes, units, windows, *, evaluate, **_kwargs):  # type: ignore[no-untyped-def]
+        by_id = {unit.donors[0].intervention.id: unit for unit in units}
+        assert {unit.plan.id for unit in units} == {"b.open"}
+        for window in windows:
+            for donor_id in window:
+                compiled.append(donor_id)
+                evaluate((_probe_output(donor_id, by_id[donor_id], VERIFIED),))
+        return tuple(compiled)
+
+    monkeypatch.setattr(subject, "probe_donor_compile_windows", fake_windows)
+    sources = {refusal.unit.plan.source: SOURCE_TEXT for refusal in refusals}
+    result = subject.probe_carrier_discovery(
+        _Handle(),
+        refusals,
+        clean_sources=sources,
+        effective_sources=sources,
+        per_unit=1,
+        candidate_budget=1,
+        window_size=1,
+    )
+    assert result.compiled_candidates == 1
+    assert result.unresolved == ()
+    assert {repair.unit_id for repair in result.repairs} == {"a.settled", "b.open"}

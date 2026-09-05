@@ -1,12 +1,8 @@
 """Composed-body ledger: what every linker-selected function looked like when verified.
 
-A successful cold verify knows, for every target, which object provided each
-function's COMDAT (the first definer in the linker's positional input order)
-and the exact bytes of that function's body.  Recording those bodies lets a
-later repair tell *unrecorded* fallout of a source edit apart from noise: a
-function with no saved record whose fresh seed body differs from its verified
-body, in the object the linker selects, will change the image, so it needs a
-record just like a refused saved record does.
+A successful cold verify captures the linker's live public/provider map and
+reads the selected object bodies.  The census uses that inventory to distinguish
+changed live functions from discarded COMDATs and unselected archive members.
 
 The ledger is derived data.  It never certifies anything: verification always
 recompiles and compares whole images.
@@ -27,7 +23,7 @@ from reprobit.coff_format import CoffObject, coff_body
 from reprobit.model import StrictModel
 from reprobit.strict_json import canonical_json, strict_load
 
-LEDGER_SCHEMA_VERSION: Literal[1] = 1
+LEDGER_SCHEMA_VERSION: Literal[2] = 2
 COMPOSED_BODY_LEDGER_RELATIVE = ("ledger", "composed-bodies.json")
 _IMAGE_SCN_CNT_CODE = 0x20
 
@@ -46,7 +42,7 @@ class ComposedTargetLedger(StrictModel):
 
 
 class ComposedBodyLedger(StrictModel):
-    schema_version: Literal[1] = LEDGER_SCHEMA_VERSION
+    schema_version: Literal[2] = LEDGER_SCHEMA_VERSION
     graph_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     targets: dict[str, ComposedTargetLedger] = Field(default_factory=dict)
 
@@ -102,31 +98,39 @@ def function_bodies(data: bytes) -> dict[str, FunctionBody]:
     return bodies
 
 
-def select_providers(objects: Sequence[ProvidedObject]) -> dict[str, LedgerFunction]:
-    """First definer wins: the linker keeps the earliest positional COMDAT of a symbol."""
+def select_providers(
+    objects: Sequence[ProvidedObject], live_providers: Mapping[str, str]
+) -> dict[str, LedgerFunction]:
+    """Read only the bodies of providers named by the actual linker's live map."""
 
+    by_reference = {item.provider: item for item in objects}
+    if len(by_reference) != len(objects):
+        raise ValueError("linker input inventory repeats an object")
     selected: dict[str, LedgerFunction] = {}
-    for item in objects:
-        for symbol, body in item.bodies.items():
-            if symbol in selected:
-                continue
-            selected[symbol] = LedgerFunction(
-                provider=item.provider,
-                translation_unit_id=item.translation_unit_id,
-                body_sha256=body.sha256,
-                body_length=body.length,
-            )
+    for symbol, reference in live_providers.items():
+        item = by_reference[reference]
+        body = item.bodies.get(symbol)
+        if body is None:
+            continue  # Static/section-interior symbols are outside this census.
+        selected[symbol] = LedgerFunction(
+            provider=item.provider,
+            translation_unit_id=item.translation_unit_id,
+            body_sha256=body.sha256,
+            body_length=body.length,
+        )
     return selected
 
 
 def build_ledger(
-    graph_digest: str, targets: Mapping[str, Sequence[ProvidedObject]]
+    graph_digest: str,
+    targets: Mapping[str, Sequence[ProvidedObject]],
+    live_providers: Mapping[str, Mapping[str, str]],
 ) -> ComposedBodyLedger:
     return ComposedBodyLedger(
         graph_digest=graph_digest,
         targets={
             target_id: ComposedTargetLedger(
-                functions=dict(sorted(select_providers(objects).items()))
+                functions=dict(sorted(select_providers(objects, live_providers[target_id]).items()))
             )
             for target_id, objects in sorted(targets.items())
         },
@@ -181,8 +185,24 @@ def write_ledger(path: Path, ledger: ComposedBodyLedger) -> bytes:
     return payload
 
 
+class ObsoleteLedgerError(ValueError):
+    """An older approximate ledger needs replacement by a successful cold verify."""
+
+
 def read_ledger(path: Path) -> ComposedBodyLedger:
-    return ComposedBodyLedger.model_validate(strict_load(path))
+    value = strict_load(path)
+    if (
+        isinstance(value, dict)
+        and type(value.get("schema_version")) is int
+        and value["schema_version"] == 1
+    ):
+        # Validate the old shape before treating it as obsolete, rather than
+        # hiding malformed persisted data as an ordinary upgrade.
+        ComposedBodyLedger.model_validate({**value, "schema_version": LEDGER_SCHEMA_VERSION})
+        raise ObsoleteLedgerError(
+            "saved repair data predates live linker maps; run rbit verify to refresh it"
+        )
+    return ComposedBodyLedger.model_validate(value)
 
 
 def ledger_translation_units(ledger: ComposedBodyLedger) -> Iterable[str]:

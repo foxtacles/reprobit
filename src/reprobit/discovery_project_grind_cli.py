@@ -130,6 +130,7 @@ def _campaign_argv(
         values.extend(("--reference-object", value))
     if acceptance is not None:
         values.append(acceptance)
+    values.extend(getattr(args, "execution_argv", ()))
     return tuple(values)
 
 
@@ -169,6 +170,8 @@ def _publish_project_grind_outcome(
     result: ProjectGrindResult,
     *,
     verify_argv: tuple[str, ...],
+    execution_argv: tuple[str, ...] = (),
+    continue_argv: tuple[str, ...] = (),
 ) -> ProjectGrindArtifacts:
     """Atomically publish one detailed result before the next symbol runs."""
 
@@ -191,9 +194,13 @@ def _publish_project_grind_outcome(
         result,
         plan_relative=plan_relative,
         commands=GrindReportCommands(
-            approval=human_command(grind_approval_argv(root, plan_relative, exact=result.exact)),
+            approval=human_command(
+                grind_approval_argv(
+                    root, plan_relative, exact=result.exact, execution_argv=execution_argv
+                )
+            ),
             verify=human_command(verify_argv),
-            proceed=human_command(("rbit", "discover", "grind", root)),
+            proceed=human_command(continue_argv or ("rbit", "discover", "grind", root)),
         ),
         cold_files=cold_files,
         extra_files=extra_files,
@@ -366,7 +373,8 @@ def command_discover_project_grind(
     assignments = _project_reference_assignments(args.reference_object)
     state_root = project_state_root(root)
     report_directory = _project_report_directory(state_root)
-    verify_argv = ("rbit", "verify", str(root))
+    execution_argv = getattr(args, "execution_argv", ())
+    verify_argv = ("rbit", "verify", str(root), *execution_argv)
     outcome_report_warnings: list[tuple[ProjectGrindWorkItem, str, str]] = []
 
     def finalize_outcome(
@@ -384,6 +392,8 @@ def command_discover_project_grind(
                 plan,
                 result,
                 verify_argv=verify_argv,
+                execution_argv=execution_argv,
+                continue_argv=_campaign_argv(root, args),
             )
         except Exception as exc:
             # Reports are diagnostics, never authority.  Preserve a completed

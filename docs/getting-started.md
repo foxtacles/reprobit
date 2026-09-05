@@ -104,10 +104,12 @@ Next: rbit source preview /path/to/project
 ```
 
 `setup` downloads and authenticates the compiler when this machine does not have
-it yet (the first run therefore prints a download activity as well), remembers
-its location in the user configuration, creates `reprobit/toolchain.lock.json`
-when it is absent or checks an existing lock against the installation, and
-probes the host backend. Later commands need no machine-specific paths. Pass
+it yet (the first run therefore prints a download activity as well), creates
+`reprobit/toolchain.lock.json` when it is absent or checks an existing lock
+against the installation, and
+probes the host backend. After those checks pass, it remembers the compiler
+location in the user configuration. A failed setup preserves the previous
+default. Later commands need no machine-specific paths. Pass
 `--toolchain-root /path/to/msvc42` to use an installation you already have;
 [platform setup](platforms.md) and the [native Windows guide](windows.md)
 cover unusual hosts.

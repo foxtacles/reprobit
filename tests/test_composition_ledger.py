@@ -40,11 +40,11 @@ def test_function_bodies_lists_external_code_symbols_with_their_digests() -> Non
     assert bodies[SYMBOL] == subject.FunctionBody(_digest(0x90), len(fixture.SEED_BODY))
 
 
-def test_first_positional_definer_provides_the_function() -> None:
+def test_actual_linker_selection_overrides_object_order() -> None:
     first = _provided("a", 0x90, "tu.a")
     second = _provided("b", 0x91, "tu.b")
 
-    selected = subject.select_providers((first, second))
+    selected = subject.select_providers((first, second), {SYMBOL: "build/a.obj"})
 
     assert selected == {
         SYMBOL: subject.LedgerFunction(
@@ -54,7 +54,10 @@ def test_first_positional_definer_provides_the_function() -> None:
             body_length=len(fixture.SEED_BODY),
         )
     }
-    assert subject.select_providers((second, first))[SYMBOL].provider == "build/b.obj"
+    assert (
+        subject.select_providers((second, first), {SYMBOL: "build/a.obj"})[SYMBOL].provider
+        == "build/a.obj"
+    )
 
 
 def test_ledger_round_trips_canonically(tmp_path: Path) -> None:
@@ -67,6 +70,7 @@ def test_ledger_round_trips_canonically(tmp_path: Path) -> None:
                 ),
             )
         },
+        {"program": {SYMBOL: "build/a.obj"}},
     )
     path = tmp_path / "ledger" / "composed-bodies.json"
 
@@ -75,7 +79,7 @@ def test_ledger_round_trips_canonically(tmp_path: Path) -> None:
 
     assert subject.read_ledger(path) == ledger
     assert not path.with_name(path.name + ".tmp").exists()
-    assert ledger.schema_version == 1
+    assert ledger.schema_version == 2
     with pytest.raises(ValidationError):
         subject.ComposedBodyLedger(graph_digest="nope")
 
@@ -93,6 +97,7 @@ def test_census_reports_only_selected_unrecorded_functions_that_moved() -> None:
                 ),
             )
         },
+        {"program": {SYMBOL: "build/a.obj"}},
     )
     target = ledger.targets["program"]
     moved = subject.function_bodies(_object(0x92))
@@ -108,3 +113,22 @@ def test_census_reports_only_selected_unrecorded_functions_that_moved() -> None:
     unchanged = subject.function_bodies(_object(0x90))
     assert subject.census_unrecorded_fallout(target, {"tu.a": unchanged}, {}) == ()
     assert set(subject.ledger_translation_units(ledger)) == {"tu.a"}
+
+
+def test_previous_approximate_ledger_is_obsolete_and_cold_verification_can_refresh_it(
+    tmp_path: Path,
+) -> None:
+    import json
+
+    from reprobit.repair_workflow import _composed_body_ledger
+
+    path = tmp_path.joinpath(*subject.COMPOSED_BODY_LEDGER_RELATIVE)
+    path.parent.mkdir()
+    legacy = {"schema_version": 1, "graph_digest": GRAPH, "targets": {}}
+    path.write_text(json.dumps(legacy))
+    with pytest.raises(subject.ObsoleteLedgerError, match="run rbit verify"):
+        subject.read_ledger(path)
+    assert _composed_body_ledger(tmp_path) is None
+    refreshed = subject.ComposedBodyLedger(graph_digest=GRAPH)
+    subject.write_ledger(path, refreshed)
+    assert _composed_body_ledger(tmp_path) == refreshed

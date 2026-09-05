@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 import reprobit.onboarding as onboarding
-from reprobit.backends import BackendDoctorReport
+from reprobit.backends import BackendDoctorReport, DoctorCheck
 from reprobit.cli import main
 from reprobit.cli_output import human_command
 from reprobit.project_loader import load_project
@@ -17,6 +17,7 @@ from reprobit.toolchains import (
     ClassicMSVCToolchain,
     ToolchainDoctorReport,
 )
+from reprobit.user_config import resolve_toolchain_root
 
 
 def _fake_toolchain(root: Path) -> Path:
@@ -100,6 +101,56 @@ def test_setup_creates_and_rechecks_the_project_toolchain_lock(
     # The first setup validates once before creating the lock and once against
     # the new lock. Later setup runs validate only once; readiness reuses it.
     assert doctor_calls == 4
+
+
+@pytest.mark.parametrize("failure", ["compiler-mismatch", "backend"])
+def test_failed_setup_preserves_the_previous_compiler_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    failure: str,
+) -> None:
+    monkeypatch.delenv("REPROBIT_MSVC_4_2_ROOT", raising=False)
+    project = tmp_path / "sample"
+    previous = _fake_toolchain(tmp_path / "previous")
+    replacement = _fake_toolchain(tmp_path / "replacement")
+    checks: tuple[DoctorCheck, ...] = ()
+    monkeypatch.setattr(onboarding, "verify_msvc42", lambda _root: None)
+    monkeypatch.setattr(
+        onboarding,
+        "selected_backend",
+        lambda _args: SimpleNamespace(
+            identifier="fixture",
+            doctor=lambda *, execute_probe: BackendDoctorReport("fixture", "fixture", checks),
+        ),
+    )
+    assert main(["init", str(project)]) == 0
+    assert main(["setup", str(project), "--toolchain-root", str(previous), "--skip-probe"]) == 0
+    assert resolve_toolchain_root(MSVC_42) == previous.resolve()
+    lock = project / "reprobit/toolchain.lock.json"
+    locked_bytes = lock.read_bytes()
+    capsys.readouterr()
+
+    if failure == "compiler-mismatch":
+        compiler = replacement / TOOLCHAIN_PROFILES[MSVC_42].required_producers[0]
+        compiler.write_bytes(b"different compiler")
+        expected_status = 2
+    else:
+        checks = (DoctorCheck("wine", False, "fixture runtime missing"),)
+        expected_status = 1
+
+    assert (
+        main(["setup", str(project), "--toolchain-root", str(replacement), "--skip-probe"])
+        == expected_status
+    )
+    assert resolve_toolchain_root(MSVC_42) == previous.resolve()
+    assert lock.read_bytes() == locked_bytes
+    captured = capsys.readouterr()
+    assert "Environment ready" not in captured.out
+    if failure == "backend":
+        assert "fixture runtime missing" in captured.out
+    else:
+        assert "digest differs" in captured.err
 
 
 def test_doctor_checks_the_compiler_remembered_for_the_project(

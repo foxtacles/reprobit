@@ -399,7 +399,7 @@ class ClassicProducerGraphBuildExecutor:
                 wave_seal,
                 root=self.build_root,
                 allowed_outputs=(
-                    path for node in ready for path in self.producer.node_outputs(node)
+                    path for node in ready for path in self.producer.node_write_outputs(node)
                 ),
                 phase="linker wave",
             )

@@ -87,6 +87,12 @@ the JSON and HTML report. An ambiguous compiler step, a failed verification, or
 a concurrent project change leaves the published project unchanged. `--target`
 is only for the first import.
 
+Use `--jobs COUNT` to set the refresh verification's parallelism and the shared
+`--initialization-timeout`, `--compile-timeout`, `--link-timeout`, and
+`--cleanup-timeout` options to adjust its execution limits. These options
+require `--refresh` and apply only to this run; they do not become part of the
+saved CMake recipe. `--timeout` separately controls CMake configuration.
+
 Older recorded graphs may not contain the original CMake options. They remain
 valid for builds and verification, but refresh will ask you to run one ordinary
 `rbit import cmake .` with those options first.

@@ -233,23 +233,13 @@ def _verify_refreshed_project(
     root: Path,
     output: CLIOutput,
     *,
-    jobs: int,
-    backend: ExecutionBackend,
-    toolchain_root: Path,
-    compiler_transport: Path,
-    resource_transport: Path,
+    execution: ProjectExecutionOptions,
     source_toolchain_report: ToolchainDoctorReport | None = None,
 ) -> VerifyResult:
     verified = execute_verify(
         VerifyRequest(
             project=root,
-            execution=ProjectExecutionOptions(
-                jobs=jobs,
-                backend=backend,
-                toolchain_root=toolchain_root,
-                compiler_transport=compiler_transport,
-                resource_transport=resource_transport,
-            ),
+            execution=execution,
             keep_workspace=KeepWorkspace.NEVER,
             source_toolchain_report=source_toolchain_report,
         ),
@@ -355,11 +345,17 @@ def _command_cmake_refresh(
                     verified = _verify_refreshed_project(
                         staged_root,
                         output,
-                        jobs=jobs,
-                        backend=backend,
-                        toolchain_root=toolchain_root,
-                        compiler_transport=compiler_transport,
-                        resource_transport=resource_transport,
+                        execution=ProjectExecutionOptions(
+                            jobs=jobs,
+                            backend=backend,
+                            toolchain_root=toolchain_root,
+                            compiler_transport=compiler_transport,
+                            resource_transport=resource_transport,
+                            initialization_timeout=args.initialization_timeout,
+                            compile_timeout=args.compile_timeout,
+                            link_timeout=args.link_timeout,
+                            cleanup_timeout=args.cleanup_timeout,
+                        ),
                         source_toolchain_report=graph_result.source_toolchain_report,
                     )
                 evidence = collect_cmake_refresh_evidence(
@@ -446,6 +442,17 @@ def command_cmake_import(args: argparse.Namespace, output: CLIOutput) -> int:
     """Scaffold, configure, and record one ordinary CMake project."""
 
     root = project_root(args.project)
+    refresh_options = {
+        "--jobs",
+        "--initialization-timeout",
+        "--compile-timeout",
+        "--link-timeout",
+        "--cleanup-timeout",
+    }
+    if not args.refresh:
+        for option in getattr(args, "execution_argv", ())[::2]:
+            if option in refresh_options:
+                raise CLIError(f"{option} requires --refresh")
     if args.path and not args.refresh:
         raise CLIError("--path requires --refresh")
     if args.refresh and args.target:

@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import ast
 import inspect
+import json
 import re
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -335,7 +337,187 @@ def test_action_summary_publishes_safe_outputs_when_report_is_missing(
     assert "quarantine-digest=\n" in received
     assert "total-cost=\n" in received
     assert f"report-json={report}" in received
-    assert "before it could publish" in summary.read_text(encoding="utf-8")
+    assert "current canonical report could not be validated" in summary.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("accepted", ("true", "false"))
+@pytest.mark.parametrize(
+    "damage",
+    (
+        "missing-json",
+        "missing-html",
+        "invalid-json",
+        "noncanonical-json",
+        "replaced-html",
+        "missing-receipt",
+        "stale-receipt",
+    ),
+)
+def test_action_summary_preserves_failure_evidence_and_rejects_false_success(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    accepted: str,
+    damage: str,
+) -> None:
+    report_path = tmp_path / "report.json"
+    html_path = report_path.with_suffix(".html")
+    receipt_path = tmp_path / "completion.json"
+    report = _fixture_report()
+    write_report_json(report, report_path)
+    write_report_html(report, html_path, canonical_json_path=report_path)
+    nonce = "6" * 64
+    publish_action_completion(
+        report,
+        report_path=report_path,
+        html_path=html_path,
+        receipt_path=receipt_path,
+        nonce=nonce,
+    )
+    if damage == "missing-json":
+        report_path.unlink()
+    elif damage == "missing-html":
+        html_path.unlink()
+    elif damage == "invalid-json":
+        report_path.write_bytes(b"{broken")
+    elif damage == "noncanonical-json":
+        report_path.write_bytes(b" " + report_path.read_bytes())
+    elif damage == "replaced-html":
+        html_path.write_text("<html>replaced after verification</html>", encoding="utf-8")
+    elif damage == "missing-receipt":
+        receipt_path.unlink()
+    else:
+        nonce = "7" * 64
+    output = tmp_path / "output"
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(output))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("REPROBIT_ACCEPTED", accepted)
+
+    result = main(
+        [
+            "--allow-missing",
+            "--receipt",
+            str(receipt_path),
+            "--nonce",
+            nonce,
+            str(report_path),
+        ]
+    )
+
+    assert result == (1 if accepted == "true" else 0)
+    outputs = dict(line.split("=", 1) for line in output.read_text(encoding="utf-8").splitlines())
+    assert outputs["report-produced"] == "false"
+    assert outputs["accepted"] == "false"
+    assert outputs["clean"] == ""
+    assert outputs["total-cost"] == ""
+    summary_text = summary.read_text(encoding="utf-8")
+    assert "A current canonical report could not be validated." in summary_text
+    stderr = capsys.readouterr().err
+    assert stderr.startswith("cannot publish Action report: ")
+    if damage == "replaced-html":
+        assert "differs from the canonical JSON report" in stderr
+        assert "differs from the canonical JSON report" in summary_text
+    elif damage == "stale-receipt":
+        assert "does not bind this report invocation" in stderr
+        assert "does not bind this report invocation" in summary_text
+    elif damage == "noncanonical-json":
+        assert "Action report JSON is not canonical" in stderr
+
+
+def test_action_summary_bounds_and_escapes_the_underlying_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fail_read(*args: object) -> Report:
+        raise ValueError("Invalid </pre><script>alert(1)</script>\n\x1b[31m " + "x" * 1000)
+
+    summary = tmp_path / "summary"
+    monkeypatch.setattr(action_summary_module, "_read_current_report", fail_read)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output"))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("REPROBIT_ACCEPTED", "false")
+
+    assert (
+        main(
+            [
+                "--allow-missing",
+                "--receipt",
+                str(tmp_path / "receipt.json"),
+                "--nonce",
+                "8" * 64,
+                str(tmp_path / "report.json"),
+            ]
+        )
+        == 0
+    )
+
+    stderr = capsys.readouterr().err
+    reason = stderr.removeprefix("cannot publish Action report: ").removesuffix("\n")
+    assert len(reason) == 512
+    assert reason.endswith("...")
+    assert "\n" not in reason
+    assert "\x1b" not in reason
+    summary_text = summary.read_text(encoding="utf-8")
+    assert "&lt;/pre&gt;&lt;script&gt;" in summary_text
+    assert "<script>" not in summary_text
+    assert "\x1b" not in summary_text
+
+
+def test_action_completion_and_summary_render_each_canonical_report_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report_path = tmp_path / "report.json"
+    html_path = report_path.with_suffix(".html")
+    receipt_path = tmp_path / "completion.json"
+    report = _fixture_report()
+    write_report_json(report, report_path)
+    write_report_html(report, html_path, canonical_json_path=report_path)
+    monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "output"))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "summary"))
+    monkeypatch.setenv("REPROBIT_ACCEPTED", "true")
+
+    for phase in ("completion", "summary"):
+        with (
+            patch.object(
+                action_summary_module, "canonical_json", wraps=action_summary_module.canonical_json
+            ) as serialize,
+            patch.object(
+                action_summary_module,
+                "render_report_html",
+                wraps=action_summary_module.render_report_html,
+            ) as render,
+        ):
+            if phase == "completion":
+                publish_action_completion(
+                    report,
+                    report_path=report_path,
+                    html_path=html_path,
+                    receipt_path=receipt_path,
+                    nonce="9" * 64,
+                )
+            else:
+                assert (
+                    main(
+                        [
+                            "--receipt",
+                            str(receipt_path),
+                            "--nonce",
+                            "9" * 64,
+                            str(report_path),
+                        ]
+                    )
+                    == 0
+                )
+            assert sum(isinstance(call.args[0], Report) for call in serialize.call_args_list) == 1
+            assert render.call_count == 1
+
+    assert json.loads(receipt_path.read_bytes()) == {
+        "schema_version": 1,
+        "nonce": "9" * 64,
+        "report_run_id": report.run_id.value,
+        "report_json_sha256": Digest.from_bytes(report_path.read_bytes()).value,
+        "report_html_sha256": Digest.from_bytes(html_path.read_bytes()).value,
+    }
 
 
 def test_action_summary_refuses_a_stale_report_from_another_invocation(
@@ -483,7 +665,7 @@ def test_composite_action_preserves_reports_when_verification_fails() -> None:
     action = (Path(__file__).parents[1] / "action.yml").read_text(encoding="utf-8")
     assert "id: verification\n      continue-on-error: true" in action
     assert "id: summary\n      if: always()" in action
-    assert "if: always() && steps.verification.outcome == 'failure'" in action
+    assert "always() && (steps.verification.outcome != 'success' ||" in action
     assert "--execute-probe" in action
     assert "targets:" not in action
     assert 'policy_args+=(--policy "$REPROBIT_POLICY")' in action
@@ -499,6 +681,42 @@ def test_composite_action_preserves_reports_when_verification_fails() -> None:
     assert '"${transport_args[@]}"' in action
     assert "toolchain-profile:" not in action
     assert "REPROBIT_ACCEPTED: ${{ steps.verification.outcome == 'success' }}" in action
+
+
+@pytest.mark.parametrize(
+    ("verification", "produced", "accepted", "must_fail"),
+    (
+        ("success", "true", "true", False),
+        ("success", "false", "false", True),
+        ("success", "false", "true", True),
+        ("success", "", "true", True),
+        ("success", "true", "false", True),
+        ("success", "true", "", True),
+        ("success", "", "", True),
+        ("failure", "true", "false", True),
+        ("failure", "true", "true", True),
+        ("failure", "false", "false", True),
+        ("skipped", "", "", True),
+        ("cancelled", "", "", True),
+    ),
+)
+def test_composite_action_final_gate_requires_verified_current_evidence(
+    verification: str, produced: str, accepted: str, must_fail: bool
+) -> None:
+    action = (Path(__file__).parents[1] / "action.yml").read_text(encoding="utf-8")
+    gate = action.split("- name: Require accepted verification and validated current reports\n")[1]
+    condition = " ".join(gate.split("if: >-\n")[1].split("shell:")[0].split())
+    for reference, value in (
+        ("steps.verification.outcome", verification),
+        ("steps.summary.outputs.report-produced", produced),
+        ("steps.summary.outputs.accepted", accepted),
+    ):
+        condition = condition.replace(reference, repr(value))
+    condition = condition.replace("always()", "True").replace("&&", "and").replace("||", "or")
+    # This fixed Action expression uses only string comparisons and boolean operators,
+    # which have the same truth table in Python and GitHub expressions.
+    assert eval(condition, {"__builtins__": {}}) is must_fail
+    assert "run: exit 1" in gate
 
 
 def test_action_completion_is_outside_prepared_cleanup_scope() -> None:

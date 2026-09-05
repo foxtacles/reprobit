@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from html import unescape
 from html.parser import HTMLParser
 from io import StringIO
 from pathlib import Path
@@ -13,6 +14,7 @@ import pytest
 import reprobit.discovery_grind_cli as grind_cli
 import reprobit.discovery_grind_report as grind_report
 import reprobit.discovery_project_grind_cli as project_grind_cli
+from reprobit.cli import _parser, main
 from reprobit.cli_output import CLIOutput, human_command
 from reprobit.discovery_contracts import (
     DeclarationFamily,
@@ -348,6 +350,78 @@ def test_cli_writes_a_human_grind_report_for_no_solution(
     assert complete["cold_verification_report_html"] is None
     assert complete["next_command"] is None
     assert complete["next_argv"] == []
+
+
+@pytest.mark.parametrize("published", [False, True])
+@pytest.mark.parametrize("exact", [False, True])
+def test_expert_grind_followups_preserve_execution_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    published: bool,
+    exact: bool,
+) -> None:
+    _install_cli_result(
+        monkeypatch, _result(solution=_solution(project_exact=exact), published=published)
+    )
+    monkeypatch.setattr(grind_report, "canonical_json", lambda _value: b"{}")
+    monkeypatch.setattr(
+        grind_report, "render_report_html", lambda _report, **_kwargs: "cold report"
+    )
+    options = [
+        "--backend",
+        "auto",
+        "--wine",
+        str(tmp_path / "custom wine"),
+        "--wineserver",
+        str(tmp_path / "custom wineserver"),
+        "--toolchain-root",
+        str(tmp_path / "compiler"),
+        "--compiler-transport",
+        str(tmp_path / "cl"),
+        "--resource-transport",
+        str(tmp_path / "rc"),
+        "--jobs",
+        "2",
+        "--initialization-timeout",
+        "701",
+        "--compile-timeout",
+        "702",
+        "--link-timeout",
+        "903",
+        "--cleanup-timeout",
+        "14",
+    ]
+    command = [
+        "discover",
+        "grind",
+        str(tmp_path),
+        "--expert-plan",
+        "reprobit/discovery.json",
+        *options,
+    ]
+    if published:
+        command.append("--accept-exact" if exact else "--accept-progress")
+    assert main(["--format", "ndjson", *command]) == 0
+    event = next(
+        json.loads(line)
+        for line in capsys.readouterr().out.splitlines()
+        if json.loads(line).get("event") == "discovery_grind_complete"
+    )
+    next_args = _parser().parse_args(event["next_argv"][1:])
+    original = _parser().parse_args(command)
+    for option in options[::2]:
+        name = option[2:].replace("-", "_")
+        assert getattr(next_args, name) == getattr(original, name)
+    if published:
+        assert next_args.command == ("verify" if exact else "discover")
+    else:
+        assert next_args.plan == "reprobit/discovery.json"
+        assert next_args.accept_exact is exact
+        assert next_args.accept_progress is not exact
+        assert event["approval_argv"] == event["next_argv"]
+    report = Path(event["grind_report_html"]).read_text(encoding="utf-8")
+    assert event["next_command"] in unescape(report)
 
 
 def test_cli_cold_report_links_its_actual_json_sibling(

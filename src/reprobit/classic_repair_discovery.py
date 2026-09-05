@@ -31,6 +31,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from hashlib import sha256
 
+from reprobit.classic_donor_usage import direct_donor_consumers, donor_after_usage
 from reprobit.classic_donors import (
     DonorSourceError,
     generate_declaration_shape,
@@ -338,6 +339,8 @@ def _prepare_attempts(
     ordinal = 0
     per_unit_ids: dict[str, list[str]] = {}
     for unit_id, entry in sorted(work.items(), key=lambda item: item[0].casefold()):
+        if all(refusal.intervention.id in entry.resolved for refusal in entry.refusals):
+            continue
         unit = entry.unit
         source = unit.plan.source
         clean = clean_sources.get(source)
@@ -664,14 +667,7 @@ def _unit_repair(entry: _UnitWork) -> ClassicDiscoveryRepair | None:
         donor_id: {scope.function or "" for scope in saved.beneficiaries}
         for donor_id, saved in saved_donors.items()
     }
-    consumers = {
-        donor_id: {
-            consumer.id
-            for consumer in (*unit.actions, *(item.intervention for item in unit.donors))
-            if donor_id in consumer.dependencies
-        }
-        for donor_id in saved_donors
-    }
+    consumers = {donor_id: direct_donor_consumers(unit, donor_id) for donor_id in saved_donors}
     additions: list[ClassicRecordAddition] = []
     intervention_edits: list[ClassicInterventionEdit] = []
     receipt_edits: list[ClassicReceiptEdit] = []
@@ -749,22 +745,20 @@ def _unit_repair(entry: _UnitWork) -> ClassicDiscoveryRepair | None:
             ClassicRecordAddition(donor.model_copy(update={"beneficiaries": scopes}), receipt)
         )
     for donor_id, saved in saved_donors.items():
-        before = {scope.function or "" for scope in saved.beneficiaries}
-        if saved_beneficiaries[donor_id] == before:
+        if saved_beneficiaries[donor_id] == {scope.function or "" for scope in saved.beneficiaries}:
             continue
-        if not consumers[donor_id] and not saved_beneficiaries[donor_id]:
-            intervention_edits.append(ClassicInterventionEdit(saved, None))
+        after = donor_after_usage(
+            saved,
+            ((target_id, unit.plan.id, symbol) for symbol in saved_beneficiaries[donor_id]),
+            consumers[donor_id],
+        )
+        if after is saved:
+            continue
+        intervention_edits.append(ClassicInterventionEdit(saved, after))
+        if after is None:
             donor_receipt = receipts.get(donor_id)
             if donor_receipt is not None:
                 receipt_edits.append(ClassicReceiptEdit(donor_receipt, None))
-            continue
-        scopes = tuple(
-            Scope(target=target_id, translation_unit=unit.plan.id, function=symbol)
-            for symbol in sorted(saved_beneficiaries[donor_id])
-        )
-        intervention_edits.append(
-            ClassicInterventionEdit(saved, saved.model_copy(update={"beneficiaries": scopes}))
-        )
     return ClassicDiscoveryRepair(
         unit.plan.id,
         tuple(resolutions),
@@ -831,14 +825,9 @@ def probe_carrier_discovery(
             for probe_id, donor, prepared in entry.attempts
         }
         if not attempts:
-            unprepared = tuple(
-                (unit_id, refusal.intervention.id, entry.reasons.get("preparation", "no state"))
-                for unit_id, entry in work.items()
-                for refusal in entry.refusals
-            )
             if close_runtime and probes.producer.is_open:
                 probes.close()
-            return ClassicDiscoveryResult((), unprepared, 0)
+            return _discovery_result(work, (), {})
         budget = min(candidate_budget, len(order))
         order = order[:budget]
         # Candidates are preferred in preparation order: a unit's saved carriers,
@@ -877,7 +866,7 @@ def probe_carrier_discovery(
                 entry = work[unit_id]
                 while cursor[unit_id] < len(ids):
                     probe_id = ids[cursor[unit_id]]
-                    landed = arrived.get(probe_id)
+                    landed = arrived.pop(probe_id, None)
                     if landed is None:
                         break
                     cursor[unit_id] += 1
@@ -907,6 +896,7 @@ def probe_carrier_discovery(
             units,
             windows(),
             evaluate=evaluate,
+            ordered_outcomes=True,
             progress=progress,
             planned_candidates=len(order),
             cache=compile_cache,

@@ -723,3 +723,60 @@ def test_probe_store_gc_preserves_an_empty_directory_replacement(
     assert swapped
     assert seat.is_dir()
     assert original.is_dir()
+
+
+def test_ordered_stream_bounds_cache_hits_behind_a_slow_predecessor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ready = threading.Event()
+    release = threading.Event()
+    looked_up: list[str] = []
+    delivered: list[str] = []
+    prepared = {str(index): (_unit(str(index)), 0) for index in range(20)}
+
+    class Cache:
+        def get(self, _epoch, _key, *, donor_id):  # type: ignore[no-untyped-def]
+            looked_up.append(donor_id)
+            return None if donor_id == "0" else _output(donor_id)
+
+        def put(self, *_args):  # type: ignore[no-untyped-def]
+            pass
+
+    def compile_first(*args: Any) -> ClassicDonorProbeOutput:
+        assert args[-1] == "0"
+        ready.set()
+        assert release.wait(5)
+        return _output("0")
+
+    original_wait = subject.wait
+
+    def wait_for_predecessor(*args: Any, **kwargs: Any) -> Any:
+        assert ready.wait(5)
+        assert looked_up == ["0", "1"]  # One running plus one buffered, never all 20.
+        assert delivered == []
+        release.set()
+        return original_wait(*args, **kwargs)
+
+    monkeypatch.setattr(subject, "_compile_output", compile_first)
+    monkeypatch.setattr(subject, "wait", wait_for_predecessor)
+    try:
+        result = subject._stream_compiles(
+            SimpleNamespace(),
+            prepared,
+            object(),
+            object(),
+            object(),
+            (tuple(prepared),),
+            evaluate=lambda outcomes: delivered.extend(item.donor_id for item in outcomes) or False,
+            progress=None,
+            planned_candidates=20,
+            cache=Cache(),
+            epoch="test",
+            jobs=2,
+            ordered_outcomes=True,
+        )
+    finally:
+        release.set()
+    assert result[:2] == ("1", "0")  # Completion reporting remains responsive.
+    assert len(result) == len(prepared) and set(result) == set(prepared)
+    assert delivered == list(prepared)

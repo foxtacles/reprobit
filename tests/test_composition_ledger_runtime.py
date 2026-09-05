@@ -21,6 +21,14 @@ from reprobit.publication_evidence import collect_verified_publication_evidence
 SYMBOL = fixture.TARGET_SYMBOL
 
 
+def _map(provider: str = "a.obj") -> bytes:
+    return (
+        " Address Publics by Value Rva+Base Lib:Object\n"
+        f" 0001:00000000 {SYMBOL} 00401000 f {provider}\n"
+        " entry point at 0001:00000000\n"
+    ).encode("ascii")
+
+
 def _object(first_byte: int) -> bytes:
     body = bytearray(fixture.SEED_BODY)
     body[0] = first_byte
@@ -86,7 +94,7 @@ def _graph(*positional: str) -> ProducerGraphDocument:
     )
 
 
-def test_ledger_orders_positional_objects_before_archive_members(tmp_path: Path) -> None:
+def test_ledger_obeys_actual_direct_and_archive_selections(tmp_path: Path) -> None:
     graph = _graph("a.obj", "core.lib")
     payloads = {"a": _object(0x90), "b": _object(0x91), "c": _object(0x92)}
     for name, payload in payloads.items():
@@ -99,6 +107,7 @@ def test_ledger_orders_positional_objects_before_archive_members(tmp_path: Path)
     ledger = subject.compose_ledger(
         graph,
         link_nodes={"program": "linker.program"},
+        link_maps={"linker.program": _map()},
         resolve=resolve,
         unit_by_object=subject.unit_objects([("tu.a", tmp_path / "a.obj")]),
     )
@@ -107,11 +116,12 @@ def test_ledger_orders_positional_objects_before_archive_members(tmp_path: Path)
     assert (function.provider, function.translation_unit_id) == ("build/a.obj", "tu.a")
     assert ledger.graph_digest == producer_graph_digest(graph).value
 
-    # Without a.obj the linker takes the first archive member in librarian order: c.obj.
+    # The archive map names the selected member; librarian order alone is no evidence.
     graph_without_a = _graph("core.lib")
     ledger = subject.compose_ledger(
         graph_without_a,
         link_nodes={"program": "linker.program"},
+        link_maps={"linker.program": _map("core.lib:c.obj")},
         resolve=resolve,
         unit_by_object={},
     )
@@ -123,12 +133,17 @@ def test_ledger_refuses_unknown_linker_or_unresolved_input(tmp_path: Path) -> No
     graph = _graph("a.obj", "core.lib")
     with pytest.raises(subject.CompositionLedgerError, match="names no linker node"):
         subject.compose_ledger(
-            graph, link_nodes={"program": "compiler.a"}, resolve=lambda _r: None, unit_by_object={}
+            graph,
+            link_nodes={"program": "compiler.a"},
+            resolve=lambda _r: None,
+            unit_by_object={},
+            link_maps={},
         )
     with pytest.raises(subject.CompositionLedgerError, match="has no host path"):
         subject.compose_ledger(
             graph,
             link_nodes={"program": "linker.program"},
+            link_maps={"linker.program": _map()},
             resolve=lambda _r: None,
             unit_by_object={},
         )
@@ -153,7 +168,9 @@ def test_ledger_from_run_reads_the_executor_like_the_runtime(tmp_path: Path) -> 
         donors=SimpleNamespace(
             record_for_unit=lambda item: SimpleNamespace(object_path=tmp_path / "a.obj")
         ),
-        producer=SimpleNamespace(reference=reference),
+        producer=SimpleNamespace(
+            reference=reference, logical_for_host_path=str, linker_maps={"linker.program": _map()}
+        ),
     )
 
     ledger = subject.ledger_from_run(run)
@@ -197,6 +214,7 @@ def test_verify_records_the_ledger_only_when_it_could_be_derived(
     derived = subject.compose_ledger(
         graph,
         link_nodes={"program": "linker.program"},
+        link_maps={"linker.program": _map()},
         resolve=lambda value: (
             tmp_path / value.split("/", 1)[1] if value.startswith("build/") else None
         ),
@@ -284,3 +302,18 @@ def test_verified_evidence_accepts_the_exact_ledger_payload_with_a_null_unit(
 
     assert b'"translation_unit_id":null' in ledger_payload
     assert evidence.composed_body_ledger == ledger_payload
+
+
+def test_archive_selection_uses_member_identity_instead_of_librarian_order(tmp_path: Path) -> None:
+    graph = _graph("core.lib")
+    for name, first in (("b", 0x91), ("c", 0x92)):
+        (tmp_path / f"{name}.obj").write_bytes(_object(first))
+    ledger = subject.compose_ledger(
+        graph,
+        link_nodes={"program": "linker.program"},
+        resolve=lambda reference: tmp_path / reference.split("/", 1)[1],
+        unit_by_object={},
+        link_maps={"linker.program": _map("core:b.obj")},
+    )
+    # c.obj comes first in the librarian, but actual link evidence selects b.obj.
+    assert ledger.targets["program"].functions[SYMBOL].provider == "build/b.obj"

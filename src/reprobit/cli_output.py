@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
-import subprocess
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
@@ -58,7 +58,18 @@ def human_command(argv: Sequence[str | Path]) -> str:
     """Render copyable human text while machine events retain the argv array."""
 
     arguments = tuple(os.fspath(value) for value in argv)
-    return subprocess.list2cmdline(arguments) if os.name == "nt" else shlex.join(arguments)
+    if os.name != "nt":
+        return shlex.join(arguments)
+    # Windows instructions use PowerShell. CRT quoting only protects spaces
+    # and quotes; PowerShell also interprets $, &, apostrophes, and backticks.
+    command = " ".join(
+        value
+        if re.fullmatch(r"[A-Za-z0-9_./:\\=-]+", value)
+        else "'" + value.replace("'", "''") + "'"
+        for value in arguments
+    )
+    # A quoted executable is a string expression until PowerShell invokes it.
+    return f"& {command}" if command.startswith("'") else command
 
 
 @dataclass(frozen=True, slots=True, init=False)

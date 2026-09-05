@@ -24,6 +24,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 
+from reprobit.classic_donor_usage import beneficiary_keys, direct_donor_consumers, donor_after_usage
 from reprobit.classic_measured_pin_repair import MeasuredPinRepairError, repair_measured_pins
 from reprobit.classic_mosaic_repair import (
     MosaicRepairError,
@@ -58,7 +59,6 @@ from reprobit.intervention_metadata import (
     ClassicRecipeFamily,
     ClassicRecipeRole,
 )
-from reprobit.model import Scope
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeIntervention,
@@ -136,10 +136,6 @@ def _donor_order(refusal: ClassicRepairRefusal) -> list[str]:
     return [donor_id for donor_id in ordered if donor_id in refusal.unit_donor_objects]
 
 
-def _beneficiary(scope_target: str, unit_id: str, symbol: str) -> Scope:
-    return Scope(target=scope_target, translation_unit=unit_id, function=symbol)
-
-
 def plan_function_reauthoring(
     refusals: Sequence[ClassicRepairRefusal],
 ) -> ClassicReauthorPlan:
@@ -190,19 +186,12 @@ def plan_function_reauthoring(
                 item.intervention.id,
                 (
                     item.intervention,
-                    {
-                        (scope.target, scope.translation_unit or "", scope.function or "")
-                        for scope in item.intervention.beneficiaries
-                    },
+                    beneficiary_keys(item.intervention),
                 ),
             )
             consumers.setdefault(
                 item.intervention.id,
-                {
-                    consumer.id
-                    for consumer in (*unit.actions, *(donor.intervention for donor in unit.donors))
-                    if item.intervention.id in consumer.dependencies
-                },
+                direct_donor_consumers(unit, item.intervention.id),
             )
         for receipt in unit.receipts:
             unit_receipts.setdefault(receipt.intervention_id, receipt)
@@ -430,25 +419,14 @@ def plan_function_reauthoring(
         receipt_edits.append(ClassicReceiptEdit(old_receipt, None))
         removed_receipts.add(old_receipt.id)
     for donor_id, (saved, beneficiaries) in donor_state.items():
-        before = {
-            (scope.target, scope.translation_unit or "", scope.function or "")
-            for scope in saved.beneficiaries
-        }
-        if beneficiaries == before:
+        after = donor_after_usage(saved, beneficiaries, consumers[donor_id])
+        if after is saved:
             continue
-        if not consumers[donor_id] and not beneficiaries:
-            intervention_edits.append(ClassicInterventionEdit(saved, None))
+        intervention_edits.append(ClassicInterventionEdit(saved, after))
+        if after is None:
             donor_receipt = unit_receipts.get(donor_id)
             if donor_receipt is not None and donor_receipt.id not in removed_receipts:
                 receipt_edits.append(ClassicReceiptEdit(donor_receipt, None))
-            continue
-        scopes = tuple(
-            _beneficiary(target, unit_id, symbol)
-            for target, unit_id, symbol in sorted(beneficiaries)
-        )
-        intervention_edits.append(
-            ClassicInterventionEdit(saved, saved.model_copy(update={"beneficiaries": scopes}))
-        )
     return ClassicReauthorPlan(
         tuple(reauthorings),
         tuple(intervention_edits),

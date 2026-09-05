@@ -60,6 +60,7 @@ from reprobit.cli_output import count_phrase
 from reprobit.composition_ledger import (
     COMPOSED_BODY_LEDGER_RELATIVE,
     ComposedBodyLedger,
+    ObsoleteLedgerError,
     read_ledger,
 )
 from reprobit.intervention_metadata import ClassicRecipeFamily, ClassicRecipeRole
@@ -390,6 +391,8 @@ def _composed_body_ledger(cache_root: Path) -> ComposedBodyLedger | None:
         return None
     try:
         return read_ledger(path)
+    except ObsoleteLedgerError:
+        return None  # Independent cold verification refreshes optional derived data.
     except (OSError, ValueError) as exc:
         raise RepairWorkflowError(f"saved repair data at {path} is unreadable: {exc}") from exc
 

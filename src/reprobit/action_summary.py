@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import html
 import os
 import re
 import sys
@@ -16,6 +17,7 @@ from reprobit.secure_paths import atomic_publish_new_relative, read_relative_fil
 from reprobit.strict_json import canonical_json, strict_loads
 
 _NONCE = re.compile(r"^[0-9a-f]{64}$")
+_MAX_FAILURE_REASON_LENGTH = 512
 
 
 def _bool(value: bool) -> str:
@@ -152,7 +154,15 @@ def _write_summary(report: Report, *, accepted: bool) -> None:
         stream.write("\n".join(lines))
 
 
-def _write_missing_summary(report_path: Path) -> None:
+def _failure_reason(error: Exception) -> str:
+    reason = " ".join(str(error).split()) or type(error).__name__
+    reason = "".join(character if character.isprintable() else "\ufffd" for character in reason)
+    if len(reason) > _MAX_FAILURE_REASON_LENGTH:
+        reason = reason[: _MAX_FAILURE_REASON_LENGTH - 3] + "..."
+    return reason
+
+
+def _write_missing_summary(report_path: Path, *, reason: str) -> None:
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if not summary_path:
         return
@@ -160,9 +170,11 @@ def _write_missing_summary(report_path: Path) -> None:
         "## ReproBit byte identity",
         "",
         "> [!ERROR]",
-        "> Verification ended before it could publish a canonical report.",
+        "> A current canonical report could not be validated.",
         "",
         f"Expected report: `{report_path}`",
+        "",
+        f"<pre>{html.escape(reason)}</pre>",
         "",
     ]
     with Path(summary_path).open("a", encoding="utf-8") as stream:
@@ -187,17 +199,15 @@ def _receipt_material(
     report: Report,
     nonce: str,
     *,
-    report_path: Path,
-    html_path: Path,
+    report_json: bytes,
+    report_html: bytes,
 ) -> dict[str, object]:
-    expected_json = canonical_json(report)
-    expected_html = _rendered_report_html(report, report_path, html_path)
     return {
         "schema_version": 1,
         "nonce": nonce,
         "report_run_id": report.run_id.value,
-        "report_json_sha256": Digest.from_bytes(expected_json).value,
-        "report_html_sha256": Digest.from_bytes(expected_html).value,
+        "report_json_sha256": Digest.from_bytes(report_json).value,
+        "report_html_sha256": Digest.from_bytes(report_html).value,
     }
 
 
@@ -239,8 +249,8 @@ def publish_action_completion(
             _receipt_material(
                 report,
                 nonce,
-                report_path=report_path,
-                html_path=html_path,
+                report_json=expected_json,
+                report_html=expected_html,
             )
         ),
     )
@@ -260,8 +270,8 @@ def _read_current_report(report_path: Path, receipt_path: Path, nonce: str) -> R
     expected = _receipt_material(
         report,
         nonce,
-        report_path=report_path,
-        html_path=html_path,
+        report_json=report_bytes,
+        report_html=html_bytes,
     )
     receipt_root, receipt_relative = _secure_location(receipt_path)
     receipt_bytes, _ = read_relative_file(receipt_root, receipt_relative)
@@ -318,12 +328,13 @@ def main(argv: list[str] | None = None) -> int:
         else:
             report = _read_current_report(report_path, receipt_path, parsed.nonce)
     except (OSError, ValueError) as exc:
+        reason = _failure_reason(exc)
+        print(f"cannot publish Action report: {reason}", file=sys.stderr)
         if not parsed.allow_missing:
-            print(f"cannot publish Action report: {exc}", file=sys.stderr)
             return 1
         _write_missing_outputs(report_path)
-        _write_missing_summary(report_path)
-        return 0
+        _write_missing_summary(report_path, reason=reason)
+        return 1 if os.environ.get("REPROBIT_ACCEPTED") == "true" else 0
     accepted = _accepted(report)
     _write_outputs(report_path, report, accepted=accepted)
     _write_summary(report, accepted=accepted)

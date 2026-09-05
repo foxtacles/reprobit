@@ -1,16 +1,13 @@
 """Derive the composed-body ledger from one finished producer-graph run.
 
-The runtime already knows every fact the ledger needs: the terminal linker of
-each target and its positional inputs, the librarians whose archive members
-those inputs expand to, which compiled object belongs to which reviewed
-translation unit, and where the composed objects were written.  This module
-only reads those objects back and applies the first-definer rule.
+The actual terminal link map supplies liveness and provider identity.  Object
+contents supply body digests only after the map selects that object.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Protocol
 
 from reprobit.composition_ledger import (
@@ -19,6 +16,7 @@ from reprobit.composition_ledger import (
     build_ledger,
     function_bodies,
 )
+from reprobit.linker_map import live_public_providers, provider_name
 from reprobit.producer_graph import (
     ProducerGraphDocument,
     ProducerNode,
@@ -46,7 +44,7 @@ def _expand_linker_inputs(graph: ProducerGraphDocument, linker: ProducerNode) ->
             owners[output.casefold()] = node
     objects: list[str] = []
     archives: list[str] = []
-    for reference in linker_input_sequence(linker):
+    for reference in (*linker_input_sequence(linker), *linker.directive_inputs):
         suffix = _suffix(reference)
         if suffix == ".obj":
             objects.append(reference)
@@ -69,6 +67,8 @@ def compose_ledger(
     link_nodes: Mapping[str, str],
     resolve: Callable[[str], Path | None],
     unit_by_object: Mapping[Path, str],
+    link_maps: Mapping[str, bytes],
+    logical_path: Callable[[Path], str] = str,
     read: Callable[[Path], bytes] = Path.read_bytes,
 ) -> ComposedBodyLedger:
     """Build the ledger of one finished run.
@@ -81,25 +81,82 @@ def compose_ledger(
 
     nodes = {node.id: node for node in graph.nodes}
     targets: dict[str, Sequence[ProvidedObject]] = {}
+    selections: dict[str, dict[str, str]] = {}
     for target_id, node_id in sorted(link_nodes.items()):
         linker = nodes.get(node_id)
         if linker is None or linker.role is not ProducerRole.LINKER:
             raise CompositionLedgerError(f"target {target_id!r} names no linker node")
-        provided: list[ProvidedObject] = []
-        for reference in _expand_linker_inputs(graph, linker):
+        if node_id not in link_maps:
+            raise CompositionLedgerError(f"linker {node_id!r} has no captured live map")
+        inventory: list[tuple[str, Path]] = []
+        aliases: dict[str, set[str]] = {}
+        owners = {output.casefold(): node for node in graph.nodes for output in node.outputs}
+        direct = set((*linker_input_sequence(linker), *linker.directive_inputs))
+        archives: dict[str, set[str]] = {}
+        for reference in direct:
+            owner = owners.get(reference.casefold())
+            if owner is not None and owner.role is ProducerRole.LIBRARIAN:
+                for member in librarian_input_sequence(owner):
+                    archives.setdefault(member, set()).add(reference)
+
+        def names(reference: str, path: Path | None) -> set[str]:
+            values = {
+                provider_name(reference.split("/", 1)[1]),
+                provider_name(PureWindowsPath(reference).name),
+            }
+            if path is not None:
+                values.add(provider_name(logical_path(path)))
+            return values
+
+        def archive_names(reference: str, path: Path | None) -> set[str]:
+            values = names(reference, path)
+            return values | {name[:-4] for name in values if name.endswith(".lib")}
+
+        external_archives: set[str] = set()
+        project_archives: set[str] = set()
+        for reference in direct:
+            if _suffix(reference) != ".lib":
+                continue
+            owner = owners.get(reference.casefold())
+            destination = (
+                project_archives
+                if owner is not None and owner.role is ProducerRole.LIBRARIAN
+                else external_archives
+            )
+            destination.update(archive_names(reference, resolve(reference)))
+        ambiguous_archives = external_archives.intersection(project_archives)
+        external_archives.difference_update(project_archives)
+
+        for reference in dict.fromkeys(_expand_linker_inputs(graph, linker)):
             path = resolve(reference)
             if path is None:
                 raise CompositionLedgerError(f"linker input {reference!r} has no host path")
             resolved = path.resolve(strict=False)
-            provided.append(
-                ProvidedObject(
-                    provider=reference,
-                    bodies=function_bodies(read(resolved)),
-                    translation_unit_id=unit_by_object.get(resolved),
-                )
-            )
-        targets[target_id] = tuple(provided)
-    return build_ledger(producer_graph_digest(graph).value, targets)
+            member_names = names(reference, path)
+            if reference in direct:
+                for name in member_names:
+                    aliases.setdefault(name, set()).add(reference)
+            for archive in archives.get(reference, ()):
+                archive_path = resolve(archive)
+                if archive_path is None:
+                    raise CompositionLedgerError(f"archive {archive!r} has no host path")
+                for archive_name in archive_names(archive, archive_path):
+                    for member_name in member_names:
+                        aliases.setdefault(archive_name + ":" + member_name, set()).add(reference)
+            inventory.append((reference, resolved))
+        selections[target_id] = live_public_providers(
+            link_maps[node_id],
+            {name: frozenset(values) for name, values in aliases.items()},
+            external_archives=frozenset(external_archives),
+            ambiguous_archives=frozenset(ambiguous_archives),
+        )
+        selected_references = set(selections[target_id].values())
+        targets[target_id] = tuple(
+            ProvidedObject(reference, function_bodies(read(path)), unit_by_object.get(path))
+            for reference, path in inventory
+            if reference in selected_references
+        )
+    return build_ledger(producer_graph_digest(graph).value, targets, selections)
 
 
 class _UnitPlan(Protocol):
@@ -125,6 +182,9 @@ class _Donors(Protocol):
 
 class _Producer(Protocol):
     def reference(self, value: str) -> Path | None: ...
+    def logical_for_host_path(self, path: Path) -> str: ...
+    @property
+    def linker_maps(self) -> Mapping[str, bytes]: ...
 
 
 class FinishedRun(Protocol):
@@ -144,6 +204,8 @@ def ledger_from_run(run: FinishedRun) -> ComposedBodyLedger:
         run.graph,
         link_nodes={target.target_id: target.link_node_id for target in run.targets},
         resolve=run.producer.reference,
+        link_maps=run.producer.linker_maps,
+        logical_path=run.producer.logical_for_host_path,
         unit_by_object=unit_objects(
             (unit.plan.id, run.donors.record_for_unit(unit).object_path) for unit in run.units
         ),

@@ -174,7 +174,10 @@ runs:
         --nonce "$REPROBIT_ACTION_NONCE"
         "$REPROBIT_REPORT_DIRECTORY/report.json"
 
-    - name: Fail the job when verification failed
-      if: always() && steps.verification.outcome == 'failure'
+    - name: Require accepted verification and validated current reports
+      if: >-
+        always() && (steps.verification.outcome != 'success' ||
+        steps.summary.outputs.report-produced != 'true' ||
+        steps.summary.outputs.accepted != 'true')
       shell: bash
       run: exit 1

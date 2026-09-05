@@ -132,6 +132,29 @@ def test_shared_html_tables_and_disclosures_have_keyboard_semantics() -> None:
     assert "<summary><h3>Sample evidence</h3>" in rendered_details
 
 
+def test_report_keeps_empty_function_table_explanation_without_a_search_control() -> None:
+    proof = proof_report()
+    report = Report.from_bundle(
+        bundle(),
+        Verdict(cold=True, byte_exact=True, logic_certified=True, toolchain_origin=True),
+        evidence=proof.summary,
+        proof=proof,
+        target_results={"program": True},
+        target_artifacts={"program": (100, digest(b"oracle"))},
+    )
+    assert report.costs.by_function == ()
+    assert len(report.costs.interventions) == 1
+
+    rendered = render_report_html(report)
+
+    assert 'data-table-filter="function-cost-table"' not in rendered
+    assert 'data-filter-count="function-cost-table"' not in rendered
+    function_table = rendered.split('<table id="function-cost-table">')[1].split("</table>")[0]
+    assert "No entries were recorded." in function_table
+    assert 'data-table-filter="intervention-cost-table"' in rendered
+    assert 'data-filter-count="intervention-cost-table"' in rendered
+
+
 def digest(seed: bytes) -> Digest:
     return Digest.from_bytes(seed)
 

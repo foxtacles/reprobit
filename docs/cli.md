@@ -15,6 +15,10 @@ available in failure details, rebuild explanations, and ndjson. Output is plain
 by design: no colour, no shell completion, and no terminal control beyond the
 transient progress line.
 
+Printed follow-up commands use POSIX shell quoting on macOS and Linux, and
+PowerShell quoting on Windows. Machine events also carry the unquoted `argv`
+array for callers that launch a process directly.
+
 This page has one section per command, in the order `rbit --help` lists them.
 It explains what commands do and how they fit together. The exact flags and
 defaults are generated from the parser into
@@ -88,13 +92,15 @@ rbit setup .
 rbit setup . --toolchain-root /opt/toolchains/msvc42
 ```
 
-`setup` selects or downloads the compiler, authenticates it, remembers the local
-path, creates the project lock when absent, verifies an existing lock, and probes
-the host backend. That is the normal workflow on macOS, Linux, and Windows. It
-ends with the same checklist `status` prints, so a finished machine setup and a
-still-incomplete project are reported together. Machine setup and project setup
-are separate: `rbit setup` can finish installing and checking the compiler while
-`rbit status` still lists missing project files. Exit status 1 means a backend
+`setup` selects or downloads the compiler, authenticates it, creates the project
+lock when absent, verifies an existing lock, and probes the host backend. It
+remembers the local compiler path only after those checks pass, so a failed
+attempt preserves the previous default. That is the normal workflow on macOS,
+Linux, and Windows. It ends with the same checklist `status` prints, so a finished
+machine setup and a still-incomplete project are reported together. Machine
+setup and project setup are separate: `rbit setup` can finish installing and
+checking the compiler while `rbit status` still lists missing project files.
+Exit status 1 means a backend
 check failed.
 
 ## rbit doctor
@@ -332,6 +338,10 @@ the full sequence.
 
 Use `--clear-cmake-defines` or `--clear-directive-inputs` with `--refresh`
 when the refreshed graph should replace one of those saved lists with no values.
+
+Refresh accepts `--jobs`, `--initialization-timeout`, `--compile-timeout`,
+`--link-timeout`, and `--cleanup-timeout` for its build from scratch. These
+options require `--refresh`; `--timeout` controls the separate CMake configure.
 
 ## rbit graph configure
 
@@ -748,6 +758,12 @@ rbit discover grind .
 rbit discover grind . --accept-progress  # save proven work; follow its printed next step
 rbit discover grind . --accept-exact     # require an exact project before saving anything
 ```
+
+The printed approval, continuation, and verification commands preserve any
+execution overrides you supplied, including compiler and Wine paths, worker
+count, and timeouts. This also applies to commands in the review reports and
+to `--expert-plan` runs. Automatic defaults are omitted so ordinary follow-ups
+stay short.
 
 Project-wide grind needs project-owned reference `.obj` files; it cannot derive
 them from the reference executable alone. Put those objects under `reference/`

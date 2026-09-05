@@ -13,6 +13,7 @@ from reprobit.classic_donor_retune_materialization import (
     MaterializedDonorRetuneCandidate,
     materialize_donor_retune_candidate,
 )
+from reprobit.classic_donor_usage import beneficiary_keys, donor_after_usage
 from reprobit.classic_donors import matching_candidate_constraints, prepare_donor_compile_request
 from reprobit.classic_legacy_repair import (
     LegacyInstallRepair,
@@ -56,7 +57,6 @@ from reprobit.intervention_metadata import (
     ClassicRecipeFamily,
     ClassicRecipeRole,
 )
-from reprobit.model import Scope
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeIntervention,
@@ -762,14 +762,7 @@ def retune_authority_edits(
                     donor_id,
                     (
                         saved,
-                        {
-                            (
-                                scope.target,
-                                scope.translation_unit or "",
-                                scope.function or "",
-                            )
-                            for scope in saved.beneficiaries
-                        },
+                        beneficiary_keys(saved),
                         {
                             consumer.id
                             for consumer in (
@@ -798,13 +791,10 @@ def retune_authority_edits(
         item.intervention_id: item for failure in failures for item in failure.unit.receipts
     }
     for donor_id, (saved, beneficiaries, consumers) in beneficiary_state.items():
-        before = {
-            (scope.target, scope.translation_unit or "", scope.function or "")
-            for scope in saved.beneficiaries
-        }
-        if beneficiaries == before:
+        after = donor_after_usage(saved, beneficiaries, consumers)
+        if after is saved:
             continue
-        if not beneficiaries and not consumers:
+        if after is None:
             if donor_id == retuned_id:
                 if saved != donor_before.intervention:
                     raise ValueError(
@@ -829,21 +819,15 @@ def retune_authority_edits(
                 else:
                     record_receipt(edit)
             continue
-        scopes = tuple(
-            Scope(target=target, translation_unit=unit_id, function=symbol)
-            for target, unit_id, symbol in sorted(beneficiaries)
-        )
         if donor_id == retuned_id:
             if saved != donor_before.intervention:
                 raise ValueError(f"retuned donor {donor_id!r} differs from its prepared authority")
             intervention_edits[donor_id] = ClassicInterventionEdit(
                 donor_before.intervention,
-                materialized.intervention.model_copy(update={"beneficiaries": scopes}),
+                materialized.intervention.model_copy(update={"beneficiaries": after.beneficiaries}),
             )
         else:
-            record_intervention(
-                ClassicInterventionEdit(saved, saved.model_copy(update={"beneficiaries": scopes}))
-            )
+            record_intervention(ClassicInterventionEdit(saved, after))
     added_ids = [item.intervention.id for item in additions]
     if len(set(added_ids)) != len(added_ids):
         raise ValueError("re-authored records repeat an identifier")

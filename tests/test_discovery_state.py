@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+import reprobit.discovery_state as discovery_state
 from reprobit.cli import main
 from reprobit.discovery_state import (
     MARKER_NAME,
@@ -213,3 +214,59 @@ def test_discovery_cleanup_revalidates_marker_ownership_before_removal(
         remove_owned_state(usage, request.name, allow_shared=True)
 
     assert usage.path.is_dir()
+
+
+def test_discovery_cleanup_preserves_directory_replaced_at_quarantine(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _owned_state(tmp_path)
+    state = tmp_path / ".reprobit-discovery"
+    original = tmp_path / "retained-original"
+    move = discovery_state.move_directory_in_exact_parent
+
+    def replace_before_move(
+        source: Path,
+        identity: tuple[int, int],
+        destination: Path,
+        parent_identity: tuple[int, int],
+    ) -> None:
+        source.rename(original)
+        source.mkdir()
+        (source / "valuable.txt").write_bytes(b"unowned replacement")
+        move(source, identity, destination, parent_identity)
+
+    monkeypatch.setattr(discovery_state, "move_directory_in_exact_parent", replace_before_move)
+    assert main(["discover", "clean", str(request)]) == 2
+    captured = capsys.readouterr()
+    assert "Removed" not in captured.out
+    assert "changed before move" in captured.err
+    assert (state / "valuable.txt").read_bytes() == b"unowned replacement"
+    assert (original / "cache/cell.obj").read_bytes() == b"cached object"
+
+
+def test_discovery_cleanup_preserves_directory_replaced_at_deletion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    request = _owned_state(tmp_path)
+    preserved = tmp_path / "retained-original"
+    replacements: list[Path] = []
+    remove = discovery_state.remove_exact_directory_tree
+
+    def replace_before_delete(path: Path, identity: tuple[int, int]) -> None:
+        path.rename(preserved)
+        path.mkdir()
+        (path / "valuable.txt").write_bytes(b"unowned replacement")
+        replacements.append(path)
+        remove(path, identity)
+
+    monkeypatch.setattr(discovery_state, "remove_exact_directory_tree", replace_before_delete)
+    assert main(["discover", "clean", str(request)]) == 2
+    captured = capsys.readouterr()
+    assert "Removed" not in captured.out
+    assert "quarantined discovery state" in captured.err
+    assert (replacements[0] / "valuable.txt").read_bytes() == b"unowned replacement"
+    assert (preserved / "cache/cell.obj").read_bytes() == b"cached object"

@@ -3012,7 +3012,14 @@ def test_cmake_refresh_reconciles_source_membership_only_after_cold_verification
 
     def verify(root: Path, output: CLIOutput, **kwargs: object) -> SimpleNamespace:
         nonlocal verified
-        del output, kwargs
+        del output
+        execution = kwargs["execution"]
+        assert isinstance(execution, ProjectExecutionOptions)
+        assert execution.jobs == 2
+        assert execution.initialization_timeout == 701
+        assert execution.compile_timeout == 702
+        assert execution.link_timeout == 903
+        assert execution.cleanup_timeout == 14
         verified = True
         assert {
             path.relative_to(project).as_posix(): path.read_bytes()
@@ -3082,7 +3089,21 @@ def test_cmake_refresh_reconciles_source_membership_only_after_cold_verification
         CLIOutput("ndjson", preview_machine, StringIO()),
     )
     preview = json.loads(preview_machine.getvalue().splitlines()[-1])
-    args = _parser().parse_args(preview["next_argv"][1:])
+    args = _parser().parse_args(
+        [
+            *preview["next_argv"][1:],
+            "--jobs",
+            "2",
+            "--initialization-timeout",
+            "701",
+            "--compile-timeout",
+            "702",
+            "--link-timeout",
+            "903",
+            "--cleanup-timeout",
+            "14",
+        ]
+    )
     args.keep_workspace = KeepWorkspace.NEVER.value
     args.timeout = 30.0
     machine = StringIO()
@@ -3098,7 +3119,7 @@ def test_cmake_refresh_reconciles_source_membership_only_after_cold_verification
                 doctor=lambda lock: SimpleNamespace(require_ok=lambda: None)
             ),
             toolchain_report=None,
-            jobs=1,
+            jobs=args.jobs,
             backend=PosixWineBackend(wine=sys.executable, wineserver=sys.executable),
             cmake=Path(sys.executable),
             compiler_transport=Path(sys.executable),
@@ -3291,14 +3312,25 @@ def test_cmake_refresh_cas_preserves_a_concurrent_source_edit(
         return evidence
 
     monkeypatch.setattr("reprobit.cli_cmake_import._verify_refreshed_project", verify)
-    args = SimpleNamespace(
-        target=[],
-        path=["CMakeLists.txt", "project-input.txt", "src"],
-        keep_workspace=KeepWorkspace.NEVER.value,
-        configuration="RelWithDebInfo",
-        timeout=30.0,
-        cmake_define=[],
-        directive_input=[],
+    args = _parser().parse_args(
+        [
+            "import",
+            "cmake",
+            str(project),
+            "--refresh",
+            "--path",
+            "CMakeLists.txt",
+            "--path",
+            "project-input.txt",
+            "--path",
+            "src",
+            "--keep-workspace",
+            KeepWorkspace.NEVER.value,
+            "--configuration",
+            "RelWithDebInfo",
+            "--timeout",
+            "30",
+        ]
     )
     with pytest.raises(TransactionConflict, match="preimage conflict"):
         _command_cmake_refresh(
@@ -3350,14 +3382,25 @@ def test_cmake_refresh_retires_removed_translation_unit_with_saved_guidance(
         "reprobit.cli_cmake_import._verify_refreshed_project",
         lambda root, *args, **kwargs: _write_cmake_refresh_evidence(root),
     )
-    args = SimpleNamespace(
-        target=[],
-        path=["CMakeLists.txt", "project-input.txt", "src"],
-        keep_workspace=KeepWorkspace.NEVER.value,
-        configuration="RelWithDebInfo",
-        timeout=30.0,
-        cmake_define=[],
-        directive_input=[],
+    args = _parser().parse_args(
+        [
+            "import",
+            "cmake",
+            str(project),
+            "--refresh",
+            "--path",
+            "CMakeLists.txt",
+            "--path",
+            "project-input.txt",
+            "--path",
+            "src",
+            "--keep-workspace",
+            KeepWorkspace.NEVER.value,
+            "--configuration",
+            "RelWithDebInfo",
+            "--timeout",
+            "30",
+        ]
     )
     assert (
         _command_cmake_refresh(

@@ -32,7 +32,7 @@ third-party Actions.
 This complete example uses the native Windows runner and shows only the inputs
 needed for the normal path. It assumes the protected reference binaries are
 already present; add the project's secret/download step before ReproBit when
-they are not committed. This example pins both installations to ReproBit `0.1.2`:
+they are not committed. This example pins both installations to ReproBit `0.1.3`:
 
 ```yaml
 name: Verify with ReproBit
@@ -55,14 +55,14 @@ jobs:
       - name: Install the pinned ReproBit CLI for provisioning
         run: >-
           python -m pip install
-          "git+https://github.com/isledecomp/reprobit.git@0.1.2"
+          "git+https://github.com/isledecomp/reprobit.git@0.1.3"
       - name: Provision and authenticate MSVC 4.2
         run: >-
           rbit toolchain provision
           --destination "${{ runner.temp }}/msvc42"
           --no-save
       - id: reprobit
-        uses: isledecomp/reprobit@0.1.2
+        uses: isledecomp/reprobit@0.1.3
         with:
           project-directory: .
           toolchain-root: ${{ runner.temp }}/msvc42
@@ -145,9 +145,12 @@ The Action exports:
 
 If verification stops before a validated report exists, `report-produced` is
 `false`. Report-derived outputs stay empty instead of looking like successful
-zero values. The summary still runs, and the final Action step fails the job
-when verification failed. Upload the report directory with `if: always()` so an
-independent failed claim remains inspectable.
+zero values. The summary still runs and includes a bounded reason when current
+evidence is missing or invalid. The final Action step requires successful
+verification, validated current reports, and policy acceptance; a successful
+verification command cannot hide a later report-validation failure. Upload the
+report directory with `if: always()` so an independent failed claim remains
+inspectable.
 
 Projects that intentionally permit quarantine should assert the expected count,
 byte total, range total, and digest. That turns a reviewed exception set into a
@@ -179,7 +182,10 @@ project without that graph pays no extra compiler work.
 Portable CI validates the Action metadata and installed package. A dedicated
 `windows-2022` job also provisions and authenticates the external Archaic MSVC
 4.2 files, tests the native private-drive lifecycle, and runs the real compiler
-child chain without caching or uploading compiler bytes.
+child chain. Native and Wine jobs cache the compiler tree under a key derived
+from its authentication pins and re-authenticate every file before use. Failure
+artifacts contain runner identity and diagnostic logs; release assets contain
+the ReproBit sdist and wheel. Neither includes the external compiler tree.
 
 That is framework evidence, not certification of a consuming project. Trust a
 specific runner and toolchain only after its own `rbit doctor --execute-probe`

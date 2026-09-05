@@ -392,9 +392,6 @@ def command_setup(args: argparse.Namespace, output: CLIOutput) -> int:
         with output.activity("authenticating the compiler installation", phase="toolchain-check"):
             verify_msvc42(selected_root)
     installation = ClassicMSVCToolchain(spec.toolchain.profile, selected_root)
-    if not args.no_save:
-        save_toolchain_root(spec.toolchain.profile, selected_root)
-
     lock_path = safe_project_path(root, spec.toolchain.lock_file)
     if lock_path.is_symlink():
         raise CLIError(f"toolchain lock is redirected: {lock_path}")
@@ -416,6 +413,8 @@ def command_setup(args: argparse.Namespace, output: CLIOutput) -> int:
 
     backend = selected_backend(args)
     failures = _backend_failures(backend, execute_probe=not args.skip_probe)
+    if not args.no_save and not failures:
+        save_toolchain_root(spec.toolchain.profile, selected_root)
     readiness = inspect_project_readiness(
         root,
         check_local_environment=True,

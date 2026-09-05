@@ -8,6 +8,7 @@ timeout or deliberate cancellation is never classified as transient.
 from __future__ import annotations
 
 import atexit
+import math
 import os
 import signal
 import subprocess
@@ -169,8 +170,13 @@ class CommandSpec:
             raise ValueError("command cwd must be absolute")
         object.__setattr__(self, "cwd", cwd)
         object.__setattr__(self, "environment", _environment(self.environment))
-        if not isinstance(self.timeout_seconds, (int, float)) or self.timeout_seconds <= 0:
-            raise ValueError("command timeout must be positive")
+        if (
+            not isinstance(self.timeout_seconds, (int, float))
+            or isinstance(self.timeout_seconds, bool)
+            or not math.isfinite(self.timeout_seconds)
+            or self.timeout_seconds <= 0
+        ):
+            raise ValueError("command timeout must be finite and positive")
         if self.log_path is not None:
             log_path = Path(self.log_path)
             if not log_path.is_absolute():
@@ -574,16 +580,19 @@ class _OwnedChild:
         except (OSError, ProcessLookupError):
             pass
 
-    def drain_after_leader_exit(self, grace_seconds: float) -> bool:
-        """Prove the owned tree empty and report whether descendants leaked."""
+    def descendants_remain(self) -> bool:
+        """Observe the owned tree after its leader exits, without waiting."""
 
         if os.name == "nt" and self.job is not None:
             self.job.close_process_handle(self.process)
-            # Job accounting may remain transiently nonzero after the leader
-            # handle becomes signalled, even when its nested producer tree has
-            # already drained. Give normal teardown one bounded grace period
-            # before classifying anything that remains as a leak.
-            if self.job.wait_empty(grace_seconds):
+            return self.job.active_processes() != 0
+        return self._posix_group_exists()
+
+    def drain_after_leader_exit(self, grace_seconds: float) -> bool:
+        """Prove the owned tree empty after the supervisor's monitored grace."""
+
+        if os.name == "nt" and self.job is not None:
+            if not self.descendants_remain():
                 return False
             self.job.terminate_and_drain(grace_seconds)
             return True
@@ -649,8 +658,14 @@ class ProcessSupervisor:
     """Own child process trees and enforce per-child deadlines."""
 
     def __init__(self, *, poll_interval: float = 0.05, termination_grace: float = 2.0) -> None:
-        if poll_interval <= 0 or termination_grace <= 0:
-            raise ValueError("process polling and termination grace must be positive")
+        if any(
+            not isinstance(value, (int, float))
+            or isinstance(value, bool)
+            or not math.isfinite(value)
+            or value <= 0
+            for value in (poll_interval, termination_grace)
+        ):
+            raise ValueError("process polling and termination grace must be finite and positive")
         self.poll_interval = poll_interval
         self.termination_grace = termination_grace
         self._active: dict[int, _OwnedChild] = {}
@@ -872,7 +887,7 @@ class ProcessSupervisor:
                     self._write_log(spec.log_path, output)
                     raise ProcessTimedOut(spec, output)
                 if child.process.poll() is not None:
-                    if os.name != "posix" or not child._posix_group_exists():
+                    if not child.descendants_remain():
                         break
                     # Keep every deadline/output/cancellation check active
                     # while short-lived helpers finish after their leader.
@@ -894,9 +909,16 @@ class ProcessSupervisor:
             if leaked:
                 raise ProcessTreeLeak(spec, output)
             return child.process.returncode, output, time.monotonic() - started
-        except BaseException:
-            if child.process.poll() is None or (os.name == "posix" and child._posix_group_exists()):
-                child.terminate_and_drain(self.termination_grace, spec.output_limit)
+        except BaseException as original:
+            try:
+                if (
+                    child.process.poll() is None
+                    or child.job is not None
+                    or child._posix_group_exists()
+                ):
+                    child.terminate_and_drain(self.termination_grace, spec.output_limit)
+            except BaseException as cleanup_error:
+                original.add_note(f"owned process tree cleanup also failed: {cleanup_error}")
             raise
         finally:
             self._forget(child, primary_error=sys.exception())

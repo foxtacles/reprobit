@@ -476,7 +476,13 @@ class GrindPublication:
     cold_html: Path | None
 
 
-def grind_approval_argv(root: Path, plan_relative: str, *, exact: bool) -> tuple[str, ...]:
+def grind_approval_argv(
+    root: Path,
+    plan_relative: str,
+    *,
+    exact: bool,
+    execution_argv: tuple[str, ...] = (),
+) -> tuple[str, ...]:
     """Return the argv that re-runs one plan with the acceptance its outcome earned."""
 
     return (
@@ -487,6 +493,7 @@ def grind_approval_argv(root: Path, plan_relative: str, *, exact: bool) -> tuple
         "--expert-plan",
         plan_relative,
         "--accept-exact" if exact else "--accept-progress",
+        *execution_argv,
     )
 
 

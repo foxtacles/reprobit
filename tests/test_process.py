@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -96,7 +97,7 @@ def test_windows_job_process_handle_close_is_idempotent() -> None:
 
 
 @pytest.mark.parametrize(("drains", "leaked"), [(True, False), (False, True)])
-def test_windows_child_waits_before_classifying_a_job_leak(
+def test_windows_child_checks_accounting_after_monitored_grace(
     monkeypatch: pytest.MonkeyPatch,
     drains: bool,
     leaked: bool,
@@ -114,9 +115,9 @@ def test_windows_child_waits_before_classifying_a_job_leak(
             events.append("close-process-handle")
 
         @staticmethod
-        def wait_empty(timeout: float) -> bool:
-            events.append(("wait-empty", timeout))
-            return drains
+        def active_processes() -> int:
+            events.append("accounting")
+            return 0 if drains else 1
 
         @staticmethod
         def terminate_and_drain(timeout: float) -> None:
@@ -130,10 +131,109 @@ def test_windows_child_waits_before_classifying_a_job_leak(
     )
 
     assert child.drain_after_leader_exit(2.0) is leaked
-    expected: list[object] = ["close-process-handle", ("wait-empty", 2.0)]
+    expected: list[object] = ["close-process-handle", "accounting"]
     if leaked:
         expected.append(("terminate-and-drain", 2.0))
     assert events == expected
+
+
+@pytest.mark.parametrize(
+    ("case", "expected_error"),
+    [
+        ("success", None),
+        ("timeout", ProcessTimedOut),
+        ("cancellation", ProcessCancelled),
+        ("output", ProcessOutputLimitExceeded),
+        ("leak", ProcessTreeLeak),
+        ("interrupt", KeyboardInterrupt),
+    ],
+)
+def test_windows_descendant_grace_keeps_supervisor_limits_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: str,
+    expected_error: type[BaseException] | None,
+) -> None:
+    clock = [0.0]
+    token = CancellationToken()
+    events: list[str] = []
+    spec = CommandSpec.create(
+        ("fixture",),
+        cwd=tmp_path,
+        timeout_seconds=0.05 if case == "timeout" else 1.0,
+        output_limit=8,
+    )
+
+    class Process:
+        pid = 4312
+        returncode = 0
+
+        def poll(self) -> int:
+            return 0
+
+        def wait(self, *, timeout: float) -> int:
+            return 0
+
+    class Job:
+        terminated = False
+
+        def close_process_handle(self, process: object) -> None:
+            pass
+
+        def active_processes(self) -> int:
+            if self.terminated or (case == "success" and clock[0] >= 0.03):
+                return 0
+            return 1
+
+        def terminate_and_drain(self, timeout: float) -> None:
+            self.terminated = True
+            events.append("drained")
+
+        def close(self) -> None:
+            events.append("closed")
+
+    import tempfile
+
+    with tempfile.TemporaryFile() as stream:
+        child = process_module._OwnedChild(Process(), Job(), stream)  # type: ignore[arg-type]
+
+        def sleep(duration: float) -> None:
+            clock[0] += duration
+            if case == "cancellation":
+                token.cancel("cancel while descendants remain")
+            if case == "output":
+                stream.write(b"x" * 9)
+                stream.flush()
+            if case == "interrupt":
+                raise KeyboardInterrupt("interrupt while descendants remain")
+
+        monkeypatch.setattr(process_module, "os", SimpleNamespace(**(vars(os) | {"name": "nt"})))
+        monkeypatch.setattr(
+            process_module, "time", SimpleNamespace(monotonic=lambda: clock[0], sleep=sleep)
+        )
+        with ProcessSupervisor(poll_interval=0.01, termination_grace=0.1) as supervisor:
+            monkeypatch.setattr(supervisor, "_spawn", lambda _spec, _planner: child)
+            if expected_error is None:
+                returncode, output, duration = supervisor._one_attempt(spec, token, None)
+                assert (returncode, output) == (0, b"")
+                assert 0.03 <= duration <= 0.04
+                assert "drained" not in events
+            else:
+                with pytest.raises(expected_error):
+                    supervisor._one_attempt(spec, token, None)
+                assert "drained" in events
+            assert events[-1] == "closed"
+            assert stream.closed
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), float("-inf"), 0, -1, True])
+def test_process_limits_require_finite_positive_values(tmp_path: Path, value: float) -> None:
+    with pytest.raises(ValueError, match="finite and positive"):
+        CommandSpec.create(("fixture",), cwd=tmp_path, timeout_seconds=value)
+    with pytest.raises(ValueError, match="finite and positive"):
+        ProcessSupervisor(poll_interval=value)
+    with pytest.raises(ValueError, match="finite and positive"):
+        ProcessSupervisor(termination_grace=value)
 
 
 def test_windows_job_close_retains_handle_after_close_failure() -> None:
@@ -278,20 +378,20 @@ def test_supervisor_terminates_a_timed_out_tree(tmp_path: Path) -> None:
         assert supervisor.active_pids == ()
 
 
-@pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
+@pytest.mark.skipif(os.name not in {"posix", "nt"}, reason="requires owned process trees")
 def test_supervisor_waits_for_short_lived_descendant_and_its_late_output(
     tmp_path: Path,
 ) -> None:
     completion = tmp_path / "descendant-complete"
     descendant = (
-        "import time; from pathlib import Path; time.sleep(0.15); "
-        "print('late descendant output', flush=True); "
+        "import sys,time; from pathlib import Path; time.sleep(0.15); "
+        "sys.stdout.buffer.write(b'late descendant output\\n'); sys.stdout.buffer.flush(); "
         f"Path({str(completion)!r}).write_bytes(b'complete')"
     )
     program = (
         "import subprocess,sys; "
         f"subprocess.Popen([sys.executable, '-c', {descendant!r}]); "
-        "print('leader output', flush=True)"
+        "sys.stdout.buffer.write(b'leader output\\n'); sys.stdout.buffer.flush()"
     )
     with ProcessSupervisor(poll_interval=0.01, termination_grace=1.0) as supervisor:
         result = supervisor.run(command(tmp_path, program))

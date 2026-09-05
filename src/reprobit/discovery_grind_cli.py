@@ -312,9 +312,14 @@ def command_discover_grind(
     cold_report_html: Path | None = None
     report_transaction_id: str | None = None
     report_warnings: list[str] = []
-    approval_argv = grind_approval_argv(root, args.plan, exact=result.exact)
+    execution_argv = getattr(args, "execution_argv", ())
+    approval_argv = grind_approval_argv(
+        root, args.plan, exact=result.exact, execution_argv=execution_argv
+    )
+    verify_argv = ("rbit", "verify", str(root), *execution_argv)
+    continue_argv = ("rbit", "discover", "grind", str(root), *execution_argv)
     report_approval_command = human_command(approval_argv)
-    report_verify_command = human_command(("rbit", "verify", root))
+    report_verify_command = human_command(verify_argv)
 
     def warn_report(artifact: str, path: Path, exc: Exception) -> None:
         warning = f"{artifact}: {type(exc).__name__}: {exc}"
@@ -354,7 +359,7 @@ def command_discover_grind(
             commands=GrindReportCommands(
                 approval=report_approval_command,
                 verify=report_verify_command,
-                proceed=human_command(("rbit", "discover", "grind", root)),
+                proceed=human_command(continue_argv),
             ),
             cold_files=cold_files,
         )
@@ -415,9 +420,7 @@ def command_discover_grind(
                 "certification."
             )
         )
-        next_step = NextStep(
-            ("rbit", "verify", root) if result.exact else ("rbit", "discover", "grind", root)
-        )
+        next_step = NextStep(verify_argv if result.exact else continue_argv)
         message = (
             f"{outcome_label} saved for '{solution.symbol}': "
             f"classes={classes}, functions={functions}.\n"

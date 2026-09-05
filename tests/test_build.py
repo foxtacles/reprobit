@@ -87,3 +87,43 @@ def test_plan_rejects_duplicate_json_keys() -> None:
 def test_build_step_rejects_shell_control_characters() -> None:
     with pytest.raises(BuildPlanError, match="control character"):
         BuildStep("bad", ("tool\nnext",), ".")
+
+
+def test_deep_build_plan_validates_and_orders_without_recursion() -> None:
+    count = 2000
+    steps = tuple(
+        BuildStep(
+            str(index),
+            ("tool",),
+            ".",
+            depends_on=(str(index - 1),) if index else (),
+        )
+        for index in reversed(range(count))
+    )
+    plan = BuildPlan(steps)
+    assert tuple(step.id for step in plan.ordered_steps()) == tuple(map(str, range(count)))
+
+
+def test_build_plan_preserves_input_and_dependency_order() -> None:
+    plan = BuildPlan(
+        (
+            BuildStep("link", ("tool",), ".", depends_on=("z", "a")),
+            BuildStep("a", ("tool",), ".", depends_on=("shared",)),
+            BuildStep("z", ("tool",), ".", depends_on=("shared",)),
+            BuildStep("shared", ("tool",), "."),
+            BuildStep("independent", ("tool",), "."),
+        )
+    )
+    assert tuple(step.id for step in plan.ordered_steps()) == (
+        "shared",
+        "z",
+        "a",
+        "link",
+        "independent",
+    )
+
+
+@pytest.mark.parametrize("timeout", [float("nan"), float("inf"), float("-inf")])
+def test_build_plan_rejects_nonfinite_timeouts(timeout: float) -> None:
+    with pytest.raises(BuildPlanError, match="finite and positive"):
+        BuildStep("bad", ("tool",), ".", timeout_seconds=timeout)

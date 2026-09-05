@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+
+from reprobit.dag_queue import DependencyQueue
 
 
 class BuildPlanError(ValueError):
@@ -49,8 +52,8 @@ class BuildStep:
         for index, argument in enumerate(self.argv):
             _check_text(argument, f"argv[{index}] for {self.id!r}")
         _check_text(self.cwd, f"cwd for {self.id!r}")
-        if self.timeout_seconds <= 0:
-            raise BuildPlanError(f"timeout for {self.id!r} must be positive")
+        if not math.isfinite(self.timeout_seconds) or self.timeout_seconds <= 0:
+            raise BuildPlanError(f"timeout for {self.id!r} must be finite and positive")
         if len(set(self.depends_on)) != len(self.depends_on):
             raise BuildPlanError(f"build step {self.id!r} has duplicate dependencies")
         if self.id in self.depends_on:
@@ -134,25 +137,10 @@ class BuildPlan:
                 output_owners[output] = step.id
         if len({admission.id for admission in self.link_admissions}) != len(self.link_admissions):
             raise BuildPlanError("link-admission ids must be unique")
-        self._validate_acyclic(step_index)
-
-    def _validate_acyclic(self, steps: Mapping[str, BuildStep]) -> None:
-        visiting: set[str] = set()
-        complete: set[str] = set()
-
-        def visit(step_id: str, trail: tuple[str, ...]) -> None:
-            if step_id in complete:
-                return
-            if step_id in visiting:
-                raise BuildPlanError(f"build-plan cycle: {' -> '.join((*trail, step_id))}")
-            visiting.add(step_id)
-            for dependency in steps[step_id].depends_on:
-                visit(dependency, (*trail, step_id))
-            visiting.remove(step_id)
-            complete.add(step_id)
-
-        for step_id in steps:
-            visit(step_id, ())
+        try:
+            DependencyQueue({step.id: step.depends_on for step in self.steps})
+        except ValueError as exc:
+            raise BuildPlanError(str(exc)) from exc
 
     def ordered_steps(self) -> tuple[BuildStep, ...]:
         """Return a stable dependency-first topological order."""
@@ -161,17 +149,21 @@ class BuildPlan:
         result: list[BuildStep] = []
         seen: set[str] = set()
 
-        def add(step_id: str) -> None:
-            if step_id in seen:
-                return
-            step = by_id[step_id]
-            for dependency in step.depends_on:
-                add(dependency)
-            seen.add(step_id)
-            result.append(step)
-
+        # Preserve the public input/dependency order without Python recursion.
         for step in self.steps:
-            add(step.id)
+            pending = [(step.id, False)]
+            while pending:
+                step_id, expanded = pending.pop()
+                if step_id in seen:
+                    continue
+                if expanded:
+                    seen.add(step_id)
+                    result.append(by_id[step_id])
+                else:
+                    pending.append((step_id, True))
+                    pending.extend(
+                        (parent, False) for parent in reversed(by_id[step_id].depends_on)
+                    )
         return tuple(result)
 
     def to_dict(self) -> dict[str, Any]:

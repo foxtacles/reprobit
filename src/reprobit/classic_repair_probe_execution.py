@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import ExitStack
@@ -236,6 +237,7 @@ def _stream_compiles(
     cache: ClassicDonorCompileStore | None,
     epoch: str,
     jobs: int,
+    ordered_outcomes: bool = False,
 ) -> tuple[str, ...]:
     """Keep ``jobs`` compiles in flight and evaluate each outcome as it lands.
 
@@ -248,17 +250,27 @@ def _stream_compiles(
     candidates = (donor_id for window in windows for donor_id in window)
     donor_ids: list[str] = []
     running: dict[Future[ClassicDonorProbeOutput], tuple[str, ProbeSeatKey]] = {}
+    pending_order: deque[str] = deque()
+    completed: dict[str, ClassicDonorCompileOutcome] = {}
     submitted = 0
     settled = False
     exhausted = False
 
     def record(outcome: ClassicDonorCompileOutcome) -> None:
         nonlocal settled
+        if evaluate((outcome,)):
+            settled = True
+
+    def deliver(outcome: ClassicDonorCompileOutcome) -> None:
         donor_ids.append(outcome.donor_id)
         if progress is not None:
             progress(len(donor_ids), planned_candidates, outcome.donor_id)
-        if evaluate((outcome,)):
-            settled = True
+        if not ordered_outcomes:
+            record(outcome)
+            return
+        completed[outcome.donor_id] = outcome
+        while pending_order and pending_order[0] in completed:
+            record(completed.pop(pending_order.popleft()))
 
     worker_count = max(1, jobs)
     with ThreadPoolExecutor(
@@ -266,16 +278,18 @@ def _stream_compiles(
         thread_name_prefix="reprobit-repair-probe",
     ) as pool:
         while True:
-            while not settled and not exhausted and len(running) < worker_count:
+            while not settled and not exhausted and len(running) + len(completed) < worker_count:
                 try:
                     donor_id = next(candidates)
                 except StopIteration:
                     exhausted = True
                     break
+                if ordered_outcomes:
+                    pending_order.append(donor_id)
                 key = _seat_key(*prepared[donor_id])
                 cached = None if cache is None else cache.get(epoch, key, donor_id=donor_id)
                 if cached is not None:
-                    record(cached)
+                    deliver(cached)
                     continue
                 future = pool.submit(
                     _compile_output,
@@ -301,7 +315,7 @@ def _stream_compiles(
                     outcome = ClassicDonorCompileRefusal(donor_id, str(exc))
                 if cache is not None:
                     cache.put(epoch, key, outcome)
-                record(outcome)
+                deliver(outcome)
     return tuple(donor_ids)
 
 
@@ -311,6 +325,7 @@ def probe_donor_compile_windows(
     windows: Iterable[Sequence[str]],
     *,
     evaluate: ClassicDonorWindowEvaluator,
+    ordered_outcomes: bool = False,
     progress: ClassicDonorProbeProgress | None = None,
     planned_candidates: int,
     cache: ClassicDonorCompileStore | None = None,
@@ -326,7 +341,10 @@ def probe_donor_compile_windows(
     A supplied ``source_seal`` reuses an epoch already prepared by the caller.
 
     ``evaluate`` receives each full outcome on the coordinating thread and may
-    stop the search before more candidates are requested.  Only completed
+    stop the search before more candidates are requested.  ``ordered_outcomes``
+    delivers in submission order and bounds running plus buffered outcomes by
+    the worker count, including immediate cache hits behind a slow predecessor.
+    Only completed
     candidate IDs are retained and returned, in completion order.  Progress is
     cumulative; its total is an upper bound because a successful cheap tier
     stops early.  No runtime evidence, cache entry, or report is issued.
@@ -384,6 +402,7 @@ def probe_donor_compile_windows(
                 cache=cache,
                 epoch=epoch,
                 jobs=probes.producer.jobs,
+                ordered_outcomes=ordered_outcomes,
             )
         _require_unchanged_tree(
             source_seal,

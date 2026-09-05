@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import os
-import shutil
 import stat
+import uuid
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from typing import cast
 
+from reprobit.exact_tree import (
+    DirectoryIdentity,
+    move_directory_in_exact_parent,
+    remove_exact_directory_tree,
+)
 from reprobit.model import Digest
+from reprobit.secure_path_contracts import is_redirected_metadata
+from reprobit.secure_paths import read_relative_file
 from reprobit.state_lock import AdvisoryFileLock, StateError
 from reprobit.strict_json import canonical_json, strict_loads
 from reprobit.transactions import CASTransaction
@@ -32,7 +39,18 @@ class DiscoveryStateUsage:
     state_directory: str
     requests: tuple[str, ...]
     marker_digest: Digest
-    identity: tuple[int, int] | None
+    identity: DirectoryIdentity
+
+
+def _directory_identity(path: Path) -> DirectoryIdentity:
+    metadata = path.stat(follow_symlinks=False)
+    if (
+        not stat.S_ISDIR(metadata.st_mode)
+        or is_redirected_metadata(metadata)
+        or not metadata.st_ino
+    ):
+        raise DiscoveryStateError(f"discovery state has no plain directory identity: {path}")
+    return metadata.st_dev, metadata.st_ino
 
 
 def _portable(value: Path) -> str:
@@ -169,7 +187,10 @@ def inspect_owned_state(
         raise DiscoveryStateError(
             f"refusing to clean unmarked discovery state: {state_root}; rerun the campaign first"
         )
-    marker_payload = marker.read_bytes()
+    identity = _directory_identity(state_root)
+    marker_payload, _ = read_relative_file(
+        state_root, MARKER_NAME, expected_directories={".": identity}
+    )
     requests = _marker_document(marker_payload, state=state_value)
     _require_request_ownership(
         requests,
@@ -177,10 +198,6 @@ def inspect_owned_state(
         allow_shared=allow_shared,
         state_root=state_root,
     )
-    root_metadata = state_root.stat(follow_symlinks=False)
-    inode = getattr(root_metadata, "st_ino", 0)
-    identity = (root_metadata.st_dev, inode) if inode else None
-
     files = 0
     total = 0
     pending = [state_root]
@@ -215,25 +232,17 @@ def inspect_owned_state(
     )
 
 
-def remove_owned_state(
+def _revalidate_marker(
     usage: DiscoveryStateUsage,
+    path: Path,
     request_name: str,
     *,
-    allow_shared: bool = False,
+    allow_shared: bool,
 ) -> None:
-    """Revalidate the ownership boundary immediately before removing the tree."""
-
-    if usage.path.is_symlink() or not usage.path.is_dir():
-        raise DiscoveryStateError(f"discovery state changed before cleanup: {usage.path}")
-    current_metadata = usage.path.stat(follow_symlinks=False)
-    current_inode = getattr(current_metadata, "st_ino", 0)
-    current_identity = (current_metadata.st_dev, current_inode) if current_inode else None
-    if usage.identity is not None and current_identity != usage.identity:
-        raise DiscoveryStateError(f"discovery state changed before cleanup: {usage.path}")
-    marker = usage.path / MARKER_NAME
-    if marker.is_symlink() or not marker.is_file():
-        raise DiscoveryStateError(f"discovery state marker changed before cleanup: {marker}")
-    marker_payload = marker.read_bytes()
+    marker = path / MARKER_NAME
+    marker_payload, _ = read_relative_file(
+        path, MARKER_NAME, expected_directories={".": usage.identity}
+    )
     if Digest.from_bytes(marker_payload) != usage.marker_digest:
         raise DiscoveryStateError(f"discovery state ownership changed before cleanup: {marker}")
     requests = _marker_document(marker_payload, state=usage.state_directory)
@@ -243,9 +252,31 @@ def remove_owned_state(
         requests,
         request_name,
         allow_shared=allow_shared,
-        state_root=usage.path,
+        state_root=path,
     )
-    shutil.rmtree(usage.path)
+
+
+def remove_owned_state(
+    usage: DiscoveryStateUsage,
+    request_name: str,
+    *,
+    allow_shared: bool = False,
+) -> None:
+    """Quarantine and delete only the inspected, request-owned directory."""
+
+    if _directory_identity(usage.path) != usage.identity:
+        raise DiscoveryStateError(f"discovery state changed before cleanup: {usage.path}")
+    _revalidate_marker(usage, usage.path, request_name, allow_shared=allow_shared)
+    quarantine = usage.path.with_name(f".{usage.path.name}.reprobit-remove-{uuid.uuid4().hex}")
+    parent_identity = _directory_identity(usage.path.parent)
+    move_directory_in_exact_parent(usage.path, usage.identity, quarantine, parent_identity)
+    try:
+        _revalidate_marker(usage, quarantine, request_name, allow_shared=allow_shared)
+        remove_exact_directory_tree(quarantine, usage.identity)
+    except (OSError, DiscoveryStateError) as exc:
+        raise DiscoveryStateError(
+            f"could not remove quarantined discovery state at {quarantine}: {exc}"
+        ) from exc
 
 
 __all__ = [

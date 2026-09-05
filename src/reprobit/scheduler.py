@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import heapq
 import re
 import threading
 from collections.abc import Callable, Iterable, Mapping
@@ -11,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 
+from reprobit.dag_queue import DependencyQueue
 from reprobit.process import (
     CancellationToken,
     CommandSpec,
@@ -170,22 +172,10 @@ class TaskScheduler:
                 raise SchedulerError(
                     f"task {task.task_id!r} has unknown dependencies: {sorted(missing)}"
                 )
-        # A deterministic Kahn pass diagnoses cycles before creating workspaces.
-        remaining = {task_id: set(task.dependencies) for task_id, task in by_id.items()}
-        ready = sorted(task_id for task_id, dependencies in remaining.items() if not dependencies)
-        visited: list[str] = []
-        while ready:
-            current = ready.pop(0)
-            visited.append(current)
-            for task_id in sorted(remaining):
-                if current in remaining[task_id]:
-                    remaining[task_id].remove(current)
-                    if not remaining[task_id] and task_id not in visited and task_id not in ready:
-                        ready.append(task_id)
-            ready.sort()
-        if len(visited) != len(by_id):
-            cyclic = sorted(set(by_id) - set(visited))
-            raise SchedulerError(f"task graph contains a cycle: {cyclic}")
+        try:
+            DependencyQueue({task.task_id: task.dependencies for task in by_id.values()})
+        except ValueError as exc:
+            raise SchedulerError(str(exc)) from exc
         return by_id
 
     def _run_task(
@@ -214,6 +204,8 @@ class TaskScheduler:
         self.run_root.mkdir(parents=True, exist_ok=True)
         token = CancellationToken()
         pending = set(by_id)
+        queue = DependencyQueue({task.task_id: task.dependencies for task in by_id.values()})
+        ready: list[str] = []
         completed: dict[str, TaskResult] = {}
         failures: dict[str, BaseException] = {}
         running: dict[Future[TaskResult], TaskSpec] = {}
@@ -228,22 +220,22 @@ class TaskScheduler:
         ) as pool:
             while pending or running:
                 if not failures:
-                    ready = sorted(
-                        (
-                            by_id[task_id]
-                            for task_id in pending
-                            if set(by_id[task_id].dependencies) <= set(completed)
-                        ),
-                        key=lambda task: task.task_id,
-                    )
-                    for task in ready:
-                        if len(running) >= self.max_workers or not capacity(task):
+                    for task_id in queue.take_ready(len(by_id)):
+                        heapq.heappush(ready, task_id)
+                    deferred: list[str] = []
+                    while ready and len(running) < self.max_workers:
+                        task_id = heapq.heappop(ready)
+                        task = by_id[task_id]
+                        if not capacity(task):
+                            deferred.append(task_id)
                             continue
                         pending.remove(task.task_id)
                         active_resources[task.resource_class] = (
                             active_resources.get(task.resource_class, 0) + 1
                         )
                         running[pool.submit(self._run_task, task, token)] = task
+                    for task_id in deferred:
+                        heapq.heappush(ready, task_id)
                 if not running:
                     break
                 finished, _ = wait(tuple(running), return_when=FIRST_COMPLETED)
@@ -252,6 +244,7 @@ class TaskScheduler:
                     active_resources[task.resource_class] -= 1
                     try:
                         completed[task.task_id] = future.result()
+                        queue.finish(task.task_id)
                     except BaseException as error:
                         failures[task.task_id] = error
                         token.cancel(f"task {task.task_id!r} failed")

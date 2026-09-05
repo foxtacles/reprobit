@@ -201,7 +201,7 @@ rbit source regenerate [-h] [--apply] [project]
 Prepare and record an ordinary CMake project in one guided run.
 
 ```
-rbit import cmake [-h] [--target TARGET=CMAKE_TARGET] [--refresh] [--path PATH] [--keep-workspace {never,on-failure,always}] [--toolchain-root DIRECTORY] [--compiler-transport PATH] [--resource-transport PATH] [--cmake PATH_OR_NAME] [--configuration CONFIGURATION] [--cmake-define NAME=VALUE | --clear-cmake-defines] [--timeout SECONDS] [--directive-input TARGET=LIBRARY | --clear-directive-inputs] [project]
+rbit import cmake [-h] [--target TARGET=CMAKE_TARGET] [--refresh] [--path PATH] [--keep-workspace {never,on-failure,always}] [--toolchain-root DIRECTORY] [--compiler-transport PATH] [--resource-transport PATH] [--cmake PATH_OR_NAME] [--configuration CONFIGURATION] [--cmake-define NAME=VALUE | --clear-cmake-defines] [--timeout SECONDS] [--directive-input TARGET=LIBRARY | --clear-directive-inputs] [--jobs COUNT] [--initialization-timeout SECONDS] [--compile-timeout SECONDS] [--link-timeout SECONDS] [--cleanup-timeout SECONDS] [project]
 ```
 
 | Argument | Default | Description |
@@ -229,6 +229,18 @@ rbit import cmake [-h] [--target TARGET=CMAKE_TARGET] [--refresh] [--path PATH] 
 | `--timeout` `SECONDS` |  | bounded configure deadline (default: 600) |
 | `--directive-input` `TARGET=LIBRARY` |  | record one prelink-discovered default library edge (repeatable) |
 | `--clear-directive-inputs` |  | replace saved default-library edges with an empty list during --refresh |
+
+**refresh execution options**
+
+With --refresh, control the required build from scratch; --timeout controls CMake.
+
+| Argument | Default | Description |
+|---|---|---|
+| `--jobs` `COUNT` |  | maximum parallel build workers (default: the CPUs this process may use, at most 8) |
+| `--initialization-timeout` `SECONDS` | `600.0` | limit for each isolated execution-lane initialization (default: 600) |
+| `--compile-timeout` `SECONDS` | `600.0` | limit for each compiler or resource-compiler step (default: 600) |
+| `--link-timeout` `SECONDS` | `900.0` | limit for each librarian or linker producer (default: 900) |
+| `--cleanup-timeout` `SECONDS` | `10.0` | limit for stopping each isolated execution lane and its wineserver (default: 10) |
 
 ### `rbit graph configure`
 

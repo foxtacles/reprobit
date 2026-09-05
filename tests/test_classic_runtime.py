@@ -1666,6 +1666,8 @@ def test_compiler_node_rejects_preexisting_lowercase_pdb_alias(
     executor.toolchain_root = toolchain_root
     executor._output_lock = Lock()
     executor._physical_outputs = {}
+    executor._linker_map_paths = {}
+    executor._linker_maps = {}
 
     with (
         ProcessSupervisor() as supervisor,
@@ -2159,6 +2161,8 @@ def test_counterfactual_compiler_audit_captures_and_erases_only_planned_outputs(
     producer.toolchain_root = toolchain_root
     producer._output_lock = Lock()
     producer._physical_outputs = {}
+    producer._linker_map_paths = {}
+    producer._linker_maps = {}
     executor.producer = producer
     executor._progress = classic_runtime_producer.ClassicProgressReporter(
         3,
@@ -2428,6 +2432,8 @@ def test_effective_compiler_capture_freezes_raw_products_and_epoch_visibility(
     producer.build_root = build_root
     producer.toolchain_root = toolchain_root
     producer._output_lock = Lock()
+    producer._linker_map_paths = {}
+    producer._linker_maps = {}
     producer._physical_outputs = {
         ordinary_object: ordinary_object,
         ordinary_pdb: ordinary_pdb,
@@ -2581,6 +2587,8 @@ def _link_control_executor(
     producer.toolchain_root = toolchain_root
     producer._output_lock = Lock()
     producer._physical_outputs = {}
+    producer._linker_map_paths = {}
+    producer._linker_maps = {}
     executor.producer = producer
     return executor, linker
 
@@ -3279,6 +3287,8 @@ def _dependent_link_control_executor(
     producer.toolchain_root = toolchain_root
     producer._output_lock = Lock()
     producer._physical_outputs = {}
+    producer._linker_map_paths = {}
+    producer._linker_maps = {}
     overlay.producer = producer
     executor = object.__new__(classic_runtime.ClassicProducerGraphBuildExecutor)
     executor.targets = overlay.targets
@@ -5309,6 +5319,8 @@ def test_exact_compiler_probe_returns_raw_outputs_and_closes_runtime(
     producer._lane_pool = cast(classic_runtime_environment._LazyExecutionLanePool, pool)
     producer._output_lock = Lock()
     producer._physical_outputs = {}
+    producer._linker_map_paths = {}
+    producer._linker_maps = {}
     executor.producer = producer
     empty_snapshot = SimpleNamespace(files=())
     producer.authority_namespace_lease = lambda: nullcontext(  # type: ignore[method-assign]

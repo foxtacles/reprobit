@@ -12,10 +12,10 @@ from typing import cast
 
 import pytest
 
-import reprobit.discovery_grind_cli as grind_cli
 import reprobit.discovery_grind_report as grind_report
 import reprobit.discovery_project_grind as project_grind
 import reprobit.discovery_project_grind_cli as project_grind_cli
+from reprobit.cli import _parser, main
 from reprobit.cli_output import CLIOutput, human_command
 from reprobit.discovery_contracts import (
     DeclarationFamily,
@@ -624,6 +624,7 @@ def test_project_report_persists_plan_decision_and_copyable_next_step(
     progress_approval_argv = (*approval_argv[:-1], "--accept-progress")
     continue_argv = approval_argv[:-1]
     verify_argv = ("rbit", "verify", str(root))
+    execution_argv = ("--jobs", "2", "--link-timeout", "1200")
     state_root = root / ".reprobit-state"
     report_directory = state_root / "reports/grind/project"
     artifacts = project_grind_cli._publish_project_grind_outcome(
@@ -634,6 +635,7 @@ def test_project_report_persists_plan_decision_and_copyable_next_step(
         project_grind.project_grind_plan(item),
         symbol_result,
         verify_argv=verify_argv,
+        execution_argv=execution_argv,
     )
     stale_owned = (
         report_directory / "plans/002-plan.json",
@@ -674,6 +676,7 @@ def test_project_report_persists_plan_decision_and_copyable_next_step(
     assert observed_hrefs == ["001-verification.json"]
     assert len(decisions) == len(plans) == 1
     assert decisions[0].is_file()
+    assert "--jobs 2 --link-timeout 1200" in decisions[0].read_text(encoding="utf-8")
     assert plans[0].is_file()
     persisted = ProjectGrindPlan.model_validate_json(plans[0].read_bytes())
     assert persisted.symbol == "_transform"
@@ -774,9 +777,12 @@ def test_project_outcome_replaces_stale_cold_reports_with_no_solution(
     assert unrelated.read_bytes() == b"old"
 
 
+@pytest.mark.parametrize("execution_argv", [(), ("--jobs", "2", "--link-timeout", "1200")])
 def test_project_wide_cli_preview_reports_copyable_acceptance_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    execution_argv: tuple[str, ...],
 ) -> None:
     item = ProjectGrindWorkItem(
         "program",
@@ -829,41 +835,37 @@ def test_project_wide_cli_preview_reports_copyable_acceptance_command(
             (),
         ),
     )
-    machine = StringIO()
-    args = argparse.Namespace(
-        project=str(tmp_path),
-        reference_object=["tu.transform=reference/reference.obj"],
-        max_symbols=3,
-        plan=None,
-        accept_exact=False,
-        accept_progress=False,
-        jobs=1,
-        backend="auto",
-        wine="wine",
-        wineserver="wineserver",
-        toolchain_root=None,
-        compiler_transport=None,
-        resource_transport=None,
-        initialization_timeout=600.0,
-        compile_timeout=600.0,
-        link_timeout=900.0,
-        cleanup_timeout=10.0,
-    )
-
-    status = grind_cli.command_discover_grind(
-        args,
-        CLIOutput("ndjson", machine, StringIO()),
-    )
+    command = [
+        "discover",
+        "grind",
+        str(tmp_path),
+        "--max-symbols",
+        "3",
+        "--reference-object",
+        "tu.transform=reference/reference.obj",
+        *execution_argv,
+    ]
+    status = main(["--format", "ndjson", *command])
 
     event = next(
         json.loads(line)
-        for line in machine.getvalue().splitlines()
+        for line in capsys.readouterr().out.splitlines()
         if json.loads(line).get("event") == "discovery_project_grind_complete"
     )
     assert status == 0
     assert project_loads == 1
     assert observed["accept_exact"] is False
-    assert event["approval_argv"][-1] == "--accept-exact"
+    approval = _parser().parse_args(event["approval_argv"][1:])
+    assert approval.accept_exact is True
+    assert approval.max_symbols == 3
+    assert approval.reference_object == ["tu.transform=reference/reference.obj"]
+    verify = _parser().parse_args(event["verify_argv"][1:])
+    if execution_argv:
+        assert approval.jobs == verify.jobs == 2
+        assert approval.link_timeout == verify.link_timeout == 1200
+    else:
+        assert "--jobs" not in event["approval_argv"]
+        assert "--jobs" not in event["verify_argv"]
     assert "--project-wide" not in event["approval_argv"]
     assert event["next_argv"] == event["approval_argv"]
     assert event["next_command"] == human_command(event["next_argv"])

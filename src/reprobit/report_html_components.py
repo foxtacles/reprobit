@@ -96,6 +96,8 @@ def table(
 
 
 def filter_control(*, table_id: str, label: str, count: int) -> str:
+    if count == 0:
+        return ""
     return f"""
 <div class="table-tools">
   <label class="filter-label">{escape(label)}

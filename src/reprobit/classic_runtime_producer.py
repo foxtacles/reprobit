@@ -7,6 +7,7 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from dataclasses import dataclass, replace
+from hashlib import sha256
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import Lock
 from types import MappingProxyType
@@ -325,6 +326,8 @@ class ClassicProducerExecution:
         self._output_lock = Lock()
         self._evidence_lock = Lock()
         self._physical_outputs: dict[Path, Path] = {}
+        self._linker_maps: dict[str, bytes] = {}
+        self._linker_map_paths: dict[str, Path] = {}
         self._producer_reads: list[ClassicProducerReadReceipt] = []
         # Compiler read receipts indexed by (node id, epoch) as they arrive, so
         # freezing one epoch's invocation does not rescan every receipt.
@@ -934,6 +937,78 @@ class ClassicProducerExecution:
             self._record_producer_read(read_receipt)
         return _ResourceDependencyAudit(step, receipt)
 
+    @property
+    def linker_maps(self) -> Mapping[str, bytes]:
+        """Immutable map bytes captured from this run's actual terminal links."""
+
+        return MappingProxyType(self._linker_maps)
+
+    def _linker_map_command(
+        self, node: ProducerNode, arguments: tuple[str, ...]
+    ) -> tuple[tuple[str, ...], Path | None]:
+        """Add only a private diagnostic map when the exact link requests none."""
+
+        if node.role is not ProducerRole.LINKER or self._mode != "certifying":
+            return arguments, None
+        controls = [
+            arg
+            for arg in arguments
+            if arg.casefold() in {"/map", "-map"} or arg.casefold().startswith(("/map:", "-map:"))
+        ]
+        if len(controls) > 1:
+            raise ClassicProjectError(f"linker {node.id!r} repeats its map output control")
+        if controls:
+            control = controls[0]
+            if ":" in control:
+                logical = control.split(":", 1)[1]
+                if not logical:
+                    raise ClassicProjectError(f"linker {node.id!r} has an empty map path")
+            else:
+                images = [
+                    arg.split(":", 1)[1]
+                    for arg in arguments
+                    if arg.casefold().startswith(("/out:", "-out:"))
+                ]
+                if len(images) != 1:
+                    raise ClassicProjectError(f"linker {node.id!r} lacks one map basename")
+                logical = str(PureWindowsPath(images[0]).with_suffix(".map"))
+            windows = PureWindowsPath(logical)
+            if not windows.is_absolute():
+                windows = PureWindowsPath(self.bundle.spec.paths.build) / windows
+            parts = _logical_relative_parts(
+                normalize_logical_path(str(windows)), drive_letter=self._logical_drive_letter
+            )
+            path = self._logical_drive_root.joinpath(*parts)
+        else:
+            path = (
+                self.build_root
+                / ".reprobit-link-maps"
+                / (sha256(node.id.encode("ascii")).hexdigest()[:20] + ".map")
+            )
+            arguments = (*arguments, "/MAP:" + self.logical_for_host_path(path))
+        if not _path_is_within(path, self.build_root):
+            raise ClassicProjectError(f"linker {node.id!r} map escapes the build root")
+        for other in self.graph.nodes:
+            for reference in (*other.inputs, *other.outputs):
+                owned = self.reference(reference)
+                if (
+                    owned is None
+                    or str(owned.resolve(strict=False)).casefold()
+                    != str(path.resolve(strict=False)).casefold()
+                ):
+                    continue
+                if (
+                    other.id != node.id
+                    or reference not in node.outputs
+                    or owned.suffix.casefold() != ".map"
+                    or not controls
+                ):
+                    raise ClassicProjectError(f"linker {node.id!r} map aliases a graph file")
+        if os.path.lexists(path):
+            raise ClassicProjectError(f"linker {node.id!r} map already exists: {path}")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return arguments, path
+
     def declared_outputs(self, node: ProducerNode) -> tuple[Path, ...]:
         outputs = tuple(self.reference(value) for value in node.outputs)
         if any(path is None for path in outputs):
@@ -941,9 +1016,19 @@ class ClassicProducerExecution:
         return cast(tuple[Path, ...], outputs)
 
     def node_outputs(self, node: ProducerNode) -> tuple[Path, ...]:
+        """Physical outputs corresponding one-to-one with authenticated graph outputs."""
+
         declared = self.declared_outputs(node)
         with self._output_lock:
             return tuple(self._physical_outputs.get(path, path) for path in declared)
+
+    def node_write_outputs(self, node: ProducerNode) -> tuple[Path, ...]:
+        """Closed phase writes, including a diagnostic map outside the graph inventory."""
+
+        physical = self.node_outputs(node)
+        with self._output_lock:
+            map_path = self._linker_map_paths.get(node.id)
+            return physical if map_path is None or map_path in physical else (*physical, map_path)
 
     @staticmethod
     def compiler_companion_output(path: Path) -> Path:
@@ -1009,10 +1094,8 @@ class ClassicProducerExecution:
             if os.path.lexists(path) or companion_exists:
                 raise ClassicProjectError(f"producer {node.id!r} output already exists: {path}")
             path.parent.mkdir(parents=True, exist_ok=True)
-        command = (
-            str(self.role_commands[node.role]),
-            *self.node_arguments(node),
-        )
+        arguments, map_path = self._linker_map_command(node, self.node_arguments(node))
+        command = (str(self.role_commands[node.role]), *arguments)
         timeout = min(
             float(node.timeout_seconds),
             (
@@ -1054,6 +1137,15 @@ class ClassicProducerExecution:
                 )
         finally:
             self._lane_pool.release(lane)
+        if map_path is not None:
+            self.require_regular(map_path, label=f"linker {node.id!r} map")
+            with map_path.open("rb") as stream:
+                map_payload = stream.read(64 * 1024 * 1024 + 1)
+            if len(map_payload) > 64 * 1024 * 1024:
+                raise ClassicProjectError(f"linker {node.id!r} map exceeds its size bound")
+            with self._output_lock:
+                self._linker_maps[node.id] = map_payload
+                self._linker_map_paths[node.id] = map_path
         physical_outputs: dict[Path, Path] = {}
         for path in declared_outputs:
             if node.role is ProducerRole.COMPILER and path.suffix.casefold() == ".pdb":
