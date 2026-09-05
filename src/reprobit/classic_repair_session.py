@@ -32,6 +32,7 @@ from reprobit.classic_repair_authority import (
 )
 from reprobit.classic_repair_dispatch import (
     ADMITTED_ADDED_PIN_KEYS,
+    CapturedDonorObject,
     ClassicMeasuredReceiptRepairRequest,
     LegacyOracleInstallRepairRequest,
 )
@@ -268,6 +269,7 @@ class ClassicRepairSession:
         self._repairs: dict[str, ClassicReceiptRepair] = {}
         self._refusals: dict[tuple[str, int, str], RepairRefusal] = {}
         self._seed_objects: dict[str, SeedObject] = {}
+        self._unit_donor_objects: dict[str, dict[str, CapturedDonorObject]] = {}
         self._unit_retail_bodies: dict[str, tuple[Mapping[str, bytes], Mapping[str, str]]] = {}
         self._unit_action_preimages: dict[str, dict[str, tuple[int, bytes]]] = {}
 
@@ -331,6 +333,36 @@ class ClassicRepairSession:
     def seed_objects(self) -> Mapping[str, SeedObject]:
         with self._lock:
             return MappingProxyType(dict(self._seed_objects))
+
+    def record_unit_donor_objects(
+        self, unit_id: str, objects: Mapping[str, CapturedDonorObject]
+    ) -> None:
+        """Keep one unit's fresh donor objects so the census can host fallout on them."""
+
+        if not isinstance(unit_id, str) or not all(
+            isinstance(donor_id, str) and isinstance(payload, CapturedDonorObject)
+            for donor_id, payload in objects.items()
+        ):
+            raise ClassicRepairSessionError("unit donor object capture is malformed")
+        with self._lock:
+            previous = self._unit_donor_objects.get(unit_id)
+            if previous is not None and previous != dict(objects):
+                raise ClassicRepairSessionError(
+                    f"unit {unit_id!r} was composed with conflicting fresh donor objects"
+                )
+            self._unit_donor_objects[unit_id] = dict(objects)
+
+    @property
+    def unit_donor_objects(self) -> Mapping[str, Mapping[str, CapturedDonorObject]]:
+        """Per translation unit, every fresh donor object the analysis composed with."""
+
+        with self._lock:
+            return MappingProxyType(
+                {
+                    unit_id: MappingProxyType(dict(objects))
+                    for unit_id, objects in self._unit_donor_objects.items()
+                }
+            )
 
     def _capture_unit_retail_bodies(
         self,

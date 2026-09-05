@@ -808,6 +808,21 @@ def compose_classic_unit(
     donor_objects = {
         donor_id: material.donor_object for donor_id, material in donor_materials.items()
     }
+    donor_object_recorder = getattr(measured_receipt_repair, "record_unit_donor_objects", None)
+    if donor_object_recorder is not None:
+        # A repair analysis keeps every unit's fresh donor objects, bound to the
+        # recipes that produced them: the census settles unrecorded fallout on a
+        # carrier the unit already compiles without compiling it again.
+        donor_object_recorder(
+            unit.plan.id,
+            {
+                donor_id: repair_dispatch.CapturedDonorObject(
+                    repair_dispatch.donor_recipe_identity(prepared_donors[donor_id].intervention),
+                    payload,
+                )
+                for donor_id, payload in donor_objects.items()
+            },
+        )
     donor_sources = {
         item.intervention.id: item.request.logical_outputs.get(unit.plan.source)
         for item in unit.donors

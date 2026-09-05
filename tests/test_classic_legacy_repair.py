@@ -644,6 +644,10 @@ def test_repair_analysis_releases_preimages_after_a_complete_unit() -> None:
     class Recorder:
         def __init__(self):
             self.released = []
+            self.donor_objects = []
+
+        def record_unit_donor_objects(self, unit_id, objects):
+            self.donor_objects.append((unit_id, dict(objects)))
 
         def record_action_preimage(self, *_entry):
             raise AssertionError("an empty unit has no action preimages")
@@ -669,6 +673,8 @@ def test_repair_analysis_releases_preimages_after_a_complete_unit() -> None:
     assert not result.incomplete
     assert result.output == b"fresh seed"
     assert recorder.released == ["unit.fixture"]
+    # The analysis keeps every unit's fresh donor objects for the census.
+    assert recorder.donor_objects == [("unit.fixture", {})]
 
 
 def test_repair_analysis_captures_a_failed_legacy_action_instead_of_aborting(

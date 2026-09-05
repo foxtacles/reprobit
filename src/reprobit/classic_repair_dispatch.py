@@ -15,12 +15,14 @@ from reprobit.classic_project import (
     ClassicFamilyDispatcher,
     ClassicProjectError,
 )
+from reprobit.model import Digest
 from reprobit.schema import (
     ClassicProofReceipt,
     ClassicRecipeIntervention,
     ClassicTranslationUnitPlan,
     LegacyOracleInstallIntervention,
 )
+from reprobit.strict_json import canonical_json
 
 if TYPE_CHECKING:
     from reprobit.oracle_pe32 import PE32VirtualAddressReader
@@ -39,6 +41,30 @@ class _ClassicRepairUnit(Protocol):
 
     @property
     def plan(self) -> ClassicTranslationUnitPlan: ...
+
+
+@dataclass(frozen=True, slots=True)
+class CapturedDonorObject:
+    """One fresh donor object a repair analysis composed with, bound to its recipe.
+
+    ``identity`` digests the donor intervention that produced ``data``; a later
+    pass that retuned the donor no longer matches it, so the capture is dropped.
+    """
+
+    identity: str
+    data: bytes
+
+
+def donor_recipe_identity(intervention: ClassicRecipeIntervention) -> str:
+    """Digest of the exact donor recipe a captured object was compiled from.
+
+    Beneficiaries name consumers, not compiler input, so widening them keeps
+    the identity (and the capture) valid.
+    """
+
+    return Digest.from_bytes(
+        canonical_json(intervention.model_dump(mode="json", exclude={"beneficiaries"}))
+    ).value
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,9 +203,11 @@ def dispatch_classic_action(
 
 
 __all__ = [
+    "CapturedDonorObject",
     "ClassicActionDispatchResult",
     "ClassicMeasuredReceiptRepair",
     "ClassicMeasuredReceiptRepairRequest",
     "LegacyOracleInstallRepairRequest",
     "dispatch_classic_action",
+    "donor_recipe_identity",
 ]

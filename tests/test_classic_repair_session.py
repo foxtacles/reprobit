@@ -227,3 +227,23 @@ def test_classic_receipt_repair_admits_only_the_debug_delta_as_an_added_pin() ->
     dropped = before.model_copy(update={"expected_values": {}})
     with pytest.raises(ClassicRepairSessionError, match="more than expected values"):
         ClassicReceiptRepair("tu_main", 0, before, dropped, ())
+
+
+def test_the_session_keeps_each_units_fresh_donor_objects_once() -> None:
+    from reprobit.classic_repair_dispatch import CapturedDonorObject
+    from reprobit.classic_repair_session import ClassicRepairSession, ClassicRepairSessionError
+
+    session = ClassicRepairSession()
+    first = {
+        "donor.a": CapturedDonorObject("a" * 64, b"aa"),
+        "donor.b": CapturedDonorObject("b" * 64, b"bb"),
+    }
+    session.record_unit_donor_objects("tu.one", first)
+    session.record_unit_donor_objects("tu.one", dict(first))
+
+    assert dict(session.unit_donor_objects["tu.one"]) == first
+    changed = {"donor.a": CapturedDonorObject("a" * 64, b"x")}
+    with pytest.raises(ClassicRepairSessionError, match="conflicting fresh donor objects"):
+        session.record_unit_donor_objects("tu.one", changed)
+    with pytest.raises(ClassicRepairSessionError, match="malformed"):
+        session.record_unit_donor_objects("tu.two", {"donor.a": b"raw"})  # type: ignore[dict-item]

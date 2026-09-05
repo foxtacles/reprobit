@@ -13,11 +13,13 @@ compiled object against every refused function of the unit:
   lets the saved record move onto the new donor unchanged, its donor-side
   measurements refreshed by the ordinary measured-pin repair.
 
-A census entry (unrecorded fallout of a source edit) names no donor at all, so
-for it the unit's saved carriers are compiled first -- or replayed from the
-command's probe store -- and one that already emits the verified body hosts the
-new record as an additional beneficiary; fresh states are tried only after
-every eligible saved carrier.
+A census entry (unrecorded fallout of a source edit) names no donor at all.
+The fresh objects of the unit's saved carriers, captured by the analysis pass
+that found the fallout, are inspected first without any compile; a carrier
+whose object lacks that capture is compiled (or replayed from the command's
+probe store) ahead of any fresh state.  One that already emits the verified
+body hosts the new record as an additional beneficiary; fresh states are tried
+only after every eligible saved carrier.
 
 Nothing here reads a reference image; the accepted objects become ordinary
 donor records whose fresh compile and cold proof still decide everything.
@@ -350,13 +352,24 @@ def _prepare_attempts(
         # one candidate, so the later state is skipped rather than compiled twice.
         seats = {item.request.compiler_seat.casefold() for item in unit.donors}
         ids: list[str] = []
-        if any(refusal.synthetic for refusal in entry.refusals):
+        open_census = [
+            refusal
+            for refusal in entry.refusals
+            if refusal.synthetic and refusal.intervention.id not in entry.resolved
+        ]
+        if open_census:
             # A census entry names no donor yet.  The carriers the unit already
             # compiles are the cheapest hosts for its verified body: they add no
             # record and no compile to the saved guidance, so they are compiled
-            # (or replayed from the command's store) ahead of any fresh state.
+            # (or replayed from the command's store) ahead of any fresh state --
+            # unless the analysis already captured their fresh objects, which
+            # were tried before any compile.
             for item in unit.donors:
                 if not _hostable_saved_carrier(item):
+                    continue
+                if all(
+                    item.intervention.id in refusal.unit_donor_objects for refusal in open_census
+                ):
                     continue
                 probe_id = f"discovery_probe_{ordinal:04d}"
                 ordinal += 1
@@ -592,6 +605,29 @@ def _try_resolve(
     return None
 
 
+def _settle_from_captured_objects(work: Mapping[str, _UnitWork]) -> None:
+    """Host census entries on saved carriers whose fresh objects the analysis captured.
+
+    Nothing is compiled: the objects are the very donor compiles of the pass
+    that found the fallout.  A carrier that carries the verified body settles
+    the entry as an additional beneficiary, in the unit's donor order.
+    """
+
+    for entry in work.values():
+        for refusal in entry.refusals:
+            if not refusal.synthetic or not refusal.unit_donor_objects:
+                continue
+            for item in entry.unit.donors:
+                if refusal.intervention.id in entry.resolved:
+                    break
+                payload = refusal.unit_donor_objects.get(item.intervention.id)
+                if payload is None or not _hostable_saved_carrier(item):
+                    continue
+                settled = _try_resolve(entry, refusal, item, payload)
+                if settled is not None:
+                    entry.resolved[refusal.intervention.id] = settled
+
+
 def _settle_attempt(
     entry: _UnitWork,
     probe_id: str,
@@ -773,6 +809,15 @@ def probe_carrier_discovery(
             if close_runtime and probes.producer.is_open:
                 probes.close()
             return ClassicDiscoveryResult((), (), 0)
+        _settle_from_captured_objects(work)
+        if all(
+            refusal.intervention.id in entry.resolved
+            for entry in work.values()
+            for refusal in entry.refusals
+        ):
+            if close_runtime and probes.producer.is_open:
+                probes.close()
+            return _discovery_result(work, (), {})
         order = _prepare_attempts(
             work,
             clean_sources=clean_sources,
@@ -879,6 +924,14 @@ def probe_carrier_discovery(
         raise
     if close_runtime and probes.producer.is_open:
         probes.close()
+    return _discovery_result(work, compiled_ids, attempts)
+
+
+def _discovery_result(
+    work: Mapping[str, _UnitWork],
+    compiled_ids: Sequence[str],
+    attempts: Mapping[str, tuple[str, ClassicRecipeIntervention, ClassicPreparedDonor]],
+) -> ClassicDiscoveryResult:
     compiled_id_set = set(compiled_ids)
     tried: dict[str, set[str]] = {}
     for probe_id, (unit_id, _donor, _prepared) in attempts.items():

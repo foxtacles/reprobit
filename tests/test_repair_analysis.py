@@ -81,6 +81,7 @@ def test_analysis_discards_results_after_each_units_first_refusal(
     session = SimpleNamespace(
         repairs=(before_first, after_first, before_second, after_second, unaffected),
         refusals=(first_refusal, downstream_refusal, second_refusal),
+        unit_donor_objects={"tu.first": {"donor.first": b"object"}},
     )
     monkeypatch.setattr(subject, "ClassicRepairSession", lambda: session)
     monkeypatch.setattr(
@@ -97,3 +98,20 @@ def test_analysis_discards_results_after_each_units_first_refusal(
 
     assert result.measured_repairs == (before_first, before_second, unaffected)
     assert result.structural_refusals == (first_refusal, second_refusal)
+    assert result.unit_donor_objects == {"tu.first": {"donor.first": b"object"}}
+
+
+def test_captured_donor_objects_carry_across_passes_until_the_unit_is_recomposed() -> None:
+    from reprobit.classic_repair_dispatch import CapturedDonorObject
+    from reprobit.repair_workflow import RepairSessionState, _remember_donor_objects
+
+    state = RepairSessionState(adjustment_limit=1, candidate_limit=1)
+    first = CapturedDonorObject("a" * 64, b"first")
+    _remember_donor_objects(state, SimpleNamespace(unit_donor_objects={"tu": {"donor": first}}))
+    # A later analysis that replays the unit from the cache composes nothing.
+    _remember_donor_objects(state, SimpleNamespace(unit_donor_objects={"tu": {}}))
+    assert state.captured_donor_objects == {"tu": {"donor": first}}
+    # A fresh composition replaces the unit's capture wholesale.
+    second = CapturedDonorObject("b" * 64, b"second")
+    _remember_donor_objects(state, SimpleNamespace(unit_donor_objects={"tu": {"other": second}}))
+    assert state.captured_donor_objects == {"tu": {"other": second}}

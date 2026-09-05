@@ -20,6 +20,7 @@ from reprobit.classic_repair_discovery import (
     _unit_repair,
     _UnitWork,
 )
+from reprobit.classic_repair_dispatch import CapturedDonorObject, donor_recipe_identity
 from reprobit.classic_repair_session import ClassicRepairRefusal
 from reprobit.discovery_authoring import build_declaration_shape_donor
 from reprobit.model import Digest, Scope
@@ -310,3 +311,81 @@ def test_a_replayed_later_candidate_cannot_overtake_a_saved_carrier(
     assert _saved_state_identity(saved.intervention) not in result.tried_states.get(
         PLAN.id, frozenset()
     )
+
+
+def test_a_captured_saved_carrier_object_hosts_the_census_entry_without_any_compile(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from test_classic_repair_discovery import _Handle
+
+    import reprobit.classic_repair_discovery as subject
+
+    unit, saved = _unit_with_saved_carriers()
+    seeds = {"compiler.unit": SeedObject("compiler.unit", SOURCE, OBJECT, "program", MOVED)}
+    (refusal,) = plan_repair_census(
+        _bundle(donors=(saved.intervention,)),
+        _ledger(VERIFIED),
+        seeds,
+        captured_donor_objects={
+            PLAN.id: {
+                saved.intervention.id: CapturedDonorObject(
+                    donor_recipe_identity(saved.intervention), VERIFIED
+                )
+            }
+        },
+    ).refusals
+    assert dict(refusal.unit_donor_objects) == {saved.intervention.id: VERIFIED}
+    (refusal,) = _bind_refusals_to_probe_units((refusal,), (unit,))
+
+    def never_compile(*_args: object, **_kwargs: object) -> tuple[str, ...]:
+        raise AssertionError("captured objects must settle the entry without a compile")
+
+    monkeypatch.setattr(subject, "probe_donor_compile_windows", never_compile)
+    handle = _Handle()
+    result = subject.probe_carrier_discovery(
+        handle,  # type: ignore[arg-type]
+        (refusal,),
+        clean_sources={SOURCE: SOURCE_TEXT},
+        effective_sources={SOURCE: SOURCE_TEXT},
+    )
+
+    assert result.compiled_candidates == 0
+    assert result.unresolved == ()
+    assert result.tried_states == {}
+    assert handle.closed == 1
+    (repair,) = result.repairs
+    (resolution,) = repair.resolutions
+    assert resolution.donor_id == saved.intervention.id
+    assert [edit.before.id for edit in repair.intervention_edits] == [saved.intervention.id]
+    assert all(item.intervention.role is ClassicRecipeRole.FUNCTION for item in repair.additions)
+
+
+def test_a_saved_carrier_with_a_captured_object_is_not_compiled_again() -> None:
+    unit, saved = _unit_with_saved_carriers()
+    other = _prepared_saved(_saved_shape_donor("donor.uncaptured", 2, 2))
+    unit = ClassicPreparedUnit(PLAN, (*unit.donors, other), (), (), (), unit.receipts)
+    seeds = {"compiler.unit": SeedObject("compiler.unit", SOURCE, OBJECT, "program", MOVED)}
+    (refusal,) = plan_repair_census(
+        _bundle(donors=(saved.intervention, other.intervention)),
+        _ledger(VERIFIED),
+        seeds,
+        captured_donor_objects={
+            PLAN.id: {
+                saved.intervention.id: CapturedDonorObject(
+                    donor_recipe_identity(saved.intervention), MOVED
+                )
+            }
+        },
+    ).refusals
+    (refusal,) = _bind_refusals_to_probe_units((refusal,), (unit,))
+    entry = _UnitWork(unit, [refusal], [], {}, {}, {})
+
+    _prepare_attempts(
+        {PLAN.id: entry},
+        clean_sources={SOURCE: SOURCE_TEXT},
+        effective_sources={SOURCE: SOURCE_TEXT},
+        per_unit=1,
+    )
+
+    enqueued = [donor.id for probe, donor, _p in entry.attempts if probe in entry.saved_attempts]
+    assert enqueued == ["donor.uncaptured"]

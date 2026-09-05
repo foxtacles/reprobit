@@ -37,6 +37,7 @@ from reprobit.classic_repair_authority import (
     LegacyInterventionEdit,
     apply_classic_authority_edits,
 )
+from reprobit.classic_repair_dispatch import CapturedDonorObject
 from reprobit.classic_repair_probe import (
     ClassicDonorRetuneRefusal,
 )
@@ -226,6 +227,8 @@ class RepairSessionState:
     exhausted_groups: set[tuple[str, str]] = field(default_factory=set)
     abandoned_states: dict[tuple[str, str], set[str]] = field(default_factory=dict)
     discovered_shapes: dict[str, set[str]] = field(default_factory=dict)
+    captured_donor_objects: dict[str, dict[str, CapturedDonorObject]] = field(default_factory=dict)
+    """Per unit, the fresh donor objects of its last fresh composition in this run."""
     initial_function_actions: int | None = None
     pass_number: int = 0
     last_outcome: str | None = None
@@ -313,6 +316,10 @@ class RepairAnalysisResult:
     measured_repairs: tuple[ClassicReceiptRepair, ...]
     structural_refusals: tuple[RepairRefusal, ...]
     seed_objects: Mapping[str, SeedObject] = field(default_factory=lambda: MappingProxyType({}))
+    unit_donor_objects: Mapping[str, Mapping[str, CapturedDonorObject]] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
+    """Per translation unit, the fresh donor objects the pass composed with."""
 
 
 def analyze_classic_repair(
@@ -365,6 +372,7 @@ def analyze_classic_repair(
         repairs,
         refusals,
         result.seed_objects,
+        session.unit_donor_objects,
     )
 
 
@@ -601,6 +609,9 @@ def _analyze_repair_pass(
         progress_description=progress_description,
         seed_census=False,
     )
+    # The first analysis of a pass is the one that composes changed units
+    # fresh; the census analysis that may follow replays them from the cache.
+    _remember_donor_objects(state, analysis)
     if not analysis.measured_repairs and analysis.completed and ledger is not None:
         analysis = analyze_classic_repair(
             options,
@@ -612,9 +623,23 @@ def _analyze_repair_pass(
             ),
             seed_census=True,
         )
+        _remember_donor_objects(state, analysis)
     state.affected_units.update(item.unit_id for item in analysis.measured_repairs)
     state.affected_units.update(item.unit_id for item in analysis.structural_refusals)
     return analysis
+
+
+def _remember_donor_objects(state: RepairSessionState, analysis: RepairAnalysisResult) -> None:
+    """Carry each unit's freshly composed donor objects to later passes of this run.
+
+    A later analysis replays an unchanged unit from the warm cache and composes
+    nothing, so the objects the census hosts fallout on come from the last pass
+    that composed the unit; each object stays bound to its donor recipe.
+    """
+
+    for unit_id, objects in getattr(analysis, "unit_donor_objects", {}).items():
+        if objects:
+            state.captured_donor_objects[unit_id] = dict(objects)
 
 
 def _repair_measured_checks(
@@ -661,7 +686,12 @@ def _repair_unrecorded_functions(
     candidate_limit = context.state.candidate_limit
 
     if ledger is not None:
-        census = plan_repair_census(bundle, ledger, getattr(analysis, "seed_objects", None) or {})
+        census = plan_repair_census(
+            bundle,
+            ledger,
+            getattr(analysis, "seed_objects", None) or {},
+            captured_donor_objects=state.captured_donor_objects,
+        )
         if census.missing:
             raise RepairWorkflowError(
                 "the edit removed functions used by the last accepted build: "

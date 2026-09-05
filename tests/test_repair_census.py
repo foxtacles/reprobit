@@ -8,7 +8,9 @@ from typing import Any, cast
 
 import test_classic_register_bijection_reencoding_full as coff_fixture
 
+from reprobit.classic_donors import generate_declaration_shape
 from reprobit.classic_incremental_context import SeedObject
+from reprobit.classic_repair_dispatch import CapturedDonorObject, donor_recipe_identity
 from reprobit.coff_format import CoffObject, coff_body
 from reprobit.composition_ledger import ComposedBodyLedger, ComposedTargetLedger, LedgerFunction
 from reprobit.model import Digest, Scope
@@ -18,7 +20,13 @@ from reprobit.repair_census import (
     census_entry_id,
     plan_repair_census,
 )
-from reprobit.schema import ClassicRecipeRole, ClassicTranslationUnitPlan
+from reprobit.schema import (
+    ClassicField,
+    ClassicRecipeFamily,
+    ClassicRecipeIntervention,
+    ClassicRecipeRole,
+    ClassicTranslationUnitPlan,
+)
 
 SYMBOL = coff_fixture.TARGET_SYMBOL
 SOURCE = "src/unit.cpp"
@@ -55,7 +63,12 @@ def _ledger(payload: bytes, *, unit_id: str | None = "tu.fixture") -> ComposedBo
     )
 
 
-def _bundle(*, planned: bool = True, recorded: tuple[str, ...] = ()) -> Any:
+def _bundle(
+    *,
+    planned: bool = True,
+    recorded: tuple[str, ...] = (),
+    donors: tuple[ClassicRecipeIntervention, ...] = (),
+) -> Any:
     interventions = tuple(
         SimpleNamespace(
             scope=Scope(target="program", translation_unit=PLAN.id, function=symbol),
@@ -65,7 +78,30 @@ def _bundle(*, planned: bool = True, recorded: tuple[str, ...] = ()) -> Any:
     )
     return SimpleNamespace(
         build_plan=SimpleNamespace(translation_units=(PLAN,) if planned else ()),
-        interventions=interventions,
+        interventions=(*interventions, *donors),
+    )
+
+
+def _donor(donor_id: str, classes: int, functions: int) -> ClassicRecipeIntervention:
+    generated = generate_declaration_shape(classes, functions)
+    return ClassicRecipeIntervention(
+        id=donor_id,
+        scope=Scope(target=PLAN.target_id, translation_unit=PLAN.id),
+        rationale="Framework-generated declaration-only compiler-state shape for the fixture.",
+        family=ClassicRecipeFamily.DECLARATION_SHAPE,
+        role=ClassicRecipeRole.DONOR,
+        build_target=PLAN.build_target,
+        parameters=tuple(
+            ClassicField(name=name, value=value)
+            for name, value in sorted(
+                {
+                    "classes": classes,
+                    "emission_policy": "non_emitting_declarations_only",
+                    "functions": functions,
+                    "generated_header_sha256": Digest.from_bytes(generated).value,
+                }.items()
+            )
+        ),
     )
 
 
@@ -148,3 +184,37 @@ def test_an_unreadable_object_and_a_vanished_function_are_reported() -> None:
     assert entry.fresh_body_sha256 == ""
     assert vanished.missing == (entry,)
     assert vanished.refusals == ()
+
+
+def test_a_synthetic_refusal_carries_captured_objects_of_unchanged_donor_recipes() -> None:
+    donor = _donor("donor.saved", 1, 2)
+    bundle = _bundle(donors=(donor,))
+    captured = {
+        PLAN.id: {
+            "donor.saved": CapturedDonorObject(donor_recipe_identity(donor), VERIFIED),
+            "donor.gone": CapturedDonorObject("0" * 64, MOVED),
+        },
+        "tu.other": {"donor.x": CapturedDonorObject("1" * 64, MOVED)},
+    }
+
+    (refusal,) = plan_repair_census(
+        bundle, _ledger(VERIFIED), _seed(MOVED), captured_donor_objects=captured
+    ).refusals
+
+    assert refusal.synthetic
+    assert dict(refusal.unit_donor_objects) == {"donor.saved": VERIFIED}
+    # A donor retuned since the capture no longer matches its recipe identity.
+    stale = {PLAN.id: {"donor.saved": CapturedDonorObject("2" * 64, VERIFIED)}}
+    (unbound,) = plan_repair_census(
+        bundle, _ledger(VERIFIED), _seed(MOVED), captured_donor_objects=stale
+    ).refusals
+    assert dict(unbound.unit_donor_objects) == {}
+    (bare,) = plan_repair_census(bundle, _ledger(VERIFIED), _seed(MOVED)).refusals
+    assert dict(bare.unit_donor_objects) == {}
+    # Widening a donor's beneficiaries does not change what it compiles.
+    widened = donor.model_copy(
+        update={
+            "beneficiaries": (Scope(target="program", translation_unit=PLAN.id, function=SYMBOL),)
+        }
+    )
+    assert donor_recipe_identity(widened) == donor_recipe_identity(donor)

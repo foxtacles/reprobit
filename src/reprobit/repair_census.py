@@ -27,6 +27,7 @@ from reprobit.binary import ByteIdentityError
 from reprobit.classic_incremental_context import SeedObject
 from reprobit.classic_orchestration import ClassicPreparedUnit
 from reprobit.classic_project import ClassicDispatchMaterials
+from reprobit.classic_repair_dispatch import CapturedDonorObject, donor_recipe_identity
 from reprobit.classic_repair_session import ClassicRepairRefusal
 from reprobit.composition_ledger import (
     ComposedBodyLedger,
@@ -136,9 +137,17 @@ def _seed_bodies(data: bytes) -> Mapping[str, FunctionBody] | None:
 
 
 def synthetic_census_refusal(
-    plan: ClassicTranslationUnitPlan, entry: RepairCensusEntry, seed_object: bytes
+    plan: ClassicTranslationUnitPlan,
+    entry: RepairCensusEntry,
+    seed_object: bytes,
+    unit_donor_objects: Mapping[str, bytes] | None = None,
 ) -> ClassicRepairRefusal:
-    """A placeholder refusal that carrier discovery settles by authoring a fresh record."""
+    """A placeholder refusal that carrier discovery settles by authoring a fresh record.
+
+    ``unit_donor_objects`` are the fresh objects of the unit's saved donors from
+    the same analysis pass; discovery hosts the entry on one that already emits
+    the verified body without compiling anything.
+    """
 
     intervention = ClassicRecipeIntervention(
         id=census_entry_id(plan.id, entry.symbol),
@@ -173,26 +182,63 @@ def synthetic_census_refusal(
             f"unrecorded function {entry.symbol!r} of {entry.source} left its verified body "
             f"{entry.verified_body_sha256[:16]}"
         ),
+        unit_donor_objects=dict(unit_donor_objects or {}),
         synthetic=True,
     )
+
+
+def _current_donor_objects(
+    bundle: ProjectBundle,
+    captured: Mapping[str, Mapping[str, CapturedDonorObject]] | None,
+) -> dict[str, dict[str, bytes]]:
+    """Captured donor objects whose recipe is still the unit's saved donor recipe."""
+
+    if not captured:
+        return {}
+    identities: dict[str, dict[str, str]] = {}
+    for intervention in bundle.interventions:
+        if (
+            isinstance(intervention, ClassicRecipeIntervention)
+            and intervention.role is ClassicRecipeRole.DONOR
+            and intervention.scope.translation_unit is not None
+        ):
+            identities.setdefault(intervention.scope.translation_unit, {})[intervention.id] = (
+                donor_recipe_identity(intervention)
+            )
+    current: dict[str, dict[str, bytes]] = {}
+    for unit_id, objects in captured.items():
+        saved = identities.get(unit_id, {})
+        kept = {
+            donor_id: item.data
+            for donor_id, item in objects.items()
+            if saved.get(donor_id) == item.identity
+        }
+        if kept:
+            current[unit_id] = kept
+    return current
 
 
 def plan_repair_census(
     bundle: ProjectBundle,
     ledger: ComposedBodyLedger,
     seed_objects: Mapping[str, SeedObject],
+    captured_donor_objects: Mapping[str, Mapping[str, CapturedDonorObject]] | None = None,
 ) -> RepairCensus:
     """Compare every captured seed object with the ledger and plan the synthetic refusals.
 
     Only functions the linker selected from the very object a seed stands for
     are compared: a body the linker takes from another object cannot change
     the image.  Functions that already carry a record in their translation
-    unit are the ordinary repair's business and are skipped.
+    unit are the ordinary repair's business and are skipped.  A synthetic
+    refusal carries the fresh objects of its unit's saved donors captured by
+    this run (``captured_donor_objects``) whenever their recipes are unchanged,
+    so discovery can host it on one of them without compiling.
     """
 
     providers = _provider_functions(ledger)
     planned = _planned_units(bundle)
     recorded = _recorded_symbols(bundle)
+    donor_objects = _current_donor_objects(bundle, captured_donor_objects)
     entries: list[RepairCensusEntry] = []
     refusals: list[ClassicRepairRefusal] = []
     unplanned: list[RepairCensusEntry] = []
@@ -231,7 +277,9 @@ def plan_repair_census(
             elif plan is None:
                 unplanned.append(entry)
             else:
-                refusals.append(synthetic_census_refusal(plan, entry, seed.data))
+                refusals.append(
+                    synthetic_census_refusal(plan, entry, seed.data, donor_objects.get(plan.id))
+                )
     return RepairCensus(
         tuple(entries), tuple(refusals), tuple(unplanned), tuple(unreadable), tuple(missing)
     )
